@@ -628,7 +628,7 @@ app.get('/faturamentomtm', async (req, res) => {
 app.get('/faturamentorevenda', async (req, res) => {
   try {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const dataInicio = dt_inicio || '2025-07-01';
+    const dataInicio = dt_inicio || '2025-06-01';
     const dataFim = dt_fim || '2025-07-15';
     let empresas = cd_empresa;
     if (!empresas) {
@@ -640,9 +640,11 @@ app.get('/faturamentorevenda', async (req, res) => {
     params = [...params, ...empresas];
     const query = `
       select
-        vfn.cd_empresa,
+        vfn.cd_grupoempresa,
         vfn.nm_grupoempresa,
-        p.nm_fantasia,
+        p.cd_pessoa,
+        p.nm_pessoa,
+        pc.cd_tipoclas,
         vfn.cd_operacao,
         vfn.cd_nivel,
         vfn.ds_nivel,
@@ -654,16 +656,17 @@ app.get('/faturamentorevenda', async (req, res) => {
         vfn.qt_faturado
       from
         vr_fis_nfitemprod vfn
-      left join pes_pesjuridica p on p.cd_pessoa = vfn.cd_pessoa
-      left join public.vr_pes_pessoaclas pc on vfn.cd_pessoa = pc.cd_pessoa
+      left join pes_pessoa p on
+        p.cd_pessoa = vfn.cd_pessoa
+        left join public.vr_pes_pessoaclas pc on
+	    vfn.cd_pessoa = pc.cd_pessoa
       where
         vfn.dt_transacao between $1 and $2
         and vfn.cd_empresa IN (${empresaPlaceholders})
-        and vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
-      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556)
-        and vfn.tp_situacao not in ('C', 'X')
-        and p.nm_fantasia NOT LIKE 'F%CROSBY%'
-        and pc.cd_tipoclas in(2,4,5)`;
+        and vfn.cd_operacao in (520,5102,1409,1407,1202,1950)
+        and pc.cd_tipoclas = 7
+	and vfn.tp_situacao not in ('C', 'X') 
+	and pc.cd_tipoclas = 7`;
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (error) {
@@ -671,6 +674,7 @@ app.get('/faturamentorevenda', async (req, res) => {
     res.status(500).json({ message: 'Erro ao buscar dados de faturamento revenda.' });
   }
 });
+
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 4000;
 app.listen(PORT, () => {
