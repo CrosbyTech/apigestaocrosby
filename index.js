@@ -5,7 +5,7 @@ import pkg from 'pg';
 const { Pool } = pkg;
 
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: 'http://localhost:3000' }));
 app.use(express.json());
 
 // Mini banco de dados em memória
@@ -163,6 +163,18 @@ app.get('/pcp', async (req, res) => {
 // Rota para buscar empresas
 app.get('/empresas', async (req, res) => {
   try {
+    const query = `SELECT cd_empresa, nm_grupoempresa FROM vr_ger_empresa where cd_grupoempresa < 5999 order by cd_grupoempresa asc`;
+    const { rows } = await pool.query(query);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar empresas:', error);
+    res.status(500).json({ message: 'Erro ao buscar empresas.' });
+  }
+});
+
+// Rota para buscar empresas
+app.get('/grupoempresas', async (req, res) => {
+  try {
     const query = `SELECT cd_grupoempresa, nm_grupoempresa FROM vr_ger_empresa where cd_grupoempresa > 5999 AND cd_empresa % 2 = 0 order by cd_grupoempresa asc`;
     const { rows } = await pool.query(query);
     res.json(rows);
@@ -217,15 +229,20 @@ app.get('/extratototvs', async (req, res) => {
 // Rota para buscar dados de faturamento
 app.get('/faturamento', async (req, res) => {
   try {
-    const { dt_inicio, dt_fim, cd_grupoempresa } = req.query;
-
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
     const dataInicio = dt_inicio || '2025-07-01';
-    const dataFim = dt_fim || '2025-07-05';
-    const grupoEmpresa = cd_grupoempresa || 95;
-    
+    const dataFim = dt_fim || '2025-07-15';
+    let grupos = cd_empresa;
+    if (!grupos) {
+      return res.json([]);
+    }
+    if (!Array.isArray(grupos)) grupos = [grupos];
+    let params = [dataInicio, dataFim];
+    let grupoPlaceholders = grupos.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+    params = [...params, ...grupos];
     const query = `
       select
-        vfn.cd_grupoempresa,
+        vfn.cd_empresa,
         vfn.nm_grupoempresa,
         vfn.cd_operacao,
         vfn.cd_nivel,
@@ -240,12 +257,13 @@ app.get('/faturamento', async (req, res) => {
         vr_fis_nfitemprod vfn
       where
         vfn.dt_transacao between $1 and $2
-        and vfn.cd_grupoempresa = $3
-        and vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711,7111,2009,5152,6029,530,5152,5930,650,5010,600,620,40,1557,8600)
+        and vfn.cd_empresa IN (${grupoPlaceholders})
+        and vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
+      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556,200,300,512,1402,1405,1409,5102,5110,200,300,512,5102,5110,5113,17,21,401,1201,1202,1204,1206,1950,1999,2203,17,21,1201,1202,1204,1950,1999,2203	
+)
         and vfn.tp_situacao not in ('C', 'X')
     `;
-    
-    const { rows } = await pool.query(query, [dataInicio, dataFim, grupoEmpresa]);
+    const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (error) {
     console.error('Erro ao buscar dados de faturamento:', error);
@@ -253,7 +271,408 @@ app.get('/faturamento', async (req, res) => {
   }
 });
 
-const PORT = process.env.PGPORT || 20187;
+// Rota para buscar dados de faturamento franquia (com SQL customizado)
+app.get('/faturamentofranquia', async (req, res) => {
+  try {
+    const { dt_inicio, dt_fim, cd_empresa, nm_fantasia } = req.query;
+    const dataInicio = dt_inicio || '2025-07-01';
+    const dataFim = dt_fim || '2025-07-15';
+    let empresas = cd_empresa;
+    if (!empresas) {
+      return res.json([]);
+    }
+    if (!Array.isArray(empresas)) empresas = [empresas];
+    let params = [dataInicio, dataFim];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+    params = [...params, ...empresas];
+    let fantasiaWhere = '';
+    if (nm_fantasia) {
+      fantasiaWhere = 'and p.nm_fantasia = $' + (params.length + 1);
+      params.push(nm_fantasia);
+    } else {
+      fantasiaWhere = `and p.nm_fantasia like 'F%CROSBY%'`;
+    }
+    const query = `
+      select
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa,
+        p.nm_fantasia,
+        vfn.cd_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.tp_situacao,
+        vfn.vl_unitliquido,
+        vfn.tp_operacao,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      from
+        vr_fis_nfitemprod vfn
+      left join pes_pesjuridica p on p.cd_pessoa = vfn.cd_pessoa   
+      where
+        vfn.dt_transacao between $1 and $2
+        and vfn.cd_empresa IN (${empresaPlaceholders})
+        and vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
+      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556)
+        and vfn.tp_situacao not in ('C', 'X')
+        ${fantasiaWhere}
+    `;
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar dados de faturamento franquia:', error);
+    res.status(500).json({ message: 'Erro ao buscar dados de faturamento franquia.' });
+  }
+});
+
+// Rota para buscar dados do fundo de propaganda
+app.get('/consultafatura', async (req, res) => {
+  try {
+    let { cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia } = req.query;
+    
+    let whereConditions = [];
+    let params = [];
+    let paramIndex = 1;
+    
+    // Filtro múltiplo para nome fantasia
+    if (nm_fantasia) {
+      let nomes = nm_fantasia;
+      if (!Array.isArray(nomes)) nomes = [nomes];
+      whereConditions.push(`pp.nm_fantasia IN (${nomes.map(() => `$${paramIndex++}`).join(',')})`);
+      params.push(...nomes);
+    } else {
+      whereConditions.push("pp.nm_fantasia like 'F%CROSBY%'");
+    }
+    
+    // Filtro por empresa
+    if (cd_empresa) {
+      whereConditions.push(`vff.cd_empresa = $${paramIndex++}`);
+      params.push(cd_empresa);
+    }
+    
+    // Filtro por cliente
+    if (cd_cliente) {
+      whereConditions.push(`vff.cd_cliente = $${paramIndex++}`);
+      params.push(cd_cliente);
+    }
+    
+    // Filtro por data
+    if (dt_inicio && dt_fim) {
+      whereConditions.push(`vff.dt_emissao between $${paramIndex++} and $${paramIndex++}`);
+      params.push(dt_inicio, dt_fim);
+    } else {
+      // Data padrão se não fornecida
+      whereConditions.push(`vff.dt_emissao between $${paramIndex++} and $${paramIndex++}`);
+      params.push('2025-05-01', '2025-05-12');
+    }
+    
+    const whereClause = whereConditions.join(' and ');
+    
+    const query = `
+      select
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nm_cliente,
+        pp.nm_fantasia,
+        vff.nr_fat,
+        vff.dt_emissao,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_pago
+      from
+        vr_fcr_faturai vff
+      left join pes_pesjuridica pp on
+        pp.cd_pessoa = vff.cd_cliente
+      where
+        ${whereClause}
+      group by
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nm_cliente,
+        pp.nm_fantasia,
+        vff.nr_fat,
+        vff.nr_parcela,
+        vff.nr_documento,
+        vff.dt_emissao,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_pago
+    `;
+    
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar dados do fundo de propaganda:', error);
+    res.status(500).json({ message: 'Erro ao buscar dados do fundo de propaganda.' });
+  }
+});
+
+// Autocomplete para nome fantasia
+app.get('/autocomplete/nm_fantasia', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 1) {
+      return res.json([]);
+    }
+    const query = `
+      select distinct nm_fantasia
+      from pes_pesjuridica
+      where nm_fantasia ILIKE 'F%CROSBY%' and nm_fantasia ILIKE $1
+      order by nm_fantasia asc
+      limit 100
+    `;
+    const { rows } = await pool.query(query, ['%'+q+'%']);
+    res.json(rows.map(r => r.nm_fantasia));
+  } catch (error) {
+    console.error('Erro no autocomplete de nm_fantasia:', error);
+    res.status(500).json({ message: 'Erro ao buscar nomes fantasia.' });
+  }
+});
+
+// Autocomplete para grupo empresa
+app.get('/autocomplete/nm_grupoempresa', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 1) {
+      return res.json([]);
+    }
+    const query = `
+      select distinct cd_empresa, nm_grupoempresa
+      from vr_ger_empresa
+      where nm_grupoempresa ILIKE $1 and cd_grupoempresa < 5999
+      order by nm_grupoempresa asc
+      limit 100
+    `;
+    const { rows } = await pool.query(query, ['%'+q+'%']);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro no autocomplete de nm_grupoempresa:', error);
+    res.status(500).json({ message: 'Erro ao buscar nomes de grupo empresa.' });
+  }
+});
+
+// Rota para faturamento franquia
+app.get('/fundopropaganda', async (req, res) => {
+  try {
+    let { cd_empresa, dt_inicio, dt_fim, nm_fantasia } = req.query;
+    let whereConditions = [];
+    let params = [];
+    let paramIndex = 1;
+
+    // Filtro múltiplo para nome fantasia
+    if (nm_fantasia) {
+      let nomes = nm_fantasia;
+      if (!Array.isArray(nomes)) nomes = [nomes];
+      whereConditions.push(`p.nm_fantasia IN (${nomes.map(() => `$${paramIndex++}`).join(',')})`);
+      params.push(...nomes);
+    } else {
+      whereConditions.push("p.nm_fantasia like 'F%CROSBY%'");
+    }
+
+    // Filtro por empresa
+    if (cd_empresa) {
+      whereConditions.push(`vfn.cd_empresa = $${paramIndex++}`);
+      params.push(cd_empresa);
+    }
+
+    // Filtro por data
+    if (dt_inicio && dt_fim) {
+      whereConditions.push(`vfn.dt_transacao between $${paramIndex++} and $${paramIndex++}`);
+      params.push(dt_inicio, dt_fim);
+    } else {
+      whereConditions.push(`vfn.dt_transacao between '2025-07-01' and '2025-07-15'`);
+    }
+
+    // Filtros fixos
+    whereConditions.push(`vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
+      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556)`);
+    whereConditions.push(`vfn.tp_situacao = 4`);
+    whereConditions.push(`vfn.cd_grupoempresa < 5999`);
+    whereConditions.push(`(f.tp_documento IS NULL OR f.tp_documento <> 20)`);
+    whereConditions.push(`vfn.tp_operacao = 'S'`);
+
+    const whereClause = whereConditions.join(' and ');
+
+    const query = `
+      select
+        vfn.cd_empresa,
+        f.cd_cliente,
+        p.nm_fantasia,
+        vfn.cd_operacao,
+        vfn.tp_situacao,
+        vfn.tp_operacao,
+        vfn.vl_total,
+        vfn.nr_transacao
+      from
+        tra_transacao vfn
+      left join pes_pesjuridica p on
+        p.cd_pessoa = vfn.cd_pessoa
+      left join fcr_faturai f on
+        f.cd_cliente = vfn.cd_pessoa
+      where
+        ${whereClause}
+      group by
+        vfn.cd_empresa,
+        f.cd_cliente,
+        p.nm_fantasia,
+        vfn.cd_operacao,
+        vfn.dt_transacao,
+        vfn.tp_situacao,
+        vfn.tp_operacao,
+        vfn.vl_total,
+        vfn.nr_transacao
+      order by
+        nm_fantasia
+    `;
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar dados de faturamento franquia:', error);
+    res.status(500).json({ message: 'Erro ao buscar dados de faturamento franquia.' });
+  }
+});
+
+// Rota para franquias credev
+app.get('/franquiascredev', async (req, res) => {
+  try {
+    const { dt_inicio, dt_fim } = req.query;
+    let where = [];
+    let params = [];
+    let idx = 1;
+
+    if (dt_inicio && dt_fim) {
+      where.push(`f.dt_emissao between $${idx++} and $${idx++}`);
+      params.push(dt_inicio, dt_fim);
+    } else {
+      // Intervalo padrão se não informado
+      where.push(`f.dt_emissao between '2025-06-10' and '2025-06-10'`);
+    }
+
+    where.push(`p.nm_fantasia like 'F%CROSBY%'`);
+    where.push(`f.tp_documento = 20`);
+
+    const query = `
+      select
+        f.cd_cliente,
+        p.nm_fantasia,
+        f.vl_pago,
+        f.dt_emissao as dt_fatura,
+        f.tp_documento
+      from
+        fcr_faturai f
+      left join pes_pesjuridica p on
+        p.cd_pessoa = f.cd_cliente
+      where
+        ${where.join(' and ')}
+    `;
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar dados de franquias credev:', error);
+    res.status(500).json({ message: 'Erro ao buscar dados de franquias credev.' });
+  }
+});
+
+// Rota para buscar dados de faturamento MTM
+app.get('/faturamentomtm', async (req, res) => {
+  try {
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const dataInicio = dt_inicio || '2025-07-01';
+    const dataFim = dt_fim || '2025-07-15';
+    let empresas = cd_empresa;
+    if (!empresas) {
+      return res.json([]);
+    }
+    if (!Array.isArray(empresas)) empresas = [empresas];
+    let params = [dataInicio, dataFim];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+    params = [...params, ...empresas];
+    const query = `
+      select
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa,
+        p.cd_pessoa,
+        p.nm_pessoa,
+        pc.cd_classificacao,
+        vfn.cd_operacao,
+        vfn.tp_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.vl_unitliquido,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      from
+        vr_fis_nfitemprod vfn
+      left join pes_pessoa p on p.cd_pessoa = vfn.cd_pessoa
+      left join public.vr_pes_pessoaclas pc on vfn.cd_pessoa = pc.cd_pessoa
+      where
+        vfn.dt_transacao between $1 and $2
+        and vfn.cd_empresa IN (${empresaPlaceholders})
+        and vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556)
+        and vfn.tp_situacao not in ('C', 'X')
+        and pc.cd_tipoclas in (5)
+    `;
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar dados de faturamento MTM:', error);
+    res.status(500).json({ message: 'Erro ao buscar dados de faturamento MTM.' });
+  }
+});
+
+app.get('/faturamentorevenda', async (req, res) => {
+  try {
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const dataInicio = dt_inicio || '2025-07-01';
+    const dataFim = dt_fim || '2025-07-15';
+    let empresas = cd_empresa;
+    if (!empresas) {
+      return res.json([]);
+    }
+    if (!Array.isArray(empresas)) empresas = [empresas];
+    let params = [dataInicio, dataFim];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+    params = [...params, ...empresas];
+    const query = `
+      select
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa,
+        p.nm_fantasia,
+        vfn.cd_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.tp_situacao,
+        vfn.vl_unitliquido,
+        vfn.tp_operacao,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      from
+        vr_fis_nfitemprod vfn
+      left join pes_pesjuridica p on p.cd_pessoa = vfn.cd_pessoa
+      left join public.vr_pes_pessoaclas pc on vfn.cd_pessoa = pc.cd_pessoa
+      where
+        vfn.dt_transacao between $1 and $2
+        and vfn.cd_empresa IN (${empresaPlaceholders})
+        and vfn.cd_operacao not in (1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
+      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556)
+        and vfn.tp_situacao not in ('C', 'X')
+        and p.nm_fantasia NOT LIKE 'F%CROSBY%'
+        and pc.cd_tipoclas in(2,4,5)`;
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.error('Erro ao buscar dados de faturamento revenda:', error);
+    res.status(500).json({ message: 'Erro ao buscar dados de faturamento revenda.' });
+  }
+});
+
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 4000;
 app.listen(PORT, () => {
   console.log(`Backend rodando em ${PORT}`);
 }); 
