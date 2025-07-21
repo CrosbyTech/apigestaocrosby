@@ -151,8 +151,10 @@ app.get('/expedicao', async (req, res) => {
 // Rota para buscar dados da view vw_detalhe_pedido_completo para PCP
 app.get('/pcp', async (req, res) => {
   try {
-    const query = `SELECT * FROM vw_detalhe_pedido_completo WHERE cd_empresa = 111`;
-    const { rows } = await pool.query(query);
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const query = `SELECT * FROM vw_detalhe_pedido_completo WHERE cd_empresa = 111 LIMIT $1 OFFSET $2`;
+    const { rows } = await pool.query(query, [limit, offset]);
     res.json(rows);
   } catch (error) {
     console.error('Erro ao buscar dados de PCP:', error);
