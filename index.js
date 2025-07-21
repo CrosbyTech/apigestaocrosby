@@ -665,7 +665,7 @@ app.get('/faturamentorevenda', async (req, res) => {
       where
         vfn.dt_transacao between $1 and $2
         and vfn.cd_empresa IN (${empresaPlaceholders})
-        and vfn.cd_operacao in (5110,300,200,520,5102,1409,1407,1202,1950)
+        and vfn.cd_operacao in (510,5110,300,200,520,5102,1409,1407,1202,1950)
         and pc.cd_tipoclas = 7
 	and vfn.tp_situacao not in ('C', 'X') 
 	and pc.cd_tipoclas = 7`;
