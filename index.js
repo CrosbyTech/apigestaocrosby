@@ -680,9 +680,12 @@ app.get('/faturamentorevenda', async (req, res) => {
 
 app.get('/faturamentolojas', async (req, res) => {
   try {
-    const { cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim } = req.query;
+    // Aceita tanto dt_inicio/dt_fim quanto inicio/fim
+    let { cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim, inicio, fim } = req.query;
+    dt_inicio = dt_inicio || inicio;
+    dt_fim = dt_fim || fim;
     if (!cd_grupoempresa_ini || !cd_grupoempresa_fim || !dt_inicio || !dt_fim) {
-      return res.status(400).json({ message: 'Parâmetros obrigatórios: cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim.' });
+      return res.status(400).json({ message: 'Parâmetros obrigatórios: cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio (ou inicio), dt_fim (ou fim).' });
     }
     const params = [cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim];
     const query = `
