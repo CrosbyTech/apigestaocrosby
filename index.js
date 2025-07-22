@@ -647,6 +647,7 @@ app.get('/faturamentorevenda', async (req, res) => {
         p.cd_pessoa,
         p.nm_pessoa,
         pc.cd_tipoclas,
+        pc.cd_classificacao,
         vfn.cd_operacao,
         vfn.cd_nivel,
         vfn.ds_nivel,
