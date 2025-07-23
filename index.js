@@ -214,7 +214,7 @@ app.get('/extratototvs', async (req, res) => {
       params.push(dt_movim_ini, dt_movim_fim);
     }
     // Adiciona filtro para in_estorno = 'T'
-    baseQuery += ` and fm.in_estorno = 'T'`;
+    baseQuery += ` and fm.in_estorno = 'F'`;
     const dataQuery = `
       select fm.cd_empresa, fm.nr_ctapes, fm.dt_movim, fm.ds_doc, fm.dt_liq, fm.in_estorno, fm.tp_operacao, fm.ds_aux, fm.vl_lancto
       ${baseQuery}
