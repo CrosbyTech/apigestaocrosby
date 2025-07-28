@@ -254,6 +254,7 @@ app.get('/faturamento', async (req, res) => {
         vfn.dt_transacao,
         vfn.tp_situacao,
         vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado
@@ -308,6 +309,7 @@ app.get('/faturamentofranquia', async (req, res) => {
         vfn.dt_transacao,
         vfn.tp_situacao,
         vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado
@@ -609,6 +611,7 @@ app.get('/faturamentomtm', async (req, res) => {
         vfn.ds_nivel,
         vfn.dt_transacao,
         vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
         vfn.nr_transacao,
         vfn.qt_faturado
       from
@@ -657,6 +660,7 @@ app.get('/faturamentorevenda', async (req, res) => {
         vfn.dt_transacao,
         vfn.tp_situacao,
         vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado
