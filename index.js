@@ -3,46 +3,27 @@ import axios from 'axios';
 import cors from 'cors';
 import pkg from 'pg';
 const { Pool } = pkg;
+import fs from 'fs';
+const USUARIOS_PATH = './backend/usuarios.json';
+
+function loadUsers() {
+  try {
+    const data = fs.readFileSync(USUARIOS_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveUsers(users) {
+  fs.writeFileSync(USUARIOS_PATH, JSON.stringify(users, null, 2));
+}
+
+let users = loadUsers();
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
-
-// Mini banco de dados em memória
-const users = [
-  {
-    id: 1,
-    name: 'Administrador',
-    email: 'admin',
-    password: 'admin123', // Em produção, nunca armazene senhas em texto puro!
-    role: 'ADM', // O ADM é o colaborador
-    active: true,
-  },
-  {
-    id: 2,
-    name: 'Diretor Exemplo',
-    email: 'diretor',
-    password: 'diretor123',
-    role: 'DIRETOR',
-    active: true,
-  },
-  {
-    id: 3,
-    name: 'Financeiro Exemplo',
-    email: 'financeiro',
-    password: 'fin123',
-    role: 'FINANCEIRO',
-    active: true,
-  },
-  {
-    id: 4,
-    name: 'Franquia Exemplo',
-    email: 'franquia',
-    password: 'fran123',
-    role: 'FRANQUIA',
-    active: true,
-  },
-];
 
 const pool = new Pool({
   user: process.env.PGUSER || 'crosby_ro',
@@ -96,7 +77,57 @@ app.post('/users', (req, res) => {
     active: active !== undefined ? active : true,
   };
   users.push(newUser);
+  saveUsers(users);
   res.status(201).json(newUser);
+});
+
+// Editar usuário (apenas ADM)
+app.put('/users/:id', (req, res) => {
+  const { requesterRole } = req.body;
+  if (requesterRole !== 'ADM') {
+    return res.status(403).json({ message: 'Apenas o ADM pode editar usuários.' });
+  }
+  const id = parseInt(req.params.id, 10);
+  const user = users.find(u => u.id === id);
+  if (!user) {
+    return res.status(404).json({ message: 'Usuário não encontrado.' });
+  }
+  // Não permitir que o ADM edite a si mesmo para não se auto-excluir
+  if (user.role === 'ADM' && user.email === 'admin') {
+    return res.status(403).json({ message: 'Não é permitido editar o usuário ADM principal.' });
+  }
+  const { name, email, password, role, active } = req.body;
+  const validRoles = ['ADM', 'DIRETOR', 'FINANCEIRO', 'FRANQUIA'];
+  if (role && !validRoles.includes(role)) {
+    return res.status(400).json({ message: 'Perfil de usuário inválido. Perfis permitidos: ADM, DIRETOR, FINANCEIRO, FRANQUIA.' });
+  }
+  if (name !== undefined) user.name = name;
+  if (email !== undefined) user.email = email;
+  if (password !== undefined) user.password = password;
+  if (role !== undefined) user.role = role;
+  if (active !== undefined) user.active = active;
+  saveUsers(users);
+  res.json(user);
+});
+
+// Excluir usuário (apenas ADM)
+app.delete('/users/:id', (req, res) => {
+  const { requesterRole } = req.body;
+  if (requesterRole !== 'ADM') {
+    return res.status(403).json({ message: 'Apenas o ADM pode excluir usuários.' });
+  }
+  const id = parseInt(req.params.id, 10);
+  const userIndex = users.findIndex(u => u.id === id);
+  if (userIndex === -1) {
+    return res.status(404).json({ message: 'Usuário não encontrado.' });
+  }
+  // Não permitir que o ADM exclua a si mesmo
+  if (users[userIndex].role === 'ADM' && users[userIndex].email === 'admin') {
+    return res.status(403).json({ message: 'Não é permitido excluir o usuário ADM principal.' });
+  }
+  users.splice(userIndex, 1);
+  saveUsers(users);
+  res.status(204).send();
 });
 
 // Exemplo de uso do axios para consumir uma API externa (mock)
