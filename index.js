@@ -39,6 +39,7 @@ export { pool };
 // Autenticação simples
 app.post('/login', (req, res) => {
   const { email, password } = req.body;
+  const users = loadUsers(); // Sempre carrega do arquivo
   const user = users.find(u => u.email === email && u.password === password && u.active);
   if (!user) {
     return res.status(401).json({ message: 'Credenciais inválidas ou usuário inativo.' });
