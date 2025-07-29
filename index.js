@@ -741,7 +741,7 @@ app.get('/faturamentorevenda', async (req, res) => {
         vfn.dt_transacao between $1 and $2
         and vfn.cd_empresa IN (${empresaPlaceholders})
       	and vfn.cd_operacao not in (522, 9001, 9009, 9027, 9017, 002, 001, 548, 555, 521, 599, 1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
-        5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 1552, 51, 1556)
+        5010, 600, 620, 40, 1557,2505, 8600, 5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 1552, 51, 1556)
 	      and pc.cd_tipoclas = 20
 	      and vfn.tp_situacao not in ('C', 'X')`;
     const { rows } = await pool.query(query, params);
