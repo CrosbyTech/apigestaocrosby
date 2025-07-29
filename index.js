@@ -3,27 +3,46 @@ import axios from 'axios';
 import cors from 'cors';
 import pkg from 'pg';
 const { Pool } = pkg;
-import fs from 'fs';
-const USUARIOS_PATH = './backend/usuarios.json';
-
-function loadUsers() {
-  try {
-    const data = fs.readFileSync(USUARIOS_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch (e) {
-    return [];
-  }
-}
-
-function saveUsers(users) {
-  fs.writeFileSync(USUARIOS_PATH, JSON.stringify(users, null, 2));
-}
-
-let users = loadUsers();
 
 const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+
+// Mini banco de dados em memória
+const users = [
+  {
+    id: 1,
+    name: 'Administrador',
+    email: 'admin',
+    password: 'admin123', // Em produção, nunca armazene senhas em texto puro!
+    role: 'ADM', // O ADM é o colaborador
+    active: true,
+  },
+  {
+    id: 2,
+    name: 'Diretor Exemplo',
+    email: 'diretor',
+    password: 'diretor123',
+    role: 'DIRETOR',
+    active: true,
+  },
+  {
+    id: 3,
+    name: 'Financeiro Exemplo',
+    email: 'financeiro',
+    password: 'fin123',
+    role: 'FINANCEIRO',
+    active: true,
+  },
+  {
+    id: 4,
+    name: 'Franquia Exemplo',
+    email: 'franquia',
+    password: 'fran123',
+    role: 'FRANQUIA',
+    active: true,
+  },
+];
 
 const pool = new Pool({
   user: process.env.PGUSER || 'crosby_ro',
@@ -39,7 +58,6 @@ export { pool };
 // Autenticação simples
 app.post('/login', (req, res) => {
   const { email, password } = req.body;
-  const users = loadUsers(); // Sempre carrega do arquivo
   const user = users.find(u => u.email === email && u.password === password && u.active);
   if (!user) {
     return res.status(401).json({ message: 'Credenciais inválidas ou usuário inativo.' });
@@ -78,7 +96,6 @@ app.post('/users', (req, res) => {
     active: active !== undefined ? active : true,
   };
   users.push(newUser);
-  saveUsers(users);
   res.status(201).json(newUser);
 });
 
@@ -107,7 +124,6 @@ app.put('/users/:id', (req, res) => {
   if (password !== undefined) user.password = password;
   if (role !== undefined) user.role = role;
   if (active !== undefined) user.active = active;
-  saveUsers(users);
   res.json(user);
 });
 
@@ -127,7 +143,6 @@ app.delete('/users/:id', (req, res) => {
     return res.status(403).json({ message: 'Não é permitido excluir o usuário ADM principal.' });
   }
   users.splice(userIndex, 1);
-  saveUsers(users);
   res.status(204).send();
 });
 
