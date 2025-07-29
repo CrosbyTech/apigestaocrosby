@@ -20,10 +20,26 @@ const users = [
   },
   {
     id: 2,
-    name: 'Usuário Exemplo',
-    email: 'user',
-    password: 'user123',
-    role: 'USER',
+    name: 'Diretor Exemplo',
+    email: 'diretor',
+    password: 'diretor123',
+    role: 'DIRETOR',
+    active: true,
+  },
+  {
+    id: 3,
+    name: 'Financeiro Exemplo',
+    email: 'financeiro',
+    password: 'fin123',
+    role: 'FINANCEIRO',
+    active: true,
+  },
+  {
+    id: 4,
+    name: 'Franquia Exemplo',
+    email: 'franquia',
+    password: 'fran123',
+    role: 'FRANQUIA',
     active: true,
   },
 ];
@@ -64,6 +80,10 @@ app.post('/users', (req, res) => {
   if (requesterRole !== 'ADM') {
     return res.status(403).json({ message: 'Apenas o ADM pode criar usuários.' });
   }
+  const validRoles = ['ADM', 'DIRETOR', 'FINANCEIRO', 'FRANQUIA'];
+  if (!validRoles.includes(role)) {
+    return res.status(400).json({ message: 'Perfil de usuário inválido. Perfis permitidos: ADM, DIRETOR, FINANCEIRO, FRANQUIA.' });
+  }
   if (users.find(u => u.email === email)) {
     return res.status(400).json({ message: 'E-mail já cadastrado.' });
   }
@@ -72,7 +92,7 @@ app.post('/users', (req, res) => {
     name,
     email,
     password,
-    role: role || 'USER',
+    role,
     active: active !== undefined ? active : true,
   };
   users.push(newUser);
