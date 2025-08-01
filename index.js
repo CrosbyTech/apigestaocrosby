@@ -812,7 +812,9 @@ app.get('/faturamentolojas', async (req, res) => {
               T.TP_SITUACAO IS NULL OR (
                   T.TP_SITUACAO = 4
                   AND T.TP_OPERACAO IN ('S', 'E')
-                  AND T.CD_OPERACAO IN (1,2,510,511,1511,521,1521,522,960,9001,9009,9027,8750,9017,9400,9401,9402,9403,9404,9005,545,546,555,548,1210,9405,1205)
+                  AND T.CD_OPERACAO not in (5914,1407,5102,520,300,200,1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
+      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556,200,300,512,1402,1405,1409,5102,5110,200,300,
+      512,5102,5110,5113,17,21,401,1201,1202,1204,1206,1950,1999,2203,17,21,1201,1202,1204,1950,1999,2203)
                   AND T.CD_GRUPOEMPRESA BETWEEN $1 AND $2
                   AND T.DT_TRANSACAO BETWEEN $3::timestamp AND $4::timestamp
               )
@@ -834,6 +836,121 @@ app.get('/faturamentolojas', async (req, res) => {
   }
 });
 
+// Rota para ranking de vendedores
+app.get('/rankingvendedor', async (req, res) => {
+  try {
+    const { inicio, fim, limit, offset } = req.query;
+    
+    // Validação dos parâmetros obrigatórios
+    if (!inicio || !fim) {
+      return res.status(400).json({ 
+        message: 'Parâmetros obrigatórios: inicio e fim (formato: YYYY-MM-DD)' 
+      });
+    }
+
+    // Configuração de paginação
+    const limitValue = parseInt(limit, 10) || 50;
+    const offsetValue = parseInt(offset, 10) || 0;
+    
+    // Formatação das datas
+    const dataInicio = `${inicio} 00:00:00`;
+    const dataFim = `${fim} 23:59:59`;
+
+    // Query principal com paginação
+    const query = `
+      SELECT
+        A.CD_VENDEDOR AS VENDEDOR,
+        A.NM_VENDEDOR AS NOME_VENDEDOR,
+        B.CD_COMPVEND,
+        SUM(
+          CASE
+            WHEN B.TP_OPERACAO = 'E' AND B.TP_SITUACAO = 4 THEN B.QT_SOLICITADA
+            ELSE 0
+          END
+        ) AS PAENTRADA,
+        SUM(
+          CASE
+            WHEN B.TP_OPERACAO = 'S' AND B.TP_SITUACAO = 4 THEN B.QT_SOLICITADA
+            ELSE 0
+          END
+        ) AS PASAIDA,
+        COUNT(*) FILTER (WHERE B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'S') AS TRASAIDA,
+        COUNT(*) FILTER (WHERE B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'E') AS TRAENTRADA,
+        (
+          SUM(
+            CASE
+              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'S' THEN B.VL_TOTAL
+              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'E' THEN -B.VL_TOTAL
+              ELSE 0
+            END
+          )
+          -
+          SUM(
+            CASE
+              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO IN ('S', 'E') THEN COALESCE(B.VL_FRETE, 0)
+              ELSE 0
+            END
+          )
+        ) AS FATURAMENTO
+      FROM PES_VENDEDOR A
+      JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
+      WHERE B.TP_SITUACAO = 4
+        AND B.TP_OPERACAO IN ('S', 'E')
+        AND B.CD_OPERACAO not in (5914,1407,5102,520,300,200,1152, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930, 650, 
+      5010, 600, 620, 40, 1557, 8600, 5910, 3336, 9003, 9052, 662, 5909,5153,5910,3336,9003,530,36,536,1552,51,1556,200,300,512,1402,1405,1409,5102,5110,200,300,
+      512,5102,5110,5113,17,21,401,1201,1202,1204,1206,1950,1999,2203,17,21,1201,1202,1204,1950,1999,2203)
+        AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
+      GROUP BY A.CD_VENDEDOR, A.NM_VENDEDOR, B.CD_COMPVEND
+      ORDER BY FATURAMENTO DESC
+      LIMIT $3 OFFSET $4
+    `;
+
+    // Query para contar total de registros
+    const countQuery = `
+      SELECT COUNT(DISTINCT A.CD_VENDEDOR) as total
+      FROM PES_VENDEDOR A
+      JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
+      WHERE B.TP_SITUACAO = 4
+        AND B.TP_OPERACAO IN ('S', 'E')
+        AND B.CD_OPERACAO IN (
+          1,2,510,511,1511,521,1521,522,960,
+          9001,9009,9027,8750,9017,9400,9401,
+          9402,9403,9005,545,546,555,548,1210,
+          1202,8800,9404,9405,1205
+        )
+        AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
+    `;
+
+    // Executar queries em paralelo
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dataInicio, dataFim, limitValue, offsetValue]),
+      pool.query(countQuery, [dataInicio, dataFim])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    // Resposta estruturada
+    res.json({
+      total,
+      limit: limitValue,
+      offset: offsetValue,
+      periodo: {
+        inicio: dataInicio,
+        fim: dataFim
+      },
+      dados: resultado.rows
+    });
+
+    console.log(`Ranking vendedores: ${resultado.rows.length} registros retornados de ${total} total`);
+
+  } catch (error) {
+    console.error('Erro ao buscar ranking de vendedores:', error);
+    res.status(500).json({ 
+      message: 'Erro interno do servidor ao buscar ranking de vendedores.',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
