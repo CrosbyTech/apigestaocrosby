@@ -1010,25 +1010,6 @@ app.get('/contasapagar', async (req, res) => {
                 where
                   fd.dt_emissao between $1 and $2
                   and fd.cd_empresa = $3
-                group by
-                  fd.cd_empresa,
-                  fd.cd_fornecedor,
-                  fd.nr_duplicata,
-                  fd.nr_portador,
-                  fd.nr_parcela,
-                  fd.dt_emissao,
-                  fd.dt_vencimento,
-                  fd.dt_entrada,
-                  fd.dt_liq,
-                  fd.tp_situacao,
-                  fd.tp_estagio,
-                  fd.vl_duplicata,
-                  fd.vl_juros,
-                  fd.vl_acrescimo,
-                  fd.vl_desconto,
-                  fd.vl_pago,
-                  fd.in_aceite,
-                  od.ds_observacao
                 order by fd.dt_emissao desc
                 limit $4 offset $5
               `;
