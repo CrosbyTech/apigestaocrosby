@@ -965,6 +965,115 @@ app.get('/rankingvendedor', async (req, res) => {
   }
 });
 
+// Rota para buscar contas a pagar
+app.get('/contasapagar', async (req, res) => {
+  try {
+    const { dt_inicio, dt_fim, cd_empresa, limit, offset } = req.query;
+    
+    // Validação dos parâmetros obrigatórios
+    if (!dt_inicio || !dt_fim || !cd_empresa) {
+      return res.status(400).json({ 
+        message: 'Parâmetros obrigatórios: dt_inicio, dt_fim (formato: YYYY-MM-DD) e cd_empresa' 
+      });
+    }
+
+    // Configuração de paginação
+    const limitValue = parseInt(limit, 10) || 50;
+    const offsetValue = parseInt(offset, 10) || 0;
+
+    // Query principal com paginação
+    const query = `
+                      select
+                  fd.cd_empresa,
+                  fd.cd_fornecedor,
+                  fd.nr_duplicata,
+                  fd.nr_portador,
+                  fd.dt_emissao,
+                  fd.dt_vencimento,
+                  fd.dt_entrada,
+                  fd.dt_liq,
+                  fd.tp_situacao,
+                  fd.tp_estagio,
+                  fd.vl_duplicata,
+                  fd.vl_juros,
+                  fd.vl_acrescimo,
+                  fd.vl_desconto,
+                  fd.vl_pago,
+                  fd.in_aceite,
+                  od.ds_observacao
+      from
+        fcp_duplicatai fd
+      left join obs_dupi od on
+        fd.nr_duplicata = od.nr_duplicata
+      where
+        fd.dt_emissao between $1 and $2
+        and fd.cd_empresa = $3
+                      group by
+                  fd.cd_empresa,
+                  fd.cd_fornecedor,
+                  fd.nr_duplicata,
+                  fd.nr_portador,
+                  fd.dt_emissao,
+                  fd.dt_vencimento,
+                  fd.dt_entrada,
+                  fd.dt_liq,
+                  fd.tp_situacao,
+                  fd.tp_estagio,
+                  fd.vl_duplicata,
+                  fd.vl_juros,
+                  fd.vl_acrescimo,
+                  fd.vl_desconto,
+                  fd.vl_pago,
+                  fd.in_aceite,
+                  od.ds_observacao
+      order by fd.dt_emissao desc
+      limit $4 offset $5
+    `;
+
+    // Query para contar total de registros
+    const countQuery = `
+      select count(*) as total
+      from
+        fcp_duplicatai fd
+      left join obs_dupi od on
+        fd.nr_duplicata = od.nr_duplicata
+      where
+        fd.dt_emissao between $1 and $2
+        and fd.cd_empresa = $3
+    `;
+
+    // Executar queries em paralelo
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limitValue, offsetValue]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    // Resposta estruturada
+    res.json({
+      total,
+      limit: limitValue,
+      offset: offsetValue,
+      filtros: {
+        dt_inicio,
+        dt_fim,
+        cd_empresa
+      },
+      dados: resultado.rows
+    });
+
+    console.log(`Contas a pagar: ${resultado.rows.length} registros retornados de ${total} total`);
+
+  } catch (error) {
+    console.error('Erro ao buscar contas a pagar:', error);
+    res.status(500).json({ 
+      message: 'Erro interno do servidor ao buscar contas a pagar.',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Backend rodando em ${PORT}`);
