@@ -981,13 +981,14 @@ app.get('/contasapagar', async (req, res) => {
     const limitValue = parseInt(limit, 10000) || 50000;
     const offsetValue = parseInt(offset, 10000) || 0;
 
-    // Query principal com paginação
-    const query = `
-                      select
+          // Query principal com paginação
+      const query = `
+                select
                   fd.cd_empresa,
                   fd.cd_fornecedor,
                   fd.nr_duplicata,
                   fd.nr_portador,
+                  fd.nr_parcela,
                   fd.dt_emissao,
                   fd.dt_vencimento,
                   fd.dt_entrada,
@@ -1000,20 +1001,21 @@ app.get('/contasapagar', async (req, res) => {
                   fd.vl_desconto,
                   fd.vl_pago,
                   fd.in_aceite,
-                  fd.nr_parcela,
                   od.ds_observacao
-      from
-        fcp_duplicatai fd
-      left join obs_dupi od on
-        fd.nr_duplicata = od.nr_duplicata
-      where
-        fd.dt_emissao between $1 and $2
-        and fd.cd_empresa = $3
-                      group by
+                from
+                  fcp_duplicatai fd
+                left join obs_dupi od on
+                  fd.nr_duplicata = od.nr_duplicata
+                  and fd.cd_fornecedor = od.cd_fornecedor
+                where
+                  fd.dt_emissao between $1 and $2
+                  and fd.cd_empresa = $3
+                group by
                   fd.cd_empresa,
                   fd.cd_fornecedor,
                   fd.nr_duplicata,
                   fd.nr_portador,
+                  fd.nr_parcela,
                   fd.dt_emissao,
                   fd.dt_vencimento,
                   fd.dt_entrada,
@@ -1026,11 +1028,10 @@ app.get('/contasapagar', async (req, res) => {
                   fd.vl_desconto,
                   fd.vl_pago,
                   fd.in_aceite,
-                  fd.nr_parcela,
                   od.ds_observacao
-      order by fd.dt_emissao desc
-      limit $4 offset $5
-    `;
+                order by fd.dt_emissao desc
+                limit $4 offset $5
+              `;
 
     // Query para contar total de registros
     const countQuery = `
