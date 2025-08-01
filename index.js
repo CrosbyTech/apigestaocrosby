@@ -1000,6 +1000,7 @@ app.get('/contasapagar', async (req, res) => {
                   fd.vl_desconto,
                   fd.vl_pago,
                   fd.in_aceite,
+                  fd.nr_parcela,
                   od.ds_observacao
       from
         fcp_duplicatai fd
@@ -1025,6 +1026,7 @@ app.get('/contasapagar', async (req, res) => {
                   fd.vl_desconto,
                   fd.vl_pago,
                   fd.in_aceite,
+                  fd.nr_parcela,
                   od.ds_observacao
       order by fd.dt_emissao desc
       limit $4 offset $5
