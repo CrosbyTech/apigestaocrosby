@@ -1010,6 +1010,7 @@ app.get('/contasapagar', async (req, res) => {
                 where
                   fd.dt_emissao between $1 and $2
                   and fd.cd_empresa = $3
+                  and fd.tp_situacao = 'N'
                 order by fd.dt_emissao desc
                 limit $4 offset $5
               `;
@@ -1024,6 +1025,7 @@ app.get('/contasapagar', async (req, res) => {
       where
         fd.dt_emissao between $1 and $2
         and fd.cd_empresa = $3
+        and fd.tp_situacao = 'N'
     `;
 
     // Executar queries em paralelo
