@@ -978,8 +978,8 @@ app.get('/contasapagar', async (req, res) => {
     }
 
     // Configuração de paginação
-    const limitValue = parseInt(limit, 10000) || 50000;
-    const offsetValue = parseInt(offset, 10000) || 0;
+    const limitValue = parseInt(limit, 100000000) || 500000000;
+    const offsetValue = parseInt(offset, 100000000) || 0;
 
           // Query principal com paginação
       const query = `
@@ -1033,7 +1033,7 @@ app.get('/contasapagar', async (req, res) => {
       pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
     ]);
 
-    const total = parseInt(totalResult.rows[0].total, 10000);
+    const total = parseInt(totalResult.rows[0].total, 100000000);
 
     // Resposta estruturada
     res.json({
