@@ -998,7 +998,8 @@ app.get('/contasapagar', async (req, res) => {
                   od.ds_observacao,
                   fd.cd_despesaitem,
                   fd2.ds_despesaitem,
-                  vpf.nm_fornecedor
+                  vpf.nm_fornecedor,
+                  fd.cd_ccusto
                 from
                   vr_fcp_despduplicatai fd
                 left join obs_dupi od on
