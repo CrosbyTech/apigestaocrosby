@@ -997,13 +997,15 @@ app.get('/contasapagar', async (req, res) => {
                   fd.in_aceite,
                   od.ds_observacao,
                   fd.cd_despesaitem,
-                  fd2.ds_despesaitem
+                  fd2.ds_despesaitem,
+                  vpf.nm_fornecedor
                 from
                   vr_fcp_despduplicatai fd
                 left join obs_dupi od on
                   fd.nr_duplicata = od.nr_duplicata
                   and fd.cd_fornecedor = od.cd_fornecedor
-                  left join fcp_despesaitem fd2 on fd.cd_despesaitem = fd2.cd_despesaitem 
+                  left join fcp_despesaitem fd2 on fd.cd_despesaitem = fd2.cd_despesaitem
+                  left join vr_pes_fornecedor vpf on fd.cd_fornecedor = vpf.cd_fornecedor
                 where
                   fd.dt_emissao between $1 and $2
                   and fd.cd_empresa = $3
@@ -1050,6 +1052,103 @@ app.get('/contasapagar', async (req, res) => {
     console.error('Erro ao buscar contas a pagar:', error);
     res.status(500).json({ 
       message: 'Erro interno do servidor ao buscar contas a pagar.',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Rota para contas a receber
+app.get('/contasareceber', async (req, res) => {
+  const { dt_inicio, dt_fim, cd_empresa, limit, offset } = req.query;
+
+  // Validação dos parâmetros obrigatórios
+  if (!dt_inicio || !dt_fim || !cd_empresa) {
+    return res.status(400).json({
+      message: 'Parâmetros obrigatórios: dt_inicio, dt_fim, cd_empresa'
+    });
+  }
+
+  try {
+    // Configurar paginação
+    const limitValue = parseInt(limit, 10) || 50;
+    const offsetValue = parseInt(offset, 10) || 0;
+
+    // Query principal com paginação
+    const query = `
+      select
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nm_cliente,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.dt_cancelamento,
+        vff.dt_liq,
+        vff.tp_cobranca,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_inclusao,
+        vff.tp_baixa,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_abatimento,
+        vff.vl_pago,
+        vff.vl_desconto,
+        vff.vl_liquido,
+        vff.vl_acrescimo,
+        vff.vl_multa,
+        vff.nr_portador,
+        vff.vl_renegociacao,
+        vff.vl_corrigido,
+        vff.vl_juros,
+        vff.pr_juromes,
+        vff.pr_multa
+      from
+        vr_fcr_faturai vff
+      where
+        vff.dt_emissao between $1 and $2
+        and vff.cd_empresa = $3
+      order by vff.dt_emissao desc
+      limit $4 offset $5
+    `;
+
+    // Query para contar total de registros
+    const countQuery = `
+      select count(*) as total
+      from vr_fcr_faturai vff
+      where
+        vff.dt_emissao between $1 and $2
+        and vff.cd_empresa = $3
+    `;
+
+    // Executar queries em paralelo
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limitValue, offsetValue]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    // Resposta estruturada
+    res.json({
+      total,
+      limit: limitValue,
+      offset: offsetValue,
+      filtros: {
+        dt_inicio,
+        dt_fim,
+        cd_empresa
+      },
+      dados: resultado.rows
+    });
+
+    console.log(`Contas a receber: ${resultado.rows.length} registros retornados de ${total} total`);
+
+  } catch (error) {
+    console.error('Erro ao buscar contas a receber:', error);
+    res.status(500).json({ 
+      message: 'Erro interno do servidor ao buscar contas a receber.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
