@@ -970,12 +970,12 @@ app.get('/rankingvendedor', async (req, res) => {
 // Rota para buscar contas a pagar
 app.get('/contasapagar', async (req, res) => {
   try {
-    const { dt_inicio, dt_fim, cd_empresa, limit, offset } = req.query;
+    const { dt_inicio, dt_fim, cd_empresa, cd_fornecedor, tp_situacao, limit, offset } = req.query;
     
     // Validação dos parâmetros obrigatórios
-    if (!dt_inicio || !dt_fim || !cd_empresa) {
+    if (!dt_inicio || !dt_fim || !cd_empresa || !cd_fornecedor || !tp_situacao) {
       return res.status(400).json({ 
-        message: 'Parâmetros obrigatórios: dt_inicio, dt_fim (formato: YYYY-MM-DD) e cd_empresa' 
+        message: 'Parâmetros obrigatórios: dt_inicio, dt_fim (formato: YYYY-MM-DD), cd_empresa, cd_fornecedor e tp_situacao' 
       });
     }
 
@@ -986,53 +986,54 @@ app.get('/contasapagar', async (req, res) => {
           // Query principal com paginação
       const query = `
                 select
-                  fd.cd_empresa,
                   fd.cd_fornecedor,
                   fd.nr_duplicata,
-                  fd.nr_portador,
-                  fd.nr_parcela,
                   fd.dt_emissao,
+                  fd.vl_pago,
                   fd.dt_vencimento,
-                  fd.dt_entrada,
-                  fd.dt_liq,
                   fd.tp_situacao,
                   fd.tp_estagio,
                   fd.vl_duplicata,
                   fd.vl_juros,
                   fd.vl_acrescimo,
                   fd.vl_desconto,
-                  fd.vl_pago,
                   fd.in_aceite,
-                  od.ds_observacao
+                  od.ds_observacao,
+                  fd.cd_despesaitem,
+                  fd2.ds_despesaitem
                 from
-                  fcp_duplicatai fd
+                  vr_fcp_despduplicatai fd
                 left join obs_dupi od on
                   fd.nr_duplicata = od.nr_duplicata
                   and fd.cd_fornecedor = od.cd_fornecedor
+                left join fcp_despesaitem fd2 on fd.cd_despesaitem = fd2.cd_despesaitem
                 where
                   fd.dt_emissao between $1 and $2
                   and fd.cd_empresa = $3
-                  and fd.tp_situacao = 'N'
+                  and fd.cd_fornecedor = $4
+                  and fd.tp_situacao = $5
                 order by fd.dt_emissao desc
-                limit $4 offset $5
+                limit $6 offset $7
               `;
 
     // Query para contar total de registros
     const countQuery = `
       select count(*) as total
       from
-        fcp_duplicatai fd
+        vr_fcp_despduplicatai fd
       left join obs_dupi od on
         fd.nr_duplicata = od.nr_duplicata
       where
         fd.dt_emissao between $1 and $2
         and fd.cd_empresa = $3
+        and fd.cd_fornecedor = $4
+        and fd.tp_situacao = $5
     `;
 
     // Executar queries em paralelo
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limitValue, offsetValue]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, cd_fornecedor, tp_situacao, limitValue, offsetValue]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa, cd_fornecedor, tp_situacao])
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 100000000);
@@ -1045,7 +1046,9 @@ app.get('/contasapagar', async (req, res) => {
       filtros: {
         dt_inicio,
         dt_fim,
-        cd_empresa
+        cd_empresa,
+        cd_fornecedor,
+        tp_situacao
       },
       dados: resultado.rows
     });
