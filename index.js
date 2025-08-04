@@ -1001,34 +1001,18 @@ app.get('/contasapagar', async (req, res) => {
                   fd.vl_desconto,
                   fd.vl_pago,
                   fd.in_aceite,
-                  od.ds_observacao
+                  od.ds_observacao,
+                  fd.cd_despesaitem,
+                  fd2.ds_despesaitem
                 from
-                  fcp_duplicatai fd
+                  vr_fcp_despduplicatai fd
                 left join obs_dupi od on
                   fd.nr_duplicata = od.nr_duplicata
                   and fd.cd_fornecedor = od.cd_fornecedor
+                  left join fcp_despesaitem fd2 on fd.cd_despesaitem = fd2.cd_despesaitem 
                 where
                   fd.dt_emissao between $1 and $2
                   and fd.cd_empresa = $3
-                group by
-                  fd.cd_empresa,
-                  fd.cd_fornecedor,
-                  fd.nr_duplicata,
-                  fd.nr_portador,
-                  fd.nr_parcela,
-                  fd.dt_emissao,
-                  fd.dt_vencimento,
-                  fd.dt_entrada,
-                  fd.dt_liq,
-                  fd.tp_situacao,
-                  fd.tp_estagio,
-                  fd.vl_duplicata,
-                  fd.vl_juros,
-                  fd.vl_acrescimo,
-                  fd.vl_desconto,
-                  fd.vl_pago,
-                  fd.in_aceite,
-                  od.ds_observacao
                 order by fd.dt_emissao desc
                 limit $4 offset $5
               `;
@@ -1039,7 +1023,7 @@ app.get('/contasapagar', async (req, res) => {
       from
         fcp_duplicatai fd
       left join obs_dupi od on
-        fd.nr_duplicata = od.nr_duplicata
+        fd.nr_duplicata = od.nr_duplicata 
       where
         fd.dt_emissao between $1 and $2
         and fd.cd_empresa = $3
