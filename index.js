@@ -49,17 +49,14 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// CORS configurado de forma mais segura
-const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? process.env.ALLOWED_ORIGINS?.split(',') || ['https://yourdomain.com']
-    : ['http://localhost:3000', 'http://localhost:3001', 'http://127.0.0.1:3000'],
-  credentials: true,
+// CORS configurado para permitir qualquer origem
+app.use(cors({
+  origin: '*',
+  credentials: false,
   optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-};
-app.use(cors(corsOptions));
+}));
 
 // Compressão de respostas
 app.use(compression());
