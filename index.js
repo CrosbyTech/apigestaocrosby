@@ -1032,7 +1032,7 @@ app.get('/contasapagar', async (req, res) => {
       pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
     ]);
 
-    const total = parseInt(totalResult.rows[0].total, 10000);
+    const total = parseInt(totalResult.rows[0].total, 100000);
 
     // Resposta estruturada
     res.json({
