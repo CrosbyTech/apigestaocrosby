@@ -1008,7 +1008,7 @@ app.get('/contasapagar', async (req, res) => {
                   left join fcp_despesaitem fd2 on fd.cd_despesaitem = fd2.cd_despesaitem
                   left join vr_pes_fornecedor vpf on fd.cd_fornecedor = vpf.cd_fornecedor
                 where
-                  fd.dt_emissao between $1 and $2
+                  fd.dt_vencimento between $1 and $2
                   and fd.cd_empresa = $3
                 order by fd.dt_emissao desc
                 limit $4 offset $5
