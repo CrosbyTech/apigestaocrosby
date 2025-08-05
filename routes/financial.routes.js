@@ -155,7 +155,7 @@ router.get('/contas-pagar',
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    // Query principal com JOIN otimizado
+    // Query principal com JOIN otimizado e centro de custo
     const query = `
       SELECT
         fd.cd_empresa,
@@ -179,12 +179,14 @@ router.get('/contas-pagar',
         fd.cd_despesaitem,
         fdi.ds_despesaitem,
         vpf.nm_fornecedor,
-        fd.cd_ccusto
+        fd.cd_ccusto,
+        gc.ds_ccusto
       FROM vr_fcp_despduplicatai fd
       LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
         AND fd.cd_fornecedor = od.cd_fornecedor
       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa = $3
       ORDER BY fd.dt_emissao DESC
