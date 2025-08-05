@@ -220,6 +220,86 @@ router.get('/contas-pagar',
 );
 
 /**
+ * @route GET /financial/fluxo-caixa
+ * @desc Buscar fluxo de caixa (baseado na data de liquidação)
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ */
+router.get('/fluxo-caixa',
+  sanitizeInput,
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validatePagination,
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Query principal com JOIN otimizado e centro de custo
+    const query = `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        fd.in_aceite,
+        od.ds_observacao,
+        fd.cd_despesaitem,
+        fdi.ds_despesaitem,
+        vpf.nm_fornecedor,
+        fd.cd_ccusto,
+        gc.ds_ccusto
+      FROM vr_fcp_despduplicatai fd
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
+        AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
+      WHERE fd.dt_liq BETWEEN $1 AND $2
+        AND fd.cd_empresa = $3
+      ORDER BY fd.dt_emissao DESC
+      LIMIT $4 OFFSET $5
+    `;
+
+    // Query para contagem
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM vr_fcp_despduplicatai fd
+      WHERE fd.dt_liq BETWEEN $1 AND $2
+        AND fd.cd_empresa = $3
+    `;
+
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    successResponse(res, {
+      total,
+      limit,
+      offset,
+      hasMore: (offset + limit) < total,
+      filtros: { dt_inicio, dt_fim, cd_empresa },
+      data: resultado.rows
+    }, 'Fluxo de caixa obtido com sucesso');
+  })
+);
+
+/**
  * @route GET /financial/contas-receber
  * @desc Buscar contas a receber
  * @access Public
