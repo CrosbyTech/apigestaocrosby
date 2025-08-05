@@ -7,7 +7,7 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 
 // Importar configurações
-import pool from './config/database.js';
+import pool, { testConnection, closePool } from './config/database.js';
 import { logger } from './utils/errorHandler.js';
 
 // Importar middlewares
@@ -35,10 +35,10 @@ app.use(helmet({
   contentSecurityPolicy: false // Desabilita CSP para APIs
 }));
 
-// Rate limiting - limitar número de requisições por IP (mais permissivo sem autenticação)
+// Rate limiting - muito permissivo para consultas grandes
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: process.env.NODE_ENV === 'production' ? 500 : 2000, // Mais permissivo
+  max: process.env.NODE_ENV === 'production' ? 10000 : 50000, // Muito permissivo
   message: {
     error: 'RATE_LIMIT_EXCEEDED',
     message: 'Muitas requisições. Tente novamente em 15 minutos.',
@@ -207,7 +207,7 @@ const gracefulShutdown = (signal) => {
     logger.info('Servidor HTTP fechado.');
     
     try {
-      await pool.end();
+      await closePool();
       logger.info('Pool de conexões do banco fechado.');
       process.exit(0);
     } catch (error) {
@@ -217,11 +217,25 @@ const gracefulShutdown = (signal) => {
   });
 };
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   logger.info(`🚀 Servidor rodando na porta ${PORT}`);
   logger.info(`📚 Documentação disponível em http://localhost:${PORT}/api/docs`);
   logger.info(`🏥 Health check em http://localhost:${PORT}/api/utils/health`);
   logger.info(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  
+  // Remover timeout do servidor HTTP (ilimitado)
+  server.timeout = 0; // Sem timeout para requisições
+  server.keepAliveTimeout = 0; // Sem timeout para keep-alive
+  server.headersTimeout = 0; // Sem timeout para headers
+  logger.info('♾️  Timeouts do servidor removidos - requisições ilimitadas');
+  
+  // Testar conexão com banco de dados na inicialização
+  const dbConnected = await testConnection();
+  if (dbConnected) {
+    logger.info('🗄️  Banco de dados conectado com sucesso - SEM TIMEOUTS');
+  } else {
+    logger.error('❌ Falha na conexão com banco de dados');
+  }
 });
 
 // Handlers para encerramento gracioso

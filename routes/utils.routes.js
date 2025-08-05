@@ -100,20 +100,37 @@ router.get('/autocomplete/nm_grupoempresa',
  */
 router.get('/health', 
   asyncHandler(async (req, res) => {
+    const startTime = Date.now();
     const healthCheck = {
       status: 'OK',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       environment: process.env.NODE_ENV || 'development',
-      version: process.env.npm_package_version || '1.0.0'
+      version: process.env.npm_package_version || '2.1.0',
+      startTime
     };
 
-    // Testar conexão com banco de dados
+    // Testar conexão com banco de dados SEM timeout
     try {
-      const result = await pool.query('SELECT 1 as test');
-      healthCheck.database = 'Connected';
+      console.log('🔍 Testando conexão com banco de dados...');
+      const result = await pool.query('SELECT NOW() as current_time, version() as version, current_database() as database');
+      
+      healthCheck.database = {
+        status: 'Connected',
+        responseTime: `${Date.now() - healthCheck.startTime}ms`,
+        serverTime: result.rows[0].current_time,
+        database: result.rows[0].database,
+        version: result.rows[0].version.split(' ')[0] + ' ' + result.rows[0].version.split(' ')[1],
+        message: 'Conexão sem timeout - ilimitada'
+      };
+      console.log('✅ Conexão com banco bem-sucedida');
     } catch (error) {
-      healthCheck.database = 'Disconnected';
+      console.error('❌ Erro na conexão com banco:', error.message);
+      healthCheck.database = {
+        status: 'Disconnected',
+        error: error.message,
+        message: 'Falha na conexão mesmo sem timeout'
+      };
       healthCheck.status = 'ERROR';
     }
 

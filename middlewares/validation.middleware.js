@@ -126,9 +126,9 @@ export const validatePagination = (req, res, next) => {
 
   if (limit) {
     const limitNum = parseInt(limit, 10);
-    if (isNaN(limitNum) || limitNum < 1 || limitNum > 10000) {
+    if (isNaN(limitNum) || limitNum < 1 || limitNum > 100000000) {
       return res.status(400).json({
-        message: 'Parâmetro limit deve ser um número entre 1 e 10000',
+        message: 'Parâmetro limit deve ser um número entre 1 e 100000000',
         error: 'VALIDATION_ERROR'
       });
     }

@@ -16,7 +16,7 @@ router.get('/extrato',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { cd_empresa, nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     let baseQuery = ' FROM fcc_extratbco fe WHERE 1=1';
@@ -88,7 +88,7 @@ router.get('/extrato-totvs',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 5000;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     let baseQuery = ' FROM fcc_mov fm WHERE fm.in_estorno = $1';
@@ -152,7 +152,7 @@ router.get('/contas-pagar',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     // Query principal com JOIN otimizado
@@ -230,7 +230,7 @@ router.get('/contas-receber',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     const query = `

@@ -301,7 +301,7 @@ router.get('/ranking-vendedores',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 500;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
     
     const dataInicio = `${inicio} 00:00:00`;

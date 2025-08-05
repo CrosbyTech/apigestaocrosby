@@ -28,11 +28,12 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // Erro de timeout
+  // Erro de timeout (não deveria acontecer mais)
   if (err.code === 'ETIMEDOUT') {
+    console.log('⚠️  Timeout detectado mesmo com configuração ilimitada');
     return res.status(504).json({
-      message: 'Timeout na operação',
-      error: 'TIMEOUT_ERROR'
+      message: 'Timeout na operação (investigar configuração)',
+      error: 'UNEXPECTED_TIMEOUT_ERROR'
     });
   }
 

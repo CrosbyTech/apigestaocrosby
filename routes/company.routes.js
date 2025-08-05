@@ -187,7 +187,7 @@ router.get('/pcp',
   sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
-    const limit = parseInt(req.query.limit, 10) || 50;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     const query = `
