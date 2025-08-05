@@ -1022,7 +1022,7 @@ app.get('/contasapagar', async (req, res) => {
       left join obs_dupi od on
         fd.nr_duplicata = od.nr_duplicata 
       where
-        fd.dt_emissao between $1 and $2
+        fd.dt_vencimento between $1 and $2
         and fd.cd_empresa = $3
     `;
 
