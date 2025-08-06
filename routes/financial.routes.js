@@ -243,9 +243,22 @@ router.get('/fluxo-caixa',
   validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
+    console.log('🔍 Fluxo-caixa - Parâmetros recebidos:', req.query);
+    
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Validar parâmetros obrigatórios
+    if (!dt_inicio || !dt_fim || !cd_empresa) {
+      return res.status(400).json({
+        error: 'MISSING_PARAMETERS',
+        message: 'Parâmetros obrigatórios: dt_inicio, dt_fim, cd_empresa',
+        received: { dt_inicio, dt_fim, cd_empresa }
+      });
+    }
+
+    console.log('✅ Fluxo-caixa - Parâmetros validados:', { dt_inicio, dt_fim, cd_empresa, limit, offset });
 
     // Construir query dinamicamente para suportar múltiplas empresas
     let baseQuery = ` FROM vr_fcp_despduplicatai fd
@@ -305,21 +318,34 @@ router.get('/fluxo-caixa',
     const countQuery = `SELECT COUNT(*) as total ${baseQuery}`;
 
     const dataParams = [...params, limit, offset];
-    const [resultado, totalResult] = await Promise.all([
-      pool.query(query, dataParams),
-      pool.query(countQuery, params)
-    ]);
+    
+    console.log('🔍 Fluxo-caixa - Query principal:', query);
+    console.log('🔍 Fluxo-caixa - Parâmetros da query:', dataParams);
+    console.log('🔍 Fluxo-caixa - Query count:', countQuery);
+    console.log('🔍 Fluxo-caixa - Parâmetros count:', params);
+    
+    try {
+      const [resultado, totalResult] = await Promise.all([
+        pool.query(query, dataParams),
+        pool.query(countQuery, params)
+      ]);
 
-    const total = parseInt(totalResult.rows[0].total, 10);
+      const total = parseInt(totalResult.rows[0].total, 10);
+      console.log('✅ Fluxo-caixa - Query executada com sucesso. Total:', total, 'Registros:', resultado.rows.length);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
-    }, 'Fluxo de caixa obtido com sucesso');
+      successResponse(res, {
+        total,
+        limit,
+        offset,
+        hasMore: (offset + limit) < total,
+        filtros: { dt_inicio, dt_fim, cd_empresa },
+        data: resultado.rows
+      }, 'Fluxo de caixa obtido com sucesso');
+    } catch (error) {
+      console.error('❌ Fluxo-caixa - Erro na query:', error.message);
+      console.error('❌ Fluxo-caixa - Stack:', error.stack);
+      throw error;
+    }
   })
 );
 
