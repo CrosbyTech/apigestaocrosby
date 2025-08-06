@@ -235,56 +235,23 @@ router.get('/contas-pagar',
  * @route GET /financial/fluxo-caixa
  * @desc Buscar fluxo de caixa (baseado na data de liquidação)
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa}
  */
 router.get('/fluxo-caixa',
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
-  validatePagination,
   asyncHandler(async (req, res) => {
-    // Configurar compressão específica para esta rota
-    res.setHeader('Content-Encoding', 'gzip');
-    res.setHeader('Cache-Control', 'no-cache');
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
-    const offset = parseInt(req.query.offset, 10) || 0;
-
-    // Validar parâmetros obrigatórios
-    if (!dt_inicio || !dt_fim || !cd_empresa) {
-      return res.status(400).json({
-        error: 'MISSING_PARAMETERS',
-        message: 'Parâmetros obrigatórios: dt_inicio, dt_fim, cd_empresa',
-        received: { dt_inicio, dt_fim, cd_empresa }
-      });
-    }
-
-
-
-    // Construir query dinamicamente para suportar múltiplas empresas
-    let baseQuery = ` FROM vr_fcp_despduplicatai fd
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
-        AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
-      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_liq BETWEEN $1 AND $2`;
     
-    const params = [dt_inicio, dt_fim];
-    let idx = 3;
-
-    if (cd_empresa) {
-      if (Array.isArray(cd_empresa) && cd_empresa.length > 0) {
-        const cd_empresa_num = cd_empresa.map(Number);
-        baseQuery += ` AND fd.cd_empresa IN (${cd_empresa_num.map(() => `$${idx++}`).join(',')})`;
-        params.push(...cd_empresa_num);
-      } else {
-        baseQuery += ` AND fd.cd_empresa = $${idx++}`;
-        params.push(Number(cd_empresa));
-      }
+    if (!cd_empresa) {
+      return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
     }
 
-    // Query principal com JOIN otimizado e centro de custo
+    // Seguir exatamente o mesmo padrão da rota /faturamento - UMA ÚNICA QUERY
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
     const query = `
       SELECT
         fd.cd_empresa,
@@ -310,80 +277,35 @@ router.get('/fluxo-caixa',
         vpf.nm_fornecedor,
         fd.cd_ccusto,
         gc.ds_ccusto
-      ${baseQuery}
-      ORDER BY fd.dt_emissao DESC
-      LIMIT $${idx++} OFFSET $${idx++}
+      FROM vr_fcp_despduplicatai fd
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
+        AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
+      WHERE fd.dt_liq BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_liq DESC
     `;
 
-    // Query para contagem
-    const countQuery = `SELECT COUNT(*) as total ${baseQuery}`;
+    const { rows } = await pool.query(query, params);
 
-    const dataParams = [...params, limit, offset];
-    
-    try {
-      // Otimização: usar streaming para grandes datasets
-      const client = await pool.connect();
-      
-      try {
-        // Query de contagem primeiro
-        const totalResult = await client.query(countQuery, params);
-        const total = parseInt(totalResult.rows[0].total, 10);
-        
-        // Para datasets grandes, usar cursor para streaming
-        if (total > 100000) {
-          // Usar cursor para não carregar tudo na memória
-          await client.query('BEGIN');
-          await client.query(`DECLARE fluxo_cursor CURSOR FOR ${query}`, dataParams);
-          
-          const rows = [];
-          let fetchMore = true;
-          const batchSize = 10000; // Processar em lotes de 10k
-          
-          while (fetchMore && rows.length < limit) {
-            const batchResult = await client.query(`FETCH ${Math.min(batchSize, limit - rows.length)} FROM fluxo_cursor`);
-            
-            if (batchResult.rows.length === 0) {
-              fetchMore = false;
-            } else {
-              rows.push(...batchResult.rows);
-            }
-          }
-          
-          await client.query('CLOSE fluxo_cursor');
-          await client.query('COMMIT');
-          
-          successResponse(res, {
-            total,
-            limit,
-            offset,
-            hasMore: (offset + limit) < total,
-            filtros: { dt_inicio, dt_fim, cd_empresa },
-            data: rows,
-            optimized: true // Indica que foi otimizado
-          }, 'Fluxo de caixa obtido com sucesso (otimizado)');
-          
-        } else {
-          // Para datasets menores, usar query normal
-          const resultado = await client.query(query, dataParams);
-          
-          successResponse(res, {
-            total,
-            limit,
-            offset,
-            hasMore: (offset + limit) < total,
-            filtros: { dt_inicio, dt_fim, cd_empresa },
-            data: resultado.rows
-          }, 'Fluxo de caixa obtido com sucesso');
-        }
-        
-      } finally {
-        client.release();
-      }
-      
-    } catch (error) {
-      console.error('❌ Fluxo-caixa erro:', error.message);
-      throw error;
-    }
+    // Calcular totais (igual ao faturamento)
+    const totals = rows.reduce((acc, row) => {
+      acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
+      acc.totalPago += parseFloat(row.vl_pago || 0);
+      acc.totalJuros += parseFloat(row.vl_juros || 0);
+      acc.totalDesconto += parseFloat(row.vl_desconto || 0);
+      return acc;
+    }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
+
+    successResponse(res, {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      totals,
+      count: rows.length,
+      data: rows
+    }, 'Fluxo de caixa obtido com sucesso');
   })
 );
 
