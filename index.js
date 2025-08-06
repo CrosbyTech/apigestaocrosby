@@ -223,16 +223,16 @@ const server = app.listen(PORT, async () => {
   logger.info(`🏥 Health check em http://localhost:${PORT}/api/utils/health`);
   logger.info(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
   
-  // Remover timeout do servidor HTTP (ilimitado)
-  server.timeout = 0; // Sem timeout para requisições
-  server.keepAliveTimeout = 0; // Sem timeout para keep-alive
-  server.headersTimeout = 0; // Sem timeout para headers
-  logger.info('♾️  Timeouts do servidor removidos - requisições ilimitadas');
+  // Configurações otimizadas do servidor HTTP
+  server.timeout = 300000; // 5 minutos timeout para requisições
+  server.keepAliveTimeout = 65000; // 65 segundos para keep-alive
+  server.headersTimeout = 66000; // 66 segundos para headers
+  logger.info('⚙️  Timeouts do servidor configurados adequadamente');
   
   // Testar conexão com banco de dados na inicialização
   const dbConnected = await testConnection();
   if (dbConnected) {
-    logger.info('🗄️  Banco de dados conectado com sucesso - SEM TIMEOUTS');
+    logger.info('🗄️  Banco de dados conectado com sucesso');
   } else {
     logger.error('❌ Falha na conexão com banco de dados');
   }

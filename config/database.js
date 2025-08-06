@@ -5,7 +5,7 @@ dotenv.config();
 
 const { Pool } = pkg;
 
-// Configuração do pool de conexões do banco de dados (otimizada para Render)
+// Configuração otimizada do pool de conexões
 const pool = new Pool({
   user: process.env.PGUSER || 'crosby_ro',
   host: process.env.PGHOST || 'dbexp.vcenter.com.br',
@@ -14,26 +14,22 @@ const pool = new Pool({
   port: process.env.PGPORT ? parseInt(process.env.PGPORT) : 20187,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   
-  // Configurações sem limites de tempo
-  max: 1000, // Máximo de conexões no pool
-  min: 200, // Mínimo de conexões mantidas
-  idleTimeoutMillis: 0, // Sem timeout para conexões ociosas (ilimitado)
-  connectionTimeoutMillis: 0, // Sem timeout para novas conexões (ilimitado)
-  acquireTimeoutMillis: 0, // Sem timeout para adquirir conexão (ilimitado)
-  createTimeoutMillis: 0, // Sem timeout para criar conexão (ilimitado)
-  destroyTimeoutMillis: 0, // Sem timeout para destruir conexão (ilimitado)
-  reapIntervalMillis: 0, // Sem limpeza automática de conexões
-  createRetryIntervalMillis: 0, // Sem intervalo entre tentativas
+  // Configurações otimizadas para evitar acúmulo de conexões
+  max: 20, // Máximo de conexões no pool (reduzido drasticamente)
+  min: 2, // Mínimo de conexões mantidas (reduzido)
+  idleTimeoutMillis: 30000, // 30 segundos para liberar conexões ociosas
+  connectionTimeoutMillis: 60000, // 60 segundos timeout para novas conexões
+  acquireTimeoutMillis: 60000, // 60 segundos timeout para adquirir conexão
   
-  // Configurações específicas do PostgreSQL - SEM TIMEOUTS
-  statement_timeout: 0, // Sem timeout para statements (ilimitado)
-  query_timeout: 0, // Sem timeout para queries (ilimitado)
-  idle_in_transaction_session_timeout: 0, // Sem timeout para transações ociosas
+  // Configurações do PostgreSQL com timeouts apropriados
+  statement_timeout: 300000, // 5 minutos timeout para statements
+  query_timeout: 300000, // 5 minutos timeout para queries
+  idle_in_transaction_session_timeout: 60000, // 1 minuto timeout para transações ociosas
   application_name: 'apigestaocrosby',
   
-  // Keep alive para conexões permanentes
+  // Keep alive configurado adequadamente
   keepAlive: true,
-  keepAliveInitialDelayMillis: 0, // Sem delay inicial
+  keepAliveInitialDelayMillis: 10000, // 10 segundos delay inicial
 });
 
 // Teste de conexão na inicialização
@@ -50,51 +46,14 @@ pool.on('error', (err) => {
   }
 });
 
-// Helper para executar queries com retry infinito para timeouts
-const queryWithRetry = async (text, params, maxRetries = 10) => {
-  let lastError;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const result = await originalQuery(text, params);
-      if (attempt > 1) {
-        console.log(`✅ Query executada com sucesso na tentativa ${attempt}`);
-      }
-      return result;
-    } catch (error) {
-      lastError = error;
-      
-      // Se é timeout ou conexão perdida, tenta novamente indefinidamente
-      if (error.message.includes('timeout') || 
-          error.code === 'ECONNRESET' || 
-          error.code === 'ENOTFOUND' ||
-          error.code === 'ECONNREFUSED') {
-        
-        console.log(`⚠️  Tentativa ${attempt} falhou: ${error.message}`);
-        console.log(`🔄 Tentando novamente em ${attempt * 2000}ms...`);
-        
-        // Se chegou no máximo de tentativas para timeout, continua tentando
-        if (attempt === maxRetries) {
-          console.log(`♾️  Continuando tentativas infinitas para timeout...`);
-          maxRetries += 10; // Aumenta o limite para continuar tentando
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, attempt * 2000));
-        continue;
-      }
-      
-      // Se não é erro de conexão/timeout, falha imediatamente
-      console.error(`❌ Erro definitivo na query:`, error.message);
-      throw error;
-    }
-  }
-  
-  throw lastError;
-};
+// Monitoramento do pool para debug
+pool.on('acquire', () => {
+  console.log('Conexão adquirida do pool. Total de conexões:', pool.totalCount, 'Ativas:', pool.idleCount);
+});
 
-// Manter referência original antes de substituir
-const originalQuery = pool.query.bind(pool);
-pool.query = queryWithRetry;
+pool.on('release', () => {
+  console.log('Conexão retornada ao pool. Total de conexões:', pool.totalCount, 'Ativas:', pool.idleCount);
+});
 
 // Função para testar conexão
 export const testConnection = async () => {
