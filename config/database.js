@@ -46,13 +46,13 @@ pool.on('error', (err) => {
   }
 });
 
-// Monitoramento do pool para debug
+// Monitoramento do pool simplificado (apenas erros críticos)
 pool.on('acquire', () => {
-  console.log('Conexão adquirida do pool. Total de conexões:', pool.totalCount, 'Ativas:', pool.idleCount);
+  // Log removido para economizar memória
 });
 
 pool.on('release', () => {
-  console.log('Conexão retornada ao pool. Total de conexões:', pool.totalCount, 'Ativas:', pool.idleCount);
+  // Log removido para economizar memória
 });
 
 // Função para testar conexão

@@ -9,8 +9,9 @@
     "npm": ">=8.0.0"
   },
   "scripts": {
-    "start": "node index.refatorado.js",
-    "dev": "NODE_ENV=development nodemon index.refatorado.js",
+    "start": "node --max-old-space-size=4096 --optimize-for-size index.js",
+    "start:prod": "node --max-old-space-size=8192 --optimize-for-size index.js",
+    "dev": "NODE_ENV=development nodemon index.js",
     "test": "NODE_ENV=test jest",
     "lint": "eslint . --ext .js",
     "lint:fix": "eslint . --ext .js --fix",

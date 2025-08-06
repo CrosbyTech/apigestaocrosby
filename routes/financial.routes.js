@@ -16,7 +16,7 @@ router.get('/extrato',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { cd_empresa, nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const limit = parseInt(req.query.limit, 10) || 1000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     let baseQuery = ' FROM fcc_extratbco fe WHERE 1=1';
@@ -88,7 +88,7 @@ router.get('/extrato-totvs',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const limit = parseInt(req.query.limit, 10) || 1000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     let baseQuery = ' FROM fcc_mov fm WHERE fm.in_estorno = $1';
@@ -152,7 +152,7 @@ router.get('/contas-pagar',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const limit = parseInt(req.query.limit, 10) || 1000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     // Construir query dinamicamente para suportar múltiplas empresas
@@ -243,8 +243,9 @@ router.get('/fluxo-caixa',
   validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
-    console.log('🔍 Fluxo-caixa - Parâmetros recebidos:', req.query);
-    
+    // Configurar compressão específica para esta rota
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Cache-Control', 'no-cache');
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
@@ -258,7 +259,7 @@ router.get('/fluxo-caixa',
       });
     }
 
-    console.log('✅ Fluxo-caixa - Parâmetros validados:', { dt_inicio, dt_fim, cd_empresa, limit, offset });
+
 
     // Construir query dinamicamente para suportar múltiplas empresas
     let baseQuery = ` FROM vr_fcp_despduplicatai fd
@@ -319,31 +320,68 @@ router.get('/fluxo-caixa',
 
     const dataParams = [...params, limit, offset];
     
-    console.log('🔍 Fluxo-caixa - Query principal:', query);
-    console.log('🔍 Fluxo-caixa - Parâmetros da query:', dataParams);
-    console.log('🔍 Fluxo-caixa - Query count:', countQuery);
-    console.log('🔍 Fluxo-caixa - Parâmetros count:', params);
-    
     try {
-      const [resultado, totalResult] = await Promise.all([
-        pool.query(query, dataParams),
-        pool.query(countQuery, params)
-      ]);
-
-      const total = parseInt(totalResult.rows[0].total, 10);
-      console.log('✅ Fluxo-caixa - Query executada com sucesso. Total:', total, 'Registros:', resultado.rows.length);
-
-      successResponse(res, {
-        total,
-        limit,
-        offset,
-        hasMore: (offset + limit) < total,
-        filtros: { dt_inicio, dt_fim, cd_empresa },
-        data: resultado.rows
-      }, 'Fluxo de caixa obtido com sucesso');
+      // Otimização: usar streaming para grandes datasets
+      const client = await pool.connect();
+      
+      try {
+        // Query de contagem primeiro
+        const totalResult = await client.query(countQuery, params);
+        const total = parseInt(totalResult.rows[0].total, 10);
+        
+        // Para datasets grandes, usar cursor para streaming
+        if (total > 100000) {
+          // Usar cursor para não carregar tudo na memória
+          await client.query('BEGIN');
+          await client.query(`DECLARE fluxo_cursor CURSOR FOR ${query}`, dataParams);
+          
+          const rows = [];
+          let fetchMore = true;
+          const batchSize = 10000; // Processar em lotes de 10k
+          
+          while (fetchMore && rows.length < limit) {
+            const batchResult = await client.query(`FETCH ${Math.min(batchSize, limit - rows.length)} FROM fluxo_cursor`);
+            
+            if (batchResult.rows.length === 0) {
+              fetchMore = false;
+            } else {
+              rows.push(...batchResult.rows);
+            }
+          }
+          
+          await client.query('CLOSE fluxo_cursor');
+          await client.query('COMMIT');
+          
+          successResponse(res, {
+            total,
+            limit,
+            offset,
+            hasMore: (offset + limit) < total,
+            filtros: { dt_inicio, dt_fim, cd_empresa },
+            data: rows,
+            optimized: true // Indica que foi otimizado
+          }, 'Fluxo de caixa obtido com sucesso (otimizado)');
+          
+        } else {
+          // Para datasets menores, usar query normal
+          const resultado = await client.query(query, dataParams);
+          
+          successResponse(res, {
+            total,
+            limit,
+            offset,
+            hasMore: (offset + limit) < total,
+            filtros: { dt_inicio, dt_fim, cd_empresa },
+            data: resultado.rows
+          }, 'Fluxo de caixa obtido com sucesso');
+        }
+        
+      } finally {
+        client.release();
+      }
+      
     } catch (error) {
-      console.error('❌ Fluxo-caixa - Erro na query:', error.message);
-      console.error('❌ Fluxo-caixa - Stack:', error.stack);
+      console.error('❌ Fluxo-caixa erro:', error.message);
       throw error;
     }
   })
@@ -362,7 +400,7 @@ router.get('/contas-receber',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const limit = parseInt(req.query.limit, 10) || 1000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     const query = `
