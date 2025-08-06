@@ -377,4 +377,69 @@ router.get('/contas-receber',
   })
 );
 
+/**
+ * @route GET /financial/nfmanifestacao
+ * @desc Buscar notas fiscais de manifestação
+ * @access Public
+ * @query {dt_inicio, dt_fim, limit, offset}
+ */
+router.get('/nfmanifestacao',
+  sanitizeInput,
+  validateRequired(['dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validatePagination,
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim } = req.query;
+    const limit = parseInt(req.query.limit, 1000000) || 50000000;
+    const offset = parseInt(req.query.offset, 1000000) || 0;
+
+    const query = `
+      SELECT
+        fn.cd_empresa,
+        fn.nr_nf,
+        fn.cd_serie,
+        fn.nr_nsu,
+        fn.ds_chaveacesso,
+        fn.nr_cnpjemi,
+        fn.nm_razaosocial,
+        fn.vl_totalnota,
+        fn.tp_situacaoman,
+        fn.dt_emissao,
+        fn.tp_situacao,
+        fn.tp_operacao,
+        fn.cd_operador,
+        fn.tp_moddctofiscal,
+        fn.nr_fatura,
+        fn.dt_fatura,
+        fn.dt_cadastro
+      FROM fis_nfmanifestacao fn
+      WHERE fn.dt_emissao BETWEEN $1 AND $2
+      ORDER BY fn.dt_emissao DESC
+      LIMIT $3 OFFSET $4
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM fis_nfmanifestacao fn
+      WHERE fn.dt_emissao BETWEEN $1 AND $2
+    `;
+
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 1000000);
+
+    successResponse(res, {
+      total,
+      limit,
+      offset,
+      hasMore: (offset + limit) < total,
+      filtros: { dt_inicio, dt_fim },
+      data: resultado.rows
+    }, 'Notas fiscais de manifestação obtidas com sucesso');
+  })
+);
+
 export default router;
