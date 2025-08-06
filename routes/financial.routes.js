@@ -244,8 +244,31 @@ router.get('/fluxo-caixa',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10000000) || 50000000000;
-    const offset = parseInt(req.query.offset, 10000000) || 0;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Construir query dinamicamente para suportar múltiplas empresas
+    let baseQuery = ` FROM vr_fcp_despduplicatai fd
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
+        AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
+      WHERE fd.dt_liq BETWEEN $1 AND $2`;
+    
+    const params = [dt_inicio, dt_fim];
+    let idx = 3;
+
+    if (cd_empresa) {
+      if (Array.isArray(cd_empresa) && cd_empresa.length > 0) {
+        const cd_empresa_num = cd_empresa.map(Number);
+        baseQuery += ` AND fd.cd_empresa IN (${cd_empresa_num.map(() => `$${idx++}`).join(',')})`;
+        params.push(...cd_empresa_num);
+      } else {
+        baseQuery += ` AND fd.cd_empresa = $${idx++}`;
+        params.push(Number(cd_empresa));
+      }
+    }
 
     // Query principal com JOIN otimizado e centro de custo
     const query = `
@@ -273,32 +296,21 @@ router.get('/fluxo-caixa',
         vpf.nm_fornecedor,
         fd.cd_ccusto,
         gc.ds_ccusto
-      FROM vr_fcp_despduplicatai fd
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
-        AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
-      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_liq BETWEEN $1 AND $2
-        AND fd.cd_empresa = $3
+      ${baseQuery}
       ORDER BY fd.dt_emissao DESC
-      LIMIT $4 OFFSET $5
+      LIMIT $${idx++} OFFSET $${idx++}
     `;
 
     // Query para contagem
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM vr_fcp_despduplicatai fd
-      WHERE fd.dt_liq BETWEEN $1 AND $2
-        AND fd.cd_empresa = $3
-    `;
+    const countQuery = `SELECT COUNT(*) as total ${baseQuery}`;
 
+    const dataParams = [...params, limit, offset];
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+      pool.query(query, dataParams),
+      pool.query(countQuery, params)
     ]);
 
-    const total = parseInt(totalResult.rows[0].total, 10000000);
+    const total = parseInt(totalResult.rows[0].total, 10);
 
     successResponse(res, {
       total,
@@ -324,8 +336,8 @@ router.get('/contas-receber',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10000000) || 50000000;
-    const offset = parseInt(req.query.offset, 10000000) || 0;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
 
     const query = `
       SELECT

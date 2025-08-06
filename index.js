@@ -223,11 +223,11 @@ const server = app.listen(PORT, async () => {
   logger.info(`🏥 Health check em http://localhost:${PORT}/api/utils/health`);
   logger.info(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
   
-  // Configurações otimizadas do servidor HTTP
-  server.timeout = 300000; // 5 minutos timeout para requisições
+  // Configurações do servidor HTTP com timeout de 1 hora
+  server.timeout = 3600000; // 1 hora timeout para requisições
   server.keepAliveTimeout = 65000; // 65 segundos para keep-alive
   server.headersTimeout = 66000; // 66 segundos para headers
-  logger.info('⚙️  Timeouts do servidor configurados adequadamente');
+  logger.info('⚙️  Timeouts do servidor configurados para 1 hora');
   
   // Testar conexão com banco de dados na inicialização
   const dbConnected = await testConnection();
