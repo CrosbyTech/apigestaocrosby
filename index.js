@@ -30,12 +30,15 @@ const app = express();
 // CONFIGURAÇÕES DE SEGURANÇA E MIDDLEWARE
 // =============================================================================
 
+// Configurar trust proxy para Render (proxies reversos)
+app.set('trust proxy', true);
+
 // Helmet para segurança básica
 app.use(helmet({
   contentSecurityPolicy: false // Desabilita CSP para APIs
 }));
 
-// Rate limiting - muito permissivo para consultas grandes
+// Rate limiting otimizado para proxies (Render)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: process.env.NODE_ENV === 'production' ? 10000 : 50000, // Muito permissivo
@@ -45,7 +48,13 @@ const limiter = rateLimit({
     retryAfter: '15 minutes'
   },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  // Configuração específica para proxies reversos
+  trustProxy: true,
+  skip: (req) => {
+    // Skip para requests de health check
+    return req.path === '/api/utils/health' || req.path === '/';
+  }
 });
 app.use('/api/', limiter);
 
