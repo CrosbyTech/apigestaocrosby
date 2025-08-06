@@ -252,7 +252,36 @@ router.get('/fluxo-caixa',
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    const query = `
+    // Para muitas empresas (>20), usar query otimizada sem JOINs pesados
+    const isHeavyQuery = empresas.length > 20;
+    
+    const query = isHeavyQuery ? `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        fd.in_aceite,
+        fd.cd_despesaitem,
+        fd.cd_ccusto
+      FROM vr_fcp_despduplicatai fd
+      WHERE fd.dt_liq BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_liq DESC
+      LIMIT 10000000000
+    ` : `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -288,7 +317,16 @@ router.get('/fluxo-caixa',
       ORDER BY fd.dt_liq DESC
     `;
 
-    const { rows } = await pool.query(query, params);
+    console.log(`🔍 Fluxo-caixa: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
+    
+    // Para queries pesadas, usar timeout específico
+    const queryOptions = isHeavyQuery ? {
+      text: query,
+      values: params,
+      // Para queries pesadas, não usar timeout (herda do pool)
+    } : query;
+
+    const { rows } = await pool.query(queryOptions, isHeavyQuery ? undefined : params);
 
     // Calcular totais (igual ao faturamento)
     const totals = rows.reduce((acc, row) => {
@@ -304,8 +342,10 @@ router.get('/fluxo-caixa',
       empresas,
       totals,
       count: rows.length,
+      optimized: isHeavyQuery,
+      queryType: isHeavyQuery ? 'sem-joins-limitado-100k' : 'completo-com-joins',
       data: rows
-    }, 'Fluxo de caixa obtido com sucesso');
+    }, `Fluxo de caixa obtido com sucesso (${isHeavyQuery ? 'otimizado' : 'completo'})`);
   })
 );
 

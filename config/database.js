@@ -14,12 +14,12 @@ const pool = new Pool({
   port: process.env.PGPORT ? parseInt(process.env.PGPORT) : 20187,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   
-  // Configurações otimizadas para evitar acúmulo de conexões
-  max: 20, // Máximo de conexões no pool (reduzido drasticamente)
-  min: 2, // Mínimo de conexões mantidas (reduzido)
-  idleTimeoutMillis: 30000, // 30 segundos para liberar conexões ociosas
-  connectionTimeoutMillis: 60000, // 60 segundos timeout para novas conexões
-  acquireTimeoutMillis: 60000, // 60 segundos timeout para adquirir conexãogit a
+  // Configurações otimizadas para queries pesadas
+  max: 30, // Aumentar para queries pesadas
+  min: 5, // Manter mais conexões ativas
+  idleTimeoutMillis: 60000, // 1 minuto para liberar conexões ociosas  
+  connectionTimeoutMillis: 120000, // 2 minutos timeout para novas conexões
+  acquireTimeoutMillis: 120000, // 2 minutos timeout para adquirir conexão
   
   // Configurações do PostgreSQL com timeouts de 1 hora
   statement_timeout: 3600000, // 1 hora timeout para statements
