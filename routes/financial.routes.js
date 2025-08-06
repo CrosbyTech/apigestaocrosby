@@ -381,17 +381,17 @@ router.get('/contas-receber',
  * @route GET /financial/nfmanifestacao
  * @desc Buscar notas fiscais de manifestação
  * @access Public
- * @query {dt_inicio, dt_fim, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get('/nfmanifestacao',
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim']),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim } = req.query;
-    const limit = parseInt(req.query.limit, 1000000) || 50000000;
-    const offset = parseInt(req.query.offset, 1000000) || 0;
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
 
     const query = `
       SELECT
@@ -414,29 +414,31 @@ router.get('/nfmanifestacao',
         fn.dt_cadastro
       FROM fis_nfmanifestacao fn
       WHERE fn.dt_emissao BETWEEN $1 AND $2
+        AND fn.cd_empresa = $3
       ORDER BY fn.dt_emissao DESC
-      LIMIT $3 OFFSET $4
+      LIMIT $4 OFFSET $5
     `;
 
     const countQuery = `
       SELECT COUNT(*) as total
       FROM fis_nfmanifestacao fn
       WHERE fn.dt_emissao BETWEEN $1 AND $2
+        AND fn.cd_empresa = $3
     `;
 
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim])
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
     ]);
 
-    const total = parseInt(totalResult.rows[0].total, 1000000);
+    const total = parseInt(totalResult.rows[0].total, 10);
 
     successResponse(res, {
       total,
       limit,
       offset,
       hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim },
+      filtros: { dt_inicio, dt_fim, cd_empresa },
       data: resultado.rows
     }, 'Notas fiscais de manifestação obtidas com sucesso');
   })
