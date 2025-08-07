@@ -143,43 +143,59 @@ router.get('/extrato-totvs',
  * @route GET /financial/contas-pagar
  * @desc Buscar contas a pagar
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa}
  */
 router.get('/contas-pagar',
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
-  validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
-    const offset = parseInt(req.query.offset, 10) || 0;
+    
+    if (!cd_empresa) {
+      return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
+    }
 
-    // Construir query dinamicamente para suportar múltiplas empresas
-    let baseQuery = ` FROM vr_fcp_despduplicatai fd
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
-        AND fd.cd_fornecedor = od.cd_fornecedor
+    // Seguir exatamente o mesmo padrão da rota /fluxo-caixa - UMA ÚNICA QUERY
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
+    // Para muitas empresas (>20), otimizar mantendo JOINs essenciais
+    const isHeavyQuery = empresas.length > 20;
+    
+    const query = isHeavyQuery ? `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        fd.in_aceite,
+        fd.cd_despesaitem,
+        fdi.ds_despesaitem,
+        vpf.nm_fornecedor,
+        fd.cd_ccusto,
+        gc.ds_ccusto
+      FROM vr_fcp_despduplicatai fd
       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2`;
-    
-    const params = [dt_inicio, dt_fim];
-    let idx = 3;
-
-    if (cd_empresa) {
-      if (Array.isArray(cd_empresa) && cd_empresa.length > 0) {
-        const cd_empresa_num = cd_empresa.map(Number);
-        baseQuery += ` AND fd.cd_empresa IN (${cd_empresa_num.map(() => `$${idx++}`).join(',')})`;
-        params.push(...cd_empresa_num);
-      } else {
-        baseQuery += ` AND fd.cd_empresa = $${idx++}`;
-        params.push(Number(cd_empresa));
-      }
-    }
-
-    // Query principal com JOIN otimizado e centro de custo
-    const query = `
+      WHERE fd.dt_vencimento BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_vencimento DESC
+      LIMIT 10000000000
+    ` : `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -204,37 +220,53 @@ router.get('/contas-pagar',
         vpf.nm_fornecedor,
         fd.cd_ccusto,
         gc.ds_ccusto
-      ${baseQuery}
-      ORDER BY fd.dt_emissao DESC
-      LIMIT $${idx++} OFFSET $${idx++}
+      FROM vr_fcp_despduplicatai fd
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
+        AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
+      WHERE fd.dt_vencimento BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_vencimento DESC
     `;
 
-    // Query para contagem
-    const countQuery = `SELECT COUNT(*) as total ${baseQuery}`;
+    console.log(`🔍 Contas-pagar: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
+    
+    // Para queries pesadas, usar timeout específico
+    const queryOptions = isHeavyQuery ? {
+      text: query,
+      values: params,
+      // Para queries pesadas, não usar timeout (herda do pool)
+    } : query;
 
-    const dataParams = [...params, limit, offset];
-    const [resultado, totalResult] = await Promise.all([
-      pool.query(query, dataParams),
-      pool.query(countQuery, params)
-    ]);
+    const { rows } = await pool.query(queryOptions, isHeavyQuery ? undefined : params);
 
-    const total = parseInt(totalResult.rows[0].total, 10);
+    // Calcular totais (igual ao fluxo-caixa)
+    const totals = rows.reduce((acc, row) => {
+      acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
+      acc.totalPago += parseFloat(row.vl_pago || 0);
+      acc.totalJuros += parseFloat(row.vl_juros || 0);
+      acc.totalDesconto += parseFloat(row.vl_desconto || 0);
+      return acc;
+    }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
 
     successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
-    }, 'Contas a pagar obtidas com sucesso');
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      totals,
+      count: rows.length,
+      optimized: isHeavyQuery,
+      queryType: isHeavyQuery ? 'joins-essenciais-otimizado' : 'completo-com-todos-joins',
+      data: rows
+    }, `Contas a pagar obtidas com sucesso (${isHeavyQuery ? 'otimizado' : 'completo'})`);
   })
 );
 
 /**
  * @route GET /financial/fluxo-caixa
  * @desc Buscar fluxo de caixa (baseado na data de liquidação)
- * @access Public
+ * @access Publicgit
  * @query {dt_inicio, dt_fim, cd_empresa}
  */
 router.get('/fluxo-caixa',
