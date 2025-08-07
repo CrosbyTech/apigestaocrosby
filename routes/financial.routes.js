@@ -16,7 +16,7 @@ router.get('/extrato',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { cd_empresa, nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 1000;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     let baseQuery = ' FROM fcc_extratbco fe WHERE 1=1';
@@ -88,7 +88,7 @@ router.get('/extrato-totvs',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 1000;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     let baseQuery = ' FROM fcc_mov fm WHERE fm.in_estorno = $1';
@@ -152,7 +152,7 @@ router.get('/contas-pagar',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 1000;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     // Construir query dinamicamente para suportar múltiplas empresas
@@ -368,7 +368,7 @@ router.get('/contas-receber',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 1000;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
     const query = `
@@ -446,8 +446,8 @@ router.get('/nfmanifestacao',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10000000) || 50000000;
-    const offset = parseInt(req.query.offset, 10000000) || 0;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
 
     // Construir query dinamicamente para suportar múltiplas empresas
     let baseQuery = ' FROM fis_nfmanifestacao fn WHERE fn.dt_emissao BETWEEN $1 AND $2';
