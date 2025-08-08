@@ -158,12 +158,23 @@ router.get('/faturamento-lojas',
  */
 router.get('/expedicao',
   asyncHandler(async (req, res) => {
+    // Primeiro, vamos descobrir quais colunas existem na view
+    const describeQuery = `
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'vw_detalhe_pedido_completo'
+      ORDER BY ordinal_position
+    `;
+    
+    const { rows: columns } = await pool.query(describeQuery);
+    
+    // Agora vamos tentar uma query simples para ver os dados
     const query = `
       SELECT * 
       FROM vw_detalhe_pedido_completo 
       WHERE cd_empresa = 850 
         AND cd_tabpreco IN (21, 22)
-      ORDER BY dt_pedido DESC
+      LIMIT 5
     `;
     
     const { rows } = await pool.query(query);
@@ -171,6 +182,7 @@ router.get('/expedicao',
     successResponse(res, {
       empresa: 850,
       tabelas_preco: [21, 22],
+      colunas_disponiveis: columns,
       count: rows.length,
       data: rows
     }, 'Dados de expedição obtidos com sucesso');
@@ -190,11 +202,20 @@ router.get('/pcp',
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
+    // Primeiro, vamos descobrir quais colunas existem na view
+    const describeQuery = `
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'vw_detalhe_pedido_completo'
+      ORDER BY ordinal_position
+    `;
+    
+    const { rows: columns } = await pool.query(describeQuery);
+
     const query = `
       SELECT * 
       FROM vw_detalhe_pedido_completo 
       WHERE cd_empresa = 111 
-      ORDER BY dt_pedido DESC
       LIMIT $1 OFFSET $2
     `;
     
@@ -217,6 +238,7 @@ router.get('/pcp',
       limit,
       offset,
       hasMore: (offset + limit) < total,
+      colunas_disponiveis: columns,
       data: resultado.rows
     }, 'Dados de PCP obtidos com sucesso');
   })

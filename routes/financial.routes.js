@@ -544,30 +544,33 @@ router.get('/nfmanifestacao',
  * @route GET /financial/observacao
  * @desc Buscar observações de duplicatas
  * @access Public
- * @query {cd_fornecedor, nr_duplicata, cd_empresa}
+ * @query {cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela}
  */
 router.get('/observacao',
   sanitizeInput,
-  validateRequired(['cd_fornecedor', 'nr_duplicata', 'cd_empresa']),
+  validateRequired(['cd_fornecedor', 'nr_duplicata', 'cd_empresa', 'nr_parcela']),
   asyncHandler(async (req, res) => {
-    const { cd_fornecedor, nr_duplicata, cd_empresa } = req.query;
+    const { cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela } = req.query;
 
     const query = `
       SELECT
         od.cd_fornecedor,
         od.nr_duplicata,
+        od.dt_cadastro,
         od.cd_empresa,
+        od.nr_parcela,
         od.ds_observacao
       FROM obs_dupi od
       WHERE od.cd_fornecedor = $1
         AND od.nr_duplicata = $2
         AND od.cd_empresa = $3
+        AND od.nr_parcela = $4
     `;
 
-    const { rows } = await pool.query(query, [cd_fornecedor, nr_duplicata, cd_empresa]);
+    const { rows } = await pool.query(query, [cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela]);
 
     successResponse(res, {
-      filtros: { cd_fornecedor, nr_duplicata, cd_empresa },
+      filtros: { cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela },
       count: rows.length,
       data: rows
     }, 'Observações obtidas com sucesso');
