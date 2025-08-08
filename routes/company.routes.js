@@ -174,7 +174,7 @@ router.get('/expedicao',
       FROM vw_detalhe_pedido_completo 
       WHERE cd_empresa = 850 
         AND cd_tabpreco IN (21, 22)
-      LIMIT 5
+      LIMIT 50000000
     `;
     
     const { rows } = await pool.query(query);
