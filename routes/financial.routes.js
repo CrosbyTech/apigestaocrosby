@@ -197,40 +197,37 @@ router.get('/contas-pagar',
       ORDER BY fd.dt_vencimento DESC
       LIMIT 10000000000
     ` : `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.vl_rateio,
-        fd.in_aceite,
-        od.ds_observacao,
-        fd.cd_despesaitem,
-        fdi.ds_despesaitem,
-        vpf.nm_fornecedor,
-        fd.cd_ccusto,
-        gc.ds_ccusto
-      FROM vr_fcp_despduplicatai fd
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
-        AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
-      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_vencimento DESC
+             SELECT
+         fd.cd_empresa,
+         fd.cd_fornecedor,
+         fd.nr_duplicata,
+         fd.nr_portador,
+         fd.nr_parcela,
+         fd.dt_emissao,
+         fd.dt_vencimento,
+         fd.dt_entrada,
+         fd.dt_liq,
+         fd.tp_situacao,
+         fd.tp_estagio,
+         fd.vl_duplicata,
+         fd.vl_juros,
+         fd.vl_acrescimo,
+         fd.vl_desconto,
+         fd.vl_pago,
+         fd.vl_rateio,
+         fd.in_aceite,
+         fd.cd_despesaitem,
+         fdi.ds_despesaitem,
+         vpf.nm_fornecedor,
+         fd.cd_ccusto,
+         gc.ds_ccusto
+       FROM vr_fcp_despduplicatai fd
+       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+       LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
+       WHERE fd.dt_vencimento BETWEEN $1 AND $2
+         AND fd.cd_empresa IN (${empresaPlaceholders})
+       ORDER BY fd.dt_vencimento DESC
     `;
 
     console.log(`🔍 Contas-pagar: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
@@ -323,40 +320,37 @@ router.get('/fluxo-caixa',
       ORDER BY fd.dt_liq DESC
       LIMIT 10000000000
     ` : `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.vl_rateio,
-        fd.in_aceite,
-        od.ds_observacao,
-        fd.cd_despesaitem,
-        fdi.ds_despesaitem,
-        vpf.nm_fornecedor,
-        fd.cd_ccusto,
-        gc.ds_ccusto
-      FROM vr_fcp_despduplicatai fd
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
-        AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
-      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_liq BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_liq DESC
+             SELECT
+         fd.cd_empresa,
+         fd.cd_fornecedor,
+         fd.nr_duplicata,
+         fd.nr_portador,
+         fd.nr_parcela,
+         fd.dt_emissao,
+         fd.dt_vencimento,
+         fd.dt_entrada,
+         fd.dt_liq,
+         fd.tp_situacao,
+         fd.tp_estagio,
+         fd.vl_duplicata,
+         fd.vl_juros,
+         fd.vl_acrescimo,
+         fd.vl_desconto,
+         fd.vl_pago,
+         fd.vl_rateio,
+         fd.in_aceite,
+         fd.cd_despesaitem,
+         fdi.ds_despesaitem,
+         vpf.nm_fornecedor,
+         fd.cd_ccusto,
+         gc.ds_ccusto
+       FROM vr_fcp_despduplicatai fd
+       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+       LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
+       WHERE fd.dt_liq BETWEEN $1 AND $2
+         AND fd.cd_empresa IN (${empresaPlaceholders})
+       ORDER BY fd.dt_liq DESC
     `;
 
     console.log(`🔍 Fluxo-caixa: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
