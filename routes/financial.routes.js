@@ -183,12 +183,15 @@ router.get('/contas-pagar',
         fd.vl_pago,
         fd.vl_rateio,
         fd.in_aceite,
+        od.ds_observacao,
         fd.cd_despesaitem,
         fdi.ds_despesaitem,
         vpf.nm_fornecedor,
         fd.cd_ccusto,
         gc.ds_ccusto
       FROM vr_fcp_despduplicatai fd
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
+        AND fd.cd_fornecedor = od.cd_fornecedor
       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
@@ -309,12 +312,15 @@ router.get('/fluxo-caixa',
         fd.vl_pago,
         fd.vl_rateio,
         fd.in_aceite,
+        od.ds_observacao,
         fd.cd_despesaitem,
         fdi.ds_despesaitem,
         vpf.nm_fornecedor,
         fd.cd_ccusto,
         gc.ds_ccusto
       FROM vr_fcp_despduplicatai fd
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata 
+        AND fd.cd_fornecedor = od.cd_fornecedor
       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
