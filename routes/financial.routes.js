@@ -220,7 +220,8 @@ router.get('/contas-pagar',
          fdi.ds_despesaitem,
          vpf.nm_fornecedor,
          fd.cd_ccusto,
-         gc.ds_ccusto
+         gc.ds_ccusto,
+	       fd.tp_previsaoreal
        FROM vr_fcp_despduplicatai fd
        LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
        LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
