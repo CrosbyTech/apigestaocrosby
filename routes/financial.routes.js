@@ -225,7 +225,7 @@ router.get('/contas-pagar',
        LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
        LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
        LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-       WHERE fd.dt_vencimento BETWEEN $1 AND $2
+       WHERE fd.dt_liq BETWEEN $1 AND $2
          AND fd.cd_empresa IN (${empresaPlaceholders})
        ORDER BY fd.dt_vencimento DESC
     `;
