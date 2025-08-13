@@ -177,8 +177,8 @@ export class BankReturnParser {
          console.log(`📋 Conta BB: ${this.conta}`);
        }
        
-       // Extrair data e hora de geração da linha 1
-       this.extrairDataHoraGeracao(lines[0]);
+       // Extrair data e hora de geração do header
+       this.extrairDataHoraGeracao(header);
      
      // Banco do Brasil: saldo está na penúltima linha (linha 9)
      const trailerLote = lines[lines.length - 2]; // Penúltima linha
@@ -236,8 +236,8 @@ export class BankReturnParser {
          console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
        }
        
-       // Extrair data e hora de geração da linha 1
-       this.extrairDataHoraGeracao(lines[0]);
+       // Extrair data e hora de geração do header
+       this.extrairDataHoraGeracao(header);
      
      // Itaú: saldo está na penúltima linha (linha 56)
      const saldoLine = lines[lines.length - 2];
@@ -307,8 +307,8 @@ export class BankReturnParser {
          console.log(`📋 Conta Sicredi: ${this.conta}`);
        }
        
-       // Extrair data e hora de geração da linha 1
-       this.extrairDataHoraGeracao(lines[0]);
+       // Extrair data e hora de geração do header
+       this.extrairDataHoraGeracao(header);
      
      // Sicredi: saldo está na linha 8 (penúltima linha)
      const trailerLote = lines[lines.length - 2]; // Linha 8
@@ -386,8 +386,8 @@ export class BankReturnParser {
           console.log(`📋 Conta CAIXA: ${this.conta}`);
         }
         
-        // Extrair data e hora de geração da linha 1
-        this.extrairDataHoraGeracao(lines[0]);
+        // Extrair data e hora de geração do header
+        this.extrairDataHoraGeracao(header);
       
       // CAIXA: saldo está na linha 6 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 6
@@ -446,8 +446,8 @@ export class BankReturnParser {
           console.log(`📋 Conta UNICRED: ${this.conta}`);
         }
         
-        // Extrair data e hora de geração da linha 1
-        this.extrairDataHoraGeracao(lines[0]);
+        // Extrair data e hora de geração do header
+        this.extrairDataHoraGeracao(header);
       
       // UNICRED: saldo está na linha 4 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 4
@@ -509,56 +509,117 @@ export class BankReturnParser {
   }
 
   /**
-   * Extrai data e hora de geração do arquivo da linha 1
+   * Analisa o header do arquivo e extrai data/hora de geração
    */
-  extrairDataHoraGeracao(linha1) {
-    console.log(`🔍 Extraindo data/hora da linha 1: "${linha1}"`);
+  extrairDataHoraGeracao(header) {
+    console.log(`🔍 Analisando header para data/hora (tamanho: ${header?.length || 0})`);
     
-    if (!linha1) {
-      console.log('⚠️ Linha 1 não encontrada');
+    if (!header) {
+      console.log('⚠️ Header não encontrado');
       return;
     }
     
-    // Procurar por padrão de data/hora na linha 1
-    // Formato esperado: DDMMAAHHMMSS (ex: 24072025025954)
-    const dataHoraMatch = linha1.match(/(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+    // Mostrar o header completo para análise
+    console.log(`📄 Header completo: "${header}"`);
     
-    if (dataHoraMatch) {
-      const [, dia, mes, ano, hora, minuto, segundo] = dataHoraMatch;
-      
-      // Converter para formato legível
-      const anoCompleto = '20' + ano;
-      this.dataGeracao = `${anoCompleto}-${mes}-${dia}`;
-      this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-      
-      console.log(`📅 Data de geração: ${this.dataGeracao} (${dia}/${mes}/${anoCompleto})`);
-      console.log(`🕐 Hora de geração: ${this.horaGeracao}`);
-    } else {
-      console.log(`⚠️ Padrão de data/hora não encontrado na linha 1: "${linha1}"`);
-      
-      // Tentar extrair das posições específicas se o padrão não for encontrado
-      if (linha1.length >= 14) {
-        const dataStr = linha1.substring(0, 6); // DDMMAA
-        const horaStr = linha1.substring(6, 12); // HHMMSS
-        
-        console.log(`📅 Tentativa por posições - Data: "${dataStr}", Hora: "${horaStr}"`);
-        
-        if (dataStr && !isNaN(parseInt(dataStr))) {
-          const dia = dataStr.substring(0, 2);
-          const mes = dataStr.substring(2, 4);
-          const ano = '20' + dataStr.substring(4, 6);
-          this.dataGeracao = `${ano}-${mes}-${dia}`;
-          console.log(`📅 Data de geração (pos): ${this.dataGeracao}`);
-        }
-        
-        if (horaStr && !isNaN(parseInt(horaStr))) {
-          const hora = horaStr.substring(0, 2);
-          const minuto = horaStr.substring(2, 4);
-          const segundo = horaStr.substring(4, 6);
-          this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-          console.log(`🕐 Hora de geração (pos): ${this.horaGeracao}`);
-        }
+    // Analisar diferentes posições onde podem estar datas/horas
+    const posicoesAnalise = [
+      { inicio: 0, fim: 6, descricao: 'Posições 0-6 (DDMMAA)' },
+      { inicio: 6, fim: 12, descricao: 'Posições 6-12 (HHMMSS)' },
+      { inicio: 95, fim: 100, descricao: 'Posições 95-100 (DDMMAA)' },
+      { inicio: 100, fim: 106, descricao: 'Posições 100-106 (HHMMSS)' },
+      { inicio: 90, fim: 95, descricao: 'Posições 90-95 (DDMMAA)' },
+      { inicio: 95, fim: 100, descricao: 'Posições 95-100 (HHMMSS)' },
+      { inicio: 80, fim: 86, descricao: 'Posições 80-86 (DDMMAA)' },
+      { inicio: 86, fim: 92, descricao: 'Posições 86-92 (HHMMSS)' }
+    ];
+    
+    console.log('🔍 Analisando posições no header:');
+    posicoesAnalise.forEach(pos => {
+      if (header.length >= pos.fim) {
+        const valor = header.substring(pos.inicio, pos.fim);
+        console.log(`  ${pos.descricao}: "${valor}"`);
       }
+    });
+    
+    // Procurar por padrões de data/hora em todo o header
+    const padroesData = [
+      { regex: /(\d{2})(\d{2})(\d{2})/, descricao: 'DDMMAA' },
+      { regex: /(\d{2})(\d{2})(\d{4})/, descricao: 'DDMMAAAA' },
+      { regex: /(\d{4})(\d{2})(\d{2})/, descricao: 'AAAAMMDD' }
+    ];
+    
+    const padroesHora = [
+      { regex: /(\d{2})(\d{2})(\d{2})/, descricao: 'HHMMSS' },
+      { regex: /(\d{2})(\d{2})/, descricao: 'HHMM' }
+    ];
+    
+    console.log('🔍 Procurando padrões de data:');
+    padroesData.forEach(padrao => {
+      const matches = header.match(new RegExp(padrao.regex, 'g'));
+      if (matches) {
+        console.log(`  ${padrao.descricao}: ${matches.join(', ')}`);
+      }
+    });
+    
+    console.log('🔍 Procurando padrões de hora:');
+    padroesHora.forEach(padrao => {
+      const matches = header.match(new RegExp(padrao.regex, 'g'));
+      if (matches) {
+        console.log(`  ${padrao.descricao}: ${matches.join(', ')}`);
+      }
+    });
+    
+    // Tentar extrair data das posições padrão CNAB400
+    if (header.length >= 106) {
+      const dataStr = header.substring(95, 100);
+      const horaStr = header.substring(100, 106);
+      
+      console.log(`📅 Tentativa CNAB400 - Data (95-100): "${dataStr}", Hora (100-106): "${horaStr}"`);
+      
+      if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
+        const dia = dataStr.substring(0, 2);
+        const mes = dataStr.substring(2, 4);
+        const ano = '20' + dataStr.substring(4, 6);
+        this.dataGeracao = `${ano}-${mes}-${dia}`;
+        console.log(`✅ Data de geração extraída: ${this.dataGeracao}`);
+      }
+      
+      if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
+        const hora = horaStr.substring(0, 2);
+        const minuto = horaStr.substring(2, 4);
+        const segundo = horaStr.substring(4, 6);
+        this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+        console.log(`✅ Hora de geração extraída: ${this.horaGeracao}`);
+      }
+    }
+    
+    // Se não encontrou, tentar posições alternativas
+    if (!this.dataGeracao && header.length >= 100) {
+      const dataStr = header.substring(90, 95);
+      const horaStr = header.substring(95, 100);
+      
+      console.log(`📅 Tentativa alternativa - Data (90-95): "${dataStr}", Hora (95-100): "${horaStr}"`);
+      
+      if (dataStr && !isNaN(parseInt(dataStr))) {
+        const dia = dataStr.substring(0, 2);
+        const mes = dataStr.substring(2, 4);
+        const ano = '20' + dataStr.substring(4, 6);
+        this.dataGeracao = `${ano}-${mes}-${dia}`;
+        console.log(`✅ Data de geração (alt): ${this.dataGeracao}`);
+      }
+      
+      if (horaStr && !isNaN(parseInt(horaStr))) {
+        const hora = horaStr.substring(0, 2);
+        const minuto = horaStr.substring(2, 4);
+        const segundo = horaStr.substring(4, 6);
+        this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+        console.log(`✅ Hora de geração (alt): ${this.horaGeracao}`);
+      }
+    }
+    
+    if (!this.dataGeracao && !this.horaGeracao) {
+      console.log('⚠️ Não foi possível extrair data/hora do header');
     }
   }
 
