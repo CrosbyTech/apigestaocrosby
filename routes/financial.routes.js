@@ -771,6 +771,8 @@ router.post('/upload-retorno-multiplo',
       arquivosComErro,
       resultados: resultados.map(result => ({
         banco: result.banco,
+        agencia: result.agencia,
+        conta: result.conta,
         saldoAtual: result.saldoAtual,
         saldoFormatado: result.saldoFormatado,
         arquivo: result.arquivo
