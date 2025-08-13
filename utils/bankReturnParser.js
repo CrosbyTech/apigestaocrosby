@@ -13,6 +13,8 @@ export class BankReturnParser {
     this.bancoDetectado = null;
     this.agencia = null;
     this.conta = null;
+    this.dataGeracao = null;
+    this.horaGeracao = null;
   }
 
   /**
@@ -165,15 +167,18 @@ export class BankReturnParser {
      parseBancoBrasil(lines) {
      console.log('🏦 Processando arquivo Banco do Brasil');
      
-     // Extrair agência e conta da primeira linha (header)
-     const header = lines[0];
-     if (header && header.length >= 240) {
-       // Banco do Brasil CNAB400: Agência posições 18-22, Conta posições 23-32
-       this.agencia = header.substring(18, 22).trim();
-       this.conta = header.substring(23, 32).trim();
-       console.log(`🏛️ Agência BB: ${this.agencia}`);
-       console.log(`📋 Conta BB: ${this.conta}`);
-     }
+           // Extrair agência e conta da primeira linha (header)
+      const header = lines[0];
+      if (header && header.length >= 240) {
+        // Banco do Brasil CNAB400: Agência posições 18-22, Conta posições 23-32
+        this.agencia = header.substring(18, 22).trim();
+        this.conta = header.substring(23, 32).trim();
+        console.log(`🏛️ Agência BB: ${this.agencia}`);
+        console.log(`📋 Conta BB: ${this.conta}`);
+        
+        // Extrair data e hora de geração
+        this.extrairDataHoraGeracao(header);
+      }
      
      // Banco do Brasil: saldo está na penúltima linha (linha 9)
      const trailerLote = lines[lines.length - 2]; // Penúltima linha
@@ -222,14 +227,17 @@ export class BankReturnParser {
      parseItau(lines) {
      console.log('🏦 Processando arquivo Itaú');
      
-     // Extrair agência e conta da primeira linha (header)
-     const header = lines[0];
-     if (header && header.length >= 240) {
-       // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
-       this.agencia = header.substring(52, 57).trim();
-       this.conta = header.substring(58, 70).trim();
-       console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
-     }
+           // Extrair agência e conta da primeira linha (header)
+      const header = lines[0];
+      if (header && header.length >= 240) {
+        // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
+        this.agencia = header.substring(52, 57).trim();
+        this.conta = header.substring(58, 70).trim();
+        console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
+        
+        // Extrair data e hora de geração (posições diferentes para CNAB240)
+        this.extrairDataHoraGeracao(header);
+      }
      
      // Itaú: saldo está na penúltima linha (linha 56)
      const saldoLine = lines[lines.length - 2];
@@ -289,15 +297,18 @@ export class BankReturnParser {
      parseSicredi(lines) {
      console.log('🏦 Processando arquivo Sicredi');
      
-     // Extrair agência e conta da primeira linha (header)
-     const header = lines[0];
-     if (header && header.length >= 240) {
-       // Sicredi CNAB400: Agência posições 18-22, Conta posições 23-32
-       this.agencia = header.substring(18, 22).trim();
-       this.conta = header.substring(23, 32).trim();
-       console.log(`🏛️ Agência Sicredi: ${this.agencia}`);
-       console.log(`📋 Conta Sicredi: ${this.conta}`);
-     }
+           // Extrair agência e conta da primeira linha (header)
+      const header = lines[0];
+      if (header && header.length >= 240) {
+        // Sicredi CNAB400: Agência posições 18-22, Conta posições 23-32
+        this.agencia = header.substring(18, 22).trim();
+        this.conta = header.substring(23, 32).trim();
+        console.log(`🏛️ Agência Sicredi: ${this.agencia}`);
+        console.log(`📋 Conta Sicredi: ${this.conta}`);
+        
+        // Extrair data e hora de geração
+        this.extrairDataHoraGeracao(header);
+      }
      
      // Sicredi: saldo está na linha 8 (penúltima linha)
      const trailerLote = lines[lines.length - 2]; // Linha 8
@@ -365,15 +376,18 @@ export class BankReturnParser {
        parseCaixa(lines) {
       console.log('🏦 Processando arquivo CAIXA');
       
-      // Extrair agência e conta da primeira linha (header)
-      const header = lines[0];
-      if (header && header.length >= 240) {
-        // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
-        this.agencia = header.substring(18, 22).trim();
-        this.conta = header.substring(23, 32).trim();
-        console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
-        console.log(`📋 Conta CAIXA: ${this.conta}`);
-      }
+             // Extrair agência e conta da primeira linha (header)
+       const header = lines[0];
+       if (header && header.length >= 240) {
+         // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
+         this.agencia = header.substring(18, 22).trim();
+         this.conta = header.substring(23, 32).trim();
+         console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
+         console.log(`📋 Conta CAIXA: ${this.conta}`);
+         
+         // Extrair data e hora de geração
+         this.extrairDataHoraGeracao(header);
+       }
       
       // CAIXA: saldo está na linha 6 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 6
@@ -422,15 +436,18 @@ export class BankReturnParser {
        parseUnicred(lines) {
       console.log('🏦 Processando arquivo UNICRED');
       
-      // Extrair agência e conta da primeira linha (header)
-      const header = lines[0];
-      if (header && header.length >= 240) {
-        // UNICRED CNAB400: Agência posições 18-22, Conta posições 23-32
-        this.agencia = header.substring(18, 22).trim();
-        this.conta = header.substring(23, 32).trim();
-        console.log(`🏛️ Agência UNICRED: ${this.agencia}`);
-        console.log(`📋 Conta UNICRED: ${this.conta}`);
-      }
+             // Extrair agência e conta da primeira linha (header)
+       const header = lines[0];
+       if (header && header.length >= 240) {
+         // UNICRED CNAB400: Agência posições 18-22, Conta posições 23-32
+         this.agencia = header.substring(18, 22).trim();
+         this.conta = header.substring(23, 32).trim();
+         console.log(`🏛️ Agência UNICRED: ${this.agencia}`);
+         console.log(`📋 Conta UNICRED: ${this.conta}`);
+         
+         // Extrair data e hora de geração
+         this.extrairDataHoraGeracao(header);
+       }
       
       // UNICRED: saldo está na linha 4 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 4
@@ -492,6 +509,38 @@ export class BankReturnParser {
   }
 
   /**
+   * Extrai data e hora de geração do arquivo (formato padrão CNAB400)
+   */
+  extrairDataHoraGeracao(header) {
+    if (header && header.length >= 106) {
+      // Data: posições 95-100 (DDMMAA)
+      const dataStr = header.substring(95, 100);
+      // Hora: posições 101-106 (HHMMSS)
+      const horaStr = header.substring(101, 106);
+      
+      if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
+        // Converter DDMMAA para formato legível
+        const dia = dataStr.substring(0, 2);
+        const mes = dataStr.substring(2, 4);
+        const ano = '20' + dataStr.substring(4, 6);
+        this.dataGeracao = `${ano}-${mes}-${dia}`;
+        
+        console.log(`📅 Data de geração: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+      }
+      
+      if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
+        // Converter HHMMSS para formato legível
+        const hora = horaStr.substring(0, 2);
+        const minuto = horaStr.substring(2, 4);
+        const segundo = horaStr.substring(4, 6);
+        this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+        
+        console.log(`🕐 Hora de geração: ${this.horaGeracao}`);
+      }
+    }
+  }
+
+  /**
    * Converte valor monetário (formato Banco do Brasil e outros)
    */
   parseValueBB(value) {
@@ -518,30 +567,32 @@ export class BankReturnParser {
   /**
    * Formata a resposta final
    */
-     formatResponse() {
-     return {
-       success: true,
-       banco: {
-         codigo: this.bancoDetectado?.codigo || '000',
-         nome: this.bancoDetectado?.nome || 'Banco Desconhecido',
-         layout: this.bancoDetectado?.layout || 'GENERICO'
-       },
-       agencia: this.agencia || 'N/A',
-       conta: this.conta || 'N/A',
-       saldoAtual: this.saldoAtual,
-       saldoFormatado: this.saldoAtual.toLocaleString('pt-BR', {
-         style: 'currency',
-         currency: 'BRL'
-       }),
-       arquivo: {
-         nome: 'Arquivo de Retorno Bancário',
-         banco: this.bancoDetectado?.nome || 'Banco',
-         dataProcessamento: new Date().toISOString()
-       },
-       resumo: {
-         saldoAtual: this.saldoAtual
-       },
-       errors: this.errors
-     };
-   }
+           formatResponse() {
+        return {
+          success: true,
+          banco: {
+            codigo: this.bancoDetectado?.codigo || '000',
+            nome: this.bancoDetectado?.nome || 'Banco Desconhecido',
+            layout: this.bancoDetectado?.layout || 'GENERICO'
+          },
+          agencia: this.agencia || 'N/A',
+          conta: this.conta || 'N/A',
+          dataGeracao: this.dataGeracao || 'N/A',
+          horaGeracao: this.horaGeracao || 'N/A',
+          saldoAtual: this.saldoAtual,
+          saldoFormatado: this.saldoAtual.toLocaleString('pt-BR', {
+            style: 'currency',
+            currency: 'BRL'
+          }),
+          arquivo: {
+            nome: 'Arquivo de Retorno Bancário',
+            banco: this.bancoDetectado?.nome || 'Banco',
+            dataProcessamento: new Date().toISOString()
+          },
+          resumo: {
+            saldoAtual: this.saldoAtual
+          },
+          errors: this.errors
+        };
+      }
 }

@@ -383,18 +383,20 @@
             if (responseData.resultados && responseData.resultados.length > 0) {
                 html += '<div class="bank-results">';
                 responseData.resultados.forEach(resultado => {
-                   html += `
-                     <div class="bank-card">
-                       <h4>🏦 ${resultado.banco.nome}</h4>
-                       <p><strong>Código:</strong> ${resultado.banco.codigo}</p>
-                       <p><strong>Layout:</strong> ${resultado.banco.layout}</p>
-                       <p><strong>🏛️ Agência:</strong> ${resultado.agencia}</p>
-                       <p><strong>📋 Conta:</strong> ${resultado.conta}</p>
-                       <div class="saldo">💰 ${resultado.saldoFormatado}</div>
-                       <p><strong>Arquivo:</strong> ${resultado.arquivo.nomeOriginal}</p>
-                       <p><strong>Processado em:</strong> ${new Date(resultado.arquivo.dataUpload).toLocaleString('pt-BR')}</p>
-                     </div>
-                   `;
+                                               html += `
+                                <div class="bank-card">
+                                    <h4>🏦 ${resultado.banco.nome}</h4>
+                                    <p><strong>Código:</strong> ${resultado.banco.codigo}</p>
+                                    <p><strong>Layout:</strong> ${resultado.banco.layout}</p>
+                                    <p><strong>🏛️ Agência:</strong> ${resultado.agencia}</p>
+                                    <p><strong>📋 Conta:</strong> ${resultado.conta}</p>
+                                    <p><strong>📅 Data de Geração:</strong> ${resultado.dataGeracao}</p>
+                                    <p><strong>🕐 Hora de Geração:</strong> ${resultado.horaGeracao}</p>
+                                    <div class="saldo">💰 ${resultado.saldoFormatado}</div>
+                                    <p><strong>Arquivo:</strong> ${resultado.arquivo.nomeOriginal}</p>
+                                    <p><strong>Processado em:</strong> ${new Date(resultado.arquivo.dataUpload).toLocaleString('pt-BR')}</p>
+                                </div>
+                            `;
                  });
                 html += '</div>';
             }
