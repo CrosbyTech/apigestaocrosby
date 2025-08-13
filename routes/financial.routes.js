@@ -773,6 +773,8 @@ router.post('/upload-retorno-multiplo',
         banco: result.banco,
         agencia: result.agencia,
         conta: result.conta,
+        dataGeracao: result.dataGeracao,
+        horaGeracao: result.horaGeracao,
         saldoAtual: result.saldoAtual,
         saldoFormatado: result.saldoFormatado,
         arquivo: result.arquivo
