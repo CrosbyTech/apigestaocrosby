@@ -180,78 +180,84 @@ export class BankReturnParser {
        // Extrair data e hora de geração do header
        this.extrairDataHoraGeracao(header);
      
-     // Banco do Brasil: saldo está na penúltima linha (linha 9)
-     const trailerLote = lines[lines.length - 2]; // Penúltima linha
-     console.log('📏 Linha 9 (trailer lote):', trailerLote);
-     console.log('📏 Tamanho da linha:', trailerLote.length);
-     
-     if (trailerLote && trailerLote.length >= 200) {
-       // Procurar pelo padrão do saldo na linha
-       // O valor 210322 está antes do "CF"
-       const saldoMatch = trailerLote.match(/(\d{6})CF/);
-       
-       if (saldoMatch) {
-         const saldoStr = saldoMatch[1];
-         this.saldoAtual = this.parseValueBB(saldoStr);
-         console.log(`💰 Saldo BB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-       } else {
-         // Fallback: tentar posições específicas
-         console.log('⚠️ Padrão CF não encontrado, tentando posições...');
-         
-         // Tentar diferentes posições onde o saldo pode estar
-         const posicoes = [
-           { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-           { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-           { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-         ];
-         
-         for (const pos of posicoes) {
-           const valor = trailerLote.substring(pos.inicio, pos.fim);
-           console.log(`${pos.descricao}: "${valor}"`);
-           
-           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-             this.saldoAtual = this.parseValueBB(valor);
-             console.log(`💰 Saldo BB encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-             break;
-           }
-         }
-       }
-     }
+           // Banco do Brasil: saldo está na penúltima linha (linha 9)
+      const trailerLote = lines[lines.length - 2]; // Penúltima linha
+      console.log('📏 Linha 9 (trailer lote):', trailerLote);
+      console.log('📏 Tamanho da linha:', trailerLote.length);
+      
+      // Extrair data e hora da linha de saldo também (BB tem data na linha de saldo)
+      this.extrairDataHoraGeracaoBB(trailerLote);
+      
+      if (trailerLote && trailerLote.length >= 200) {
+        // Procurar pelo padrão do saldo na linha
+        // O valor 210322 está antes do "CF"
+        const saldoMatch = trailerLote.match(/(\d{6})CF/);
+        
+        if (saldoMatch) {
+          const saldoStr = saldoMatch[1];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo BB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else {
+          // Fallback: tentar posições específicas
+          console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+          
+          // Tentar diferentes posições onde o saldo pode estar
+          const posicoes = [
+            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+          ];
+          
+          for (const pos of posicoes) {
+            const valor = trailerLote.substring(pos.inicio, pos.fim);
+            console.log(`${pos.descricao}: "${valor}"`);
+            
+            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+              this.saldoAtual = this.parseValueBB(valor);
+              console.log(`💰 Saldo BB encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+              break;
+            }
+          }
+        }
+      }
 
      return this.formatResponse();
    }
 
-  /**
+    /**
    * Processa arquivo do Itaú (CNAB240)
    */
-     parseItau(lines) {
-     console.log('🏦 Processando arquivo Itaú');
-     
-           // Extrair agência e conta da primeira linha (header)
-      const header = lines[0];
-             if (header && header.length >= 240) {
-         // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
-         this.agencia = header.substring(52, 57).trim();
-         this.conta = header.substring(58, 70).trim();
-         console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
-       }
-       
-       // Extrair data e hora de geração do header
-       this.extrairDataHoraGeracao(header);
-     
-     // Itaú: saldo está na penúltima linha (linha 56)
-     const saldoLine = lines[lines.length - 2];
-     console.log('💰 Processando linha de saldo Itaú:', saldoLine);
-     
-     const saldoMatch = saldoLine.match(/(\d{7})DP/);
-     if (saldoMatch) {
-       const saldoStr = saldoMatch[1];
-       this.saldoAtual = parseInt(saldoStr) / 100; // Dividir por 100 para converter centavos em reais
-       console.log(`💰 Saldo Itaú encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-     }
+    parseItau(lines) {
+    console.log('🏦 Processando arquivo Itaú');
+    
+          // Extrair agência e conta da primeira linha (header)
+     const header = lines[0];
+            if (header && header.length >= 240) {
+        // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
+        this.agencia = header.substring(52, 57).trim();
+        this.conta = header.substring(58, 70).trim();
+        console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
+      }
+      
+      // Extrair data e hora de geração do header
+      this.extrairDataHoraGeracao(header);
+    
+    // Itaú: saldo está na penúltima linha (linha 56)
+    const saldoLine = lines[lines.length - 2];
+    console.log('💰 Processando linha de saldo Itaú:', saldoLine);
+    
+    // Extrair data e hora da linha de saldo também (Itaú tem data na linha de saldo)
+    this.extrairDataHoraGeracaoItau(saldoLine);
+    
+    const saldoMatch = saldoLine.match(/(\d{7})DP/);
+    if (saldoMatch) {
+      const saldoStr = saldoMatch[1];
+      this.saldoAtual = parseInt(saldoStr) / 100; // Dividir por 100 para converter centavos em reais
+      console.log(`💰 Saldo Itaú encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    }
 
-     return this.formatResponse();
-   }
+    return this.formatResponse();
+  }
 
   /**
    * Processa arquivo do Bradesco
@@ -310,43 +316,46 @@ export class BankReturnParser {
        // Extrair data e hora de geração do header
        this.extrairDataHoraGeracao(header);
      
-     // Sicredi: saldo está na linha 8 (penúltima linha)
-     const trailerLote = lines[lines.length - 2]; // Linha 8
-     console.log('📏 Linha 8 (trailer lote):', trailerLote);
-     console.log('📏 Tamanho da linha:', trailerLote.length);
-     
-     if (trailerLote && trailerLote.length >= 200) {
-       // Procurar pelo padrão do saldo na linha
-       // O valor 5534 está antes do "CP"
-       const saldoMatch = trailerLote.match(/(\d{4})CP/);
-       
-       if (saldoMatch) {
-         const saldoStr = saldoMatch[1];
-         this.saldoAtual = this.parseValueBB(saldoStr);
-         console.log(`💰 Saldo Sicredi encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-       } else {
-         // Fallback: tentar posições específicas
-         console.log('⚠️ Padrão CP não encontrado, tentando posições...');
-         
-         // Tentar diferentes posições onde o saldo pode estar
-         const posicoes = [
-           { inicio: 150, fim: 154, descricao: 'Posição 150-154' },
-           { inicio: 140, fim: 144, descricao: 'Posição 140-144' },
-           { inicio: 130, fim: 134, descricao: 'Posição 130-134' }
-         ];
-         
-         for (const pos of posicoes) {
-           const valor = trailerLote.substring(pos.inicio, pos.fim);
-           console.log(`${pos.descricao}: "${valor}"`);
-           
-           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-             this.saldoAtual = this.parseValueBB(valor);
-             console.log(`💰 Saldo Sicredi encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-             break;
-           }
-         }
-       }
-     }
+           // Sicredi: saldo está na linha 8 (penúltima linha)
+      const trailerLote = lines[lines.length - 2]; // Linha 8
+      console.log('📏 Linha 8 (trailer lote):', trailerLote);
+      console.log('📏 Tamanho da linha:', trailerLote.length);
+      
+      // Extrair data e hora da linha de saldo também (Sicredi tem data na linha de saldo)
+      this.extrairDataHoraGeracaoSicredi(trailerLote);
+      
+      if (trailerLote && trailerLote.length >= 200) {
+        // Procurar pelo padrão do saldo na linha
+        // O valor 5534 está antes do "CP"
+        const saldoMatch = trailerLote.match(/(\d{4})CP/);
+        
+        if (saldoMatch) {
+          const saldoStr = saldoMatch[1];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Sicredi encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else {
+          // Fallback: tentar posições específicas
+          console.log('⚠️ Padrão CP não encontrado, tentando posições...');
+          
+          // Tentar diferentes posições onde o saldo pode estar
+          const posicoes = [
+            { inicio: 150, fim: 154, descricao: 'Posição 150-154' },
+            { inicio: 140, fim: 144, descricao: 'Posição 140-144' },
+            { inicio: 130, fim: 134, descricao: 'Posição 130-134' }
+          ];
+          
+          for (const pos of posicoes) {
+            const valor = trailerLote.substring(pos.inicio, pos.fim);
+            console.log(`${pos.descricao}: "${valor}"`);
+            
+            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+              this.saldoAtual = this.parseValueBB(valor);
+              console.log(`💰 Saldo Sicredi encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+              break;
+            }
+          }
+        }
+      }
 
      return this.formatResponse();
    }
@@ -389,43 +398,46 @@ export class BankReturnParser {
         // Extrair data e hora de geração do header
         this.extrairDataHoraGeracao(header);
       
-      // CAIXA: saldo está na linha 6 (penúltima linha)
-      const trailerLote = lines[lines.length - 2]; // Linha 6
-      console.log('📏 Linha 6 (trailer lote):', trailerLote);
-      console.log('📏 Tamanho da linha:', trailerLote.length);
-      
-      if (trailerLote && trailerLote.length >= 200) {
-        // Procurar pelo padrão do saldo na linha
-        // O valor 833458 está antes do "CF"
-        const saldoMatch = trailerLote.match(/(\d{6})CF/);
-        
-        if (saldoMatch) {
-          const saldoStr = saldoMatch[1];
-          this.saldoAtual = this.parseValueBB(saldoStr);
-          console.log(`💰 Saldo CAIXA encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-        } else {
-          // Fallback: tentar posições específicas
-          console.log('⚠️ Padrão CF não encontrado, tentando posições...');
-          
-          // Tentar diferentes posições onde o saldo pode estar
-          const posicoes = [
-            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-          ];
-          
-          for (const pos of posicoes) {
-            const valor = trailerLote.substring(pos.inicio, pos.fim);
-            console.log(`${pos.descricao}: "${valor}"`);
-            
-            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-              this.saldoAtual = this.parseValueBB(valor);
-              console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-              break;
-            }
-          }
-        }
-      }
+             // CAIXA: saldo está na linha 6 (penúltima linha)
+       const trailerLote = lines[lines.length - 2]; // Linha 6
+       console.log('📏 Linha 6 (trailer lote):', trailerLote);
+       console.log('📏 Tamanho da linha:', trailerLote.length);
+       
+       // Extrair data e hora da linha de saldo também (CAIXA tem data na linha de saldo)
+       this.extrairDataHoraGeracaoCaixa(trailerLote);
+       
+       if (trailerLote && trailerLote.length >= 200) {
+         // Procurar pelo padrão do saldo na linha
+         // O valor 833458 está antes do "CF"
+         const saldoMatch = trailerLote.match(/(\d{6})CF/);
+         
+         if (saldoMatch) {
+           const saldoStr = saldoMatch[1];
+           this.saldoAtual = this.parseValueBB(saldoStr);
+           console.log(`💰 Saldo CAIXA encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+         } else {
+           // Fallback: tentar posições específicas
+           console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+           
+           // Tentar diferentes posições onde o saldo pode estar
+           const posicoes = [
+             { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+             { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+             { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+           ];
+           
+           for (const pos of posicoes) {
+             const valor = trailerLote.substring(pos.inicio, pos.fim);
+             console.log(`${pos.descricao}: "${valor}"`);
+             
+             if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+               this.saldoAtual = this.parseValueBB(valor);
+               console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+               break;
+             }
+           }
+         }
+       }
 
       return this.formatResponse();
     }
@@ -449,43 +461,46 @@ export class BankReturnParser {
         // Extrair data e hora de geração do header
         this.extrairDataHoraGeracao(header);
       
-      // UNICRED: saldo está na linha 4 (penúltima linha)
-      const trailerLote = lines[lines.length - 2]; // Linha 4
-      console.log('📏 Linha 4 (trailer lote):', trailerLote);
-      console.log('📏 Tamanho da linha:', trailerLote.length);
-      
-      if (trailerLote && trailerLote.length >= 200) {
-        // Procurar pelo padrão do saldo na linha
-        // O valor 471540 está antes do "DF"
-        const saldoMatch = trailerLote.match(/(\d{6})DF/);
-        
-        if (saldoMatch) {
-          const saldoStr = saldoMatch[1];
-          this.saldoAtual = this.parseValueBB(saldoStr);
-          console.log(`💰 Saldo UNICRED encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-        } else {
-          // Fallback: tentar posições específicas
-          console.log('⚠️ Padrão DF não encontrado, tentando posições...');
-          
-          // Tentar diferentes posições onde o saldo pode estar
-          const posicoes = [
-            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-          ];
-          
-          for (const pos of posicoes) {
-            const valor = trailerLote.substring(pos.inicio, pos.fim);
-            console.log(`${pos.descricao}: "${valor}"`);
-            
-            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-              this.saldoAtual = this.parseValueBB(valor);
-              console.log(`💰 Saldo UNICRED encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-              break;
-            }
-          }
-        }
-      }
+             // UNICRED: saldo está na linha 4 (penúltima linha)
+       const trailerLote = lines[lines.length - 2]; // Linha 4
+       console.log('📏 Linha 4 (trailer lote):', trailerLote);
+       console.log('📏 Tamanho da linha:', trailerLote.length);
+       
+       // Extrair data e hora da linha de saldo também (UNICRED tem data na linha de saldo)
+       this.extrairDataHoraGeracaoUnicred(trailerLote);
+       
+       if (trailerLote && trailerLote.length >= 200) {
+         // Procurar pelo padrão do saldo na linha
+         // O valor 471540 está antes do "DF"
+         const saldoMatch = trailerLote.match(/(\d{6})DF/);
+         
+         if (saldoMatch) {
+           const saldoStr = saldoMatch[1];
+           this.saldoAtual = this.parseValueBB(saldoStr);
+           console.log(`💰 Saldo UNICRED encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+         } else {
+           // Fallback: tentar posições específicas
+           console.log('⚠️ Padrão DF não encontrado, tentando posições...');
+           
+           // Tentar diferentes posições onde o saldo pode estar
+           const posicoes = [
+             { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+             { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+             { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+           ];
+           
+           for (const pos of posicoes) {
+             const valor = trailerLote.substring(pos.inicio, pos.fim);
+             console.log(`${pos.descricao}: "${valor}"`);
+             
+             if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+               this.saldoAtual = this.parseValueBB(valor);
+               console.log(`💰 Saldo UNICRED encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+               break;
+             }
+           }
+         }
+       }
 
       return this.formatResponse();
     }
@@ -618,14 +633,188 @@ export class BankReturnParser {
       }
     }
     
-    if (!this.dataGeracao && !this.horaGeracao) {
-      console.log('⚠️ Não foi possível extrair data/hora do header');
-    }
-  }
+         if (!this.dataGeracao && !this.horaGeracao) {
+       console.log('⚠️ Não foi possível extrair data/hora do header');
+     }
+   }
 
-  /**
-   * Converte valor monetário (formato Banco do Brasil e outros)
-   */
+   /**
+    * Extrai data e hora de geração específica para Itaú (da linha de saldo)
+    */
+   extrairDataHoraGeracaoItau(saldoLine) {
+     console.log(`🔍 Analisando linha de saldo Itaú para data/hora: "${saldoLine}"`);
+     
+     if (!saldoLine) {
+       console.log('⚠️ Linha de saldo Itaú não encontrada');
+       return;
+     }
+     
+     // Procurar por padrão DDMMAAAA na linha de saldo
+     // Exemplo: 22072025 (22/07/2025)
+     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
+     
+     if (dataMatch) {
+       const [, dia, mes, ano] = dataMatch;
+       this.dataGeracao = `${ano}-${mes}-${dia}`;
+       console.log(`✅ Data de geração Itaú extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+     }
+     
+     // Procurar por padrão HHMMSS na linha de saldo
+     // Exemplo: 143022 (14:30:22)
+     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
+     
+     if (horaMatch) {
+       const [, hora, minuto, segundo] = horaMatch;
+       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+       console.log(`✅ Hora de geração Itaú extraída: ${this.horaGeracao}`);
+     }
+     
+     // Se não encontrou, tentar posições específicas
+     if (!this.dataGeracao && saldoLine.length >= 8) {
+       const dataStr = saldoLine.substring(0, 8); // DDMMAAAA
+       console.log(`📅 Tentativa por posições - Data (0-8): "${dataStr}"`);
+       
+       if (dataStr && !isNaN(parseInt(dataStr))) {
+         const dia = dataStr.substring(0, 2);
+         const mes = dataStr.substring(2, 4);
+         const ano = dataStr.substring(4, 8);
+         this.dataGeracao = `${ano}-${mes}-${dia}`;
+         console.log(`✅ Data de geração Itaú (pos): ${this.dataGeracao}`);
+       }
+           }
+    }
+
+   /**
+    * Extrai data e hora de geração específica para Banco do Brasil (da linha de saldo)
+    */
+   extrairDataHoraGeracaoBB(saldoLine) {
+     console.log(`🔍 Analisando linha de saldo BB para data/hora: "${saldoLine}"`);
+     
+     if (!saldoLine) {
+       console.log('⚠️ Linha de saldo BB não encontrada');
+       return;
+     }
+     
+     // Procurar por padrão DDMMAAAA na linha de saldo
+     // Exemplo: 22072025 (22/07/2025)
+     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
+     
+     if (dataMatch) {
+       const [, dia, mes, ano] = dataMatch;
+       this.dataGeracao = `${ano}-${mes}-${dia}`;
+       console.log(`✅ Data de geração BB extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+     }
+     
+     // Procurar por padrão HHMMSS na linha de saldo
+     // Exemplo: 143022 (14:30:22)
+     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
+     
+     if (horaMatch) {
+       const [, hora, minuto, segundo] = horaMatch;
+       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+       console.log(`✅ Hora de geração BB extraída: ${this.horaGeracao}`);
+     }
+   }
+
+   /**
+    * Extrai data e hora de geração específica para Sicredi (da linha de saldo)
+    */
+   extrairDataHoraGeracaoSicredi(saldoLine) {
+     console.log(`🔍 Analisando linha de saldo Sicredi para data/hora: "${saldoLine}"`);
+     
+     if (!saldoLine) {
+       console.log('⚠️ Linha de saldo Sicredi não encontrada');
+       return;
+     }
+     
+     // Procurar por padrão DDMMAAAA na linha de saldo
+     // Exemplo: 22072025 (22/07/2025)
+     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
+     
+     if (dataMatch) {
+       const [, dia, mes, ano] = dataMatch;
+       this.dataGeracao = `${ano}-${mes}-${dia}`;
+       console.log(`✅ Data de geração Sicredi extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+     }
+     
+     // Procurar por padrão HHMMSS na linha de saldo
+     // Exemplo: 143022 (14:30:22)
+     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
+     
+     if (horaMatch) {
+       const [, hora, minuto, segundo] = horaMatch;
+       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+       console.log(`✅ Hora de geração Sicredi extraída: ${this.horaGeracao}`);
+     }
+   }
+
+   /**
+    * Extrai data e hora de geração específica para CAIXA (da linha de saldo)
+    */
+   extrairDataHoraGeracaoCaixa(saldoLine) {
+     console.log(`🔍 Analisando linha de saldo CAIXA para data/hora: "${saldoLine}"`);
+     
+     if (!saldoLine) {
+       console.log('⚠️ Linha de saldo CAIXA não encontrada');
+       return;
+     }
+     
+     // Procurar por padrão DDMMAAAA na linha de saldo
+     // Exemplo: 22072025 (22/07/2025)
+     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
+     
+     if (dataMatch) {
+       const [, dia, mes, ano] = dataMatch;
+       this.dataGeracao = `${ano}-${mes}-${dia}`;
+       console.log(`✅ Data de geração CAIXA extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+     }
+     
+     // Procurar por padrão HHMMSS na linha de saldo
+     // Exemplo: 143022 (14:30:22)
+     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
+     
+     if (horaMatch) {
+       const [, hora, minuto, segundo] = horaMatch;
+       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+       console.log(`✅ Hora de geração CAIXA extraída: ${this.horaGeracao}`);
+     }
+   }
+
+   /**
+    * Extrai data e hora de geração específica para UNICRED (da linha de saldo)
+    */
+   extrairDataHoraGeracaoUnicred(saldoLine) {
+     console.log(`🔍 Analisando linha de saldo UNICRED para data/hora: "${saldoLine}"`);
+     
+     if (!saldoLine) {
+       console.log('⚠️ Linha de saldo UNICRED não encontrada');
+       return;
+     }
+     
+     // Procurar por padrão DDMMAAAA na linha de saldo
+     // Exemplo: 22072025 (22/07/2025)
+     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
+     
+     if (dataMatch) {
+       const [, dia, mes, ano] = dataMatch;
+       this.dataGeracao = `${ano}-${mes}-${dia}`;
+       console.log(`✅ Data de geração UNICRED extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+     }
+     
+     // Procurar por padrão HHMMSS na linha de saldo
+     // Exemplo: 143022 (14:30:22)
+     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
+     
+     if (horaMatch) {
+       const [, hora, minuto, segundo] = horaMatch;
+       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+       console.log(`✅ Hora de geração UNICRED extraída: ${this.horaGeracao}`);
+     }
+   }
+
+   /**
+    * Converte valor monetário (formato Banco do Brasil e outros)
+    */
   parseValueBB(value) {
     if (!value || value.trim() === '') {
       return 0;
