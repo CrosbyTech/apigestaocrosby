@@ -98,7 +98,7 @@ export class BankReturnParser {
     
     // Processar transações (linhas do meio)
     this.transactions = [];
-    for (let i = 1; i < lines.length - 1; i++) {
+    for (let i = 1; i < lines.length - 2; i++) {
       const line = lines[i];
       const recordType = line.substring(0, 1);
       
@@ -122,6 +122,11 @@ export class BankReturnParser {
         continue;
       }
     }
+    
+    // Processar linha de saldo (penúltima linha - linha 56)
+    const saldoLine = lines[lines.length - 2];
+    console.log('💰 Processando linha de saldo (penúltima):', saldoLine);
+    this.saldoLine = this.parseSaldoLine(saldoLine);
     
     // Processar trailer (última linha)
     this.trailer = this.parseTrailerCNAB240(lines[lines.length - 1]);
@@ -484,6 +489,60 @@ export class BankReturnParser {
   }
 
   /**
+   * Processa a linha de saldo (linha 56)
+   */
+  parseSaldoLine(line) {
+    console.log('🔍 Analisando linha de saldo:', line);
+    console.log('📏 Tamanho da linha:', line.length);
+    
+    // Procurar pelo padrão do saldo na linha
+    // Baseado na linha: 34100015...5358346DP...
+    const saldoMatch = line.match(/(\d{7})DP/);
+    
+    if (saldoMatch) {
+      const saldo = parseInt(saldoMatch[1]);
+      console.log('💰 Saldo encontrado:', saldo);
+      return {
+        saldoAtual: saldo,
+        linhaOriginal: line,
+        posicaoEncontrada: saldoMatch.index
+      };
+    }
+    
+    // Se não encontrar o padrão DP, tentar outras posições
+    console.log('⚠️ Padrão DP não encontrado, tentando outras posições...');
+    
+    // Tentar posições específicas onde o saldo pode estar
+    const posicoes = [
+      { inicio: 200, fim: 207, descricao: 'Posição 200-207' },
+      { inicio: 180, fim: 187, descricao: 'Posição 180-187' },
+      { inicio: 160, fim: 167, descricao: 'Posição 160-167' }
+    ];
+    
+    for (const pos of posicoes) {
+      const valor = line.substring(pos.inicio, pos.fim);
+      console.log(`${pos.descricao}: "${valor}"`);
+      
+      if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+        const saldo = parseInt(valor);
+        console.log('💰 Saldo encontrado em posição alternativa:', saldo);
+        return {
+          saldoAtual: saldo,
+          linhaOriginal: line,
+          posicaoEncontrada: pos.inicio
+        };
+      }
+    }
+    
+    console.log('❌ Saldo não encontrado na linha');
+    return {
+      saldoAtual: 0,
+      linhaOriginal: line,
+      posicaoEncontrada: -1
+    };
+  }
+
+  /**
    * Processa o trailer do arquivo CNAB240
    */
   parseTrailerCNAB240(line) {
@@ -656,8 +715,8 @@ export class BankReturnParser {
       .filter(t => t.tipoOperacao === 'D')
       .reduce((sum, t) => sum + (t.valorPagamento || 0), 0);
 
-    // Obter saldo atual do trailer (última linha)
-    const saldoAtual = this.trailer?.saldoAtual || this.trailer?.saldo || 0;
+    // Obter saldo atual da linha de saldo (linha 56)
+    const saldoAtual = this.saldoLine?.saldoAtual || this.trailer?.saldoAtual || this.trailer?.saldo || 0;
 
     return {
       success: true,
@@ -676,13 +735,14 @@ export class BankReturnParser {
         totalCreditos: totalCreditos,
         totalDebitos: totalDebitos,
         saldo: totalCreditos - totalDebitos,
-        saldoAtual: saldoAtual, // Saldo atual da conta (da última linha)
+        saldoAtual: saldoAtual, // Saldo atual da conta (da linha 56)
         quantidadeLotes: this.trailer?.quantidadeLotes,
         quantidadeRegistros: this.trailer?.quantidadeRegistros
       },
       transacoes: this.transactions,
       header: this.header,
       trailer: this.trailer,
+      saldoLine: this.saldoLine, // Adicionar informações da linha de saldo
       errors: this.errors
     };
   }
