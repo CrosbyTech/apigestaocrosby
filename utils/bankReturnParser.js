@@ -133,6 +133,9 @@ export class BankReturnParser {
       console.log(`🏦 Banco detectado: ${this.bancoDetectado.nome} (${this.bancoDetectado.codigo})`);
       console.log(`📋 Layout: ${this.bancoDetectado.layout}`);
 
+      // Extrair data/hora a partir do registro de cabeçalho (tipo 0) como primeira tentativa
+      this.extrairDataHoraPorRegistroTipo0(lines);
+
       // Processar baseado no layout do banco
       switch (this.bancoDetectado.layout) {
         case 'CNAB400_BB':
@@ -1023,6 +1026,58 @@ export class BankReturnParser {
     } catch (error) {
       console.log(`⚠️ Erro ao converter valor BB: "${value}" -> ${error.message}`);
       return 0;
+    }
+  }
+
+  /**
+   * Percorre as linhas e extrai data e hora do registro de cabeçalho (tipo 0)
+   * Posições: data (144-151, DDMMAAAA), hora (152-157, HHMMSS) — índices zero-based [143,151) e [151,157)
+   */
+  extrairDataHoraPorRegistroTipo0(lines) {
+    if (!Array.isArray(lines) || lines.length === 0) return;
+
+    try {
+      for (const line of lines) {
+        if (!line || line.length < 157) continue;
+
+        const tipoRegistro = line.substring(7, 8);
+        if (tipoRegistro !== '0') continue;
+
+        const rawData = line.slice(143, 151);
+        const rawHora = line.slice(151, 157);
+
+        const dataNum = (rawData || '').replace(/\D/g, '');
+        const horaNum = (rawHora || '').replace(/\D/g, '');
+
+        // Validar data DDMMAAAA
+        if (!this.dataGeracao && dataNum.length === 8) {
+          const dia = parseInt(dataNum.substring(0, 2));
+          const mes = parseInt(dataNum.substring(2, 4));
+          const ano = parseInt(dataNum.substring(4, 8));
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 1900 && ano <= 2100) {
+            const diaStr = dia.toString().padStart(2, '0');
+            const mesStr = mes.toString().padStart(2, '0');
+            this.dataGeracao = `${ano}-${mesStr}-${diaStr}`;
+            console.log(`✅ Data de geração (tipo 0): ${this.dataGeracao}`);
+          }
+        }
+
+        // Validar hora HHMMSS
+        if (!this.horaGeracao && horaNum.length === 6) {
+          const hh = parseInt(horaNum.substring(0, 2));
+          const mm = parseInt(horaNum.substring(2, 4));
+          const ss = parseInt(horaNum.substring(4, 6));
+          if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59 && ss >= 0 && ss <= 59) {
+            this.horaGeracao = `${hh.toString().padStart(2, '0')}:${mm.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração (tipo 0): ${this.horaGeracao}`);
+          }
+        }
+
+        // Se já conseguiu ambos, parar
+        if (this.dataGeracao && this.horaGeracao) break;
+      }
+    } catch (error) {
+      console.log(`⚠️ Falha ao extrair data/hora do registro tipo 0: ${error.message}`);
     }
   }
 
