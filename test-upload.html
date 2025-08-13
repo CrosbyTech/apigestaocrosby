@@ -220,11 +220,10 @@
                 <div class="summary">
                     <h4>📊 Resumo</h4>
                     <p><strong>Total de Transações:</strong> ${data.resumo.totalTransacoes}</p>
-                    <p><strong>Total de Créditos:</strong> R$ ${data.resumo.totalCreditos.toFixed(2)}</p>
-                    <p><strong>Total de Débitos:</strong> R$ ${data.resumo.totalDebitos.toFixed(2)}</p>
-                    <p><strong>Saldo das Transações:</strong> R$ ${data.resumo.saldo.toFixed(2)}</p>
-                    <p><strong>💰 Saldo Atual da Conta:</strong> R$ ${(data.resumo.saldoAtual || 0).toFixed(2)}</p>
-                    <p><strong>🔍 Debug - Saldo Atual (raw):</strong> ${JSON.stringify(data.resumo.saldoAtual)}</p>
+                    <p><strong>Total de Créditos:</strong> R$ ${data.resumo.totalCreditos.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+                    <p><strong>Total de Débitos:</strong> R$ ${data.resumo.totalDebitos.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+                    <p><strong>Saldo das Transações:</strong> R$ ${data.resumo.saldo.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+                    <p><strong>💰 Saldo Atual da Conta:</strong> R$ ${(data.resumo.saldoAtual || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
                 </div>
 
                 <h4>💳 Transações (${data.transacoes.length})</h4>
@@ -238,7 +237,7 @@
                     <div class="transaction ${tipoClass}">
                         <h5>${tipoIcon} Transação ${index + 1}</h5>
                         <p><strong>Favorecido:</strong> ${transacao.nomeFavorecido}</p>
-                        <p><strong>Valor:</strong> R$ ${transacao.valorPagamento?.toFixed(2) || '0.00'}</p>
+                        <p><strong>Valor:</strong> R$ ${(transacao.valorPagamento || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
                         <p><strong>Data:</strong> ${transacao.dataPagamento || 'N/A'}</p>
                         <p><strong>Documento:</strong> ${transacao.numeroDocumento || 'N/A'}</p>
                         <p><strong>Ocorrência:</strong> ${transacao.descricaoOcorrencia}</p>
