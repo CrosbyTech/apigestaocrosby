@@ -578,4 +578,43 @@ router.get('/observacao',
   })
 );
 
+/**
+ * @route GET /financial/saldo-conta
+ * @desc Buscar saldo de conta bancária
+ * @access Public
+ * @query {nr_ctapes, dt_inicio, dt_fim}
+ */
+router.get('/saldo-conta',
+  sanitizeInput,
+  validateRequired(['nr_ctapes', 'dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { nr_ctapes, dt_inicio, dt_fim } = req.query;
+
+    const query = `
+      SELECT
+        SUM(
+          CASE
+            WHEN fm.TP_OPERACAO = 'C' THEN fm.vl_lancto
+            WHEN fm.TP_OPERACAO = 'D' THEN -fm.vl_lancto
+            ELSE 0
+          END
+        ) as SALDO
+      FROM vr_fcc_mov fm
+      WHERE fm.nr_ctapes = $1
+        AND fm.dt_movim BETWEEN $2 AND $3
+    `;
+
+    const { rows } = await pool.query(query, [nr_ctapes, dt_inicio, dt_fim]);
+
+    const saldo = rows[0]?.saldo || 0;
+
+    successResponse(res, {
+      filtros: { nr_ctapes, dt_inicio, dt_fim },
+      saldo: parseFloat(saldo),
+      data: rows[0]
+    }, 'Saldo de conta obtido com sucesso');
+  })
+);
+
 export default router;

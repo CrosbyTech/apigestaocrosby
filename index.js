@@ -161,7 +161,8 @@ app.get('/api/docs', (req, res) => {
       'GET /api/financial/extrato': 'Extrato bancário com filtros',
       'GET /api/financial/extrato-totvs': 'Extrato TOTVS',
       'GET /api/financial/contas-pagar': 'Contas a pagar',
-      'GET /api/financial/contas-receber': 'Contas a receber'
+      'GET /api/financial/contas-receber': 'Contas a receber',
+      'GET /api/financial/saldo-conta': 'Saldo de conta bancária'
     },
     'Vendas': {
       'GET /api/sales/faturamento': 'Faturamento geral',
