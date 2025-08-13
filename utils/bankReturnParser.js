@@ -141,12 +141,12 @@ export class BankReturnParser {
   parseBancoBrasil(lines) {
     console.log('🏦 Processando arquivo Banco do Brasil');
     
-    // Banco do Brasil: saldo está na penúltima linha (trailer de lote)
-    // Formato: posições 119-134 contêm o saldo final
+    // Banco do Brasil: saldo está na penúltima linha (linha 9)
+    // Formato: posições 119-125 contêm o saldo final (antes do CF)
     const trailerLote = lines[lines.length - 2]; // Penúltima linha
     
-    if (trailerLote && trailerLote.length >= 134) {
-      const saldoStr = trailerLote.substring(119, 134);
+    if (trailerLote && trailerLote.length >= 125) {
+      const saldoStr = trailerLote.substring(119, 125);
       this.saldoAtual = this.parseValueBB(saldoStr);
       console.log(`💰 Saldo BB extraído: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
     }

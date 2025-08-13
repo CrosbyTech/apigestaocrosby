@@ -202,48 +202,32 @@
             
             // Debug: mostrar estrutura completa dos dados
             console.log('🔍 Dados recebidos:', data);
-            console.log('🔍 Resumo:', data.resumo);
-            console.log('🔍 Saldo Atual:', data.resumo?.saldoAtual);
+            console.log('🏦 Banco detectado:', data.banco);
+            console.log('💰 Saldo Atual:', data.saldoAtual);
             
             let html = `
                 <h3>✅ Arquivo processado com sucesso!</h3>
                 
                 <div class="summary">
-                    <h4>📋 Informações do Arquivo</h4>
-                    <p><strong>Empresa:</strong> ${data.arquivo.nome || 'N/A'}</p>
-                    <p><strong>Banco:</strong> ${data.arquivo.banco || 'N/A'}</p>
-                    <p><strong>Data de Geração:</strong> ${data.arquivo.dataGeracao || 'N/A'}</p>
-                    <p><strong>Hora de Geração:</strong> ${data.arquivo.horaGeracao || 'N/A'}</p>
-                    <p><strong>Arquivo Original:</strong> ${data.arquivo.nomeOriginal || 'N/A'}</p>
+                    <h4>🏦 Informações do Banco</h4>
+                    <p><strong>Banco:</strong> ${data.banco.nome}</p>
+                    <p><strong>Código:</strong> ${data.banco.codigo}</p>
+                    <p><strong>Layout:</strong> ${data.banco.layout}</p>
                 </div>
 
                 <div class="summary">
-                    <h4>📊 Resumo</h4>
-                    <p><strong>Total de Transações:</strong> ${data.resumo.totalTransacoes}</p>
-                    <p><strong>Total de Créditos:</strong> R$ ${data.resumo.totalCreditos.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-                    <p><strong>Total de Débitos:</strong> R$ ${data.resumo.totalDebitos.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-                    <p><strong>Saldo das Transações:</strong> R$ ${data.resumo.saldo.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-                    <p><strong>💰 Saldo Atual da Conta:</strong> R$ ${(data.resumo.saldoAtual || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+                    <h4>💰 Saldo Atual da Conta</h4>
+                    <p style="font-size: 24px; font-weight: bold; color: #28a745;">
+                        ${data.saldoFormatado}
+                    </p>
+                    <p><strong>Valor numérico:</strong> ${data.saldoAtual.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
                 </div>
 
-                <h4>💳 Transações (${data.transacoes.length})</h4>
+                <div class="summary">
+                    <h4>📋 Informações do Arquivo</h4>
+                    <p><strong>Data de Processamento:</strong> ${new Date(data.arquivo.dataProcessamento).toLocaleString('pt-BR')}</p>
+                </div>
             `;
-
-            data.transacoes.forEach((transacao, index) => {
-                const tipoClass = transacao.tipoOperacao === 'C' ? 'credito' : 'debito';
-                const tipoIcon = transacao.tipoOperacao === 'C' ? '💰' : '💸';
-                
-                html += `
-                    <div class="transaction ${tipoClass}">
-                        <h5>${tipoIcon} Transação ${index + 1}</h5>
-                        <p><strong>Favorecido:</strong> ${transacao.nomeFavorecido}</p>
-                        <p><strong>Valor:</strong> R$ ${(transacao.valorPagamento || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-                        <p><strong>Data:</strong> ${transacao.dataPagamento || 'N/A'}</p>
-                        <p><strong>Documento:</strong> ${transacao.numeroDocumento || 'N/A'}</p>
-                        <p><strong>Ocorrência:</strong> ${transacao.descricaoOcorrencia}</p>
-                    </div>
-                `;
-            });
 
             result.innerHTML = html;
         }
