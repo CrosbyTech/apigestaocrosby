@@ -11,6 +11,8 @@ export class BankReturnParser {
     this.errors = [];
     this.saldoAtual = 0;
     this.bancoDetectado = null;
+    this.agencia = null;
+    this.conta = null;
   }
 
   /**
@@ -160,68 +162,86 @@ export class BankReturnParser {
   /**
    * Processa arquivo do Banco do Brasil
    */
-  parseBancoBrasil(lines) {
-    console.log('🏦 Processando arquivo Banco do Brasil');
-    
-    // Banco do Brasil: saldo está na penúltima linha (linha 9)
-    const trailerLote = lines[lines.length - 2]; // Penúltima linha
-    console.log('📏 Linha 9 (trailer lote):', trailerLote);
-    console.log('📏 Tamanho da linha:', trailerLote.length);
-    
-    if (trailerLote && trailerLote.length >= 200) {
-      // Procurar pelo padrão do saldo na linha
-      // O valor 210322 está antes do "CF"
-      const saldoMatch = trailerLote.match(/(\d{6})CF/);
-      
-      if (saldoMatch) {
-        const saldoStr = saldoMatch[1];
-        this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo BB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-      } else {
-        // Fallback: tentar posições específicas
-        console.log('⚠️ Padrão CF não encontrado, tentando posições...');
-        
-        // Tentar diferentes posições onde o saldo pode estar
-        const posicoes = [
-          { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-          { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-          { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-        ];
-        
-        for (const pos of posicoes) {
-          const valor = trailerLote.substring(pos.inicio, pos.fim);
-          console.log(`${pos.descricao}: "${valor}"`);
-          
-          if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-            this.saldoAtual = this.parseValueBB(valor);
-            console.log(`💰 Saldo BB encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-            break;
-          }
-        }
-      }
-    }
+     parseBancoBrasil(lines) {
+     console.log('🏦 Processando arquivo Banco do Brasil');
+     
+     // Extrair agência e conta da primeira linha (header)
+     const header = lines[0];
+     if (header && header.length >= 400) {
+       // BB: Agência posições 26-30, Conta posições 31-39
+       this.agencia = header.substring(26, 30).trim();
+       this.conta = header.substring(31, 39).trim();
+       console.log(`🏛️ Agência BB: ${this.agencia}, Conta: ${this.conta}`);
+     }
+     
+     // Banco do Brasil: saldo está na penúltima linha (linha 9)
+     const trailerLote = lines[lines.length - 2]; // Penúltima linha
+     console.log('📏 Linha 9 (trailer lote):', trailerLote);
+     console.log('📏 Tamanho da linha:', trailerLote.length);
+     
+     if (trailerLote && trailerLote.length >= 200) {
+       // Procurar pelo padrão do saldo na linha
+       // O valor 210322 está antes do "CF"
+       const saldoMatch = trailerLote.match(/(\d{6})CF/);
+       
+       if (saldoMatch) {
+         const saldoStr = saldoMatch[1];
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo BB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else {
+         // Fallback: tentar posições específicas
+         console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+         
+         // Tentar diferentes posições onde o saldo pode estar
+         const posicoes = [
+           { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+           { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+           { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+         ];
+         
+         for (const pos of posicoes) {
+           const valor = trailerLote.substring(pos.inicio, pos.fim);
+           console.log(`${pos.descricao}: "${valor}"`);
+           
+           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+             this.saldoAtual = this.parseValueBB(valor);
+             console.log(`💰 Saldo BB encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+             break;
+           }
+         }
+       }
+     }
 
-    return this.formatResponse();
-  }
+     return this.formatResponse();
+   }
 
   /**
    * Processa arquivo do Itaú (CNAB240)
    */
-  parseItau(lines) {
-    console.log('🏦 Processando arquivo Itaú');
-    
-    // Itaú: saldo está na penúltima linha (linha 56)
-    const saldoLine = lines[lines.length - 2];
-    console.log('💰 Processando linha de saldo Itaú:', saldoLine);
-    
-    const saldoMatch = saldoLine.match(/(\d{7})DP/);
-    if (saldoMatch) {
-      this.saldoAtual = parseInt(saldoMatch[1]);
-      console.log(`💰 Saldo Itaú encontrado: ${this.saldoAtual}`);
-    }
+     parseItau(lines) {
+     console.log('🏦 Processando arquivo Itaú');
+     
+     // Extrair agência e conta da primeira linha (header)
+     const header = lines[0];
+     if (header && header.length >= 240) {
+       // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
+       this.agencia = header.substring(52, 57).trim();
+       this.conta = header.substring(58, 70).trim();
+       console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
+     }
+     
+     // Itaú: saldo está na penúltima linha (linha 56)
+     const saldoLine = lines[lines.length - 2];
+     console.log('💰 Processando linha de saldo Itaú:', saldoLine);
+     
+     const saldoMatch = saldoLine.match(/(\d{7})DP/);
+     if (saldoMatch) {
+       this.saldoAtual = parseInt(saldoMatch[1]);
+       console.log(`💰 Saldo Itaú encontrado: ${this.saldoAtual}`);
+     }
 
-    return this.formatResponse();
-  }
+     return this.formatResponse();
+   }
 
   /**
    * Processa arquivo do Bradesco
@@ -264,49 +284,58 @@ export class BankReturnParser {
   /**
    * Processa arquivo do Sicredi
    */
-  parseSicredi(lines) {
-    console.log('🏦 Processando arquivo Sicredi');
-    
-    // Sicredi: saldo está na linha 8 (penúltima linha)
-    const trailerLote = lines[lines.length - 2]; // Linha 8
-    console.log('📏 Linha 8 (trailer lote):', trailerLote);
-    console.log('📏 Tamanho da linha:', trailerLote.length);
-    
-    if (trailerLote && trailerLote.length >= 200) {
-      // Procurar pelo padrão do saldo na linha
-      // O valor 5534 está antes do "CP"
-      const saldoMatch = trailerLote.match(/(\d{4})CP/);
-      
-      if (saldoMatch) {
-        const saldoStr = saldoMatch[1];
-        this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Sicredi encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-      } else {
-        // Fallback: tentar posições específicas
-        console.log('⚠️ Padrão CP não encontrado, tentando posições...');
-        
-        // Tentar diferentes posições onde o saldo pode estar
-        const posicoes = [
-          { inicio: 150, fim: 154, descricao: 'Posição 150-154' },
-          { inicio: 140, fim: 144, descricao: 'Posição 140-144' },
-          { inicio: 130, fim: 134, descricao: 'Posição 130-134' }
-        ];
-        
-        for (const pos of posicoes) {
-          const valor = trailerLote.substring(pos.inicio, pos.fim);
-          console.log(`${pos.descricao}: "${valor}"`);
-          
-          if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-            this.saldoAtual = this.parseValueBB(valor);
-            console.log(`💰 Saldo Sicredi encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-            break;
-          }
-        }
-      }
-    }
+     parseSicredi(lines) {
+     console.log('🏦 Processando arquivo Sicredi');
+     
+     // Extrair agência e conta da primeira linha (header)
+     const header = lines[0];
+     if (header && header.length >= 400) {
+       // Sicredi: Agência posições 26-30, Conta posições 31-39
+       this.agencia = header.substring(26, 30).trim();
+       this.conta = header.substring(31, 39).trim();
+       console.log(`🏛️ Agência Sicredi: ${this.agencia}, Conta: ${this.conta}`);
+     }
+     
+     // Sicredi: saldo está na linha 8 (penúltima linha)
+     const trailerLote = lines[lines.length - 2]; // Linha 8
+     console.log('📏 Linha 8 (trailer lote):', trailerLote);
+     console.log('📏 Tamanho da linha:', trailerLote.length);
+     
+     if (trailerLote && trailerLote.length >= 200) {
+       // Procurar pelo padrão do saldo na linha
+       // O valor 5534 está antes do "CP"
+       const saldoMatch = trailerLote.match(/(\d{4})CP/);
+       
+       if (saldoMatch) {
+         const saldoStr = saldoMatch[1];
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo Sicredi encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else {
+         // Fallback: tentar posições específicas
+         console.log('⚠️ Padrão CP não encontrado, tentando posições...');
+         
+         // Tentar diferentes posições onde o saldo pode estar
+         const posicoes = [
+           { inicio: 150, fim: 154, descricao: 'Posição 150-154' },
+           { inicio: 140, fim: 144, descricao: 'Posição 140-144' },
+           { inicio: 130, fim: 134, descricao: 'Posição 130-134' }
+         ];
+         
+         for (const pos of posicoes) {
+           const valor = trailerLote.substring(pos.inicio, pos.fim);
+           console.log(`${pos.descricao}: "${valor}"`);
+           
+           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+             this.saldoAtual = this.parseValueBB(valor);
+             console.log(`💰 Saldo Sicredi encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+             break;
+           }
+         }
+       }
+     }
 
-    return this.formatResponse();
-  }
+     return this.formatResponse();
+   }
 
      /**
     * Processa arquivo do Unibanco
@@ -330,96 +359,114 @@ export class BankReturnParser {
    /**
     * Processa arquivo da CAIXA
     */
-   parseCaixa(lines) {
-     console.log('🏦 Processando arquivo CAIXA');
-     
-     // CAIXA: saldo está na linha 6 (penúltima linha)
-     const trailerLote = lines[lines.length - 2]; // Linha 6
-     console.log('📏 Linha 6 (trailer lote):', trailerLote);
-     console.log('📏 Tamanho da linha:', trailerLote.length);
-     
-     if (trailerLote && trailerLote.length >= 200) {
-       // Procurar pelo padrão do saldo na linha
-       // O valor 833458 está antes do "CF"
-       const saldoMatch = trailerLote.match(/(\d{6})CF/);
-       
-       if (saldoMatch) {
-         const saldoStr = saldoMatch[1];
-         this.saldoAtual = this.parseValueBB(saldoStr);
-         console.log(`💰 Saldo CAIXA encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-       } else {
-         // Fallback: tentar posições específicas
-         console.log('⚠️ Padrão CF não encontrado, tentando posições...');
-         
-         // Tentar diferentes posições onde o saldo pode estar
-         const posicoes = [
-           { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-           { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-           { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-         ];
-         
-         for (const pos of posicoes) {
-           const valor = trailerLote.substring(pos.inicio, pos.fim);
-           console.log(`${pos.descricao}: "${valor}"`);
-           
-           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-             this.saldoAtual = this.parseValueBB(valor);
-             console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-             break;
-           }
-         }
-       }
-     }
+       parseCaixa(lines) {
+      console.log('🏦 Processando arquivo CAIXA');
+      
+      // Extrair agência e conta da primeira linha (header)
+      const header = lines[0];
+      if (header && header.length >= 400) {
+        // CAIXA: Agência posições 26-30, Conta posições 31-39
+        this.agencia = header.substring(26, 30).trim();
+        this.conta = header.substring(31, 39).trim();
+        console.log(`🏛️ Agência CAIXA: ${this.agencia}, Conta: ${this.conta}`);
+      }
+      
+      // CAIXA: saldo está na linha 6 (penúltima linha)
+      const trailerLote = lines[lines.length - 2]; // Linha 6
+      console.log('📏 Linha 6 (trailer lote):', trailerLote);
+      console.log('📏 Tamanho da linha:', trailerLote.length);
+      
+      if (trailerLote && trailerLote.length >= 200) {
+        // Procurar pelo padrão do saldo na linha
+        // O valor 833458 está antes do "CF"
+        const saldoMatch = trailerLote.match(/(\d{6})CF/);
+        
+        if (saldoMatch) {
+          const saldoStr = saldoMatch[1];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo CAIXA encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else {
+          // Fallback: tentar posições específicas
+          console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+          
+          // Tentar diferentes posições onde o saldo pode estar
+          const posicoes = [
+            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+          ];
+          
+          for (const pos of posicoes) {
+            const valor = trailerLote.substring(pos.inicio, pos.fim);
+            console.log(`${pos.descricao}: "${valor}"`);
+            
+            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+              this.saldoAtual = this.parseValueBB(valor);
+              console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+              break;
+            }
+          }
+        }
+      }
 
-           return this.formatResponse();
+      return this.formatResponse();
     }
 
    /**
     * Processa arquivo da UNICRED
     */
-   parseUnicred(lines) {
-     console.log('🏦 Processando arquivo UNICRED');
-     
-     // UNICRED: saldo está na linha 4 (penúltima linha)
-     const trailerLote = lines[lines.length - 2]; // Linha 4
-     console.log('📏 Linha 4 (trailer lote):', trailerLote);
-     console.log('📏 Tamanho da linha:', trailerLote.length);
-     
-     if (trailerLote && trailerLote.length >= 200) {
-       // Procurar pelo padrão do saldo na linha
-       // O valor 471540 está antes do "DF"
-       const saldoMatch = trailerLote.match(/(\d{6})DF/);
-       
-       if (saldoMatch) {
-         const saldoStr = saldoMatch[1];
-         this.saldoAtual = this.parseValueBB(saldoStr);
-         console.log(`💰 Saldo UNICRED encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-       } else {
-         // Fallback: tentar posições específicas
-         console.log('⚠️ Padrão DF não encontrado, tentando posições...');
-         
-         // Tentar diferentes posições onde o saldo pode estar
-         const posicoes = [
-           { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-           { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-           { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-         ];
-         
-         for (const pos of posicoes) {
-           const valor = trailerLote.substring(pos.inicio, pos.fim);
-           console.log(`${pos.descricao}: "${valor}"`);
-           
-           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-             this.saldoAtual = this.parseValueBB(valor);
-             console.log(`💰 Saldo UNICRED encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-             break;
-           }
-         }
-       }
-     }
+       parseUnicred(lines) {
+      console.log('🏦 Processando arquivo UNICRED');
+      
+      // Extrair agência e conta da primeira linha (header)
+      const header = lines[0];
+      if (header && header.length >= 400) {
+        // UNICRED: Agência posições 26-30, Conta posições 31-39
+        this.agencia = header.substring(26, 30).trim();
+        this.conta = header.substring(31, 39).trim();
+        console.log(`🏛️ Agência UNICRED: ${this.agencia}, Conta: ${this.conta}`);
+      }
+      
+      // UNICRED: saldo está na linha 4 (penúltima linha)
+      const trailerLote = lines[lines.length - 2]; // Linha 4
+      console.log('📏 Linha 4 (trailer lote):', trailerLote);
+      console.log('📏 Tamanho da linha:', trailerLote.length);
+      
+      if (trailerLote && trailerLote.length >= 200) {
+        // Procurar pelo padrão do saldo na linha
+        // O valor 471540 está antes do "DF"
+        const saldoMatch = trailerLote.match(/(\d{6})DF/);
+        
+        if (saldoMatch) {
+          const saldoStr = saldoMatch[1];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo UNICRED encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else {
+          // Fallback: tentar posições específicas
+          console.log('⚠️ Padrão DF não encontrado, tentando posições...');
+          
+          // Tentar diferentes posições onde o saldo pode estar
+          const posicoes = [
+            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+          ];
+          
+          for (const pos of posicoes) {
+            const valor = trailerLote.substring(pos.inicio, pos.fim);
+            console.log(`${pos.descricao}: "${valor}"`);
+            
+            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+              this.saldoAtual = this.parseValueBB(valor);
+              console.log(`💰 Saldo UNICRED encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+              break;
+            }
+          }
+        }
+      }
 
-     return this.formatResponse();
-   }
+      return this.formatResponse();
+    }
 
    /**
     * Processa arquivo genérico
@@ -466,28 +513,30 @@ export class BankReturnParser {
   /**
    * Formata a resposta final
    */
-  formatResponse() {
-    return {
-      success: true,
-      banco: {
-        codigo: this.bancoDetectado?.codigo || '000',
-        nome: this.bancoDetectado?.nome || 'Banco Desconhecido',
-        layout: this.bancoDetectado?.layout || 'GENERICO'
-      },
-      saldoAtual: this.saldoAtual,
-      saldoFormatado: this.saldoAtual.toLocaleString('pt-BR', {
-        style: 'currency',
-        currency: 'BRL'
-      }),
-      arquivo: {
-        nome: 'Arquivo de Retorno Bancário',
-        banco: this.bancoDetectado?.nome || 'Banco',
-        dataProcessamento: new Date().toISOString()
-      },
-      resumo: {
-        saldoAtual: this.saldoAtual
-      },
-      errors: this.errors
-    };
-  }
+     formatResponse() {
+     return {
+       success: true,
+       banco: {
+         codigo: this.bancoDetectado?.codigo || '000',
+         nome: this.bancoDetectado?.nome || 'Banco Desconhecido',
+         layout: this.bancoDetectado?.layout || 'GENERICO'
+       },
+       agencia: this.agencia || 'N/A',
+       conta: this.conta || 'N/A',
+       saldoAtual: this.saldoAtual,
+       saldoFormatado: this.saldoAtual.toLocaleString('pt-BR', {
+         style: 'currency',
+         currency: 'BRL'
+       }),
+       arquivo: {
+         nome: 'Arquivo de Retorno Bancário',
+         banco: this.bancoDetectado?.nome || 'Banco',
+         dataProcessamento: new Date().toISOString()
+       },
+       resumo: {
+         saldoAtual: this.saldoAtual
+       },
+       errors: this.errors
+     };
+   }
 }

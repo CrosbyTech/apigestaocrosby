@@ -40,6 +40,24 @@ const upload = multer({
   }
 });
 
+// Configuração para upload múltiplo
+const uploadMultiple = multer({ 
+  storage: storage,
+  fileFilter: (req, file, cb) => {
+    // Aceitar arquivos .RET (maiúsculo e minúsculo) e arquivos de texto
+    const fileName = file.originalname.toLowerCase();
+    if (fileName.endsWith('.ret') || file.mimetype === 'text/plain') {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas arquivos .RET são permitidos'), false);
+    }
+  },
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB por arquivo
+    files: 10 // Máximo 10 arquivos
+  }
+}).array('files', 10); // Campo 'files' com máximo 10 arquivos
+
 /**
  * @route GET /financial/extrato
  * @desc Buscar extrato bancário com filtros e paginação
@@ -652,6 +670,112 @@ router.post('/upload-retorno',
       
       return errorResponse(res, `Erro ao processar arquivo: ${error.message}`, 400, 'FILE_PROCESSING_ERROR');
     }
+  })
+);
+
+/**
+ * @route POST /financial/upload-retorno-multiplo
+ * @desc Upload e processamento de múltiplos arquivos de retorno bancário
+ * @access Public
+ * @body {files[]} - Array de arquivos .RET do banco (máximo 10)
+ */
+router.post('/upload-retorno-multiplo',
+  (req, res, next) => {
+    uploadMultiple(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_COUNT') {
+          return errorResponse(res, 'Máximo de 10 arquivos permitidos', 400, 'TOO_MANY_FILES');
+        }
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return errorResponse(res, 'Arquivo muito grande (máximo 10MB)', 400, 'FILE_TOO_LARGE');
+        }
+        return errorResponse(res, `Erro no upload: ${err.message}`, 400, 'UPLOAD_ERROR');
+      } else if (err) {
+        return errorResponse(res, `Erro no upload: ${err.message}`, 400, 'UPLOAD_ERROR');
+      }
+      next();
+    });
+  },
+  asyncHandler(async (req, res) => {
+    if (!req.files || req.files.length === 0) {
+      return errorResponse(res, 'Nenhum arquivo foi enviado', 400, 'NO_FILES_UPLOADED');
+    }
+
+    const resultados = [];
+    const arquivosProcessados = [];
+    const arquivosComErro = [];
+
+    console.log(`📁 Processando ${req.files.length} arquivos...`);
+
+    for (const file of req.files) {
+      try {
+        console.log(`📄 Processando arquivo: ${file.originalname}`);
+        
+        // Ler o arquivo
+        const fileContent = fs.readFileSync(file.path, 'utf8');
+        
+        // Processar o arquivo
+        const parser = new BankReturnParser();
+        const result = parser.parseFile(fileContent);
+        
+        // Adicionar informações do arquivo
+        result.arquivo.nomeOriginal = file.originalname;
+        result.arquivo.tamanho = file.size;
+        result.arquivo.dataUpload = new Date().toISOString();
+        
+        resultados.push(result);
+        arquivosProcessados.push(file.originalname);
+        
+        // Limpar arquivo temporário
+        fs.unlinkSync(file.path);
+        
+        console.log(`✅ Arquivo processado com sucesso: ${file.originalname}`);
+        
+      } catch (error) {
+        console.log(`❌ Erro ao processar arquivo ${file.originalname}: ${error.message}`);
+        
+        arquivosComErro.push({
+          nome: file.originalname,
+          erro: error.message
+        });
+        
+        // Limpar arquivo em caso de erro
+        if (fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+        }
+      }
+    }
+
+    // Calcular resumo
+    const totalArquivos = req.files.length;
+    const sucessos = arquivosProcessados.length;
+    const erros = arquivosComErro.length;
+    
+    // Calcular saldo total (soma de todos os saldos)
+    const saldoTotal = resultados.reduce((total, result) => {
+      return total + (result.saldoAtual || 0);
+    }, 0);
+
+    successResponse(res, {
+      resumo: {
+        totalArquivos,
+        sucessos,
+        erros,
+        saldoTotal: saldoTotal,
+        saldoTotalFormatado: saldoTotal.toLocaleString('pt-BR', {
+          style: 'currency',
+          currency: 'BRL'
+        })
+      },
+      arquivosProcessados,
+      arquivosComErro,
+      resultados: resultados.map(result => ({
+        banco: result.banco,
+        saldoAtual: result.saldoAtual,
+        saldoFormatado: result.saldoFormatado,
+        arquivo: result.arquivo
+      }))
+    }, `Processamento concluído: ${sucessos} sucessos, ${erros} erros`);
   })
 );
 
