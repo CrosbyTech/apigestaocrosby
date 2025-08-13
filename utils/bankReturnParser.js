@@ -496,6 +496,28 @@ export class BankReturnParser {
       };
     }
 
+    // Verificar se é uma linha de saldo (baseado no padrão do arquivo)
+    const codigoBanco = line.substring(0, 3);
+    const tipoRegistro = line.substring(7, 8);
+    
+    // Se for linha de saldo (geralmente tem padrão específico)
+    if (codigoBanco === '341' && tipoRegistro === '9') {
+      console.log('💰 Detectada linha de saldo atual da conta');
+      return {
+        codigoBanco: line.substring(0, 3),
+        loteServico: line.substring(3, 7),
+        tipoRegistro: line.substring(7, 8),
+        usoExclusivo: line.substring(8, 17),
+        totalRegistros: parseInt(line.substring(17, 23), 10),
+        totalCreditos: this.parseValue(line.substring(23, 41)),
+        totalDebitos: this.parseValue(line.substring(41, 59)),
+        saldo: this.parseValue(line.substring(59, 77)),
+        saldoAtual: this.parseValue(line.substring(59, 77)), // Saldo atual da conta
+        usoExclusivo2: line.substring(77, 240),
+        isSaldoAtual: true
+      };
+    }
+
     return {
       codigoBanco: line.substring(0, 3),
       loteServico: line.substring(3, 7),
@@ -505,7 +527,8 @@ export class BankReturnParser {
       totalCreditos: this.parseValue(line.substring(23, 41)),
       totalDebitos: this.parseValue(line.substring(41, 59)),
       saldo: this.parseValue(line.substring(59, 77)),
-      usoExclusivo2: line.substring(77, 240)
+      usoExclusivo2: line.substring(77, 240),
+      isSaldoAtual: false
     };
   }
 
@@ -601,6 +624,9 @@ export class BankReturnParser {
       .filter(t => t.tipoOperacao === 'D')
       .reduce((sum, t) => sum + (t.valorPagamento || 0), 0);
 
+    // Obter saldo atual do trailer (última linha)
+    const saldoAtual = this.trailer?.saldoAtual || this.trailer?.saldo || 0;
+
     return {
       success: true,
       arquivo: {
@@ -618,6 +644,7 @@ export class BankReturnParser {
         totalCreditos: totalCreditos,
         totalDebitos: totalDebitos,
         saldo: totalCreditos - totalDebitos,
+        saldoAtual: saldoAtual, // Saldo atual da conta (da última linha)
         quantidadeLotes: this.trailer?.quantidadeLotes,
         quantidadeRegistros: this.trailer?.quantidadeRegistros
       },

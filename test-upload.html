@@ -185,7 +185,7 @@
             .then(data => {
                 loading.style.display = 'none';
                 if (data.success) {
-                    showSuccess(data);
+                    showSuccess(data.data);
                 } else {
                     showError(data.message || 'Erro ao processar arquivo');
                 }
@@ -217,7 +217,8 @@
                     <p><strong>Total de Transações:</strong> ${data.resumo.totalTransacoes}</p>
                     <p><strong>Total de Créditos:</strong> R$ ${data.resumo.totalCreditos.toFixed(2)}</p>
                     <p><strong>Total de Débitos:</strong> R$ ${data.resumo.totalDebitos.toFixed(2)}</p>
-                    <p><strong>Saldo:</strong> R$ ${data.resumo.saldo.toFixed(2)}</p>
+                    <p><strong>Saldo das Transações:</strong> R$ ${data.resumo.saldo.toFixed(2)}</p>
+                    <p><strong>💰 Saldo Atual da Conta:</strong> R$ ${(data.resumo.saldoAtual || 0).toFixed(2)}</p>
                 </div>
 
                 <h4>💳 Transações (${data.transacoes.length})</h4>
