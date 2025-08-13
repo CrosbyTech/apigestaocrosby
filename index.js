@@ -31,7 +31,7 @@ const app = express();
 // =============================================================================
 
 // Configurar trust proxy para Render (proxies reversos)
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 
 // Helmet para segurança básica
 app.use(helmet({
@@ -49,8 +49,8 @@ const limiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  // Configuração específica para proxies reversos
-  trustProxy: true,
+  // Configuração específica para proxies reversos - usar número em vez de boolean
+  trustProxy: 1,
   skip: (req) => {
     // Skip para requests de health check
     return req.path === '/api/utils/health' || req.path === '/';
