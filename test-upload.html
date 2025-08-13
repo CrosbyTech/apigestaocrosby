@@ -200,6 +200,11 @@
             result.className = 'result success';
             result.style.display = 'block';
             
+            // Debug: mostrar estrutura completa dos dados
+            console.log('🔍 Dados recebidos:', data);
+            console.log('🔍 Resumo:', data.resumo);
+            console.log('🔍 Saldo Atual:', data.resumo?.saldoAtual);
+            
             let html = `
                 <h3>✅ Arquivo processado com sucesso!</h3>
                 
@@ -219,6 +224,7 @@
                     <p><strong>Total de Débitos:</strong> R$ ${data.resumo.totalDebitos.toFixed(2)}</p>
                     <p><strong>Saldo das Transações:</strong> R$ ${data.resumo.saldo.toFixed(2)}</p>
                     <p><strong>💰 Saldo Atual da Conta:</strong> R$ ${(data.resumo.saldoAtual || 0).toFixed(2)}</p>
+                    <p><strong>🔍 Debug - Saldo Atual (raw):</strong> ${JSON.stringify(data.resumo.saldoAtual)}</p>
                 </div>
 
                 <h4>💳 Transações (${data.transacoes.length})</h4>

@@ -503,6 +503,21 @@ export class BankReturnParser {
     // Se for linha de saldo (geralmente tem padrão específico)
     if (codigoBanco === '341' && tipoRegistro === '9') {
       console.log('💰 Detectada linha de saldo atual da conta');
+      console.log('📏 Linha completa:', line);
+      console.log('📏 Tamanho da linha:', line.length);
+      
+      // Debug das posições
+      const pos17_23 = line.substring(17, 23);
+      const pos23_41 = line.substring(23, 41);
+      const pos41_59 = line.substring(41, 59);
+      const pos59_77 = line.substring(59, 77);
+      
+      console.log('🔍 Posições extraídas:');
+      console.log('  Total Registros (17-23):', pos17_23);
+      console.log('  Total Créditos (23-41):', pos23_41);
+      console.log('  Total Débitos (41-59):', pos41_59);
+      console.log('  Saldo Atual (59-77):', pos59_77);
+      
       return {
         codigoBanco: line.substring(0, 3),
         loteServico: line.substring(3, 7),
@@ -536,8 +551,25 @@ export class BankReturnParser {
    * Converte valor monetário
    */
   parseValue(value) {
-    const numericValue = parseInt(value) / 100;
-    return numericValue;
+    if (!value || value.trim() === '') {
+      return 0;
+    }
+    
+    // Remover espaços em branco
+    const cleanValue = value.trim();
+    
+    // Se for apenas zeros, retornar 0
+    if (cleanValue === '00000000000000000000' || cleanValue === '0000000000000000000') {
+      return 0;
+    }
+    
+    try {
+      const numericValue = parseInt(cleanValue) / 100;
+      return isNaN(numericValue) ? 0 : numericValue;
+    } catch (error) {
+      console.log(`⚠️ Erro ao converter valor: "${value}" -> ${error.message}`);
+      return 0;
+    }
   }
 
   /**
