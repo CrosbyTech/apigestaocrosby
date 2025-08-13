@@ -27,8 +27,9 @@ const storage = multer.diskStorage({
 const upload = multer({ 
   storage: storage,
   fileFilter: (req, file, cb) => {
-    // Aceitar apenas arquivos .RET
-    if (file.originalname.endsWith('.RET') || file.mimetype === 'text/plain') {
+    // Aceitar arquivos .RET (maiúsculo e minúsculo) e arquivos de texto
+    const fileName = file.originalname.toLowerCase();
+    if (fileName.endsWith('.ret') || file.mimetype === 'text/plain') {
       cb(null, true);
     } else {
       cb(new Error('Apenas arquivos .RET são permitidos'), false);

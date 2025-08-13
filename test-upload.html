@@ -162,7 +162,8 @@
 
         function handleFile(file) {
             // Validar tipo de arquivo
-            if (!file.name.endsWith('.RET') && !file.name.endsWith('.ret')) {
+            const fileName = file.name.toLowerCase();
+            if (!fileName.endsWith('.ret')) {
                 showError('Por favor, selecione um arquivo .RET válido');
                 return;
             }
@@ -176,7 +177,7 @@
             result.style.display = 'none';
 
             // Enviar para API
-            fetch('http://localhost:4000/api/financial/upload-retorno', {
+            fetch('https://apigestaocrosby-bw2v.onrender.com/api/financial/upload-retorno', {
                 method: 'POST',
                 body: formData
             })
