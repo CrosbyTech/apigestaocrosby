@@ -167,11 +167,12 @@ export class BankReturnParser {
      
      // Extrair agência e conta da primeira linha (header)
      const header = lines[0];
-     if (header && header.length >= 400) {
-       // BB: Agência posições 26-30, Conta posições 31-39
-       this.agencia = header.substring(26, 30).trim();
-       this.conta = header.substring(31, 39).trim();
-       console.log(`🏛️ Agência BB: ${this.agencia}, Conta: ${this.conta}`);
+     if (header && header.length >= 240) {
+       // Banco do Brasil CNAB400: Agência posições 18-22, Conta posições 23-32
+       this.agencia = header.substring(18, 22).trim();
+       this.conta = header.substring(23, 32).trim();
+       console.log(`🏛️ Agência BB: ${this.agencia}`);
+       console.log(`📋 Conta BB: ${this.conta}`);
      }
      
      // Banco do Brasil: saldo está na penúltima linha (linha 9)
@@ -290,11 +291,12 @@ export class BankReturnParser {
      
      // Extrair agência e conta da primeira linha (header)
      const header = lines[0];
-     if (header && header.length >= 400) {
-       // Sicredi: Agência posições 26-30, Conta posições 31-39
-       this.agencia = header.substring(26, 30).trim();
-       this.conta = header.substring(31, 39).trim();
-       console.log(`🏛️ Agência Sicredi: ${this.agencia}, Conta: ${this.conta}`);
+     if (header && header.length >= 240) {
+       // Sicredi CNAB400: Agência posições 18-22, Conta posições 23-32
+       this.agencia = header.substring(18, 22).trim();
+       this.conta = header.substring(23, 32).trim();
+       console.log(`🏛️ Agência Sicredi: ${this.agencia}`);
+       console.log(`📋 Conta Sicredi: ${this.conta}`);
      }
      
      // Sicredi: saldo está na linha 8 (penúltima linha)
@@ -365,11 +367,12 @@ export class BankReturnParser {
       
       // Extrair agência e conta da primeira linha (header)
       const header = lines[0];
-      if (header && header.length >= 400) {
-        // CAIXA: Agência posições 26-30, Conta posições 31-39
-        this.agencia = header.substring(26, 30).trim();
-        this.conta = header.substring(31, 39).trim();
-        console.log(`🏛️ Agência CAIXA: ${this.agencia}, Conta: ${this.conta}`);
+      if (header && header.length >= 240) {
+        // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
+        this.agencia = header.substring(18, 22).trim();
+        this.conta = header.substring(23, 32).trim();
+        console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
+        console.log(`📋 Conta CAIXA: ${this.conta}`);
       }
       
       // CAIXA: saldo está na linha 6 (penúltima linha)
@@ -421,11 +424,12 @@ export class BankReturnParser {
       
       // Extrair agência e conta da primeira linha (header)
       const header = lines[0];
-      if (header && header.length >= 400) {
-        // UNICRED: Agência posições 26-30, Conta posições 31-39
-        this.agencia = header.substring(26, 30).trim();
-        this.conta = header.substring(31, 39).trim();
-        console.log(`🏛️ Agência UNICRED: ${this.agencia}, Conta: ${this.conta}`);
+      if (header && header.length >= 240) {
+        // UNICRED CNAB400: Agência posições 18-22, Conta posições 23-32
+        this.agencia = header.substring(18, 22).trim();
+        this.conta = header.substring(23, 32).trim();
+        console.log(`🏛️ Agência UNICRED: ${this.agencia}`);
+        console.log(`📋 Conta UNICRED: ${this.conta}`);
       }
       
       // UNICRED: saldo está na linha 4 (penúltima linha)
