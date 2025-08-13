@@ -236,8 +236,9 @@ export class BankReturnParser {
      
      const saldoMatch = saldoLine.match(/(\d{7})DP/);
      if (saldoMatch) {
-       this.saldoAtual = parseInt(saldoMatch[1]);
-       console.log(`💰 Saldo Itaú encontrado: ${this.saldoAtual}`);
+       const saldoStr = saldoMatch[1];
+       this.saldoAtual = parseInt(saldoStr) / 100; // Dividir por 100 para converter centavos em reais
+       console.log(`💰 Saldo Itaú encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
      }
 
      return this.formatResponse();

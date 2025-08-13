@@ -358,28 +358,31 @@
         function showResults(data) {
             const results = document.getElementById('results');
             
+            // Acessar os dados corretos da resposta da API
+            const responseData = data.data || data;
+            
             let html = `
                 <div class="summary">
                     <h3>📊 Resumo do Processamento</h3>
-                    <p><strong>Total de arquivos:</strong> ${data.resumo.totalArquivos}</p>
-                    <p><strong>Sucessos:</strong> ${data.resumo.sucessos}</p>
-                    <p><strong>Erros:</strong> ${data.resumo.erros}</p>
-                    <p><strong>💰 Saldo Total:</strong> ${data.resumo.saldoTotalFormatado}</p>
+                    <p><strong>Total de arquivos:</strong> ${responseData.resumo.totalArquivos}</p>
+                    <p><strong>Sucessos:</strong> ${responseData.resumo.sucessos}</p>
+                    <p><strong>Erros:</strong> ${responseData.resumo.erros}</p>
+                    <p><strong>💰 Saldo Total:</strong> ${responseData.resumo.saldoTotalFormatado}</p>
                 </div>
             `;
             
-            if (data.arquivosComErro.length > 0) {
+            if (responseData.arquivosComErro && responseData.arquivosComErro.length > 0) {
                 html += '<div class="error">';
                 html += '<h4>❌ Arquivos com Erro:</h4>';
-                data.arquivosComErro.forEach(erro => {
+                responseData.arquivosComErro.forEach(erro => {
                     html += `<p><strong>${erro.nome}:</strong> ${erro.erro}</p>`;
                 });
                 html += '</div>';
             }
             
-            if (data.resultados.length > 0) {
+            if (responseData.resultados && responseData.resultados.length > 0) {
                 html += '<div class="bank-results">';
-                                 data.resultados.forEach(resultado => {
+                responseData.resultados.forEach(resultado => {
                    html += `
                      <div class="bank-card">
                        <h4>🏦 ${resultado.banco.nome}</h4>
