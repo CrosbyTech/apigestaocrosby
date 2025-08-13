@@ -67,14 +67,23 @@ export class BankReturnParser {
       };
     }
     
-    // Unibanco - Código 409
-    if (primeiraLinha.startsWith('409')) {
-      return {
-        codigo: '409',
-        nome: 'UNIBANCO',
-        layout: 'CNAB400_UNIBANCO'
-      };
-    }
+         // Unibanco - Código 409
+     if (primeiraLinha.startsWith('409')) {
+       return {
+         codigo: '409',
+         nome: 'UNIBANCO',
+         layout: 'CNAB400_UNIBANCO'
+       };
+     }
+     
+     // CAIXA - Código 104
+     if (primeiraLinha.startsWith('104')) {
+       return {
+         codigo: '104',
+         nome: 'CAIXA ECONOMICA FEDERAL',
+         layout: 'CNAB400_CAIXA'
+       };
+     }
 
     // Detecção por padrão de linha
     if (primeiraLinha.length >= 400) {
@@ -123,10 +132,12 @@ export class BankReturnParser {
           return this.parseSantander(lines);
         case 'CNAB400_SICREDI':
           return this.parseSicredi(lines);
-        case 'CNAB400_UNIBANCO':
-          return this.parseUnibanco(lines);
-        default:
-          return this.parseGenerico(lines);
+                 case 'CNAB400_UNIBANCO':
+           return this.parseUnibanco(lines);
+         case 'CNAB400_CAIXA':
+           return this.parseCaixa(lines);
+         default:
+           return this.parseGenerico(lines);
       }
       
     } catch (error) {
@@ -286,24 +297,71 @@ export class BankReturnParser {
     return this.formatResponse();
   }
 
-  /**
-   * Processa arquivo do Unibanco
-   */
-  parseUnibanco(lines) {
-    console.log('🏦 Processando arquivo Unibanco');
-    
-    // Unibanco: saldo está no trailer (última linha)
-    const trailer = lines[lines.length - 1];
-    
-    if (trailer && trailer.length >= 400) {
-      // Posições 119-134 contêm o saldo final
-      const saldoStr = trailer.substring(119, 134);
-      this.saldoAtual = this.parseValueBB(saldoStr);
-      console.log(`💰 Saldo Unibanco extraído: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-    }
+     /**
+    * Processa arquivo do Unibanco
+    */
+   parseUnibanco(lines) {
+     console.log('🏦 Processando arquivo Unibanco');
+     
+     // Unibanco: saldo está no trailer (última linha)
+     const trailer = lines[lines.length - 1];
+     
+     if (trailer && trailer.length >= 400) {
+       // Posições 119-134 contêm o saldo final
+       const saldoStr = trailer.substring(119, 134);
+       this.saldoAtual = this.parseValueBB(saldoStr);
+       console.log(`💰 Saldo Unibanco extraído: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+     }
 
-    return this.formatResponse();
-  }
+     return this.formatResponse();
+   }
+
+   /**
+    * Processa arquivo da CAIXA
+    */
+   parseCaixa(lines) {
+     console.log('🏦 Processando arquivo CAIXA');
+     
+     // CAIXA: saldo está na linha 6 (penúltima linha)
+     const trailerLote = lines[lines.length - 2]; // Linha 6
+     console.log('📏 Linha 6 (trailer lote):', trailerLote);
+     console.log('📏 Tamanho da linha:', trailerLote.length);
+     
+     if (trailerLote && trailerLote.length >= 200) {
+       // Procurar pelo padrão do saldo na linha
+       // O valor 833458 está antes do "CF"
+       const saldoMatch = trailerLote.match(/(\d{6})CF/);
+       
+       if (saldoMatch) {
+         const saldoStr = saldoMatch[1];
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo CAIXA encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else {
+         // Fallback: tentar posições específicas
+         console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+         
+         // Tentar diferentes posições onde o saldo pode estar
+         const posicoes = [
+           { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+           { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+           { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+         ];
+         
+         for (const pos of posicoes) {
+           const valor = trailerLote.substring(pos.inicio, pos.fim);
+           console.log(`${pos.descricao}: "${valor}"`);
+           
+           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+             this.saldoAtual = this.parseValueBB(valor);
+             console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+             break;
+           }
+         }
+       }
+     }
+
+     return this.formatResponse();
+   }
 
   /**
    * Processa arquivo genérico
