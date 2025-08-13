@@ -638,179 +638,313 @@ export class BankReturnParser {
      }
    }
 
-   /**
-    * Extrai data e hora de geração específica para Itaú (da linha de saldo)
-    */
-   extrairDataHoraGeracaoItau(saldoLine) {
-     console.log(`🔍 Analisando linha de saldo Itaú para data/hora: "${saldoLine}"`);
-     
-     if (!saldoLine) {
-       console.log('⚠️ Linha de saldo Itaú não encontrada');
-       return;
-     }
-     
-     // Procurar por padrão DDMMAAAA na linha de saldo
-     // Exemplo: 22072025 (22/07/2025)
-     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
-     
-     if (dataMatch) {
-       const [, dia, mes, ano] = dataMatch;
-       this.dataGeracao = `${ano}-${mes}-${dia}`;
-       console.log(`✅ Data de geração Itaú extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
-     }
-     
-     // Procurar por padrão HHMMSS na linha de saldo
-     // Exemplo: 143022 (14:30:22)
-     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
-     
-     if (horaMatch) {
-       const [, hora, minuto, segundo] = horaMatch;
-       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-       console.log(`✅ Hora de geração Itaú extraída: ${this.horaGeracao}`);
-     }
-     
-     // Se não encontrou, tentar posições específicas
-     if (!this.dataGeracao && saldoLine.length >= 8) {
-       const dataStr = saldoLine.substring(0, 8); // DDMMAAAA
-       console.log(`📅 Tentativa por posições - Data (0-8): "${dataStr}"`);
-       
-       if (dataStr && !isNaN(parseInt(dataStr))) {
-         const dia = dataStr.substring(0, 2);
-         const mes = dataStr.substring(2, 4);
-         const ano = dataStr.substring(4, 8);
-         this.dataGeracao = `${ano}-${mes}-${dia}`;
-         console.log(`✅ Data de geração Itaú (pos): ${this.dataGeracao}`);
-       }
-           }
+       /**
+     * Extrai data e hora de geração específica para Itaú (da linha de saldo)
+     */
+    extrairDataHoraGeracaoItau(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo Itaú para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo Itaú não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 22072025 (22/07/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração Itaú extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração Itaú extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      // Se não encontrou, tentar posições específicas
+      if (!this.dataGeracao && saldoLine.length >= 8) {
+        const dataStr = saldoLine.substring(0, 8); // DDMMAAAA
+        console.log(`📅 Tentativa por posições - Data (0-8): "${dataStr}"`);
+        
+        if (dataStr && !isNaN(parseInt(dataStr))) {
+          const dia = parseInt(dataStr.substring(0, 2));
+          const mes = parseInt(dataStr.substring(2, 4));
+          const ano = parseInt(dataStr.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração Itaú (pos): ${this.dataGeracao}`);
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo Itaú');
+      }
     }
 
-   /**
-    * Extrai data e hora de geração específica para Banco do Brasil (da linha de saldo)
-    */
-   extrairDataHoraGeracaoBB(saldoLine) {
-     console.log(`🔍 Analisando linha de saldo BB para data/hora: "${saldoLine}"`);
-     
-     if (!saldoLine) {
-       console.log('⚠️ Linha de saldo BB não encontrada');
-       return;
-     }
-     
-     // Procurar por padrão DDMMAAAA na linha de saldo
-     // Exemplo: 22072025 (22/07/2025)
-     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
-     
-     if (dataMatch) {
-       const [, dia, mes, ano] = dataMatch;
-       this.dataGeracao = `${ano}-${mes}-${dia}`;
-       console.log(`✅ Data de geração BB extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
-     }
-     
-     // Procurar por padrão HHMMSS na linha de saldo
-     // Exemplo: 143022 (14:30:22)
-     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
-     
-     if (horaMatch) {
-       const [, hora, minuto, segundo] = horaMatch;
-       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-       console.log(`✅ Hora de geração BB extraída: ${this.horaGeracao}`);
-     }
-   }
+       /**
+     * Extrai data e hora de geração específica para Banco do Brasil (da linha de saldo)
+     */
+    extrairDataHoraGeracaoBB(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo BB para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo BB não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 22072025 (22/07/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração BB extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração BB extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo BB');
+      }
+    }
 
-   /**
-    * Extrai data e hora de geração específica para Sicredi (da linha de saldo)
-    */
-   extrairDataHoraGeracaoSicredi(saldoLine) {
-     console.log(`🔍 Analisando linha de saldo Sicredi para data/hora: "${saldoLine}"`);
-     
-     if (!saldoLine) {
-       console.log('⚠️ Linha de saldo Sicredi não encontrada');
-       return;
-     }
-     
-     // Procurar por padrão DDMMAAAA na linha de saldo
-     // Exemplo: 22072025 (22/07/2025)
-     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
-     
-     if (dataMatch) {
-       const [, dia, mes, ano] = dataMatch;
-       this.dataGeracao = `${ano}-${mes}-${dia}`;
-       console.log(`✅ Data de geração Sicredi extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
-     }
-     
-     // Procurar por padrão HHMMSS na linha de saldo
-     // Exemplo: 143022 (14:30:22)
-     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
-     
-     if (horaMatch) {
-       const [, hora, minuto, segundo] = horaMatch;
-       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-       console.log(`✅ Hora de geração Sicredi extraída: ${this.horaGeracao}`);
-     }
-   }
+       /**
+     * Extrai data e hora de geração específica para Sicredi (da linha de saldo)
+     */
+    extrairDataHoraGeracaoSicredi(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo Sicredi para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo Sicredi não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 22072025 (22/07/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração Sicredi extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração Sicredi extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo Sicredi');
+      }
+    }
 
-   /**
-    * Extrai data e hora de geração específica para CAIXA (da linha de saldo)
-    */
-   extrairDataHoraGeracaoCaixa(saldoLine) {
-     console.log(`🔍 Analisando linha de saldo CAIXA para data/hora: "${saldoLine}"`);
-     
-     if (!saldoLine) {
-       console.log('⚠️ Linha de saldo CAIXA não encontrada');
-       return;
-     }
-     
-     // Procurar por padrão DDMMAAAA na linha de saldo
-     // Exemplo: 22072025 (22/07/2025)
-     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
-     
-     if (dataMatch) {
-       const [, dia, mes, ano] = dataMatch;
-       this.dataGeracao = `${ano}-${mes}-${dia}`;
-       console.log(`✅ Data de geração CAIXA extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
-     }
-     
-     // Procurar por padrão HHMMSS na linha de saldo
-     // Exemplo: 143022 (14:30:22)
-     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
-     
-     if (horaMatch) {
-       const [, hora, minuto, segundo] = horaMatch;
-       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-       console.log(`✅ Hora de geração CAIXA extraída: ${this.horaGeracao}`);
-     }
-   }
+       /**
+     * Extrai data e hora de geração específica para CAIXA (da linha de saldo)
+     */
+    extrairDataHoraGeracaoCaixa(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo CAIXA para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo CAIXA não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 22072025 (22/07/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração CAIXA extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração CAIXA extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo CAIXA');
+      }
+    }
 
-   /**
-    * Extrai data e hora de geração específica para UNICRED (da linha de saldo)
-    */
-   extrairDataHoraGeracaoUnicred(saldoLine) {
-     console.log(`🔍 Analisando linha de saldo UNICRED para data/hora: "${saldoLine}"`);
-     
-     if (!saldoLine) {
-       console.log('⚠️ Linha de saldo UNICRED não encontrada');
-       return;
-     }
-     
-     // Procurar por padrão DDMMAAAA na linha de saldo
-     // Exemplo: 22072025 (22/07/2025)
-     const dataMatch = saldoLine.match(/(\d{2})(\d{2})(\d{4})/);
-     
-     if (dataMatch) {
-       const [, dia, mes, ano] = dataMatch;
-       this.dataGeracao = `${ano}-${mes}-${dia}`;
-       console.log(`✅ Data de geração UNICRED extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
-     }
-     
-     // Procurar por padrão HHMMSS na linha de saldo
-     // Exemplo: 143022 (14:30:22)
-     const horaMatch = saldoLine.match(/(\d{2})(\d{2})(\d{2})/);
-     
-     if (horaMatch) {
-       const [, hora, minuto, segundo] = horaMatch;
-       this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-       console.log(`✅ Hora de geração UNICRED extraída: ${this.horaGeracao}`);
-     }
-   }
+       /**
+     * Extrai data e hora de geração específica para UNICRED (da linha de saldo)
+     */
+    extrairDataHoraGeracaoUnicred(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo UNICRED para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo UNICRED não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 22072025 (22/07/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração UNICRED extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração UNICRED extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo UNICRED');
+      }
+    }
 
    /**
     * Converte valor monetário (formato Banco do Brasil e outros)
