@@ -205,11 +205,11 @@
                 
                 <div class="summary">
                     <h4>📋 Informações do Arquivo</h4>
-                    <p><strong>Empresa:</strong> ${data.arquivo.nome}</p>
-                    <p><strong>Banco:</strong> ${data.arquivo.banco}</p>
-                    <p><strong>Data de Geração:</strong> ${data.arquivo.dataGeracao}</p>
-                    <p><strong>Hora de Geração:</strong> ${data.arquivo.horaGeracao}</p>
-                    <p><strong>Arquivo Original:</strong> ${data.arquivo.nomeOriginal}</p>
+                    <p><strong>Empresa:</strong> ${data.arquivo.nome || 'N/A'}</p>
+                    <p><strong>Banco:</strong> ${data.arquivo.banco || 'N/A'}</p>
+                    <p><strong>Data de Geração:</strong> ${data.arquivo.dataGeracao || 'N/A'}</p>
+                    <p><strong>Hora de Geração:</strong> ${data.arquivo.horaGeracao || 'N/A'}</p>
+                    <p><strong>Arquivo Original:</strong> ${data.arquivo.nomeOriginal || 'N/A'}</p>
                 </div>
 
                 <div class="summary">

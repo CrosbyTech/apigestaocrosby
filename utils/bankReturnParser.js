@@ -606,9 +606,12 @@ export class BankReturnParser {
       arquivo: {
         nome: this.header?.nomeEmpresa || 'Arquivo de Retorno',
         banco: this.header?.nomeBanco || 'Banco',
-        dataGeracao: this.header?.dataGeracao,
-        horaGeracao: this.header?.horaGeracao,
-        versaoLayout: this.header?.versaoLayout
+        dataGeracao: this.header?.dataGeracao || null,
+        horaGeracao: this.header?.horaGeracao || null,
+        versaoLayout: this.header?.versaoLayout || null,
+        nomeOriginal: null,
+        tamanho: 0,
+        dataUpload: new Date().toISOString()
       },
       resumo: {
         totalTransacoes: this.transactions.length,
