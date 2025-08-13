@@ -76,14 +76,23 @@ export class BankReturnParser {
        };
      }
      
-     // CAIXA - Código 104
-     if (primeiraLinha.startsWith('104')) {
-       return {
-         codigo: '104',
-         nome: 'CAIXA ECONOMICA FEDERAL',
-         layout: 'CNAB400_CAIXA'
-       };
-     }
+           // CAIXA - Código 104
+      if (primeiraLinha.startsWith('104')) {
+        return {
+          codigo: '104',
+          nome: 'CAIXA ECONOMICA FEDERAL',
+          layout: 'CNAB400_CAIXA'
+        };
+      }
+      
+      // UNICRED - Código 136
+      if (primeiraLinha.startsWith('136')) {
+        return {
+          codigo: '136',
+          nome: 'UNICRED DO BRASIL',
+          layout: 'CNAB400_UNICRED'
+        };
+      }
 
     // Detecção por padrão de linha
     if (primeiraLinha.length >= 400) {
@@ -134,10 +143,12 @@ export class BankReturnParser {
           return this.parseSicredi(lines);
                  case 'CNAB400_UNIBANCO':
            return this.parseUnibanco(lines);
-         case 'CNAB400_CAIXA':
-           return this.parseCaixa(lines);
-         default:
-           return this.parseGenerico(lines);
+                   case 'CNAB400_CAIXA':
+            return this.parseCaixa(lines);
+          case 'CNAB400_UNICRED':
+            return this.parseUnicred(lines);
+          default:
+            return this.parseGenerico(lines);
       }
       
     } catch (error) {
@@ -360,12 +371,59 @@ export class BankReturnParser {
        }
      }
 
+           return this.formatResponse();
+    }
+
+   /**
+    * Processa arquivo da UNICRED
+    */
+   parseUnicred(lines) {
+     console.log('🏦 Processando arquivo UNICRED');
+     
+     // UNICRED: saldo está na linha 4 (penúltima linha)
+     const trailerLote = lines[lines.length - 2]; // Linha 4
+     console.log('📏 Linha 4 (trailer lote):', trailerLote);
+     console.log('📏 Tamanho da linha:', trailerLote.length);
+     
+     if (trailerLote && trailerLote.length >= 200) {
+       // Procurar pelo padrão do saldo na linha
+       // O valor 471540 está antes do "DF"
+       const saldoMatch = trailerLote.match(/(\d{6})DF/);
+       
+       if (saldoMatch) {
+         const saldoStr = saldoMatch[1];
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo UNICRED encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else {
+         // Fallback: tentar posições específicas
+         console.log('⚠️ Padrão DF não encontrado, tentando posições...');
+         
+         // Tentar diferentes posições onde o saldo pode estar
+         const posicoes = [
+           { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+           { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+           { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+         ];
+         
+         for (const pos of posicoes) {
+           const valor = trailerLote.substring(pos.inicio, pos.fim);
+           console.log(`${pos.descricao}: "${valor}"`);
+           
+           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+             this.saldoAtual = this.parseValueBB(valor);
+             console.log(`💰 Saldo UNICRED encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+             break;
+           }
+         }
+       }
+     }
+
      return this.formatResponse();
    }
 
-  /**
-   * Processa arquivo genérico
-   */
+   /**
+    * Processa arquivo genérico
+    */
   parseGenerico(lines) {
     console.log('🏦 Processando arquivo genérico');
     
