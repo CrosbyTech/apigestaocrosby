@@ -557,7 +557,7 @@ export class BankReturnParser {
       }
     });
     
-    // Procurar por padrões de data/hora em todo o header
+    // Procurar por padrões de data/hora em todo o header (para diagnóstico)
     const padroesData = [
       { regex: /(\d{2})(\d{2})(\d{2})/, descricao: 'DDMMAA' },
       { regex: /(\d{2})(\d{2})(\d{4})/, descricao: 'DDMMAAAA' },
@@ -633,9 +633,65 @@ export class BankReturnParser {
       }
     }
     
-         if (!this.dataGeracao && !this.horaGeracao) {
-       console.log('⚠️ Não foi possível extrair data/hora do header');
-     }
+    // Fallback robusto: procurar por DDMMAAAA e HHMMSS em qualquer posição do header
+    if (!this.dataGeracao) {
+      const datas8 = header.match(/\d{8}/g);
+      if (datas8 && datas8.length > 0) {
+        // Percorre do fim para o começo (tende a estar no final da linha)
+        for (let i = datas8.length - 1; i >= 0; i--) {
+          const dd = parseInt(datas8[i].substring(0, 2));
+          const mm = parseInt(datas8[i].substring(2, 4));
+          const yyyy = parseInt(datas8[i].substring(4, 8));
+          if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 && yyyy >= 2000 && yyyy <= 2100) {
+            const diaStr = dd.toString().padStart(2, '0');
+            const mesStr = mm.toString().padStart(2, '0');
+            this.dataGeracao = `${yyyy}-${mesStr}-${diaStr}`;
+            console.log(`✅ Data de geração (regex DDMMAAAA): ${this.dataGeracao}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Se ainda não encontrou data, tentar AAAAMMDD
+    if (!this.dataGeracao) {
+      const datasAA = header.match(/\d{8}/g);
+      if (datasAA && datasAA.length > 0) {
+        for (let i = datasAA.length - 1; i >= 0; i--) {
+          const yyyy = parseInt(datasAA[i].substring(0, 4));
+          const mm = parseInt(datasAA[i].substring(4, 6));
+          const dd = parseInt(datasAA[i].substring(6, 8));
+          if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 && yyyy >= 2000 && yyyy <= 2100) {
+            const diaStr = dd.toString().padStart(2, '0');
+            const mesStr = mm.toString().padStart(2, '0');
+            this.dataGeracao = `${yyyy}-${mesStr}-${diaStr}`;
+            console.log(`✅ Data de geração (regex AAAAMMDD): ${this.dataGeracao}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Fallback robusto: procurar por HHMMSS em qualquer posição do header
+    if (!this.horaGeracao) {
+      const horas = header.match(/\d{6}/g);
+      if (horas && horas.length > 0) {
+        for (let i = horas.length - 1; i >= 0; i--) {
+          const hh = parseInt(horas[i].substring(0, 2));
+          const mi = parseInt(horas[i].substring(2, 4));
+          const ss = parseInt(horas[i].substring(4, 6));
+          if (hh >= 0 && hh <= 23 && mi >= 0 && mi <= 59 && ss >= 0 && ss <= 59) {
+            this.horaGeracao = `${hh.toString().padStart(2, '0')}:${mi.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração (regex HHMMSS): ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    if (!this.dataGeracao && !this.horaGeracao) {
+      console.log('⚠️ Não foi possível extrair data/hora do header');
+    }
    }
 
        /**
