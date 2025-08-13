@@ -169,16 +169,16 @@ export class BankReturnParser {
      
            // Extrair agência e conta da primeira linha (header)
       const header = lines[0];
-      if (header && header.length >= 240) {
-        // Banco do Brasil CNAB400: Agência posições 18-22, Conta posições 23-32
-        this.agencia = header.substring(18, 22).trim();
-        this.conta = header.substring(23, 32).trim();
-        console.log(`🏛️ Agência BB: ${this.agencia}`);
-        console.log(`📋 Conta BB: ${this.conta}`);
-        
-        // Extrair data e hora de geração
-        this.extrairDataHoraGeracao(header);
-      }
+             if (header && header.length >= 240) {
+         // Banco do Brasil CNAB400: Agência posições 18-22, Conta posições 23-32
+         this.agencia = header.substring(18, 22).trim();
+         this.conta = header.substring(23, 32).trim();
+         console.log(`🏛️ Agência BB: ${this.agencia}`);
+         console.log(`📋 Conta BB: ${this.conta}`);
+       }
+       
+       // Extrair data e hora de geração da linha 1
+       this.extrairDataHoraGeracao(lines[0]);
      
      // Banco do Brasil: saldo está na penúltima linha (linha 9)
      const trailerLote = lines[lines.length - 2]; // Penúltima linha
@@ -229,15 +229,15 @@ export class BankReturnParser {
      
            // Extrair agência e conta da primeira linha (header)
       const header = lines[0];
-      if (header && header.length >= 240) {
-        // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
-        this.agencia = header.substring(52, 57).trim();
-        this.conta = header.substring(58, 70).trim();
-        console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
-        
-        // Extrair data e hora de geração (posições diferentes para CNAB240)
-        this.extrairDataHoraGeracao(header);
-      }
+             if (header && header.length >= 240) {
+         // Itaú CNAB240: Agência posições 52-57, Conta posições 58-70
+         this.agencia = header.substring(52, 57).trim();
+         this.conta = header.substring(58, 70).trim();
+         console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
+       }
+       
+       // Extrair data e hora de geração da linha 1
+       this.extrairDataHoraGeracao(lines[0]);
      
      // Itaú: saldo está na penúltima linha (linha 56)
      const saldoLine = lines[lines.length - 2];
@@ -299,16 +299,16 @@ export class BankReturnParser {
      
            // Extrair agência e conta da primeira linha (header)
       const header = lines[0];
-      if (header && header.length >= 240) {
-        // Sicredi CNAB400: Agência posições 18-22, Conta posições 23-32
-        this.agencia = header.substring(18, 22).trim();
-        this.conta = header.substring(23, 32).trim();
-        console.log(`🏛️ Agência Sicredi: ${this.agencia}`);
-        console.log(`📋 Conta Sicredi: ${this.conta}`);
-        
-        // Extrair data e hora de geração
-        this.extrairDataHoraGeracao(header);
-      }
+             if (header && header.length >= 240) {
+         // Sicredi CNAB400: Agência posições 18-22, Conta posições 23-32
+         this.agencia = header.substring(18, 22).trim();
+         this.conta = header.substring(23, 32).trim();
+         console.log(`🏛️ Agência Sicredi: ${this.agencia}`);
+         console.log(`📋 Conta Sicredi: ${this.conta}`);
+       }
+       
+       // Extrair data e hora de geração da linha 1
+       this.extrairDataHoraGeracao(lines[0]);
      
      // Sicredi: saldo está na linha 8 (penúltima linha)
      const trailerLote = lines[lines.length - 2]; // Linha 8
@@ -378,16 +378,16 @@ export class BankReturnParser {
       
              // Extrair agência e conta da primeira linha (header)
        const header = lines[0];
-       if (header && header.length >= 240) {
-         // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
-         this.agencia = header.substring(18, 22).trim();
-         this.conta = header.substring(23, 32).trim();
-         console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
-         console.log(`📋 Conta CAIXA: ${this.conta}`);
-         
-         // Extrair data e hora de geração
-         this.extrairDataHoraGeracao(header);
-       }
+               if (header && header.length >= 240) {
+          // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
+          this.agencia = header.substring(18, 22).trim();
+          this.conta = header.substring(23, 32).trim();
+          console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
+          console.log(`📋 Conta CAIXA: ${this.conta}`);
+        }
+        
+        // Extrair data e hora de geração da linha 1
+        this.extrairDataHoraGeracao(lines[0]);
       
       // CAIXA: saldo está na linha 6 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 6
@@ -438,16 +438,16 @@ export class BankReturnParser {
       
              // Extrair agência e conta da primeira linha (header)
        const header = lines[0];
-       if (header && header.length >= 240) {
-         // UNICRED CNAB400: Agência posições 18-22, Conta posições 23-32
-         this.agencia = header.substring(18, 22).trim();
-         this.conta = header.substring(23, 32).trim();
-         console.log(`🏛️ Agência UNICRED: ${this.agencia}`);
-         console.log(`📋 Conta UNICRED: ${this.conta}`);
-         
-         // Extrair data e hora de geração
-         this.extrairDataHoraGeracao(header);
-       }
+               if (header && header.length >= 240) {
+          // UNICRED CNAB400: Agência posições 18-22, Conta posições 23-32
+          this.agencia = header.substring(18, 22).trim();
+          this.conta = header.substring(23, 32).trim();
+          console.log(`🏛️ Agência UNICRED: ${this.agencia}`);
+          console.log(`📋 Conta UNICRED: ${this.conta}`);
+        }
+        
+        // Extrair data e hora de geração da linha 1
+        this.extrairDataHoraGeracao(lines[0]);
       
       // UNICRED: saldo está na linha 4 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 4
@@ -509,76 +509,56 @@ export class BankReturnParser {
   }
 
   /**
-   * Extrai data e hora de geração do arquivo (formato padrão CNAB400)
+   * Extrai data e hora de geração do arquivo da linha 1
    */
-  extrairDataHoraGeracao(header) {
-    console.log(`🔍 Extraindo data/hora do header (tamanho: ${header?.length || 0})`);
+  extrairDataHoraGeracao(linha1) {
+    console.log(`🔍 Extraindo data/hora da linha 1: "${linha1}"`);
     
-    if (!header) {
-      console.log('⚠️ Header não encontrado');
+    if (!linha1) {
+      console.log('⚠️ Linha 1 não encontrada');
       return;
     }
     
-    // Verificar se o header tem tamanho suficiente
-    if (header.length < 106) {
-      console.log(`⚠️ Header muito pequeno (${header.length} < 106), tentando posições alternativas...`);
+    // Procurar por padrão de data/hora na linha 1
+    // Formato esperado: DDMMAAHHMMSS (ex: 24072025025954)
+    const dataHoraMatch = linha1.match(/(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+    
+    if (dataHoraMatch) {
+      const [, dia, mes, ano, hora, minuto, segundo] = dataHoraMatch;
       
-      // Tentar posições alternativas para arquivos menores
-      if (header.length >= 100) {
-        const dataStr = header.substring(90, 95);
-        const horaStr = header.substring(95, 100);
+      // Converter para formato legível
+      const anoCompleto = '20' + ano;
+      this.dataGeracao = `${anoCompleto}-${mes}-${dia}`;
+      this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+      
+      console.log(`📅 Data de geração: ${this.dataGeracao} (${dia}/${mes}/${anoCompleto})`);
+      console.log(`🕐 Hora de geração: ${this.horaGeracao}`);
+    } else {
+      console.log(`⚠️ Padrão de data/hora não encontrado na linha 1: "${linha1}"`);
+      
+      // Tentar extrair das posições específicas se o padrão não for encontrado
+      if (linha1.length >= 14) {
+        const dataStr = linha1.substring(0, 6); // DDMMAA
+        const horaStr = linha1.substring(6, 12); // HHMMSS
         
-        console.log(`📅 Tentativa alternativa - Data: "${dataStr}", Hora: "${horaStr}"`);
+        console.log(`📅 Tentativa por posições - Data: "${dataStr}", Hora: "${horaStr}"`);
         
-        if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
+        if (dataStr && !isNaN(parseInt(dataStr))) {
           const dia = dataStr.substring(0, 2);
           const mes = dataStr.substring(2, 4);
           const ano = '20' + dataStr.substring(4, 6);
           this.dataGeracao = `${ano}-${mes}-${dia}`;
-          console.log(`📅 Data de geração (alt): ${this.dataGeracao}`);
+          console.log(`📅 Data de geração (pos): ${this.dataGeracao}`);
         }
         
-        if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
+        if (horaStr && !isNaN(parseInt(horaStr))) {
           const hora = horaStr.substring(0, 2);
           const minuto = horaStr.substring(2, 4);
           const segundo = horaStr.substring(4, 6);
           this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-          console.log(`🕐 Hora de geração (alt): ${this.horaGeracao}`);
+          console.log(`🕐 Hora de geração (pos): ${this.horaGeracao}`);
         }
       }
-      return;
-    }
-    
-    // Data: posições 95-100 (DDMMAA)
-    const dataStr = header.substring(95, 100);
-    // Hora: posições 101-106 (HHMMSS)
-    const horaStr = header.substring(101, 106);
-    
-    console.log(`📅 Extraindo data das posições 95-100: "${dataStr}"`);
-    console.log(`🕐 Extraindo hora das posições 101-106: "${horaStr}"`);
-    
-    if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
-      // Converter DDMMAA para formato legível
-      const dia = dataStr.substring(0, 2);
-      const mes = dataStr.substring(2, 4);
-      const ano = '20' + dataStr.substring(4, 6);
-      this.dataGeracao = `${ano}-${mes}-${dia}`;
-      
-      console.log(`📅 Data de geração: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
-    } else {
-      console.log(`⚠️ Data inválida: "${dataStr}"`);
-    }
-    
-    if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
-      // Converter HHMMSS para formato legível
-      const hora = horaStr.substring(0, 2);
-      const minuto = horaStr.substring(2, 4);
-      const segundo = horaStr.substring(4, 6);
-      this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-      
-      console.log(`🕐 Hora de geração: ${this.horaGeracao}`);
-    } else {
-      console.log(`⚠️ Hora inválida: "${horaStr}"`);
     }
   }
 
