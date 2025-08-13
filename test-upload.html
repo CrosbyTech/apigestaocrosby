@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teste Upload Arquivo de Retorno Bancário</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            margin: 20px 0;
+            transition: border-color 0.3s;
+        }
+        .upload-area:hover {
+            border-color: #007bff;
+        }
+        .upload-area.dragover {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .btn {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+        }
+        .btn:hover {
+            background-color: #0056b3;
+        }
+        .btn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 5px;
+            display: none;
+        }
+        .result.success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .result.error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .summary {
+            background-color: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .transaction {
+            background-color: #f8f9fa;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 3px;
+            border-left: 4px solid #007bff;
+        }
+        .transaction.credito {
+            border-left-color: #28a745;
+        }
+        .transaction.debito {
+            border-left-color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📁 Upload de Arquivo de Retorno Bancário</h1>
+        <p>Faça upload de um arquivo .RET do banco para processar e visualizar os dados.</p>
+        
+        <div class="upload-area" id="uploadArea">
+            <p>📄 Arraste e solte o arquivo .RET aqui ou clique para selecionar</p>
+            <input type="file" id="fileInput" accept=".RET,.ret,text/plain">
+            <button class="btn" onclick="document.getElementById('fileInput').click()">
+                Selecionar Arquivo
+            </button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Processando arquivo...</p>
+        </div>
+        
+        <div class="result" id="result"></div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const loading = document.getElementById('loading');
+        const result = document.getElementById('result');
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            // Validar tipo de arquivo
+            if (!file.name.endsWith('.RET') && !file.name.endsWith('.ret')) {
+                showError('Por favor, selecione um arquivo .RET válido');
+                return;
+            }
+
+            // Criar FormData
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Mostrar loading
+            loading.style.display = 'block';
+            result.style.display = 'none';
+
+            // Enviar para API
+            fetch('http://localhost:4000/api/financial/upload-retorno', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                loading.style.display = 'none';
+                if (data.success) {
+                    showSuccess(data);
+                } else {
+                    showError(data.message || 'Erro ao processar arquivo');
+                }
+            })
+            .catch(error => {
+                loading.style.display = 'none';
+                showError('Erro na comunicação com o servidor: ' + error.message);
+            });
+        }
+
+        function showSuccess(data) {
+            result.className = 'result success';
+            result.style.display = 'block';
+            
+            let html = `
+                <h3>✅ Arquivo processado com sucesso!</h3>
+                
+                <div class="summary">
+                    <h4>📋 Informações do Arquivo</h4>
+                    <p><strong>Empresa:</strong> ${data.arquivo.nome}</p>
+                    <p><strong>Banco:</strong> ${data.arquivo.banco}</p>
+                    <p><strong>Data de Geração:</strong> ${data.arquivo.dataGeracao}</p>
+                    <p><strong>Hora de Geração:</strong> ${data.arquivo.horaGeracao}</p>
+                    <p><strong>Arquivo Original:</strong> ${data.arquivo.nomeOriginal}</p>
+                </div>
+
+                <div class="summary">
+                    <h4>📊 Resumo</h4>
+                    <p><strong>Total de Transações:</strong> ${data.resumo.totalTransacoes}</p>
+                    <p><strong>Total de Créditos:</strong> R$ ${data.resumo.totalCreditos.toFixed(2)}</p>
+                    <p><strong>Total de Débitos:</strong> R$ ${data.resumo.totalDebitos.toFixed(2)}</p>
+                    <p><strong>Saldo:</strong> R$ ${data.resumo.saldo.toFixed(2)}</p>
+                </div>
+
+                <h4>💳 Transações (${data.transacoes.length})</h4>
+            `;
+
+            data.transacoes.forEach((transacao, index) => {
+                const tipoClass = transacao.tipoOperacao === 'C' ? 'credito' : 'debito';
+                const tipoIcon = transacao.tipoOperacao === 'C' ? '💰' : '💸';
+                
+                html += `
+                    <div class="transaction ${tipoClass}">
+                        <h5>${tipoIcon} Transação ${index + 1}</h5>
+                        <p><strong>Favorecido:</strong> ${transacao.nomeFavorecido}</p>
+                        <p><strong>Valor:</strong> R$ ${transacao.valorPagamento?.toFixed(2) || '0.00'}</p>
+                        <p><strong>Data:</strong> ${transacao.dataPagamento || 'N/A'}</p>
+                        <p><strong>Documento:</strong> ${transacao.numeroDocumento || 'N/A'}</p>
+                        <p><strong>Ocorrência:</strong> ${transacao.descricaoOcorrencia}</p>
+                    </div>
+                `;
+            });
+
+            result.innerHTML = html;
+        }
+
+        function showError(message) {
+            result.className = 'result error';
+            result.style.display = 'block';
+            result.innerHTML = `<h3>❌ Erro</h3><p>${message}</p>`;
+        }
+    </script>
+</body>
+</html>

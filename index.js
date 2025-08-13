@@ -162,7 +162,8 @@ app.get('/api/docs', (req, res) => {
       'GET /api/financial/extrato-totvs': 'Extrato TOTVS',
       'GET /api/financial/contas-pagar': 'Contas a pagar',
       'GET /api/financial/contas-receber': 'Contas a receber',
-      'GET /api/financial/saldo-conta': 'Saldo de conta bancária'
+      'GET /api/financial/saldo-conta': 'Saldo de conta bancária',
+      'POST /api/financial/upload-retorno': 'Upload e processamento de arquivo de retorno bancário'
     },
     'Vendas': {
       'GET /api/sales/faturamento': 'Faturamento geral',

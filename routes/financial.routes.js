@@ -2,8 +2,42 @@ import express from 'express';
 import pool from '../config/database.js';
 import { validateRequired, validateDateFormat, validatePagination, sanitizeInput } from '../middlewares/validation.middleware.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import multer from 'multer';
+import { BankReturnParser } from '../utils/bankReturnParser.js';
+import fs from 'fs';
+import path from 'path';
 
 const router = express.Router();
+
+// Configuração do multer para upload de arquivos
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = './uploads';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + '.RET');
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  fileFilter: (req, file, cb) => {
+    // Aceitar apenas arquivos .RET
+    if (file.originalname.endsWith('.RET') || file.mimetype === 'text/plain') {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas arquivos .RET são permitidos'), false);
+    }
+  },
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB
+  }
+});
 
 /**
  * @route GET /financial/extrato
@@ -575,6 +609,48 @@ router.get('/observacao',
       count: rows.length,
       data: rows
     }, 'Observações obtidas com sucesso');
+  })
+);
+
+/**
+ * @route POST /financial/upload-retorno
+ * @desc Upload e processamento de arquivo de retorno bancário
+ * @access Public
+ * @body {file} - Arquivo .RET do banco
+ */
+router.post('/upload-retorno',
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return errorResponse(res, 'Nenhum arquivo foi enviado', 400, 'NO_FILE_UPLOADED');
+    }
+
+    try {
+      // Ler o arquivo
+      const fileContent = fs.readFileSync(req.file.path, 'utf8');
+      
+      // Processar o arquivo
+      const parser = new BankReturnParser();
+      const result = parser.parseFile(fileContent);
+      
+      // Adicionar informações do arquivo
+      result.arquivo.nomeOriginal = req.file.originalname;
+      result.arquivo.tamanho = req.file.size;
+      result.arquivo.dataUpload = new Date().toISOString();
+      
+      // Limpar arquivo temporário
+      fs.unlinkSync(req.file.path);
+      
+      successResponse(res, result, 'Arquivo de retorno processado com sucesso');
+      
+    } catch (error) {
+      // Limpar arquivo em caso de erro
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      
+      return errorResponse(res, `Erro ao processar arquivo: ${error.message}`, 400, 'FILE_PROCESSING_ERROR');
+    }
   })
 );
 
