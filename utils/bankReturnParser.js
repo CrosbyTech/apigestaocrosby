@@ -512,31 +512,73 @@ export class BankReturnParser {
    * Extrai data e hora de geração do arquivo (formato padrão CNAB400)
    */
   extrairDataHoraGeracao(header) {
-    if (header && header.length >= 106) {
-      // Data: posições 95-100 (DDMMAA)
-      const dataStr = header.substring(95, 100);
-      // Hora: posições 101-106 (HHMMSS)
-      const horaStr = header.substring(101, 106);
+    console.log(`🔍 Extraindo data/hora do header (tamanho: ${header?.length || 0})`);
+    
+    if (!header) {
+      console.log('⚠️ Header não encontrado');
+      return;
+    }
+    
+    // Verificar se o header tem tamanho suficiente
+    if (header.length < 106) {
+      console.log(`⚠️ Header muito pequeno (${header.length} < 106), tentando posições alternativas...`);
       
-      if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
-        // Converter DDMMAA para formato legível
-        const dia = dataStr.substring(0, 2);
-        const mes = dataStr.substring(2, 4);
-        const ano = '20' + dataStr.substring(4, 6);
-        this.dataGeracao = `${ano}-${mes}-${dia}`;
+      // Tentar posições alternativas para arquivos menores
+      if (header.length >= 100) {
+        const dataStr = header.substring(90, 95);
+        const horaStr = header.substring(95, 100);
         
-        console.log(`📅 Data de geração: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+        console.log(`📅 Tentativa alternativa - Data: "${dataStr}", Hora: "${horaStr}"`);
+        
+        if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
+          const dia = dataStr.substring(0, 2);
+          const mes = dataStr.substring(2, 4);
+          const ano = '20' + dataStr.substring(4, 6);
+          this.dataGeracao = `${ano}-${mes}-${dia}`;
+          console.log(`📅 Data de geração (alt): ${this.dataGeracao}`);
+        }
+        
+        if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
+          const hora = horaStr.substring(0, 2);
+          const minuto = horaStr.substring(2, 4);
+          const segundo = horaStr.substring(4, 6);
+          this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+          console.log(`🕐 Hora de geração (alt): ${this.horaGeracao}`);
+        }
       }
+      return;
+    }
+    
+    // Data: posições 95-100 (DDMMAA)
+    const dataStr = header.substring(95, 100);
+    // Hora: posições 101-106 (HHMMSS)
+    const horaStr = header.substring(101, 106);
+    
+    console.log(`📅 Extraindo data das posições 95-100: "${dataStr}"`);
+    console.log(`🕐 Extraindo hora das posições 101-106: "${horaStr}"`);
+    
+    if (dataStr && dataStr.trim() !== '' && !isNaN(parseInt(dataStr))) {
+      // Converter DDMMAA para formato legível
+      const dia = dataStr.substring(0, 2);
+      const mes = dataStr.substring(2, 4);
+      const ano = '20' + dataStr.substring(4, 6);
+      this.dataGeracao = `${ano}-${mes}-${dia}`;
       
-      if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
-        // Converter HHMMSS para formato legível
-        const hora = horaStr.substring(0, 2);
-        const minuto = horaStr.substring(2, 4);
-        const segundo = horaStr.substring(4, 6);
-        this.horaGeracao = `${hora}:${minuto}:${segundo}`;
-        
-        console.log(`🕐 Hora de geração: ${this.horaGeracao}`);
-      }
+      console.log(`📅 Data de geração: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+    } else {
+      console.log(`⚠️ Data inválida: "${dataStr}"`);
+    }
+    
+    if (horaStr && horaStr.trim() !== '' && !isNaN(parseInt(horaStr))) {
+      // Converter HHMMSS para formato legível
+      const hora = horaStr.substring(0, 2);
+      const minuto = horaStr.substring(2, 4);
+      const segundo = horaStr.substring(4, 6);
+      this.horaGeracao = `${hora}:${minuto}:${segundo}`;
+      
+      console.log(`🕐 Hora de geração: ${this.horaGeracao}`);
+    } else {
+      console.log(`⚠️ Hora inválida: "${horaStr}"`);
     }
   }
 
