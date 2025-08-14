@@ -1192,17 +1192,31 @@ export class BankReturnParser {
        this.extrairDataHoraGeracaoUnicred(trailerLote);
        
        if (trailerLote && trailerLote.length >= 200) {
-         // Procurar pelo padrão do saldo na linha
-         // O valor 471540 está antes do "DF"
-         const saldoMatch = trailerLote.match(/(\d{6})DF/);
+         // Procurar pelo padrão do saldo na linha (suporta CF/CP/DP/DF com 4 a 8 dígitos)
+         const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
+         const saldoMatchCP = trailerLote.match(/(\d{4,8})CP/);
+         const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+         const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
          
-         if (saldoMatch) {
-           const saldoStr = saldoMatch[1];
+         if (saldoMatchCF) {
+           const saldoStr = saldoMatchCF[0]; // inclui sufixo para sinal correto
            this.saldoAtual = this.parseValueBB(saldoStr);
-           console.log(`💰 Saldo UNICRED encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+           console.log(`💰 Saldo UNICRED (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+         } else if (saldoMatchCP) {
+           const saldoStr = saldoMatchCP[0];
+           this.saldoAtual = this.parseValueBB(saldoStr);
+           console.log(`💰 Saldo UNICRED (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+         } else if (saldoMatchDP) {
+           const saldoStr = saldoMatchDP[0];
+           this.saldoAtual = this.parseValueBB(saldoStr);
+           console.log(`💰 Saldo UNICRED (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+         } else if (saldoMatchDF) {
+           const saldoStr = saldoMatchDF[0];
+           this.saldoAtual = this.parseValueBB(saldoStr);
+           console.log(`💰 Saldo UNICRED (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
          } else {
            // Fallback: tentar posições específicas
-           console.log('⚠️ Padrão DF não encontrado, tentando posições...');
+           console.log('⚠️ Padrão CF/CP/DP/DF não encontrado, tentando posições...');
            
            // Tentar diferentes posições onde o saldo pode estar
            const posicoes = [
