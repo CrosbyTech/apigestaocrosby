@@ -1505,19 +1505,21 @@ export class BankReturnParser {
         // Procurar por padrões específicos
         const cfMatch = cleanValue.match(/(\d+)CF/);
         const dpMatch = cleanValue.match(/(\d+)DP/);
+        const dfMatch = cleanValue.match(/(\d+)DF/);
         
         if (cfMatch) {
           numericString = cfMatch[1];
           isPositive = true; // CF = Crédito Financeiro (positivo)
           console.log(`🔍 Crédito Financeiro (CF) detectado: "${cleanValue}" -> "${numericString}"`);
-        } else if (dpMatch) {
-          numericString = dpMatch[1];
-          isPositive = false; // DP = Débito Financeiro (negativo)
-          console.log(`🔍 Débito Financeiro (DP) detectado: "${cleanValue}" -> "${numericString}"`);
+        } else if (dpMatch || dfMatch) {
+          // DP ou DF = Débito Financeiro (negativo)
+          numericString = dpMatch ? dpMatch[1] : dfMatch[1];
+          isPositive = false;
+          console.log(`🔍 Débito Financeiro (${dpMatch ? 'DP' : 'DF'}) detectado: "${cleanValue}" -> "${numericString}"`);
         } else {
-          // Se não tem CF ou DP, extrair apenas números
+          // Se não tem CF, DP ou DF, extrair apenas números
           numericString = cleanValue.replace(/\D/g, '');
-          console.log(`🔍 Valor com letras (sem CF/DP): "${cleanValue}" -> "${numericString}"`);
+          console.log(`🔍 Valor com letras (sem CF/DP/DF): "${cleanValue}" -> "${numericString}"`);
         }
       }
       
