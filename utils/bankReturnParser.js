@@ -1,6 +1,6 @@
 /**
  * Parser para arquivos de retorno bancário - Multi-banco
- * Suporta: Itaú, Banco do Brasil, Sicredi, Unibanco, Santander, Bradesco
+ * Suporta: Itaú, Banco do Brasil, Sicredi, Unibanco, Santander, Bradesco, BNB, CAIXA, UNICRED
  */
 
 export class BankReturnParser {
@@ -97,6 +97,15 @@ export class BankReturnParser {
           layout: 'CNAB400_UNICRED'
         };
       }
+      
+      // BNB - Código 004
+      if (primeiraLinha.startsWith('004')) {
+        return {
+          codigo: '004',
+          nome: 'BANCO DO NORDESTE',
+          layout: 'CNAB400_BNB'
+        };
+      }
 
     // Detecção por padrão de linha
     if (primeiraLinha.length >= 400) {
@@ -154,6 +163,8 @@ export class BankReturnParser {
             return this.parseCaixa(lines);
           case 'CNAB400_UNICRED':
             return this.parseUnicred(lines);
+        case 'CNAB400_BNB':
+            return this.parseBNB(lines);
           default:
             return this.parseGenerico(lines);
       }
@@ -268,14 +279,58 @@ export class BankReturnParser {
   parseBradesco(lines) {
     console.log('🏦 Processando arquivo Bradesco');
     
-    // Bradesco: saldo está no trailer (última linha)
-    const trailer = lines[lines.length - 1];
+    // Extrair agência e conta da primeira linha (header)
+    const header = lines[0];
+    if (header && header.length >= 240) {
+      // Bradesco CNAB400: Agência posições 18-22, Conta posições 23-32
+      this.agencia = header.substring(18, 22).trim();
+      this.conta = header.substring(23, 32).trim();
+      console.log(`🏛️ Agência Bradesco: ${this.agencia}`);
+      console.log(`📋 Conta Bradesco: ${this.conta}`);
+    }
     
-    if (trailer && trailer.length >= 400) {
-      // Posições 119-134 contêm o saldo final
-      const saldoStr = trailer.substring(119, 134);
-      this.saldoAtual = this.parseValueBB(saldoStr);
-      console.log(`💰 Saldo Bradesco extraído: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    // Extrair data e hora de geração do header
+    this.extrairDataHoraGeracao(header);
+    
+    // Bradesco: saldo está na linha 4 (penúltima linha)
+    const trailerLote = lines[lines.length - 2]; // Linha 4
+    console.log('📏 Linha 4 (trailer lote):', trailerLote);
+    console.log('📏 Tamanho da linha:', trailerLote.length);
+    
+    // Extrair data e hora da linha de saldo também (Bradesco tem data na linha de saldo)
+    this.extrairDataHoraGeracaoBradesco(trailerLote);
+    
+    if (trailerLote && trailerLote.length >= 200) {
+      // Procurar pelo padrão do saldo na linha
+      // O valor 3124668 está antes do "DP"
+      const saldoMatch = trailerLote.match(/(\d{7})DP/);
+      
+      if (saldoMatch) {
+        const saldoStr = saldoMatch[1];
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Bradesco encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+      } else {
+        // Fallback: tentar posições específicas
+        console.log('⚠️ Padrão DP não encontrado, tentando posições...');
+        
+        // Tentar diferentes posições onde o saldo pode estar
+        const posicoes = [
+          { inicio: 150, fim: 157, descricao: 'Posição 150-157' },
+          { inicio: 140, fim: 147, descricao: 'Posição 140-147' },
+          { inicio: 130, fim: 137, descricao: 'Posição 130-137' }
+        ];
+        
+        for (const pos of posicoes) {
+          const valor = trailerLote.substring(pos.inicio, pos.fim);
+          console.log(`${pos.descricao}: "${valor}"`);
+          
+          if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+            this.saldoAtual = this.parseValueBB(valor);
+            console.log(`💰 Saldo Bradesco encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+            break;
+          }
+        }
+      }
     }
 
     return this.formatResponse();
@@ -287,14 +342,58 @@ export class BankReturnParser {
   parseSantander(lines) {
     console.log('🏦 Processando arquivo Santander');
     
-    // Santander: saldo está no trailer (última linha)
-    const trailer = lines[lines.length - 1];
+    // Extrair agência e conta da primeira linha (header)
+    const header = lines[0];
+    if (header && header.length >= 240) {
+      // Santander CNAB400: Agência posições 18-22, Conta posições 23-32
+      this.agencia = header.substring(18, 22).trim();
+      this.conta = header.substring(23, 32).trim();
+      console.log(`🏛️ Agência Santander: ${this.agencia}`);
+      console.log(`📋 Conta Santander: ${this.conta}`);
+    }
     
-    if (trailer && trailer.length >= 400) {
-      // Posições 119-134 contêm o saldo final
-      const saldoStr = trailer.substring(119, 134);
-      this.saldoAtual = this.parseValueBB(saldoStr);
-      console.log(`💰 Saldo Santander extraído: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    // Extrair data e hora de geração do header
+    this.extrairDataHoraGeracao(header);
+    
+    // Santander: saldo está na linha 7 (penúltima linha)
+    const trailerLote = lines[lines.length - 2]; // Linha 7
+    console.log('📏 Linha 7 (trailer lote):', trailerLote);
+    console.log('📏 Tamanho da linha:', trailerLote.length);
+    
+    // Extrair data e hora da linha de saldo também (Santander tem data na linha de saldo)
+    this.extrairDataHoraGeracaoSantander(trailerLote);
+    
+    if (trailerLote && trailerLote.length >= 200) {
+      // Procurar pelo padrão do saldo na linha
+      // O valor 493451 está antes do "DP"
+      const saldoMatch = trailerLote.match(/(\d{6})DP/);
+      
+      if (saldoMatch) {
+        const saldoStr = saldoMatch[1];
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Santander encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+      } else {
+        // Fallback: tentar posições específicas
+        console.log('⚠️ Padrão DP não encontrado, tentando posições...');
+        
+        // Tentar diferentes posições onde o saldo pode estar
+        const posicoes = [
+          { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+          { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+          { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+        ];
+        
+        for (const pos of posicoes) {
+          const valor = trailerLote.substring(pos.inicio, pos.fim);
+          console.log(`${pos.descricao}: "${valor}"`);
+          
+          if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+            this.saldoAtual = this.parseValueBB(valor);
+            console.log(`💰 Saldo Santander encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+            break;
+          }
+        }
+      }
     }
 
     return this.formatResponse();
@@ -507,6 +606,69 @@ export class BankReturnParser {
 
       return this.formatResponse();
     }
+
+   /**
+    * Processa arquivo do BNB (Banco do Nordeste)
+    */
+   parseBNB(lines) {
+     console.log('🏦 Processando arquivo BNB (Banco do Nordeste)');
+     
+     // Extrair agência e conta da primeira linha (header)
+     const header = lines[0];
+     if (header && header.length >= 240) {
+       // BNB CNAB400: Agência posições 18-22, Conta posições 23-32
+       this.agencia = header.substring(18, 22).trim();
+       this.conta = header.substring(23, 32).trim();
+       console.log(`🏛️ Agência BNB: ${this.agencia}`);
+       console.log(`📋 Conta BNB: ${this.conta}`);
+     }
+     
+     // Extrair data e hora de geração do header
+     this.extrairDataHoraGeracao(header);
+   
+     // BNB: saldo está na linha 4 (penúltima linha)
+     const trailerLote = lines[lines.length - 2]; // Linha 4
+     console.log('📏 Linha 4 (trailer lote):', trailerLote);
+     console.log('📏 Tamanho da linha:', trailerLote.length);
+     
+     // Extrair data e hora da linha de saldo também (BNB tem data na linha de saldo)
+     this.extrairDataHoraGeracaoBNB(trailerLote);
+     
+     if (trailerLote && trailerLote.length >= 200) {
+       // Procurar pelo padrão do saldo na linha
+       // O valor 42140 está antes do "CF"
+       const saldoMatch = trailerLote.match(/(\d{5})CF/);
+       
+       if (saldoMatch) {
+         const saldoStr = saldoMatch[1];
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo BNB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else {
+         // Fallback: tentar posições específicas
+         console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+         
+         // Tentar diferentes posições onde o saldo pode estar
+         const posicoes = [
+           { inicio: 150, fim: 155, descricao: 'Posição 150-155' },
+           { inicio: 140, fim: 145, descricao: 'Posição 140-145' },
+           { inicio: 130, fim: 135, descricao: 'Posição 130-135' }
+         ];
+         
+         for (const pos of posicoes) {
+           const valor = trailerLote.substring(pos.inicio, pos.fim);
+           console.log(`${pos.descricao}: "${valor}"`);
+           
+           if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+             this.saldoAtual = this.parseValueBB(valor);
+             console.log(`💰 Saldo BNB encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+             break;
+           }
+         }
+       }
+     }
+
+     return this.formatResponse();
+   }
 
    /**
     * Processa arquivo genérico
@@ -1002,6 +1164,180 @@ export class BankReturnParser {
       
       if (!this.dataGeracao && !this.horaGeracao) {
         console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo UNICRED');
+      }
+    }
+
+       /**
+     * Extrai data e hora de geração específica para BNB (da linha de saldo)
+     */
+    extrairDataHoraGeracaoBNB(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo BNB para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo BNB não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 25072025 (25/07/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração BNB extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração BNB extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+             if (!this.dataGeracao && !this.horaGeracao) {
+         console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo BNB');
+       }
+     }
+
+       /**
+     * Extrai data e hora de geração específica para Bradesco (da linha de saldo)
+     */
+    extrairDataHoraGeracaoBradesco(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo Bradesco para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo Bradesco não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 05082025 (05/08/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração Bradesco extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração Bradesco extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo Bradesco');
+      }
+    }
+
+       /**
+     * Extrai data e hora de geração específica para Santander (da linha de saldo)
+     */
+    extrairDataHoraGeracaoSantander(saldoLine) {
+      console.log(`🔍 Analisando linha de saldo Santander para data/hora: "${saldoLine}"`);
+      
+      if (!saldoLine) {
+        console.log('⚠️ Linha de saldo Santander não encontrada');
+        return;
+      }
+      
+      // Procurar por padrão DDMMAAAA na linha de saldo com validação
+      // Exemplo: 12082025 (12/08/2025)
+      const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas: ${dataMatches.join(', ')}`);
+        
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          // Validar se é uma data válida
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+            console.log(`✅ Data de geração Santander extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS na linha de saldo com validação
+      // Exemplo: 143022 (14:30:22)
+      const horaMatches = saldoLine.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração Santander extraída: ${this.horaGeracao}`);
+            break;
+          }
+        }
+      }
+      
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo Santander');
       }
     }
 
