@@ -831,20 +831,29 @@ export class BankReturnParser {
     // Extrair data e hora da linha de saldo também (Santander tem data na linha de saldo)
     this.extrairDataHoraGeracaoSantander(trailerLote);
     
-    if (trailerLote && trailerLote.length >= 200) {
-      // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
-      // O valor pode ter entre 4 e 8 dígitos antes do "DP" ou "CF"
-      const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+          if (trailerLote && trailerLote.length >= 200) {
+      // Procurar pelo padrão do saldo na linha - capturar 4 a 8 dígitos antes do sufixo
+      const saldoMatchCP = trailerLote.match(/(\d{4,8})CP/);
       const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
+      const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+      const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
       
-      if (saldoMatchDP) {
-        const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
+      if (saldoMatchCP) {
+        const saldoStr = saldoMatchCP[0];
         this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Santander (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        console.log(`💰 Saldo Santander (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else if (saldoMatchCF) {
-        const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
+        const saldoStr = saldoMatchCF[0];
         this.saldoAtual = this.parseValueBB(saldoStr);
         console.log(`💰 Saldo Santander (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+      } else if (saldoMatchDP) {
+        const saldoStr = saldoMatchDP[0];
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Santander (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+      } else if (saldoMatchDF) {
+        const saldoStr = saldoMatchDF[0];
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Santander (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else {
         // Fallback: tentar posições específicas
         console.log('⚠️ Padrão CF/DP não encontrado, tentando posições...');
