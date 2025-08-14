@@ -203,17 +203,26 @@ export class BankReturnParser {
       this.extrairDataHoraGeracaoBB(trailerLote);
       
       if (trailerLote && trailerLote.length >= 200) {
-        // Procurar pelo padrão do saldo na linha
-        // O valor 210322 está antes do "CF"
-        const saldoMatch = trailerLote.match(/(\d{10})CF/);
+        // Procurar por padrões específicos do BB - CF (Crédito), DP (Débito), DF (Débito)
+        const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
+        const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+        const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
         
-        if (saldoMatch) {
-          const saldoStr = saldoMatch[1];
+        if (saldoMatchCF) {
+          const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
           this.saldoAtual = this.parseValueBB(saldoStr);
-          console.log(`💰 Saldo BB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+          console.log(`💰 Saldo BB (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchDP) {
+          const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo BB (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchDF) {
+          const saldoStr = saldoMatchDF[0]; // Incluir o "DF" para o parseValueBB detectar
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo BB (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
         } else {
           // Fallback: tentar posições específicas
-          console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+          console.log('⚠️ Padrão CF/DP/DF não encontrado, tentando posições...');
           
           // Tentar diferentes posições onde o saldo pode estar
           const posicoes = [
@@ -234,6 +243,12 @@ export class BankReturnParser {
           }
         }
       }
+
+      // Extrair informações detalhadas
+      const detalhes = this.extrairDetalhesBB(lines);
+      
+      // Adicionar detalhes à resposta
+      this.detalhes = detalhes;
 
      return this.formatResponse();
    }
@@ -263,11 +278,17 @@ export class BankReturnParser {
     // Extrair data e hora da linha de saldo também (Itaú tem data na linha de saldo)
     this.extrairDataHoraGeracaoItau(saldoLine);
     
-    // Procurar por padrões CF/DP - corrigido para capturar valores específicos
+    // Procurar por padrões específicos do ITAÚ - CP (Crédito), DP (Débito), DF (Débito)
+    const saldoMatchCP = saldoLine.match(/(\d{4,8})CP/);
     const saldoMatchDP = saldoLine.match(/(\d{4,8})DP/);
     const saldoMatchCF = saldoLine.match(/(\d{4,8})CF/);
+    const saldoMatchDF = saldoLine.match(/(\d{4,8})DF/);
     
-    if (saldoMatchDP) {
+    if (saldoMatchCP) {
+      const saldoStr = saldoMatchCP[0]; // Incluir o "CP" para o parseValueBB detectar
+      this.saldoAtual = this.parseValueBB(saldoStr);
+      console.log(`💰 Saldo Itaú (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    } else if (saldoMatchDP) {
       const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
       this.saldoAtual = this.parseValueBB(saldoStr);
       console.log(`💰 Saldo Itaú (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
@@ -275,9 +296,411 @@ export class BankReturnParser {
       const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
       this.saldoAtual = this.parseValueBB(saldoStr);
       console.log(`💰 Saldo Itaú (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    } else if (saldoMatchDF) {
+      const saldoStr = saldoMatchDF[0]; // Incluir o "DF" para o parseValueBB detectar
+      this.saldoAtual = this.parseValueBB(saldoStr);
+      console.log(`💰 Saldo Itaú (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
     }
 
+    // Extrair informações detalhadas
+    const detalhes = this.extrairDetalhesItau(lines);
+    
+    // Adicionar detalhes à resposta
+    this.detalhes = detalhes;
+
     return this.formatResponse();
+  }
+
+  /**
+   * Extrai informações detalhadas do arquivo ITAÚ (débitos, tarifas, etc.)
+   */
+  extrairDetalhesItau(lines) {
+    console.log('🔍 Extraindo detalhes do arquivo ITAÚ...');
+    
+    const detalhes = {
+      debitos: [],
+      tarifas: [],
+      creditos: [],
+      resumo: {
+        totalDebitos: 0,
+        totalTarifas: 0,
+        totalCreditos: 0
+      }
+    };
+
+    // Percorrer todas as linhas procurando por detalhes
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || line.length < 240) continue;
+
+      // ITAÚ CNAB240: Detalhes estão em linhas com segmento 'E' (detalhes)
+      const segmento = line.substring(13, 14);
+      const codigoOcorrencia = line.substring(15, 17);
+      
+      // Detalhes estão em segmentos 'E' (detalhes de transação)
+      if (segmento === 'E') {
+        // Extrair informações do detalhe ITAÚ CNAB240
+        // Procurar por valores específicos das transações (DPV + valor)
+        const dpvMatch = line.match(/DPV(\d{15})/);
+        const tipoMovimento = line.substring(9, 10); // Tipo de movimento
+        const descricao = line.substring(96, 126).trim(); // Descrição
+        const dataOcorrencia = line.substring(73, 81); // Data da ocorrência
+        
+        let valor = '';
+        if (dpvMatch) {
+          valor = dpvMatch[1];
+        }
+
+        // Verificar se o valor é válido (não apenas zeros)
+        if (valor && valor.replace(/0/g, '').length > 0) {
+          // Calcular valor
+          const valorNumerico = parseInt(valor) / 100;
+          const isDebito = tipoMovimento === 'D' || descricao.toLowerCase().includes('deb') || descricao.toLowerCase().includes('emprest');
+          const valorFinal = isDebito ? -valorNumerico : valorNumerico;
+
+          const detalhe = {
+            linha: i + 1,
+            valor: valorFinal,
+            valorFormatado: valorFinal.toLocaleString('pt-BR', {
+              style: 'currency',
+              currency: 'BRL'
+            }),
+            tipo: isDebito ? 'Débito' : 'Crédito',
+            descricao: descricao,
+            codigoOcorrencia: codigoOcorrencia,
+            dataOcorrencia: dataOcorrencia,
+            tipoMovimento: tipoMovimento,
+            segmento: segmento
+          };
+
+          // Classificar por tipo
+          if (isDebito) {
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.debitos.push(detalhe);
+              detalhes.resumo.totalDebitos += Math.abs(valorFinal);
+            }
+          } else {
+            // Verificar se é tarifa mesmo sendo "crédito" (algumas tarifas aparecem como crédito)
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.creditos.push(detalhe);
+              detalhes.resumo.totalCreditos += valorFinal;
+            }
+          }
+
+          console.log(`💰 Detalhe ITAÚ encontrado: ${detalhe.tipo} - ${detalhe.valorFormatado} - ${detalhe.descricao}`);
+        }
+      }
+    }
+
+    console.log('📊 Resumo dos detalhes ITAÚ:');
+    console.log(`💸 Total de débitos: R$ ${detalhes.resumo.totalDebitos.toLocaleString('pt-BR')}`);
+    console.log(`💸 Total de tarifas: R$ ${detalhes.resumo.totalTarifas.toLocaleString('pt-BR')}`);
+    console.log(`💰 Total de créditos: R$ ${detalhes.resumo.totalCreditos.toLocaleString('pt-BR')}`);
+
+    return detalhes;
+  }
+
+  /**
+   * Extrai informações detalhadas do arquivo BB (débitos, tarifas, etc.)
+   */
+  extrairDetalhesBB(lines) {
+    console.log('🔍 Extraindo detalhes do arquivo BB...');
+    
+    const detalhes = {
+      debitos: [],
+      tarifas: [],
+      creditos: [],
+      resumo: {
+        totalDebitos: 0,
+        totalTarifas: 0,
+        totalCreditos: 0
+      }
+    };
+
+    // Percorrer todas as linhas procurando por detalhes
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || line.length < 240) continue;
+
+      const tipoRegistro = line.substring(6, 7);
+      const tipoOperacao = line.substring(7, 8);
+      const tipoServico = line.substring(8, 9);
+
+      // Detalhes estão em linhas com tipo de registro 1 e tipo de operação 3
+      if (tipoRegistro === '1' && tipoOperacao === '3') {
+        // BB CNAB400: Procurar por valores específicos das transações
+        // Procurar por padrões como "000000000002653662C" ou "0000002500000D1"
+        const valorMatch = line.match(/(\d{15})[CD]/);
+        const tipoMovimento = line.substring(134, 135);
+        const codigoOcorrencia = line.substring(135, 137);
+        const descricao = line.substring(137, 162).trim();
+        const dataOcorrencia = line.substring(130, 138);
+
+        let valor = '';
+        if (valorMatch) {
+          valor = valorMatch[1];
+        }
+
+        // Verificar se o valor é válido (não apenas zeros)
+        if (valor && valor.replace(/0/g, '').length > 0) {
+          // Calcular valor
+          const valorNumerico = parseInt(valor) / 100;
+          const isDebito = tipoMovimento === 'D' || descricao.toLowerCase().includes('deb') || descricao.toLowerCase().includes('emprest');
+          const valorFinal = isDebito ? -valorNumerico : valorNumerico;
+
+          const detalhe = {
+            linha: i + 1,
+            valor: valorFinal,
+            valorFormatado: valorFinal.toLocaleString('pt-BR', {
+              style: 'currency',
+              currency: 'BRL'
+            }),
+            tipo: isDebito ? 'Débito' : 'Crédito',
+            descricao: descricao,
+            codigoOcorrencia: codigoOcorrencia,
+            dataOcorrencia: dataOcorrencia,
+            tipoMovimento: tipoMovimento
+          };
+
+          // Classificar por tipo
+          if (isDebito) {
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.debitos.push(detalhe);
+              detalhes.resumo.totalDebitos += Math.abs(valorFinal);
+            }
+          } else {
+            // Verificar se é tarifa mesmo sendo "crédito" (algumas tarifas aparecem como crédito)
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.creditos.push(detalhe);
+              detalhes.resumo.totalCreditos += valorFinal;
+            }
+          }
+
+          console.log(`💰 Detalhe BB encontrado: ${detalhe.tipo} - ${detalhe.valorFormatado} - ${detalhe.descricao}`);
+        }
+      }
+    }
+
+    console.log('📊 Resumo dos detalhes BB:');
+    console.log(`💸 Total de débitos: R$ ${detalhes.resumo.totalDebitos.toLocaleString('pt-BR')}`);
+    console.log(`💸 Total de tarifas: R$ ${detalhes.resumo.totalTarifas.toLocaleString('pt-BR')}`);
+    console.log(`💰 Total de créditos: R$ ${detalhes.resumo.totalCreditos.toLocaleString('pt-BR')}`);
+
+    return detalhes;
+  }
+
+  /**
+   * Extrai informações detalhadas do arquivo BNB (débitos, tarifas, etc.)
+   */
+  extrairDetalhesBNB(lines) {
+    console.log('🔍 Extraindo detalhes do arquivo BNB...');
+    
+    const detalhes = {
+      debitos: [],
+      tarifas: [],
+      creditos: [],
+      resumo: {
+        totalDebitos: 0,
+        totalTarifas: 0,
+        totalCreditos: 0
+      }
+    };
+
+    // Percorrer todas as linhas procurando por detalhes
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || line.length < 240) continue;
+
+      const tipoRegistro = line.substring(6, 7);
+      const tipoOperacao = line.substring(7, 8);
+      const tipoServico = line.substring(8, 9);
+
+      // Detalhes estão em linhas com tipo de registro 1 e tipo de operação 3
+      if (tipoRegistro === '1' && tipoOperacao === '3') {
+        // BNB CNAB400: Procurar por valores específicos das transações
+        // Procurar por padrões como "0000000000010500D" ou "0000000000010500C"
+        const valorMatch = line.match(/(\d{15})[CD]/);
+        const tipoMovimento = line.substring(134, 135);
+        const codigoOcorrencia = line.substring(135, 137);
+        const descricao = line.substring(176, 200).trim(); // Posição correta para descrição BNB
+        const dataOcorrencia = line.substring(130, 138);
+
+        let valor = '';
+        if (valorMatch) {
+          valor = valorMatch[1];
+        }
+
+        // Verificar se o valor é válido (não apenas zeros)
+        if (valor && valor.replace(/0/g, '').length > 0) {
+          // Calcular valor
+          const valorNumerico = parseInt(valor) / 100;
+          const isDebito = tipoMovimento === 'D' || descricao.toLowerCase().includes('deb') || descricao.toLowerCase().includes('emprest');
+          const valorFinal = isDebito ? -valorNumerico : valorNumerico;
+
+          const detalhe = {
+            linha: i + 1,
+            valor: valorFinal,
+            valorFormatado: valorFinal.toLocaleString('pt-BR', {
+              style: 'currency',
+              currency: 'BRL'
+            }),
+            tipo: isDebito ? 'Débito' : 'Crédito',
+            descricao: descricao,
+            codigoOcorrencia: codigoOcorrencia,
+            dataOcorrencia: dataOcorrencia,
+            tipoMovimento: tipoMovimento
+          };
+
+          // Classificar por tipo
+          if (isDebito) {
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.debitos.push(detalhe);
+              detalhes.resumo.totalDebitos += Math.abs(valorFinal);
+            }
+          } else {
+            // Verificar se é tarifa mesmo sendo "crédito" (algumas tarifas aparecem como crédito)
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.creditos.push(detalhe);
+              detalhes.resumo.totalCreditos += valorFinal;
+            }
+          }
+
+          console.log(`💰 Detalhe BNB encontrado: ${detalhe.tipo} - ${detalhe.valorFormatado} - ${detalhe.descricao}`);
+        }
+      }
+    }
+
+    console.log('📊 Resumo dos detalhes BNB:');
+    console.log(`💸 Total de débitos: R$ ${detalhes.resumo.totalDebitos.toLocaleString('pt-BR')}`);
+    console.log(`💸 Total de tarifas: R$ ${detalhes.resumo.totalTarifas.toLocaleString('pt-BR')}`);
+    console.log(`💰 Total de créditos: R$ ${detalhes.resumo.totalCreditos.toLocaleString('pt-BR')}`);
+
+    return detalhes;
+  }
+
+  /**
+   * Extrai informações detalhadas do arquivo Sicredi (débitos, tarifas, etc.)
+   */
+  extrairDetalhesSicredi(lines) {
+    console.log('🔍 Extraindo detalhes do arquivo Sicredi...');
+    
+    const detalhes = {
+      debitos: [],
+      tarifas: [],
+      creditos: [],
+      resumo: {
+        totalDebitos: 0,
+        totalTarifas: 0,
+        totalCreditos: 0
+      }
+    };
+
+    // Percorrer todas as linhas procurando por detalhes
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line || line.length < 240) continue;
+
+      const tipoRegistro = line.substring(6, 7);
+      const tipoOperacao = line.substring(7, 8);
+      const tipoServico = line.substring(8, 9);
+
+      // Detalhes estão em linhas com tipo de registro 1 e tipo de operação 3
+      if (tipoRegistro === '1' && tipoOperacao === '3') {
+        // Sicredi CNAB400: Procurar por valores específicos das transações
+        // Procurar por padrões como "000000000000621076D" ou "000000000000500000D"
+        const valorMatch = line.match(/(\d{15})[CD]/);
+        const tipoMovimento = line.substring(134, 135);
+        const codigoOcorrencia = line.substring(135, 137);
+        
+        // Extrair descrição correta do Sicredi - procurar por padrões específicos
+        let descricao = '';
+        if (line.includes('DEB.CTA.FATURA')) {
+          descricao = 'DEB.CTA.FATURA';
+        } else if (line.includes('PAGAMENTO PIX')) {
+          descricao = 'PAGAMENTO PIX';
+        } else if (line.includes('RECEBIMENTO PIX')) {
+          descricao = 'RECEBIMENTO PIX';
+        } else {
+          descricao = line.substring(137, 162).trim(); // Fallback para posição padrão
+        }
+        
+        const dataOcorrencia = line.substring(130, 138);
+
+        let valor = '';
+        if (valorMatch) {
+          valor = valorMatch[1];
+        }
+
+        // Verificar se o valor é válido (não apenas zeros)
+        if (valor && valor.replace(/0/g, '').length > 0) {
+          // Calcular valor
+          const valorNumerico = parseInt(valor) / 100;
+          const isDebito = tipoMovimento === 'D' || descricao.toLowerCase().includes('deb') || descricao.toLowerCase().includes('emprest');
+          const valorFinal = isDebito ? -valorNumerico : valorNumerico;
+
+          const detalhe = {
+            linha: i + 1,
+            valor: valorFinal,
+            valorFormatado: valorFinal.toLocaleString('pt-BR', {
+              style: 'currency',
+              currency: 'BRL'
+            }),
+            tipo: isDebito ? 'Débito' : 'Crédito',
+            descricao: descricao,
+            codigoOcorrencia: codigoOcorrencia,
+            dataOcorrencia: dataOcorrencia,
+            tipoMovimento: tipoMovimento
+          };
+
+          // Classificar por tipo
+          if (isDebito) {
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.debitos.push(detalhe);
+              detalhes.resumo.totalDebitos += Math.abs(valorFinal);
+            }
+          } else {
+            // Verificar se é tarifa mesmo sendo "crédito" (algumas tarifas aparecem como crédito)
+            if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+              detalhes.tarifas.push(detalhe);
+              detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+            } else {
+              detalhes.creditos.push(detalhe);
+              detalhes.resumo.totalCreditos += valorFinal;
+            }
+          }
+
+          console.log(`💰 Detalhe Sicredi encontrado: ${detalhe.tipo} - ${detalhe.valorFormatado} - ${detalhe.descricao}`);
+        }
+      }
+    }
+
+    console.log('📊 Resumo dos detalhes Sicredi:');
+    console.log(`💸 Total de débitos: R$ ${detalhes.resumo.totalDebitos.toLocaleString('pt-BR')}`);
+    console.log(`💸 Total de tarifas: R$ ${detalhes.resumo.totalTarifas.toLocaleString('pt-BR')}`);
+    console.log(`💰 Total de créditos: R$ ${detalhes.resumo.totalCreditos.toLocaleString('pt-BR')}`);
+
+    return detalhes;
   }
 
   /**
@@ -444,17 +867,26 @@ export class BankReturnParser {
       this.extrairDataHoraGeracaoSicredi(trailerLote);
       
       if (trailerLote && trailerLote.length >= 200) {
-        // Procurar pelo padrão do saldo na linha
-        // O valor 5534 está antes do "CP"
-        const saldoMatch = trailerLote.match(/(\d{4})CP/);
+        // Procurar por padrões específicos do Sicredi - CP (Crédito), DP (Débito), DF (Débito)
+        const saldoMatchCP = trailerLote.match(/(\d{4,8})CP/);
+        const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+        const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
         
-        if (saldoMatch) {
-          const saldoStr = saldoMatch[1];
+        if (saldoMatchCP) {
+          const saldoStr = saldoMatchCP[0]; // Incluir o "CP" para o parseValueBB detectar
           this.saldoAtual = this.parseValueBB(saldoStr);
-          console.log(`💰 Saldo Sicredi encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+          console.log(`💰 Saldo Sicredi (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchDP) {
+          const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Sicredi (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchDF) {
+          const saldoStr = saldoMatchDF[0]; // Incluir o "DF" para o parseValueBB detectar
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Sicredi (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
         } else {
           // Fallback: tentar posições específicas
-          console.log('⚠️ Padrão CP não encontrado, tentando posições...');
+          console.log('⚠️ Padrão CP/DP/DF não encontrado, tentando posições...');
           
           // Tentar diferentes posições onde o saldo pode estar
           const posicoes = [
@@ -475,6 +907,12 @@ export class BankReturnParser {
           }
         }
       }
+
+      // Extrair informações detalhadas
+      const detalhes = this.extrairDetalhesSicredi(lines);
+      
+      // Adicionar detalhes à resposta
+      this.detalhes = detalhes;
 
      return this.formatResponse();
    }
@@ -768,22 +1206,26 @@ export class BankReturnParser {
      this.extrairDataHoraGeracaoBNB(trailerLote);
      
      if (trailerLote && trailerLote.length >= 200) {
-       // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
-       // O valor pode ter entre 4 e 8 dígitos antes do "DP" ou "CF"
-       const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+       // Procurar por padrões específicos do BNB - CF (Crédito), DP (Débito), DF (Débito)
        const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
+       const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+       const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
        
-       if (saldoMatchDP) {
-         const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
-         this.saldoAtual = this.parseValueBB(saldoStr);
-         console.log(`💰 Saldo BNB (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-       } else if (saldoMatchCF) {
+       if (saldoMatchCF) {
          const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
          this.saldoAtual = this.parseValueBB(saldoStr);
          console.log(`💰 Saldo BNB (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else if (saldoMatchDP) {
+         const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo BNB (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else if (saldoMatchDF) {
+         const saldoStr = saldoMatchDF[0]; // Incluir o "DF" para o parseValueBB detectar
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo BNB (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
        } else {
          // Fallback: tentar posições específicas
-         console.log('⚠️ Padrão CF/DP não encontrado, tentando posições...');
+         console.log('⚠️ Padrão CF/DP/DF não encontrado, tentando posições...');
          
          // Tentar diferentes posições onde o saldo pode estar
          const posicoes = [
@@ -804,6 +1246,12 @@ export class BankReturnParser {
          }
        }
      }
+
+     // Extrair informações detalhadas
+     const detalhes = this.extrairDetalhesBNB(lines);
+     
+     // Adicionar detalhes à resposta
+     this.detalhes = detalhes;
 
      return this.formatResponse();
    }
@@ -1504,22 +1952,24 @@ export class BankReturnParser {
       if (/[A-Za-z]/.test(cleanValue)) {
         // Procurar por padrões específicos
         const cfMatch = cleanValue.match(/(\d+)CF/);
+        const cpMatch = cleanValue.match(/(\d+)CP/);
         const dpMatch = cleanValue.match(/(\d+)DP/);
         const dfMatch = cleanValue.match(/(\d+)DF/);
         
-        if (cfMatch) {
-          numericString = cfMatch[1];
-          isPositive = true; // CF = Crédito Financeiro (positivo)
-          console.log(`🔍 Crédito Financeiro (CF) detectado: "${cleanValue}" -> "${numericString}"`);
+        if (cfMatch || cpMatch) {
+          // CF ou CP = Crédito Financeiro (positivo)
+          numericString = cfMatch ? cfMatch[1] : cpMatch[1];
+          isPositive = true;
+          console.log(`🔍 Crédito Financeiro (${cfMatch ? 'CF' : 'CP'}) detectado: "${cleanValue}" -> "${numericString}"`);
         } else if (dpMatch || dfMatch) {
           // DP ou DF = Débito Financeiro (negativo)
           numericString = dpMatch ? dpMatch[1] : dfMatch[1];
           isPositive = false;
           console.log(`🔍 Débito Financeiro (${dpMatch ? 'DP' : 'DF'}) detectado: "${cleanValue}" -> "${numericString}"`);
         } else {
-          // Se não tem CF, DP ou DF, extrair apenas números
+          // Se não tem CF, CP, DP ou DF, extrair apenas números
           numericString = cleanValue.replace(/\D/g, '');
-          console.log(`🔍 Valor com letras (sem CF/DP/DF): "${cleanValue}" -> "${numericString}"`);
+          console.log(`🔍 Valor com letras (sem CF/CP/DP/DF): "${cleanValue}" -> "${numericString}"`);
         }
       }
       
