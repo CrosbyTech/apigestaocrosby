@@ -387,8 +387,13 @@
                                     <p><strong>Layout:</strong> ${resultado.banco.layout}</p>
                                     <p><strong>🏛️ Agência:</strong> ${resultado.agencia}</p>
                                     <p><strong>📋 Conta:</strong> ${resultado.conta}</p>
+                                    <p><strong>🏢 Empresa:</strong> ${resultado.empresa ?? '-'}</p>
+                                    <p><strong>🏦 Banco destino:</strong> ${resultado.bancoDestino ?? resultado.banco.nome}</p>
                                     <p><strong>📅 Data de Geração:</strong> ${resultado.dataGeracao}</p>
                                     <p><strong>🕐 Hora de Geração:</strong> ${resultado.horaGeracao}</p>
+                                    <p><strong>💵 Saldo anterior:</strong> ${resultado.saldoAnteriorFormatado ?? 'N/A'}</p>
+                                    <p><strong>🧾 Limite de crédito:</strong> ${resultado.limiteCreditoFormatado ?? 'N/A'}</p>
+                                    <p><strong>✅ Saldo disponível:</strong> ${resultado.saldoDisponivelFormatado ?? 'N/A'}</p>
                                     <div class="saldo" style="color: ${resultado.operacao?.isPositive ? '#27ae60' : '#e74c3c'};">💰 ${resultado.operacao?.sinal || ''} ${resultado.saldoFormatado}</div>
                                     ${resultado.operacao ? `
                                     <p style="font-size: 14px; color: ${resultado.operacao.isPositive ? '#27ae60' : '#e74c3c'}; font-weight: bold;">

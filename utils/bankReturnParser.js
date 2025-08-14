@@ -15,6 +15,13 @@ export class BankReturnParser {
     this.conta = null;
     this.dataGeracao = null;
     this.horaGeracao = null;
+    // Novos campos
+    this.empresa = null;
+    this.bancoDestino = null;
+    this.saldoAnterior = null;
+    this.limiteCredito = null;
+    this.saldoDisponivel = null;
+    this.dataSaldoInicial = null;
   }
 
   /**
@@ -193,6 +200,10 @@ export class BankReturnParser {
        
        // Extrair data e hora de geração do header
        this.extrairDataHoraGeracao(header);
+       // Aplicar posições padrão CNAB400 (FEBRABAN)
+       this.applyCNAB400HeaderFields(header);
+       // Banco destino/empresa por âncora
+       this.setEmpresaEBancoDestinoFromHeader(header);
      
            // Banco do Brasil: saldo está na penúltima linha (linha 9)
       const trailerLote = lines[lines.length - 2]; // Penúltima linha
@@ -268,10 +279,14 @@ export class BankReturnParser {
         console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
       }
       
-      // Extrair data e hora de geração do header
-      this.extrairDataHoraGeracao(header);
-    
-    // Itaú: saldo está na penúltima linha (linha 56)
+             // Extrair data e hora de geração do header
+       this.extrairDataHoraGeracao(header);
+       // Aplicar posições padrão CNAB400 (FEBRABAN) quando aplicável
+       this.applyCNAB400HeaderFields(header);
+       // Banco destino/empresa por âncora
+       this.setEmpresaEBancoDestinoFromHeader(header);
+     
+     // Itaú: saldo está na penúltima linha (linha 56)
     const saldoLine = lines[lines.length - 2];
     console.log('💰 Processando linha de saldo Itaú:', saldoLine);
     
@@ -721,6 +736,10 @@ export class BankReturnParser {
     
     // Extrair data e hora de geração do header
     this.extrairDataHoraGeracao(header);
+    // Aplicar posições padrão CNAB400 (FEBRABAN)
+    this.applyCNAB400HeaderFields(header);
+    // Banco destino/empresa por âncora
+    this.setEmpresaEBancoDestinoFromHeader(header);
     
     // Bradesco: saldo está na linha 4 (penúltima linha)
     const trailerLote = lines[lines.length - 2]; // Linha 4
@@ -789,6 +808,10 @@ export class BankReturnParser {
     
     // Extrair data e hora de geração do header
     this.extrairDataHoraGeracao(header);
+    // Aplicar posições padrão CNAB400 (FEBRABAN)
+    this.applyCNAB400HeaderFields(header);
+    // Banco destino/empresa por âncora
+    this.setEmpresaEBancoDestinoFromHeader(header);
     
     // Santander: saldo está na linha 7 (penúltima linha)
     const trailerLote = lines[lines.length - 2]; // Linha 7
@@ -857,6 +880,10 @@ export class BankReturnParser {
        
        // Extrair data e hora de geração do header
        this.extrairDataHoraGeracao(header);
+       // Aplicar posições padrão CNAB400 (FEBRABAN)
+       this.applyCNAB400HeaderFields(header);
+       // Banco destino/empresa por âncora
+       this.setEmpresaEBancoDestinoFromHeader(header);
      
            // Sicredi: saldo está na linha 8 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 8
@@ -876,29 +903,45 @@ export class BankReturnParser {
           const saldoStr = saldoMatchCP[0]; // Incluir o "CP" para o parseValueBB detectar
           this.saldoAtual = this.parseValueBB(saldoStr);
           console.log(`💰 Saldo Sicredi (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+          // Extrair saldos adicionais após o marcador
+          const after = trailerLote.slice(trailerLote.indexOf(saldoStr) + saldoStr.length);
+          const numsAfter = Array.from(after.matchAll(/\d{8,15}/g)).map(m => m[0]).filter(n => /[1-9]/.test(n));
+          // Heurística: penúltimo número grande = limite, último = saldo disponível
+          if (numsAfter.length >= 1) {
+            const ultimo = numsAfter[numsAfter.length - 1];
+            this.saldoDisponivel = parseInt(ultimo, 10) / 100;
+          }
+          if (numsAfter.length >= 2) {
+            const penultimo = numsAfter[numsAfter.length - 2];
+            this.limiteCredito = parseInt(penultimo, 10) / 100;
+          }
+          // Saldo anterior: último número significativo antes da data (8 dígitos)
+          const dataIdx = trailerLote.search(/\d{8}/);
+          if (dataIdx > 0) {
+            const before = trailerLote.slice(0, dataIdx);
+            const numsBefore = Array.from(before.matchAll(/\d{12,15}/g)).map(m => m[0]).filter(n => /[1-9]/.test(n));
+            if (numsBefore.length) {
+              this.saldoAnterior = parseInt(numsBefore[numsBefore.length - 1], 10) / 100;
+            }
+          }
         } else if (saldoMatchDP) {
-          const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
+          const saldoStr = saldoMatchDP[0];
           this.saldoAtual = this.parseValueBB(saldoStr);
-          console.log(`💰 Saldo Sicredi (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+          console.log(`�� Saldo Sicredi (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
         } else if (saldoMatchDF) {
-          const saldoStr = saldoMatchDF[0]; // Incluir o "DF" para o parseValueBB detectar
+          const saldoStr = saldoMatchDF[0];
           this.saldoAtual = this.parseValueBB(saldoStr);
-          console.log(`💰 Saldo Sicredi (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+          console.log(`�� Saldo Sicredi (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
         } else {
-          // Fallback: tentar posições específicas
           console.log('⚠️ Padrão CP/DP/DF não encontrado, tentando posições...');
-          
-          // Tentar diferentes posições onde o saldo pode estar
           const posicoes = [
             { inicio: 150, fim: 154, descricao: 'Posição 150-154' },
             { inicio: 140, fim: 144, descricao: 'Posição 140-144' },
             { inicio: 130, fim: 134, descricao: 'Posição 130-134' }
           ];
-          
           for (const pos of posicoes) {
             const valor = trailerLote.substring(pos.inicio, pos.fim);
             console.log(`${pos.descricao}: "${valor}"`);
-            
             if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
               this.saldoAtual = this.parseValueBB(valor);
               console.log(`💰 Saldo Sicredi encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
@@ -910,8 +953,6 @@ export class BankReturnParser {
 
       // Extrair informações detalhadas
       const detalhes = this.extrairDetalhesSicredi(lines);
-      
-      // Adicionar detalhes à resposta
       this.detalhes = detalhes;
 
      return this.formatResponse();
@@ -954,6 +995,10 @@ export class BankReturnParser {
       
       // Extrair data e hora de geração do header
       this.extrairDataHoraGeracao(header);
+      // Aplicar posições padrão CNAB400 (FEBRABAN)
+      this.applyCNAB400HeaderFields(header);
+      // Banco destino/empresa por âncora
+      this.setEmpresaEBancoDestinoFromHeader(header);
       
       // CAIXA: saldo está na linha 5 (penúltima linha)
       const trailerLote = lines[lines.length - 2]; // Linha 5
@@ -1131,10 +1176,14 @@ export class BankReturnParser {
           console.log(`📋 Conta UNICRED: ${this.conta}`);
         }
         
-        // Extrair data e hora de geração do header
-        this.extrairDataHoraGeracao(header);
-      
-             // UNICRED: saldo está na linha 4 (penúltima linha)
+              // Extrair data e hora de geração do header
+      this.extrairDataHoraGeracao(header);
+      // Aplicar posições padrão CNAB400 (FEBRABAN)
+      this.applyCNAB400HeaderFields(header);
+      // Banco destino/empresa por âncora
+      this.setEmpresaEBancoDestinoFromHeader(header);
+    
+      // UNICRED: saldo está na linha 4 (penúltima linha)
        const trailerLote = lines[lines.length - 2]; // Linha 4
        console.log('📏 Linha 4 (trailer lote):', trailerLote);
        console.log('📏 Tamanho da linha:', trailerLote.length);
@@ -1194,10 +1243,14 @@ export class BankReturnParser {
        console.log(`📋 Conta BNB: ${this.conta}`);
      }
      
-     // Extrair data e hora de geração do header
-     this.extrairDataHoraGeracao(header);
-   
-     // BNB: saldo está na linha 4 (penúltima linha)
+           // Extrair data e hora de geração do header
+      this.extrairDataHoraGeracao(header);
+      // Aplicar posições padrão CNAB400 (FEBRABAN)
+      this.applyCNAB400HeaderFields(header);
+      // Banco destino/empresa por âncora
+      this.setEmpresaEBancoDestinoFromHeader(header);
+    
+      // BNB: saldo está na linha 4 (penúltima linha)
      const trailerLote = lines[lines.length - 2]; // Linha 4
      console.log('📏 Linha 4 (trailer lote):', trailerLote);
      console.log('📏 Tamanho da linha:', trailerLote.length);
@@ -2066,13 +2119,21 @@ export class BankReturnParser {
           },
           agencia: this.agencia || 'N/A',
           conta: this.conta || 'N/A',
+          empresa: this.empresa || null,
+          bancoDestino: this.bancoDestino || (this.bancoDetectado?.nome || null),
           dataGeracao: this.dataGeracao || 'N/A',
           horaGeracao: this.horaGeracao || 'N/A',
+          saldoAnterior: this.saldoAnterior,
+          saldoAnteriorFormatado: this.saldoAnterior == null ? null : this.saldoAnterior.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
           saldoAtual: this.saldoAtual,
           saldoFormatado: this.saldoAtual.toLocaleString('pt-BR', {
             style: 'currency',
             currency: 'BRL'
           }),
+          limiteCredito: this.limiteCredito,
+          limiteCreditoFormatado: this.limiteCredito == null ? null : this.limiteCredito.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
+          saldoDisponivel: this.saldoDisponivel,
+          saldoDisponivelFormatado: this.saldoDisponivel == null ? null : this.saldoDisponivel.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
           // Informações sobre o sinal/operação
           operacao: {
             tipo: tipoOperacao, // 'CREDITO' ou 'DEBITO'
@@ -2091,9 +2152,85 @@ export class BankReturnParser {
             tipoOperacao: tipoOperacao,
             sinal: sinal
           },
-          // Detalhes específicos da CAIXA (se disponível)
+          // Detalhes específicos (se disponível)
           detalhes: this.detalhes || null,
           errors: this.errors
         };
       }
+
+  /**
+   * Tenta extrair empresa e banco destino a partir do header, usando nomes de bancos conhecidos como âncora
+   */
+  setEmpresaEBancoDestinoFromHeader(header) {
+    if (!header || header.length < 120) return;
+    const bancosConhecidos = [
+      'CAIXA ECONOMICA FEDERAL',
+      'BANCO DO NORDESTE',
+      'BRADESCO S/A',
+      'BRADESCO S.A.',
+      'BANCO ITAU S/A',
+      'BANCO DO BRASIL S.A.',
+      'SANTANDER BANESPA',
+      'BANCO SANTANDER',
+      'COOP. CRED. SICREDI RIO GRANDE',
+      'UNICRED DO BRASIL',
+      'Unicred do Brasil'
+    ];
+    let bancoMatch = null;
+    let bancoIndex = -1;
+    for (const nome of bancosConhecidos) {
+      const idx = header.indexOf(nome);
+      if (idx !== -1 && (bancoMatch === null || nome.length > bancoMatch.length)) {
+        bancoMatch = nome;
+        bancoIndex = idx;
+      }
+    }
+    if (bancoMatch) {
+      this.bancoDestino = bancoMatch.trim();
+      // Pegar até 40 chars anteriores ao início do banco como empresa e limpar sobras
+      const startEmpresa = Math.max(0, bancoIndex - 40);
+      let empresaRaw = header.substring(startEmpresa, bancoIndex).trim();
+      // Remover lixo numérico à esquerda
+      empresaRaw = empresaRaw.replace(/^[^A-Za-zÀ-ú]+/, '').trim();
+      this.empresa = empresaRaw || this.empresa;
+    }
+  }
+
+  /**
+   * Aplica campos padrão do header CNAB400 conforme FEBRABAN (página 87)
+   * Posições 1-based convertidas para substring 0-based
+   */
+  applyCNAB400HeaderFields(header) {
+    if (!header || header.length < 180) return;
+    const get = (de, ate) => header.substring(de - 1, ate);
+    // Agência 53-57, DV 58
+    this.agencia = (get(53, 57) || '').trim() || this.agencia;
+    const dvAg = (get(58, 58) || '').trim();
+    // Conta 59-70, DV 71, DV Ag/Conta 72
+    this.conta = (get(59, 70) || '').trim() || this.conta;
+    const dvConta = (get(71, 71) || '').trim();
+    const dvAgConta = (get(72, 72) || '').trim();
+    // Nome da empresa 73-102
+    const nomeEmp = (get(73, 102) || '').trim();
+    if (nomeEmp) this.empresa = nomeEmp;
+    // Data saldo inicial 143-150 (DDMMAA)
+    const dataSaldoIni = get(143, 150);
+    if (dataSaldoIni && /\d{6}/.test(dataSaldoIni)) {
+      const d = dataSaldoIni.substring(0, 2);
+      const m = dataSaldoIni.substring(2, 4);
+      const a = '20' + dataSaldoIni.substring(4, 6);
+      this.dataSaldoInicial = `${a}-${m}-${d}`;
+    }
+    // Valor saldo inicial 151-168 (2 dec)
+    const valorSaldoIni = get(151, 168);
+    if (valorSaldoIni && /\d+/.test(valorSaldoIni)) {
+      this.saldoAnterior = parseInt(valorSaldoIni, 10) / 100;
+    }
+    // Situação saldo inicial 169 (D/C)
+    const situacaoIni = get(169, 169);
+    if (situacaoIni === 'D' && this.saldoAnterior != null) this.saldoAnterior = -Math.abs(this.saldoAnterior);
+    // Status/posição 170-173 (não usado diretamente)
+    // Nº sequência extrato 174-178
+    this.numeroSequenciaExtrato = (get(174, 178) || '').trim();
+  }
 }
