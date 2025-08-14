@@ -263,11 +263,18 @@ export class BankReturnParser {
     // Extrair data e hora da linha de saldo também (Itaú tem data na linha de saldo)
     this.extrairDataHoraGeracaoItau(saldoLine);
     
-    const saldoMatch = saldoLine.match(/(\d{10})DP/);
-    if (saldoMatch) {
-      const saldoStr = saldoMatch[1];
-      this.saldoAtual = parseInt(saldoStr) / 100; // Dividir por 100 para converter centavos em reais
-      console.log(`💰 Saldo Itaú encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    // Procurar por padrões CF/DP - corrigido para capturar valores específicos
+    const saldoMatchDP = saldoLine.match(/(\d{4,8})DP/);
+    const saldoMatchCF = saldoLine.match(/(\d{4,8})CF/);
+    
+    if (saldoMatchDP) {
+      const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
+      this.saldoAtual = this.parseValueBB(saldoStr);
+      console.log(`💰 Saldo Itaú (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+    } else if (saldoMatchCF) {
+      const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
+      this.saldoAtual = this.parseValueBB(saldoStr);
+      console.log(`💰 Saldo Itaú (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
     }
 
     return this.formatResponse();
@@ -301,17 +308,22 @@ export class BankReturnParser {
     this.extrairDataHoraGeracaoBradesco(trailerLote);
     
     if (trailerLote && trailerLote.length >= 200) {
-      // Procurar pelo padrão do saldo na linha
-      // O valor 3124668 está antes do "DP"
-      const saldoMatch = trailerLote.match(/(\d{10})DP/);
+      // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
+      // O valor pode ter entre 4 e 8 dígitos antes do "DP" ou "CF"
+      const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+      const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
       
-      if (saldoMatch) {
-        const saldoStr = saldoMatch[1];
+      if (saldoMatchDP) {
+        const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
         this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Bradesco encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        console.log(`💰 Saldo Bradesco (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+      } else if (saldoMatchCF) {
+        const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Bradesco (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else {
         // Fallback: tentar posições específicas
-        console.log('⚠️ Padrão DP não encontrado, tentando posições...');
+        console.log('⚠️ Padrão CF/DP não encontrado, tentando posições...');
         
         // Tentar diferentes posições onde o saldo pode estar
         const posicoes = [
@@ -364,17 +376,22 @@ export class BankReturnParser {
     this.extrairDataHoraGeracaoSantander(trailerLote);
     
     if (trailerLote && trailerLote.length >= 200) {
-      // Procurar pelo padrão do saldo na linha
-      // O valor 493451 está antes do "DP"
-      const saldoMatch = trailerLote.match(/(\d{10})DP/);
+      // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
+      // O valor pode ter entre 4 e 8 dígitos antes do "DP" ou "CF"
+      const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+      const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
       
-      if (saldoMatch) {
-        const saldoStr = saldoMatch[1];
+      if (saldoMatchDP) {
+        const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
         this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Santander encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        console.log(`💰 Saldo Santander (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+      } else if (saldoMatchCF) {
+        const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Santander (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else {
         // Fallback: tentar posições específicas
-        console.log('⚠️ Padrão DP não encontrado, tentando posições...');
+        console.log('⚠️ Padrão CF/DP não encontrado, tentando posições...');
         
         // Tentar diferentes posições onde o saldo pode estar
         const posicoes = [
@@ -635,17 +652,22 @@ export class BankReturnParser {
      this.extrairDataHoraGeracaoBNB(trailerLote);
      
      if (trailerLote && trailerLote.length >= 200) {
-       // Procurar pelo padrão do saldo na linha
-       // O valor 42140 está antes do "CF"
-       const saldoMatch = trailerLote.match(/(\d{10})CF/);
+       // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
+       // O valor pode ter entre 4 e 8 dígitos antes do "DP" ou "CF"
+       const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+       const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
        
-       if (saldoMatch) {
-         const saldoStr = saldoMatch[1];
+       if (saldoMatchDP) {
+         const saldoStr = saldoMatchDP[0]; // Incluir o "DP" para o parseValueBB detectar
          this.saldoAtual = this.parseValueBB(saldoStr);
-         console.log(`💰 Saldo BNB encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+         console.log(`💰 Saldo BNB (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+       } else if (saldoMatchCF) {
+         const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
+         this.saldoAtual = this.parseValueBB(saldoStr);
+         console.log(`💰 Saldo BNB (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
        } else {
          // Fallback: tentar posições específicas
-         console.log('⚠️ Padrão CF não encontrado, tentando posições...');
+         console.log('⚠️ Padrão CF/DP não encontrado, tentando posições...');
          
          // Tentar diferentes posições onde o saldo pode estar
          const posicoes = [

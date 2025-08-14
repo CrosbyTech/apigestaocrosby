@@ -217,8 +217,8 @@
 
                 <div class="summary">
                     <h4>💰 Saldo Atual da Conta</h4>
-                    <p style="font-size: 24px; font-weight: bold; color: #28a745;">
-                        ${data.saldoFormatado}
+                    <p style="font-size: 24px; font-weight: bold; color: ${data.operacao?.isPositive ? '#28a745' : '#dc3545'};">
+                        ${data.operacao?.sinal || ''} ${data.saldoFormatado}
                     </p>
                     <p><strong>🏛️ Agência:</strong> ${data.agencia}</p>
                     <p><strong>📋 Conta:</strong> ${data.conta}</p>
@@ -226,6 +226,18 @@
                     <p><strong>🕐 Hora de Geração:</strong> ${data.horaGeracao}</p>
                     <p><strong>Valor numérico:</strong> ${data.saldoAtual.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
                 </div>
+
+                ${data.operacao ? `
+                <div class="summary">
+                    <h4>📊 Informações da Operação</h4>
+                    <p style="font-size: 18px; font-weight: bold; color: ${data.operacao.isPositive ? '#28a745' : '#dc3545'};">
+                        ${data.operacao.isPositive ? '✅' : '❌'} ${data.operacao.descricao}
+                    </p>
+                    <p><strong>Tipo:</strong> ${data.operacao.tipo}</p>
+                    <p><strong>Sinal:</strong> ${data.operacao.sinal}</p>
+                    <p><strong>Valor Absoluto:</strong> ${data.operacao.valorAbsoluto.toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'})}</p>
+                </div>
+                ` : ''}
 
                 <div class="summary">
                     <h4>📋 Informações do Arquivo</h4>

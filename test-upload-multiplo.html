@@ -392,7 +392,16 @@
                                     <p><strong>📋 Conta:</strong> ${resultado.conta}</p>
                                     <p><strong>📅 Data de Geração:</strong> ${resultado.dataGeracao}</p>
                                     <p><strong>🕐 Hora de Geração:</strong> ${resultado.horaGeracao}</p>
-                                    <div class="saldo">💰 ${resultado.saldoFormatado}</div>
+                                    <div class="saldo" style="color: ${resultado.operacao?.isPositive ? '#27ae60' : '#e74c3c'};">💰 ${resultado.operacao?.sinal || ''} ${resultado.saldoFormatado}</div>
+                                    ${resultado.operacao ? `
+                                    <p style="font-size: 14px; color: ${resultado.operacao.isPositive ? '#27ae60' : '#e74c3c'}; font-weight: bold;">
+                                        ${resultado.operacao.isPositive ? '✅' : '❌'} ${resultado.operacao.descricao}
+                                    </p>
+                                    <p style="font-size: 12px; color: #7f8c8d;">
+                                        <strong>Tipo:</strong> ${resultado.operacao.tipo} | 
+                                        <strong>Valor Absoluto:</strong> ${resultado.operacao.valorAbsoluto.toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'})}
+                                    </p>
+                                    ` : ''}
                                     <p><strong>Arquivo:</strong> ${resultado.arquivo.nomeOriginal}</p>
                                     <p><strong>Processado em:</strong> ${new Date(resultado.arquivo.dataUpload).toLocaleString('pt-BR')}</p>
                                 </div>
