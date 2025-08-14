@@ -34,10 +34,8 @@ const upload = multer({
     } else {
       cb(new Error('Apenas arquivos .RET são permitidos'), false);
     }
-  },
-  limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB
   }
+  // Removidos os limites de tamanho de arquivo
 });
 
 // Configuração para upload múltiplo
@@ -51,12 +49,9 @@ const uploadMultiple = multer({
     } else {
       cb(new Error('Apenas arquivos .RET são permitidos'), false);
     }
-  },
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB por arquivo
-    files: 10 // Máximo 10 arquivos
   }
-}).array('files', 10); // Campo 'files' com máximo 10 arquivos
+  // Removidos os limites de tamanho e quantidade de arquivos
+}).array('files'); // Campo 'files' sem limite de quantidade
 
 /**
  * @route GET /financial/extrato
@@ -677,18 +672,12 @@ router.post('/upload-retorno',
  * @route POST /financial/upload-retorno-multiplo
  * @desc Upload e processamento de múltiplos arquivos de retorno bancário
  * @access Public
- * @body {files[]} - Array de arquivos .RET do banco (máximo 10)
+ * @body {files[]} - Array de arquivos .RET do banco (quantidade ilimitada)
  */
 router.post('/upload-retorno-multiplo',
   (req, res, next) => {
     uploadMultiple(req, res, (err) => {
       if (err instanceof multer.MulterError) {
-        if (err.code === 'LIMIT_FILE_COUNT') {
-          return errorResponse(res, 'Máximo de 10 arquivos permitidos', 400, 'TOO_MANY_FILES');
-        }
-        if (err.code === 'LIMIT_FILE_SIZE') {
-          return errorResponse(res, 'Arquivo muito grande (máximo 10MB)', 400, 'FILE_TOO_LARGE');
-        }
         return errorResponse(res, `Erro no upload: ${err.message}`, 400, 'UPLOAD_ERROR');
       } else if (err) {
         return errorResponse(res, `Erro no upload: ${err.message}`, 400, 'UPLOAD_ERROR');

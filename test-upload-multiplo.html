@@ -316,10 +316,7 @@
                 return;
             }
             
-            if (selectedFiles.length > 10) {
-                alert('Máximo de 10 arquivos permitidos');
-                return;
-            }
+            // Removido o limite de 10 arquivos - agora permite quantidade ilimitada
             
             const formData = new FormData();
             selectedFiles.forEach(file => {
