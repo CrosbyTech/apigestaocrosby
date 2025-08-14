@@ -205,7 +205,7 @@ export class BankReturnParser {
       if (trailerLote && trailerLote.length >= 200) {
         // Procurar pelo padrão do saldo na linha
         // O valor 210322 está antes do "CF"
-        const saldoMatch = trailerLote.match(/(\d{7})CF/);
+        const saldoMatch = trailerLote.match(/(\d{10})CF/);
         
         if (saldoMatch) {
           const saldoStr = saldoMatch[1];
@@ -263,7 +263,7 @@ export class BankReturnParser {
     // Extrair data e hora da linha de saldo também (Itaú tem data na linha de saldo)
     this.extrairDataHoraGeracaoItau(saldoLine);
     
-    const saldoMatch = saldoLine.match(/(\d{7})DP/);
+    const saldoMatch = saldoLine.match(/(\d{10})DP/);
     if (saldoMatch) {
       const saldoStr = saldoMatch[1];
       this.saldoAtual = parseInt(saldoStr) / 100; // Dividir por 100 para converter centavos em reais
@@ -303,7 +303,7 @@ export class BankReturnParser {
     if (trailerLote && trailerLote.length >= 200) {
       // Procurar pelo padrão do saldo na linha
       // O valor 3124668 está antes do "DP"
-      const saldoMatch = trailerLote.match(/(\d{7})DP/);
+      const saldoMatch = trailerLote.match(/(\d{10})DP/);
       
       if (saldoMatch) {
         const saldoStr = saldoMatch[1];
@@ -366,7 +366,7 @@ export class BankReturnParser {
     if (trailerLote && trailerLote.length >= 200) {
       // Procurar pelo padrão do saldo na linha
       // O valor 493451 está antes do "DP"
-      const saldoMatch = trailerLote.match(/(\d{6})DP/);
+      const saldoMatch = trailerLote.match(/(\d{10})DP/);
       
       if (saldoMatch) {
         const saldoStr = saldoMatch[1];
@@ -511,7 +511,7 @@ export class BankReturnParser {
        if (trailerLote && trailerLote.length >= 200) {
          // Procurar pelo padrão do saldo na linha
          // O valor 833458 está antes do "CF"
-         const saldoMatch = trailerLote.match(/(\d{6})CF/);
+         const saldoMatch = trailerLote.match(/(\d{10})CF/);
          
          if (saldoMatch) {
            const saldoStr = saldoMatch[1];
@@ -637,7 +637,7 @@ export class BankReturnParser {
      if (trailerLote && trailerLote.length >= 200) {
        // Procurar pelo padrão do saldo na linha
        // O valor 42140 está antes do "CF"
-       const saldoMatch = trailerLote.match(/(\d{5})CF/);
+       const saldoMatch = trailerLote.match(/(\d{10})CF/);
        
        if (saldoMatch) {
          const saldoStr = saldoMatch[1];
