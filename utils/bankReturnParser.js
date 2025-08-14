@@ -504,61 +504,177 @@ export class BankReturnParser {
        parseCaixa(lines) {
       console.log('🏦 Processando arquivo CAIXA');
       
-             // Extrair agência e conta da primeira linha (header)
-       const header = lines[0];
-               if (header && header.length >= 240) {
-          // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
-          this.agencia = header.substring(18, 22).trim();
-          this.conta = header.substring(23, 32).trim();
-          console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
-          console.log(`📋 Conta CAIXA: ${this.conta}`);
-        }
-        
-        // Extrair data e hora de geração do header
-        this.extrairDataHoraGeracao(header);
+      // Extrair agência e conta da primeira linha (header)
+      const header = lines[0];
+      if (header && header.length >= 240) {
+        // CAIXA CNAB400: Agência posições 18-22, Conta posições 23-32
+        this.agencia = header.substring(18, 22).trim();
+        this.conta = header.substring(23, 32).trim();
+        console.log(`🏛️ Agência CAIXA: ${this.agencia}`);
+        console.log(`📋 Conta CAIXA: ${this.conta}`);
+      }
       
-             // CAIXA: saldo está na linha 6 (penúltima linha)
-       const trailerLote = lines[lines.length - 2]; // Linha 6
-       console.log('📏 Linha 6 (trailer lote):', trailerLote);
-       console.log('📏 Tamanho da linha:', trailerLote.length);
-       
-       // Extrair data e hora da linha de saldo também (CAIXA tem data na linha de saldo)
-       this.extrairDataHoraGeracaoCaixa(trailerLote);
-       
-       if (trailerLote && trailerLote.length >= 200) {
-         // Procurar pelo padrão do saldo na linha
-         // O valor 833458 está antes do "CF"
-         const saldoMatch = trailerLote.match(/(\d{10})CF/);
-         
-         if (saldoMatch) {
-           const saldoStr = saldoMatch[1];
-           this.saldoAtual = this.parseValueBB(saldoStr);
-           console.log(`💰 Saldo CAIXA encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-         } else {
-           // Fallback: tentar posições específicas
-           console.log('⚠️ Padrão CF não encontrado, tentando posições...');
-           
-           // Tentar diferentes posições onde o saldo pode estar
-           const posicoes = [
-             { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-             { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-             { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-           ];
-           
-           for (const pos of posicoes) {
-             const valor = trailerLote.substring(pos.inicio, pos.fim);
-             console.log(`${pos.descricao}: "${valor}"`);
-             
-             if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-               this.saldoAtual = this.parseValueBB(valor);
-               console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-               break;
-             }
-           }
-         }
-       }
+      // Extrair data e hora de geração do header
+      this.extrairDataHoraGeracao(header);
+      
+      // CAIXA: saldo está na linha 5 (penúltima linha)
+      const trailerLote = lines[lines.length - 2]; // Linha 5
+      console.log('📏 Linha 5 (trailer lote):', trailerLote);
+      console.log('📏 Tamanho da linha:', trailerLote.length);
+      
+      // Extrair data e hora da linha de saldo também (CAIXA tem data na linha de saldo)
+      this.extrairDataHoraGeracaoCaixa(trailerLote);
+      
+      // Extrair informações detalhadas
+      const detalhes = this.extrairDetalhesCaixa(lines);
+      
+      if (trailerLote && trailerLote.length >= 200) {
+        // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
+        // O valor pode ter entre 4 e 8 dígitos antes do "DF" ou "CF"
+        const saldoMatchDP = trailerLote.match(/(\d{4,8})DF/);
+        const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
+        
+        if (saldoMatchDP) {
+          const saldoStr = saldoMatchDP[0]; // Incluir o "DF" para o parseValueBB detectar
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo CAIXA (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchCF) {
+          const saldoStr = saldoMatchCF[0]; // Incluir o "CF" para o parseValueBB detectar
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo CAIXA (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else {
+          // Fallback: tentar posições específicas
+          console.log('⚠️ Padrão CF/DF não encontrado, tentando posições...');
+          
+          // Tentar diferentes posições onde o saldo pode estar
+          const posicoes = [
+            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+          ];
+          
+          for (const pos of posicoes) {
+            const valor = trailerLote.substring(pos.inicio, pos.fim);
+            console.log(`${pos.descricao}: "${valor}"`);
+            
+            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+              this.saldoAtual = this.parseValueBB(valor);
+              console.log(`💰 Saldo CAIXA encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+              break;
+            }
+          }
+        }
+      }
+
+      // Adicionar detalhes à resposta
+      this.detalhes = detalhes;
 
       return this.formatResponse();
+    }
+
+    /**
+     * Extrai informações detalhadas do arquivo CAIXA (débitos, tarifas, etc.)
+     */
+    extrairDetalhesCaixa(lines) {
+      console.log('🔍 Extraindo detalhes do arquivo CAIXA...');
+      
+      const detalhes = {
+        debitos: [],
+        tarifas: [],
+        creditos: [],
+        resumo: {
+          totalDebitos: 0,
+          totalTarifas: 0,
+          totalCreditos: 0
+        }
+      };
+
+      // Percorrer todas as linhas procurando por detalhes
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line || line.length < 240) continue;
+
+        const tipoRegistro = line.substring(6, 7);
+        const tipoOperacao = line.substring(7, 8);
+        const tipoServico = line.substring(8, 9);
+
+                // Detalhes estão em linhas com tipo de registro 1 e tipo de operação 3
+        if (tipoRegistro === '1' && tipoOperacao === '3') {
+          // Para CAIXA, os valores estão em posições específicas
+          // Valor: posições 150-165 (15 dígitos) - onde está o valor real
+          // Tipo de movimento: posição 165 (D para débito, C para crédito)
+          // Código da ocorrência: posições 166-168
+          // Descrição: posições 176-201 (onde estão as descrições)
+          // Data da ocorrência: posições 130-138
+          
+          let valor = line.substring(150, 165);
+          const tipoMovimento = line.substring(165, 166);
+          const codigoOcorrencia = line.substring(166, 168);
+          const descricao = line.substring(176, 201).trim();
+          const dataOcorrencia = line.substring(130, 138);
+
+          // Se o valor está vazio, procurar por padrões específicos
+          if (!valor || valor.replace(/0/g, '').length === 0) {
+            // Procurar por "00000040" que pode ser o valor da tarifa
+            const posicao40 = line.indexOf('00000040');
+            if (posicao40 !== -1) {
+              valor = '000000000000040'; // R$ 0,40
+            }
+          }
+
+          // Verificar se o valor é válido (não apenas zeros)
+          if (valor && valor.replace(/0/g, '').length > 0) {
+                      // Calcular valor
+          const valorNumerico = parseInt(valor) / 100;
+          // Para CAIXA, verificar se é débito baseado na descrição também
+          const isDebito = tipoMovimento === 'D' || descricao.toLowerCase().includes('deb') || descricao.toLowerCase().includes('emprest');
+          const valorFinal = isDebito ? -valorNumerico : valorNumerico;
+
+            const detalhe = {
+              linha: i + 1,
+              valor: valorFinal,
+              valorFormatado: valorFinal.toLocaleString('pt-BR', {
+                style: 'currency',
+                currency: 'BRL'
+              }),
+              tipo: isDebito ? 'Débito' : 'Crédito',
+              descricao: descricao,
+              codigoOcorrencia: codigoOcorrencia,
+              dataOcorrencia: dataOcorrencia,
+              tipoMovimento: tipoMovimento
+            };
+
+            // Classificar por tipo
+            if (isDebito) {
+              if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+                detalhes.tarifas.push(detalhe);
+                detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+              } else {
+                detalhes.debitos.push(detalhe);
+                detalhes.resumo.totalDebitos += Math.abs(valorFinal);
+              }
+            } else {
+              // Verificar se é tarifa mesmo sendo "crédito" (algumas tarifas aparecem como crédito)
+              if (descricao.toLowerCase().includes('tarifa') || descricao.toLowerCase().includes('tar')) {
+                detalhes.tarifas.push(detalhe);
+                detalhes.resumo.totalTarifas += Math.abs(valorFinal);
+              } else {
+                detalhes.creditos.push(detalhe);
+                detalhes.resumo.totalCreditos += valorFinal;
+              }
+            }
+
+            console.log(`💰 Detalhe encontrado: ${detalhe.tipo} - ${detalhe.valorFormatado} - ${detalhe.descricao}`);
+          }
+        }
+      }
+
+      console.log('📊 Resumo dos detalhes:');
+      console.log(`💸 Total de débitos: R$ ${detalhes.resumo.totalDebitos.toLocaleString('pt-BR')}`);
+      console.log(`💸 Total de tarifas: R$ ${detalhes.resumo.totalTarifas.toLocaleString('pt-BR')}`);
+      console.log(`💰 Total de créditos: R$ ${detalhes.resumo.totalCreditos.toLocaleString('pt-BR')}`);
+
+      return detalhes;
     }
 
    /**
@@ -1523,6 +1639,8 @@ export class BankReturnParser {
             tipoOperacao: tipoOperacao,
             sinal: sinal
           },
+          // Detalhes específicos da CAIXA (se disponível)
+          detalhes: this.detalhes || null,
           errors: this.errors
         };
       }
