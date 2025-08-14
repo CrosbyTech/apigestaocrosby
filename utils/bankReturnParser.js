@@ -1341,9 +1341,10 @@ export class BankReturnParser {
       }
     }
 
-   /**
-    * Converte valor monetário (formato Banco do Brasil e outros)
-    */
+     /**
+   * Converte valor monetário (formato Banco do Brasil e outros)
+   * Suporta sufixos CF (Crédito Financeiro - positivo) e DP (Débito Financeiro - negativo)
+   */
   parseValueBB(value) {
     if (!value || value.trim() === '') {
       return 0;
@@ -1357,8 +1358,47 @@ export class BankReturnParser {
     }
     
     try {
-      const numericValue = parseInt(cleanValue) / 100;
-      return isNaN(numericValue) ? 0 : numericValue;
+      // Verificar se o valor tem sufixo CF (Crédito Financeiro) ou DP (Débito Financeiro)
+      let isPositive = true; // Por padrão, assume positivo
+      let numericString = cleanValue;
+      
+      // Se o valor contém letras, extrair apenas os números e verificar o sufixo
+      if (/[A-Za-z]/.test(cleanValue)) {
+        // Procurar por padrões específicos
+        const cfMatch = cleanValue.match(/(\d+)CF/);
+        const dpMatch = cleanValue.match(/(\d+)DP/);
+        
+        if (cfMatch) {
+          numericString = cfMatch[1];
+          isPositive = true; // CF = Crédito Financeiro (positivo)
+          console.log(`🔍 Crédito Financeiro (CF) detectado: "${cleanValue}" -> "${numericString}"`);
+        } else if (dpMatch) {
+          numericString = dpMatch[1];
+          isPositive = false; // DP = Débito Financeiro (negativo)
+          console.log(`🔍 Débito Financeiro (DP) detectado: "${cleanValue}" -> "${numericString}"`);
+        } else {
+          // Se não tem CF ou DP, extrair apenas números
+          numericString = cleanValue.replace(/\D/g, '');
+          console.log(`🔍 Valor com letras (sem CF/DP): "${cleanValue}" -> "${numericString}"`);
+        }
+      }
+      
+      // Se ainda não temos números válidos, retornar 0
+      if (!numericString || numericString.length === 0) {
+        console.log(`⚠️ Nenhum número encontrado em: "${cleanValue}"`);
+        return 0;
+      }
+      
+      // Calcular o valor
+      const numericValue = parseInt(numericString) / 100;
+      const result = isNaN(numericValue) ? 0 : numericValue;
+      
+      // Aplicar o sinal baseado no sufixo
+      const finalResult = isPositive ? result : -result;
+      
+      console.log(`✅ Valor calculado: ${numericString} / 100 = ${result} (${isPositive ? 'positivo' : 'negativo'}) = ${finalResult}`);
+      return finalResult;
+      
     } catch (error) {
       console.log(`⚠️ Erro ao converter valor BB: "${value}" -> ${error.message}`);
       return 0;
