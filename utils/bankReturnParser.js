@@ -1461,6 +1461,12 @@ export class BankReturnParser {
    * Formata a resposta final
    */
            formatResponse() {
+        // Determinar o tipo de operação baseado no sinal do saldo
+        const isPositive = this.saldoAtual >= 0;
+        const tipoOperacao = isPositive ? 'CREDITO' : 'DEBITO';
+        const tipoOperacaoDescricao = isPositive ? 'Crédito Financeiro' : 'Débito Financeiro';
+        const sinal = isPositive ? '+' : '-';
+        
         return {
           success: true,
           banco: {
@@ -1477,13 +1483,23 @@ export class BankReturnParser {
             style: 'currency',
             currency: 'BRL'
           }),
+          // Informações sobre o sinal/operação
+          operacao: {
+            tipo: tipoOperacao, // 'CREDITO' ou 'DEBITO'
+            descricao: tipoOperacaoDescricao, // 'Crédito Financeiro' ou 'Débito Financeiro'
+            sinal: sinal, // '+' ou '-'
+            isPositive: isPositive, // true ou false
+            valorAbsoluto: Math.abs(this.saldoAtual) // Valor sem sinal
+          },
           arquivo: {
             nome: 'Arquivo de Retorno Bancário',
             banco: this.bancoDetectado?.nome || 'Banco',
             dataProcessamento: new Date().toISOString()
           },
           resumo: {
-            saldoAtual: this.saldoAtual
+            saldoAtual: this.saldoAtual,
+            tipoOperacao: tipoOperacao,
+            sinal: sinal
           },
           errors: this.errors
         };
