@@ -21,10 +21,10 @@ const pool = new Pool({
   connectionTimeoutMillis: 120000, // 2 minutos timeout para novas conexões
   acquireTimeoutMillis: 120000, // 2 minutos timeout para adquirir conexão
   
-  // Configurações do PostgreSQL com timeouts de 1 hora
-  statement_timeout: 3600000, // 1 hora timeout para statements
-  query_timeout: 3600000, // 1 hora timeout para queries
-  idle_in_transaction_session_timeout: 3600000, // 1 hora timeout para transações ociosas
+  // Configurações do PostgreSQL SEM timeouts (para queries pesadas)
+  // statement_timeout: 0, // Sem timeout para statements
+  // query_timeout: 0, // Sem timeout para queries
+  // idle_in_transaction_session_timeout: 0, // Sem timeout para transações ociosas
   application_name: 'apigestaocrosby',
   
   // Keep alive configurado adequadamente
