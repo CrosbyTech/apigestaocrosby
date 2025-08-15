@@ -211,6 +211,7 @@ router.get('/contas-pagar',
     // Para muitas empresas (>20), otimizar mantendo JOINs essenciais
     const isHeavyQuery = empresas.length > 20;
     
+    // Query otimizada seguindo exatamente o SQL fornecido
     const query = isHeavyQuery ? `
       SELECT
         fd.cd_empresa,
@@ -229,54 +230,59 @@ router.get('/contas-pagar',
         fd.vl_acrescimo,
         fd.vl_desconto,
         fd.vl_pago,
-        fd.vl_rateio,
+        vfd.vl_rateio,
         fd.in_aceite,
-        fd.cd_despesaitem,
-        fdi.ds_despesaitem,
-        vpf.nm_fornecedor,
-        fd.cd_ccusto,
-        gc.ds_ccusto
-      FROM vr_fcp_despduplicatai fd
-      LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
+        vfd.cd_despesaitem,
+        COALESCE(fd2.ds_despesaitem, '') as ds_despesaitem,
+        COALESCE(vpf.nm_fornecedor, '') as nm_fornecedor,
+        vfd.cd_ccusto,
+        COALESCE(gc.ds_ccusto, '') as ds_ccusto,
+        fd.tp_previsaoreal
+      FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
+      LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
+      WHERE fd.cd_empresa IN (${empresaPlaceholders})
+        AND fd.dt_vencimento BETWEEN $1 AND $2
       ORDER BY fd.dt_vencimento DESC
       LIMIT 10000000000
     ` : `
-             SELECT
-         fd.cd_empresa,
-         fd.cd_fornecedor,
-         fd.nr_duplicata,
-         fd.nr_portador,
-         fd.nr_parcela,
-         fd.dt_emissao,
-         fd.dt_vencimento,
-         fd.dt_entrada,
-         fd.dt_liq,
-         fd.tp_situacao,
-         fd.tp_estagio,
-         fd.vl_duplicata,
-         fd.vl_juros,
-         fd.vl_acrescimo,
-         fd.vl_desconto,
-         fd.vl_pago,
-         fd.vl_rateio,
-         fd.in_aceite,
-         fd.cd_despesaitem,
-         fdi.ds_despesaitem,
-         vpf.nm_fornecedor,
-         fd.cd_ccusto,
-         gc.ds_ccusto,
-	       fd.tp_previsaoreal
-       FROM vr_fcp_despduplicatai fd
-       LEFT JOIN fcp_despesaitem fdi ON fd.cd_despesaitem = fdi.cd_despesaitem
-       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-       LEFT JOIN gec_ccusto gc ON fd.cd_ccusto = gc.cd_ccusto
-       WHERE fd.dt_vencimento BETWEEN $1 AND $2
-         AND fd.cd_empresa IN (${empresaPlaceholders})
-       ORDER BY fd.dt_vencimento DESC
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        vfd.vl_rateio,
+        fd.in_aceite,
+        vfd.cd_despesaitem,
+        COALESCE(fd2.ds_despesaitem, '') as ds_despesaitem,
+        COALESCE(vpf.nm_fornecedor, '') as nm_fornecedor,
+        vfd.cd_ccusto,
+        COALESCE(gc.ds_ccusto, '') as ds_ccusto,
+        fd.tp_previsaoreal
+      FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
+      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
+      WHERE fd.cd_empresa IN (${empresaPlaceholders})
+        AND fd.dt_vencimento BETWEEN $1 AND $2
+      ORDER BY fd.dt_vencimento DESC
     `;
 
     console.log(`🔍 Contas-pagar: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
