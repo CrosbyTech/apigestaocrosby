@@ -150,7 +150,13 @@ export class BankReturnParser {
       console.log(`📋 Layout: ${this.bancoDetectado.layout}`);
 
       // Extrair data/hora a partir do registro de cabeçalho (tipo 0) como primeira tentativa
-      this.extrairDataHoraPorRegistroTipo0(lines);
+      // Mas não sobrescrever se já temos uma data válida
+      // Para Itaú, não usar a função genérica pois ela extrai datas incorretas
+      const header = lines[0];
+      const codigoBanco = header.substring(0, 3);
+      if (codigoBanco !== '341') {
+        this.extrairDataHoraPorRegistroTipo0(lines);
+      }
 
       // Processar baseado no layout do banco
       switch (this.bancoDetectado.layout) {
@@ -279,8 +285,10 @@ export class BankReturnParser {
         console.log(`🏛️ Agência Itaú: ${this.agencia}, Conta: ${this.conta}`);
       }
       
-             // Extrair data e hora de geração do header
-       this.extrairDataHoraGeracao(header);
+             // Para Itaú, não usar a função genérica de extração de data do header
+       // pois ela pode extrair datas incorretas. Vamos usar apenas a função específica.
+       // this.extrairDataHoraGeracao(header);
+       
        // Aplicar posições padrão CNAB400 (FEBRABAN) quando aplicável
        this.applyCNAB400HeaderFields(header);
        // Banco destino/empresa por âncora
@@ -290,8 +298,23 @@ export class BankReturnParser {
     const saldoLine = lines[lines.length - 2];
     console.log('💰 Processando linha de saldo Itaú:', saldoLine);
     
-    // Extrair data e hora da linha de saldo também (Itaú tem data na linha de saldo)
-    this.extrairDataHoraGeracaoItau(saldoLine);
+    // Para Itaú, seguir o manual FEBRABAN: Data de Gravação está no Header de Lote (linha 2)
+    if (lines.length > 1) {
+      const headerLote = lines[1]; // Linha 2 (índice 1) - Registro de Início do Lote
+      console.log(`🔍 Extraindo Data de Gravação do Header de Lote Itaú (FEBRABAN): "${headerLote}"`);
+      this.extrairDataHoraGeracaoItauHeaderLote(headerLote);
+    }
+    
+    // Se não encontrou data no header de lote, tentar linha de saldo
+    if (!this.dataGeracao) {
+      this.extrairDataHoraGeracaoItau(saldoLine);
+    }
+    
+    // Se ainda não encontrou, tentar linhas de detalhes
+    if (!this.dataGeracao && lines.length > 2) {
+      console.log(`🔍 Tentando extrair data das linhas de detalhes Itaú`);
+      this.extrairDataHoraGeracaoItauDetalhes(lines);
+    }
     
     // Procurar por padrões específicos do ITAÚ - CP (Crédito), DP (Débito), DF (Débito)
     const saldoMatchCP = saldoLine.match(/(\d{4,8})CP/);
@@ -1543,8 +1566,9 @@ export class BankReturnParser {
         return;
       }
       
-      // Procurar por padrão DDMMAAAA na linha de saldo com validação
-      // Exemplo: 22072025 (22/07/2025)
+      // Para Itaú, a data de geração está na linha 2 (header de lote), não na linha de saldo
+      // Vamos procurar por padrão DDMMAAAA na linha de saldo com validação mais rigorosa
+      // Exemplo: 11082025 (11/08/2025)
       const dataMatches = saldoLine.match(/(\d{2})(\d{2})(\d{4})/g);
       
       if (dataMatches) {
@@ -1555,11 +1579,21 @@ export class BankReturnParser {
           const mes = parseInt(match.substring(2, 4));
           const ano = parseInt(match.substring(4, 8));
           
-          // Validar se é uma data válida
+          console.log(`  Testando: ${match} -> dia=${dia}, mes=${mes}, ano=${ano}`);
+          
+          // Validar se é uma data válida com critérios mais rigorosos
           if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+            // Verificar se não é um valor que pode ser interpretado como hora
+            if (dia >= 0 && dia <= 23) {
+              console.log(`  ⚠️ Ignorando ${match} - pode ser hora`);
+              continue;
+            }
+            
             this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
             console.log(`✅ Data de geração Itaú extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
             break;
+          } else {
+            console.log(`  ❌ Data inválida: dia=${dia}, mes=${mes}, ano=${ano}`);
           }
         }
       }
@@ -1585,26 +1619,116 @@ export class BankReturnParser {
         }
       }
       
-      // Se não encontrou, tentar posições específicas
-      if (!this.dataGeracao && saldoLine.length >= 8) {
-        const dataStr = saldoLine.substring(0, 8); // DDMMAAAA
-        console.log(`📅 Tentativa por posições - Data (0-8): "${dataStr}"`);
+      if (!this.dataGeracao && !this.horaGeracao) {
+        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo Itaú');
+      }
+    }
+
+    /**
+     * Extrai data e hora de geração específica para Itaú (do header de lote - linha 2)
+     */
+    extrairDataHoraGeracaoItauHeaderLote(headerLote) {
+      console.log(`🔍 Analisando header de lote Itaú para data/hora: "${headerLote}"`);
+      
+      if (!headerLote) {
+        console.log('⚠️ Header de lote Itaú não encontrado');
+        return;
+      }
+      
+      // Para Itaú, a data de geração está na linha 2 (header de lote)
+      // Procurar por padrão DDMMAAAA no header de lote
+      // Exemplo: 11082025 (11/08/2025)
+      const dataMatches = headerLote.match(/(\d{2})(\d{2})(\d{4})/g);
+      
+      if (dataMatches) {
+        console.log(`🔍 Possíveis datas encontradas no header de lote: ${dataMatches.join(', ')}`);
         
-        if (dataStr && !isNaN(parseInt(dataStr))) {
-          const dia = parseInt(dataStr.substring(0, 2));
-          const mes = parseInt(dataStr.substring(2, 4));
-          const ano = parseInt(dataStr.substring(4, 8));
+        for (const match of dataMatches) {
+          const dia = parseInt(match.substring(0, 2));
+          const mes = parseInt(match.substring(2, 4));
+          const ano = parseInt(match.substring(4, 8));
+          
+          console.log(`  Testando: ${match} -> dia=${dia}, mes=${mes}, ano=${ano}`);
           
           // Validar se é uma data válida
           if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
             this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
-            console.log(`✅ Data de geração Itaú (pos): ${this.dataGeracao}`);
+            console.log(`✅ Data de geração Itaú (header de lote) extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+            break;
+          } else {
+            console.log(`  ❌ Data inválida: dia=${dia}, mes=${mes}, ano=${ano}`);
+          }
+        }
+      }
+      
+      // Procurar por padrão HHMMSS no header de lote
+      const horaMatches = headerLote.match(/(\d{2})(\d{2})(\d{2})/g);
+      
+      if (horaMatches) {
+        console.log(`🔍 Possíveis horas encontradas no header de lote: ${horaMatches.join(', ')}`);
+        
+        for (const match of horaMatches) {
+          const hora = parseInt(match.substring(0, 2));
+          const minuto = parseInt(match.substring(2, 4));
+          const segundo = parseInt(match.substring(4, 6));
+          
+          // Validar se é uma hora válida
+          if (hora >= 0 && hora <= 23 && minuto >= 0 && minuto <= 59 && segundo >= 0 && segundo <= 59) {
+            this.horaGeracao = `${hora.toString().padStart(2, '0')}:${minuto.toString().padStart(2, '0')}:${segundo.toString().padStart(2, '0')}`;
+            console.log(`✅ Hora de geração Itaú (header de lote) extraída: ${this.horaGeracao}`);
+            break;
           }
         }
       }
       
       if (!this.dataGeracao && !this.horaGeracao) {
-        console.log('⚠️ Não foi possível extrair data/hora válida da linha de saldo Itaú');
+        console.log('⚠️ Não foi possível extrair data/hora válida do header de lote Itaú');
+      }
+    }
+
+    /**
+     * Extrai data e hora de geração específica para Itaú (das linhas de detalhes)
+     */
+    extrairDataHoraGeracaoItauDetalhes(lines) {
+      console.log(`🔍 Analisando linhas de detalhes Itaú para data/hora`);
+      
+      if (!lines || lines.length < 3) {
+        console.log('⚠️ Linhas de detalhes Itaú não encontradas');
+        return;
+      }
+      
+      // Procurar por data nas linhas de detalhes (linhas 3 até penúltima)
+      for (let i = 2; i < lines.length - 1; i++) {
+        const linha = lines[i];
+        console.log(`🔍 Analisando linha de detalhe ${i + 1}: "${linha}"`);
+        
+        // Procurar por padrão DDMMAAAA nas linhas de detalhes
+        const dataMatches = linha.match(/(\d{2})(\d{2})(\d{4})/g);
+        
+        if (dataMatches) {
+          console.log(`🔍 Possíveis datas encontradas na linha ${i + 1}: ${dataMatches.join(', ')}`);
+          
+          for (const match of dataMatches) {
+            const dia = parseInt(match.substring(0, 2));
+            const mes = parseInt(match.substring(2, 4));
+            const ano = parseInt(match.substring(4, 8));
+            
+            console.log(`  Testando: ${match} -> dia=${dia}, mes=${mes}, ano=${ano}`);
+            
+            // Validar se é uma data válida
+            if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
+              this.dataGeracao = `${ano}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
+              console.log(`✅ Data de geração Itaú (detalhes) extraída: ${this.dataGeracao} (${dia}/${mes}/${ano})`);
+              return; // Parar na primeira data válida encontrada
+            } else {
+              console.log(`  ❌ Data inválida: dia=${dia}, mes=${mes}, ano=${ano}`);
+            }
+          }
+        }
+      }
+      
+      if (!this.dataGeracao) {
+        console.log('⚠️ Não foi possível extrair data válida das linhas de detalhes Itaú');
       }
     }
 
@@ -2102,16 +2226,19 @@ export class BankReturnParser {
         const dataNum = (rawData || '').replace(/\D/g, '');
         const horaNum = (rawHora || '').replace(/\D/g, '');
 
-        // Validar data DDMMAAAA
+        // Validar data DDMMAAAA com critérios mais rigorosos
         if (!this.dataGeracao && dataNum.length === 8) {
           const dia = parseInt(dataNum.substring(0, 2));
           const mes = parseInt(dataNum.substring(2, 4));
           const ano = parseInt(dataNum.substring(4, 8));
-          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 1900 && ano <= 2100) {
+          // Critérios mais rigorosos para evitar datas inválidas como "204-97-41"
+          if (dia >= 1 && dia <= 31 && mes >= 1 && mes <= 12 && ano >= 2020 && ano <= 2030) {
             const diaStr = dia.toString().padStart(2, '0');
             const mesStr = mes.toString().padStart(2, '0');
             this.dataGeracao = `${ano}-${mesStr}-${diaStr}`;
             console.log(`✅ Data de geração (tipo 0): ${this.dataGeracao}`);
+          } else {
+            console.log(`⚠️ Data inválida ignorada (tipo 0): ${dia}/${mes}/${ano}`);
           }
         }
 
