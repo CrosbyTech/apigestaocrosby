@@ -1,5 +1,5 @@
 import express from 'express';
-import pool from '../config/database.js';
+import pool, { checkConnectionHealth, executeQueryWithRetry } from '../config/database.js';
 import { validateRequired, validateDateFormat, validatePagination, sanitizeInput } from '../middlewares/validation.middleware.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import multer from 'multer';
@@ -8,6 +8,23 @@ import fs from 'fs';
 import path from 'path';
 
 const router = express.Router();
+
+/**
+ * @route GET /financial/health
+ * @desc Verificar saúde da conexão com o banco
+ * @access Public
+ */
+router.get('/health',
+  asyncHandler(async (req, res) => {
+    const health = await checkConnectionHealth();
+    
+    if (health.healthy) {
+      successResponse(res, health, 'Conexão com banco de dados saudável');
+    } else {
+      errorResponse(res, 'Problemas na conexão com banco de dados', 503, 'DB_CONNECTION_ERROR', health);
+    }
+  })
+);
 
 // Configuração do multer para upload de arquivos
 const storage = multer.diskStorage({
@@ -197,14 +214,18 @@ router.get('/contas-pagar',
   sanitizeInput,
   validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
-  validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
-    const offset = parseInt(req.query.offset, 10) || 0;
 
-    // Construir query dinamicamente para suportar múltiplas empresas (como contas-receber)
-    let baseQuery = `
+    // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
+    // Para muitas empresas (>20), considerar consulta pesada
+    const isHeavyQuery = empresas.length > 20;
+
+    const query = isHeavyQuery ? `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -225,64 +246,67 @@ router.get('/contas-pagar',
         vfd.vl_rateio,
         fd.in_aceite,
         vfd.cd_despesaitem,
-        COALESCE(fd2.ds_despesaitem, '') as ds_despesaitem,
-        COALESCE(vpf.nm_fornecedor, '') as nm_fornecedor,
+        fdi.ds_despesaitem,
+        vpf.nm_fornecedor,
         vfd.cd_ccusto,
-        COALESCE(gc.ds_ccusto, '') as ds_ccusto,
+        gc.ds_ccusto,
         fd.tp_previsaoreal
       FROM vr_fcp_duplicatai fd
       LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
+      LEFT JOIN fcp_despesaitem fdi ON vfd.cd_despesaitem = fdi.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
-    `;
-    
-    const params = [dt_inicio, dt_fim];
-    let idx = 3;
-
-    if (cd_empresa) {
-      if (Array.isArray(cd_empresa) && cd_empresa.length > 0) {
-        const cd_empresa_num = cd_empresa.map(Number);
-        baseQuery += ` AND fd.cd_empresa IN (${cd_empresa_num.map(() => `$${idx++}`).join(',')})`;
-        params.push(...cd_empresa_num);
-      } else {
-        baseQuery += ` AND fd.cd_empresa = $${idx++}`;
-        params.push(Number(cd_empresa));
-      }
-    }
-
-    baseQuery += ` ORDER BY fd.dt_vencimento DESC LIMIT $${idx++} OFFSET $${idx++}`;
-    params.push(limit, offset);
-
-    const countQuery = `
-      SELECT COUNT(*) as total
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_vencimento DESC
+      LIMIT 10000000000
+    ` : `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        vfd.vl_rateio,
+        fd.in_aceite,
+        vfd.cd_despesaitem,
+        fdi.ds_despesaitem,
+        vpf.nm_fornecedor,
+        vfd.cd_ccusto,
+        gc.ds_ccusto,
+        fd.tp_previsaoreal
       FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+      LEFT JOIN fcp_despesaitem fdi ON vfd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
+      LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        ${cd_empresa ? (Array.isArray(cd_empresa) && cd_empresa.length > 0 
-          ? `AND fd.cd_empresa IN (${cd_empresa.map((_, i) => `$${3 + i}`).join(',')})`
-          : `AND fd.cd_empresa = $3`) : ''}
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_vencimento DESC
     `;
 
-    const countParams = [dt_inicio, dt_fim];
-    if (cd_empresa) {
-      if (Array.isArray(cd_empresa) && cd_empresa.length > 0) {
-        countParams.push(...cd_empresa.map(Number));
-      } else {
-        countParams.push(Number(cd_empresa));
-      }
-    }
+    console.log(`🔍 Contas-pagar: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
 
-    const [resultado, totalResult] = await Promise.all([
-      pool.query(baseQuery, params),
-      pool.query(countQuery, countParams)
-    ]);
+    const queryOptions = isHeavyQuery ? {
+      text: query,
+      values: params,
+    } : query;
 
-    const total = parseInt(totalResult.rows[0].total, 10);
+    const { rows } = await pool.query(queryOptions, isHeavyQuery ? undefined : params);
 
-    // Calcular totais
-    const totals = resultado.rows.reduce((acc, row) => {
+    // Totais agregados (como no fluxo de caixa)
+    const totals = rows.reduce((acc, row) => {
       acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
       acc.totalPago += parseFloat(row.vl_pago || 0);
       acc.totalJuros += parseFloat(row.vl_juros || 0);
@@ -291,14 +315,14 @@ router.get('/contas-pagar',
     }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
 
     successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
+      periodo: { dt_inicio, dt_fim },
+      empresas,
       totals,
-      data: resultado.rows
-    }, 'Contas a pagar obtidas com sucesso');
+      count: rows.length,
+      optimized: isHeavyQuery,
+      queryType: isHeavyQuery ? 'joins-essenciais-otimizado' : 'completo-com-todos-joins',
+      data: rows
+    }, `Contas a pagar obtidas com sucesso (${isHeavyQuery ? 'otimizado' : 'completo'})`);
   })
 );
 
