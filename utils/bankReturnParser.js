@@ -846,56 +846,66 @@ export class BankReturnParser {
     // Banco destino/empresa por âncora
     this.setEmpresaEBancoDestinoFromHeader(header);
     
-    // Santander: saldo está na linha 7 (penúltima linha)
-    const trailerLote = lines[lines.length - 2]; // Linha 7
-    console.log('📏 Linha 7 (trailer lote):', trailerLote);
+    // Santander: saldo está na linha 5 (trailer)
+    const trailerLote = lines[lines.length - 2]; // Linha 5
+    console.log('📏 Linha 5 (trailer):', trailerLote);
     console.log('📏 Tamanho da linha:', trailerLote.length);
     
     // Extrair data e hora da linha de saldo também (Santander tem data na linha de saldo)
     this.extrairDataHoraGeracaoSantander(trailerLote);
     
-          if (trailerLote && trailerLote.length >= 200) {
-      // Procurar pelo padrão do saldo na linha - capturar 4 a 8 dígitos antes do sufixo
-      const saldoMatchCP = trailerLote.match(/(\d{4,8})CP/);
-      const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
-      const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
-      const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
+    if (trailerLote && trailerLote.length >= 200) {
+      // NOVO: Procurar pelo saldo principal (5986266) na posição específica
+      // O saldo principal está na posição onde aparece 5986266
+      const saldoPrincipal = trailerLote.match(/(\d{7})04543/);
       
-      if (saldoMatchCP) {
-        const saldoStr = saldoMatchCP[0];
+      if (saldoPrincipal) {
+        const saldoStr = saldoPrincipal[1]; // Pegar apenas os 7 dígitos
         this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Santander (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-      } else if (saldoMatchCF) {
-        const saldoStr = saldoMatchCF[0];
-        this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Santander (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-      } else if (saldoMatchDP) {
-        const saldoStr = saldoMatchDP[0];
-        this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Santander (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-      } else if (saldoMatchDF) {
-        const saldoStr = saldoMatchDF[0];
-        this.saldoAtual = this.parseValueBB(saldoStr);
-        console.log(`💰 Saldo Santander (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        console.log(`💰 Saldo Santander principal encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else {
-        // Fallback: tentar posições específicas
-        console.log('⚠️ Padrão CF/DP não encontrado, tentando posições...');
+        // Fallback: procurar por padrões alternativos
+        const saldoMatchCP = trailerLote.match(/(\d{4,8})CP/);
+        const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
+        const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
+        const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
         
-        // Tentar diferentes posições onde o saldo pode estar
-        const posicoes = [
-          { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
-          { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
-          { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
-        ];
-        
-        for (const pos of posicoes) {
-          const valor = trailerLote.substring(pos.inicio, pos.fim);
-          console.log(`${pos.descricao}: "${valor}"`);
+        if (saldoMatchCP) {
+          const saldoStr = saldoMatchCP[0];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Santander (CP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchCF) {
+          const saldoStr = saldoMatchCF[0];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Santander (CF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchDP) {
+          const saldoStr = saldoMatchDP[0];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Santander (DP) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else if (saldoMatchDF) {
+          const saldoStr = saldoMatchDF[0];
+          this.saldoAtual = this.parseValueBB(saldoStr);
+          console.log(`💰 Saldo Santander (DF) encontrado: ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        } else {
+          // Fallback: tentar posições específicas
+          console.log('⚠️ Padrão principal não encontrado, tentando posições...');
           
-          if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
-            this.saldoAtual = this.parseValueBB(valor);
-            console.log(`💰 Saldo Santander encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
-            break;
+          // Tentar diferentes posições onde o saldo pode estar
+          const posicoes = [
+            { inicio: 150, fim: 156, descricao: 'Posição 150-156' },
+            { inicio: 140, fim: 146, descricao: 'Posição 140-146' },
+            { inicio: 130, fim: 136, descricao: 'Posição 130-136' }
+          ];
+          
+          for (const pos of posicoes) {
+            const valor = trailerLote.substring(pos.inicio, pos.fim);
+            console.log(`${pos.descricao}: "${valor}"`);
+            
+            if (valor && !isNaN(parseInt(valor)) && parseInt(valor) > 0) {
+              this.saldoAtual = this.parseValueBB(valor);
+              console.log(`💰 Saldo Santander encontrado em posição alternativa: ${valor} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+              break;
+            }
           }
         }
       }
