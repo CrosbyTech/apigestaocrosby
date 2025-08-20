@@ -206,12 +206,6 @@ router.get('/extrato-totvs',
 
 /**
  * @route GET /financial/contas-pagar
- * @desc Buscar contas a pagar (otimizado como contas-receber)
- * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
- */
-/**
- * @route GET /financial/contas-pagar
  * @desc Buscar contas a pagar
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
@@ -249,18 +243,18 @@ router.get('/contas-pagar',
         fd.vl_acrescimo,
         fd.vl_desconto,
         fd.vl_pago,
-        vfd.vl_rateio,
         fd.in_aceite,
-        vfd.cd_despesaitem,
-        fd2.ds_despesaitem,
-        vpf.nm_fornecedor,
+        vfd.vl_rateio,
+        vfd2.cd_despesaitem,
+        vfd2.ds_despesaitem,
         vfd.cd_ccusto,
+        fd.tp_previsaoreal,
         gc.ds_ccusto,
-        fd.tp_previsaoreal
+        vpf.nm_fornecedor
       FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata
+      LEFT JOIN vr_fcp_despduplicatai vfd ON vfd.cd_empresa = fd.cd_empresa AND fd.cd_componente = vfd.cd_componente AND fd.dt_vencimento = vfd.dt_vencimento
+      LEFT JOIN vr_fcp_despesaitem vfd2 ON vfd.cd_despesaitem = vfd2.cd_despesaitem
       LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
@@ -285,18 +279,18 @@ router.get('/contas-pagar',
         fd.vl_acrescimo,
         fd.vl_desconto,
         fd.vl_pago,
-        vfd.vl_rateio,
         fd.in_aceite,
-        vfd.cd_despesaitem,
-        fd2.ds_despesaitem,
-        vpf.nm_fornecedor,
+        vfd.vl_rateio,
+        vfd2.cd_despesaitem,
+        vfd2.ds_despesaitem,
         vfd.cd_ccusto,
+        fd.tp_previsaoreal,
         gc.ds_ccusto,
-        fd.tp_previsaoreal
+        vpf.nm_fornecedor
       FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata
+      LEFT JOIN vr_fcp_despduplicatai vfd ON vfd.cd_empresa = fd.cd_empresa AND fd.cd_componente = vfd.cd_componente AND fd.dt_vencimento = vfd.dt_vencimento
+      LEFT JOIN vr_fcp_despesaitem vfd2 ON vfd.cd_despesaitem = vfd2.cd_despesaitem
       LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
-      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
