@@ -222,10 +222,11 @@ router.get('/contas-pagar',
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    // Para muitas empresas (>20), considerar consulta pesada
-    const isHeavyQuery = empresas.length > 20;
+    // Otimização baseada no número de empresas e período
+    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
 
-    const query = isHeavyQuery ? `
+    const query = isVeryHeavyQuery ? `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -252,15 +253,16 @@ router.get('/contas-pagar',
         gc.ds_ccusto,
         fd.tp_previsaoreal
       FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata AND fd.cd_empresa = vfd.cd_empresa AND fd.cd_fornecedor = vfd.cd_fornecedor
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+        AND fd.cd_empresa = vfd.cd_empresa 
+        AND fd.cd_fornecedor = vfd.cd_fornecedor
       LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_vencimento DESC
-      LIMIT 10000000000
+      LIMIT 50000
     ` : `
       SELECT
         fd.cd_empresa,
@@ -288,24 +290,22 @@ router.get('/contas-pagar',
         gc.ds_ccusto,
         fd.tp_previsaoreal
       FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata AND fd.cd_empresa = vfd.cd_empresa AND fd.cd_fornecedor = vfd.cd_fornecedor
-      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+        AND fd.cd_empresa = vfd.cd_empresa 
+        AND fd.cd_fornecedor = vfd.cd_fornecedor
       LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_vencimento DESC
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
-    console.log(`🔍 Contas-pagar: ${empresas.length} empresas, query ${isHeavyQuery ? 'otimizada' : 'completa'}`);
+    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
+    console.log(`🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
 
-    const queryOptions = isHeavyQuery ? {
-      text: query,
-      values: params,
-    } : query;
-
-    const { rows } = await pool.query(queryOptions, isHeavyQuery ? undefined : params);
+    const { rows } = await pool.query(query, params);
 
     // Totais agregados (como no fluxo de caixa)
     const totals = rows.reduce((acc, row) => {
@@ -321,10 +321,16 @@ router.get('/contas-pagar',
       empresas,
       totals,
       count: rows.length,
-      optimized: isHeavyQuery,
-      queryType: isHeavyQuery ? 'joins-essenciais-otimizado' : 'completo-com-todos-joins',
+      optimized: isHeavyQuery || isVeryHeavyQuery,
+      queryType: queryType,
+      performance: {
+        isHeavyQuery,
+        isVeryHeavyQuery,
+        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
+        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+      },
       data: rows
-    }, `Contas a pagar obtidas com sucesso (${isHeavyQuery ? 'otimizado' : 'completo'})`);
+    }, `Contas a pagar obtidas com sucesso (${queryType})`);
   })
 );
 
