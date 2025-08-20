@@ -876,11 +876,19 @@ export class BankReturnParser {
       const linha2 = lines[1];
       console.log('📝 Linha 2:', linha2);
       
-      // Procurar padrão com DF na linha 2 (mais confiável)
+      // Procurar padrão com CF/DF na linha 2 (mais confiável)
+      const saldoLinha2CF = linha2.match(/(\d{7})CF/);
       const saldoLinha2DF = linha2.match(/(\d{7})DF/);
-      
+
+      if (saldoLinha2CF) {
+        const saldoStr = `${saldoLinha2CF[1]}CF`;
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Santander encontrado na linha 2 (CF): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        return this.formatResponse();
+      }
+
       if (saldoLinha2DF) {
-        const saldoStr = saldoLinha2DF[1];
+        const saldoStr = `${saldoLinha2DF[1]}DF`;
         this.saldoAtual = this.parseValueBB(saldoStr);
         console.log(`💰 Saldo Santander encontrado na linha 2 (DF): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
         return this.formatResponse();
@@ -917,19 +925,19 @@ export class BankReturnParser {
       const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
       
       if (saldoMatchCP) {
-        const saldoStr = saldoMatchCP[1]; // Apenas os dígitos, sem o sufixo
+        const saldoStr = saldoMatchCP[0]; // Incluir sufixo para sinal correto
         this.saldoAtual = this.parseValueBB(saldoStr);
         console.log(`💰 Saldo Santander (CP trailer): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else if (saldoMatchCF) {
-        const saldoStr = saldoMatchCF[1];
+        const saldoStr = saldoMatchCF[0];
         this.saldoAtual = this.parseValueBB(saldoStr);
         console.log(`💰 Saldo Santander (CF trailer): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else if (saldoMatchDF) {
-        const saldoStr = saldoMatchDF[1];
+        const saldoStr = saldoMatchDF[0];
         this.saldoAtual = this.parseValueBB(saldoStr);
         console.log(`💰 Saldo Santander (DF trailer): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else if (saldoMatchDP) {
-        const saldoStr = saldoMatchDP[1];
+        const saldoStr = saldoMatchDP[0];
         this.saldoAtual = this.parseValueBB(saldoStr);
         console.log(`💰 Saldo Santander (DP trailer): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
       } else {
