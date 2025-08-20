@@ -763,7 +763,32 @@ export class BankReturnParser {
     this.applyCNAB400HeaderFields(header);
     // Banco destino/empresa por âncora
     this.setEmpresaEBancoDestinoFromHeader(header);
-    
+
+    // PRIORIDADE 1: Verificar linha 2 (CF/DF)
+    if (lines[1] && lines[1].length >= 200) {
+      console.log('🔍 Verificando linha 2 para saldo Bradesco...');
+      const linha2 = lines[1];
+      console.log('📝 Linha 2:', linha2);
+
+      // Buscar primeiro por CF (Crédito Final) e depois DF (Débito Final)
+      const saldoLinha2CF = linha2.match(/(\d{1,12})CF/);
+      const saldoLinha2DF = linha2.match(/(\d{1,12})DF/);
+
+      if (saldoLinha2CF) {
+        const saldoStr = `${saldoLinha2CF[1]}CF`;
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Bradesco encontrado na linha 2 (CF): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        return this.formatResponse();
+      }
+
+      if (saldoLinha2DF) {
+        const saldoStr = `${saldoLinha2DF[1]}DF`;
+        this.saldoAtual = this.parseValueBB(saldoStr);
+        console.log(`💰 Saldo Bradesco encontrado na linha 2 (DF): ${saldoStr} -> R$ ${this.saldoAtual.toLocaleString('pt-BR')}`);
+        return this.formatResponse();
+      }
+    }
+
     // Bradesco: saldo está na linha 4 (penúltima linha)
     const trailerLote = lines[lines.length - 2]; // Linha 4
     console.log('📏 Linha 4 (trailer lote):', trailerLote);
@@ -773,12 +798,11 @@ export class BankReturnParser {
     this.extrairDataHoraGeracaoBradesco(trailerLote);
     
           if (trailerLote && trailerLote.length >= 200) {
-        // Procurar pelo padrão do saldo na linha - corrigido para capturar valores específicos
-        // O valor pode ter entre 4 e 8 dígitos antes do sufixo
-        const saldoMatchCP = trailerLote.match(/(\d{4,8})CP/);
-        const saldoMatchCF = trailerLote.match(/(\d{4,8})CF/);
-        const saldoMatchDP = trailerLote.match(/(\d{4,8})DP/);
-        const saldoMatchDF = trailerLote.match(/(\d{4,8})DF/);
+        // Procurar pelo padrão do saldo na linha - aceitar 1 a 12 dígitos antes do sufixo
+        const saldoMatchCP = trailerLote.match(/(\d{1,12})CP/);
+        const saldoMatchCF = trailerLote.match(/(\d{1,12})CF/);
+        const saldoMatchDP = trailerLote.match(/(\d{1,12})DP/);
+        const saldoMatchDF = trailerLote.match(/(\d{1,12})DF/);
         
         if (saldoMatchCP) {
           const saldoStr = saldoMatchCP[0]; // Incluir o sufixo para o parseValueBB detectar
