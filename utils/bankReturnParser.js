@@ -999,10 +999,10 @@ export class BankReturnParser {
       
       if (trailerLote && trailerLote.length >= 200) {
         // Procurar por padrões específicos do Sicredi - CP (Crédito), DP (Débito), DF (Débito)
-        // Sicredi usa 6 dígitos antes do sufixo (ex: 722691CP)
-        const saldoMatchCP = trailerLote.match(/(\d{6})CP/);
-        const saldoMatchDP = trailerLote.match(/(\d{6})DP/);
-        const saldoMatchDF = trailerLote.match(/(\d{6})DF/);
+        // Aceitar 6 a 12 dígitos antes do sufixo para não cortar dígitos significativos
+        const saldoMatchCP = trailerLote.match(/(\d{6,12})CP/);
+        const saldoMatchDP = trailerLote.match(/(\d{6,12})DP/);
+        const saldoMatchDF = trailerLote.match(/(\d{6,12})DF/);
         
         if (saldoMatchCP) {
           const saldoStr = saldoMatchCP[0]; // Incluir o "CP" para o parseValueBB detectar
