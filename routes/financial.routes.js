@@ -252,14 +252,15 @@ router.get('/contas-pagar',
         vfd.vl_rateio,
         fd.in_aceite,
         vfd.cd_despesaitem,
-        fdi.ds_despesaitem,
+        fd2.ds_despesaitem,
         vpf.nm_fornecedor,
         vfd.cd_ccusto,
         gc.ds_ccusto,
         fd.tp_previsaoreal
       FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-      LEFT JOIN fcp_despesaitem fdi ON vfd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
@@ -287,14 +288,15 @@ router.get('/contas-pagar',
         vfd.vl_rateio,
         fd.in_aceite,
         vfd.cd_despesaitem,
-        fdi.ds_despesaitem,
+        fd2.ds_despesaitem,
         vpf.nm_fornecedor,
         vfd.cd_ccusto,
         gc.ds_ccusto,
         fd.tp_previsaoreal
       FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-      LEFT JOIN fcp_despesaitem fdi ON vfd.cd_despesaitem = fdi.cd_despesaitem
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata
+      LEFT JOIN obs_dupi od ON fd.nr_duplicata = od.nr_duplicata AND fd.cd_fornecedor = od.cd_fornecedor
+      LEFT JOIN fcp_despesaitem fd2 ON vfd.cd_despesaitem = fd2.cd_despesaitem
       LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
       LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
