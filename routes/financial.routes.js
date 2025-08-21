@@ -504,16 +504,16 @@ router.get('/contas-receber',
         vff.pr_juromes,
         vff.pr_multa
       FROM vr_fcr_faturai vff
-      WHERE vff.dt_emissao BETWEEN $1 AND $2
+      WHERE vff.dt_vencimento BETWEEN $1 AND $2
         AND vff.cd_empresa = $3
-      ORDER BY vff.dt_emissao DESC
+      ORDER BY vff.dt_vencimento DESC
       LIMIT $4 OFFSET $5
     `;
 
     const countQuery = `
       SELECT COUNT(*) as total
       FROM vr_fcr_faturai vff
-      WHERE vff.dt_emissao BETWEEN $1 AND $2
+      WHERE vff.dt_vencimento BETWEEN $1 AND $2
         AND vff.cd_empresa = $3
     `;
 

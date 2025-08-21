@@ -32,11 +32,37 @@ router.get('/faturamento',
       return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
     }
 
+    // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    const query = `
+    // Otimização baseada no número de empresas e período
+    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+    const query = isVeryHeavyQuery ? `
+      SELECT
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa,
+        vfn.cd_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.tp_situacao,
+        vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
+        vfn.tp_operacao,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      FROM vr_fis_nfitemprod vfn
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 30).join(',')})
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+      ORDER BY vfn.dt_transacao DESC
+      LIMIT 50000
+    ` : `
       SELECT
         vfn.cd_empresa,
         vfn.nm_grupoempresa,
@@ -56,11 +82,15 @@ router.get('/faturamento',
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
+
+    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
+    console.log(`🔍 Faturamento: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
 
     const { rows } = await pool.query(query, params);
 
-    // Calcular totais
+    // Totais agregados (como no contas-pagar)
     const totals = rows.reduce((acc, row) => {
       acc.totalBruto += parseFloat(row.vl_unitbruto || 0);
       acc.totalLiquido += parseFloat(row.vl_unitliquido || 0);
@@ -73,8 +103,16 @@ router.get('/faturamento',
       empresas,
       totals,
       count: rows.length,
+      optimized: isHeavyQuery || isVeryHeavyQuery,
+      queryType: queryType,
+      performance: {
+        isHeavyQuery,
+        isVeryHeavyQuery,
+        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
+        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+      },
       data: rows
-    }, 'Dados de faturamento obtidos com sucesso');
+    }, `Dados de faturamento obtidos com sucesso (${queryType})`);
   })
 );
 
@@ -94,6 +132,7 @@ router.get('/faturamento-franquia',
       return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
     }
 
+    // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
@@ -106,7 +145,35 @@ router.get('/faturamento-franquia',
       fantasiaWhere = `AND p.nm_fantasia LIKE 'F%CROSBY%'`;
     }
 
-    const query = `
+    // Otimização baseada no número de empresas e período
+    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+    const query = isVeryHeavyQuery ? `
+      SELECT
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa,
+        p.nm_fantasia,
+        vfn.cd_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.tp_situacao,
+        vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
+        vfn.tp_operacao,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 15).join(',')})
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+        ${fantasiaWhere}
+      ORDER BY vfn.dt_transacao DESC
+      LIMIT 50000
+    ` : `
       SELECT
         vfn.cd_empresa,
         vfn.nm_grupoempresa,
@@ -129,7 +196,11 @@ router.get('/faturamento-franquia',
         AND vfn.tp_situacao NOT IN ('C', 'X')
         ${fantasiaWhere}
       ORDER BY vfn.dt_transacao DESC
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
+
+    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
+    console.log(`🔍 Faturamento-franquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
 
     const { rows } = await pool.query(query, params);
 
@@ -154,8 +225,16 @@ router.get('/faturamento-franquia',
       periodo: { dt_inicio, dt_fim },
       empresas,
       count: rows.length,
+      optimized: isHeavyQuery || isVeryHeavyQuery,
+      queryType: queryType,
+      performance: {
+        isHeavyQuery,
+        isVeryHeavyQuery,
+        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
+        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+      },
       groupedData: Object.values(groupedData)
-    }, 'Faturamento de franquias obtido com sucesso');
+    }, `Faturamento de franquias obtido com sucesso (${queryType})`);
   })
 );
 
@@ -175,11 +254,42 @@ router.get('/faturamento-mtm',
       return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
     }
 
+    // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    const query = `
+    // Otimização baseada no número de empresas e período
+    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+    const query = isVeryHeavyQuery ? `
+      SELECT
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa,
+        p.cd_pessoa,
+        p.nm_pessoa,
+        pc.cd_classificacao,
+        vfn.cd_operacao,
+        vfn.tp_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 20).join(',')})
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+        AND pc.cd_tipoclas = 5
+      ORDER BY vfn.dt_transacao DESC
+      LIMIT 50000
+    ` : `
       SELECT
         vfn.cd_empresa,
         vfn.nm_grupoempresa,
@@ -204,17 +314,38 @@ router.get('/faturamento-mtm',
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND pc.cd_tipoclas = 5
       ORDER BY vfn.dt_transacao DESC
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
+    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
+    console.log(`🔍 Faturamento-mtm: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+
     const { rows } = await pool.query(query, params);
+
+    // Totais agregados (como no contas-pagar)
+    const totals = rows.reduce((acc, row) => {
+      acc.totalBruto += parseFloat(row.vl_unitbruto || 0);
+      acc.totalLiquido += parseFloat(row.vl_unitliquido || 0);
+      acc.totalQuantidade += parseFloat(row.qt_faturado || 0);
+      return acc;
+    }, { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 });
 
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
       tipo: 'MTM',
+      totals,
       count: rows.length,
+      optimized: isHeavyQuery || isVeryHeavyQuery,
+      queryType: queryType,
+      performance: {
+        isHeavyQuery,
+        isVeryHeavyQuery,
+        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
+        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+      },
       data: rows
-    }, 'Faturamento MTM obtido com sucesso');
+    }, `Faturamento MTM obtido com sucesso (${queryType})`);
   })
 );
 
@@ -234,6 +365,7 @@ router.get('/faturamento-revenda',
       return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
     }
 
+    // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
@@ -247,7 +379,39 @@ router.get('/faturamento-revenda',
       1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410
     ];
 
-    const query = `
+    // Otimização baseada no número de empresas e período
+    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+    const query = isVeryHeavyQuery ? `
+      SELECT
+        vfn.cd_grupoempresa,
+        vfn.nm_grupoempresa,
+        p.cd_pessoa,
+        p.nm_pessoa,
+        pc.cd_tipoclas,
+        pc.cd_classificacao,
+        vfn.cd_operacao,
+        vfn.cd_nivel,
+        vfn.ds_nivel,
+        vfn.dt_transacao,
+        vfn.tp_situacao,
+        vfn.vl_unitliquido,
+        vfn.vl_unitbruto,
+        vfn.tp_operacao,
+        vfn.nr_transacao,
+        vfn.qt_faturado
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.slice(0, 30).join(',')})
+        AND pc.cd_tipoclas = 20
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+      ORDER BY vfn.dt_transacao DESC
+      LIMIT 50000
+    ` : `
       SELECT
         vfn.cd_grupoempresa,
         vfn.nm_grupoempresa,
@@ -274,17 +438,38 @@ router.get('/faturamento-revenda',
         AND pc.cd_tipoclas = 20
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
+    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
+    console.log(`🔍 Faturamento-revenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+
     const { rows } = await pool.query(query, params);
+
+    // Totais agregados (como no contas-pagar)
+    const totals = rows.reduce((acc, row) => {
+      acc.totalBruto += parseFloat(row.vl_unitbruto || 0);
+      acc.totalLiquido += parseFloat(row.vl_unitliquido || 0);
+      acc.totalQuantidade += parseFloat(row.qt_faturado || 0);
+      return acc;
+    }, { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 });
 
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
       tipo: 'Revenda',
+      totals,
       count: rows.length,
+      optimized: isHeavyQuery || isVeryHeavyQuery,
+      queryType: queryType,
+      performance: {
+        isHeavyQuery,
+        isVeryHeavyQuery,
+        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
+        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+      },
       data: rows
-    }, 'Faturamento de revenda obtido com sucesso');
+    }, `Faturamento de revenda obtido com sucesso (${queryType})`);
   })
 );
 
