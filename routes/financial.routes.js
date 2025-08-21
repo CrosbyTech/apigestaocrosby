@@ -834,4 +834,61 @@ router.get('/saldo-conta',
   })
 );
 
+/**
+ * @route GET /financial/infopessoa
+ * @desc Buscar informações de pessoas com endereços
+ * @access Public
+ * @query {cd_pessoa} - Array de códigos de pessoa
+ */
+router.get('/infopessoa',
+  sanitizeInput,
+  validateRequired(['cd_pessoa']),
+  asyncHandler(async (req, res) => {
+    const { cd_pessoa } = req.query;
+
+    // Converter para array se for string única
+    let codigosPessoa = Array.isArray(cd_pessoa) ? cd_pessoa : [cd_pessoa];
+    
+    // Validar se há códigos de pessoa
+    if (codigosPessoa.length === 0) {
+      return errorResponse(res, 'Pelo menos um código de pessoa deve ser fornecido', 400, 'MISSING_PERSON_CODE');
+    }
+
+    // Construir placeholders para a query IN
+    const placeholders = codigosPessoa.map((_, index) => `$${index + 1}`).join(',');
+
+    const query = `
+      SELECT
+        pp.cd_pessoa,
+        pe.nm_pessoa,
+        pp.nr_cpfcnpj,
+        pe.nm_logradouro,
+        pe.nr_logradouro,
+        pe.nr_caixapostal,
+        pe.ds_referencia,
+        pe.ds_complemento,
+        pe.ds_bairro,
+        pe.ds_siglalograd,
+        pe.nm_municipio,
+        pe.ds_siglaest,
+        pe.nm_pais,
+        pj.nm_fantasia
+      FROM
+        pes_pessoa pp
+      LEFT JOIN vr_pes_endereco pe ON
+        pp.cd_pessoa = pe.cd_pessoa
+      LEFT JOIN pes_pesjuridica pj ON pp.cd_pessoa = pj.cd_pessoa
+      WHERE pp.cd_pessoa IN (${placeholders})
+    `;
+
+    const { rows } = await pool.query(query, codigosPessoa);
+
+    successResponse(res, {
+      filtros: { cd_pessoa: codigosPessoa },
+      count: rows.length,
+      data: rows
+    }, 'Informações de pessoas obtidas com sucesso');
+  })
+);
+
 export default router;
