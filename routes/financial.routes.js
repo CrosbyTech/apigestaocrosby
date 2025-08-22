@@ -337,7 +337,7 @@ router.get('/contas-pagar',
 /**
  * @route GET /financial/fluxo-caixa
  * @desc Buscar fluxo de caixa (baseado na data de liquidação)
- * @access Publicgit
+ * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa}
  */
 router.get('/fluxo-caixa',
