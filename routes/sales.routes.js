@@ -5,20 +5,15 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 
 const router = express.Router();
 
-// Operações excluídas comuns para faturamento
-const EXCLUDED_OPERATIONS = [
-  1152, 590, 5153, 660, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 
-  2009, 5152, 6029, 530, 5152, 5930, 650, 5010, 600, 620, 40, 1557, 8600, 
-  5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 
-  1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 
-  1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410, 5914, 1407, 5102, 
-  520, 300, 200, 512, 1402, 1405, 1409, 5110, 5113, 17, 21, 401, 1201, 
-  1202, 1204, 1206, 1950, 1999, 2203
+// Operações permitidas para faturamento (INCLUSIVAS)
+const ALLOWED_OPERATIONS = [
+  1,2,510,511,1511,521,1521,522,960,9001,9009,9027,8750,9017,9400,
+  9401,9402,9403,9404,9005,545,546,555,548,1210,9405,1205,1101
 ];
 
 /**
  * @route GET /sales/faturamento
- * @desc Buscar dados de faturamento geral
+ * @desc Buscar dados de faturamento geral (apenas operações permitidas)
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
@@ -58,7 +53,7 @@ router.get('/faturamento',
       FROM vr_fis_nfitemprod vfn
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 30).join(',')})
+        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
       LIMIT 50000
@@ -79,14 +74,14 @@ router.get('/faturamento',
       FROM vr_fis_nfitemprod vfn
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
+        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
       ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
-    console.log(`🔍 Faturamento: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+    console.log(`🔍 Faturamento (INCLUSIVO): ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
 
     const { rows } = await pool.query(query, params);
 
@@ -101,6 +96,7 @@ router.get('/faturamento',
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
+      operacoes_permitidas: ALLOWED_OPERATIONS,
       totals,
       count: rows.length,
       optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -112,7 +108,7 @@ router.get('/faturamento',
         limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
       },
       data: rows
-    }, `Dados de faturamento obtidos com sucesso (${queryType})`);
+    }, `Dados de faturamento obtidos com sucesso (${queryType}) - Operações INCLUSIVAS`);
   })
 );
 
@@ -495,7 +491,7 @@ router.get('/ranking-vendedores',
     const excludedGroups = [1,3,4,6,7,8,9,10,31,50,51,45,75,85,99];
     const allowedOperations = [
       1,2,510,511,1511,521,1521,522,960,9001,9009,9027,8750,9017,9400,
-      9401,9402,9403,9404,9005,545,546,555,548,1210,9405,1205
+      9401,9402,9403,9404,9005,545,546,555,548,1210,9405,1205,1101
     ];
 
     const query = `
