@@ -106,7 +106,7 @@ router.get('/faturamento',
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
-      operacoes_permitidas: ALLOWED_OPERATIONS,
+      operacoes_permitidas: git,
       totals,
       count: rows.length,
       optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -776,16 +776,6 @@ router.get('/fatuvalor-lojas',
     let params = [dt_inicio, dt_fim, ...empresas];
     let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    // Operações específicas para lojas/varejo
-    const excludedOperationsLojas = [
-      522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 
-      2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 
-      5152, 5930, 650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 
-      5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 
-      1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 
-      1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410
-    ];
-
     const query = `
       SELECT
         SUM(vfn.vl_unitbruto) as total_bruto,
@@ -797,7 +787,7 @@ router.get('/fatuvalor-lojas',
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${excludedOperationsLojas.join(',')})
+        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND (pc.cd_tipoclas IS NULL OR pc.cd_tipoclas NOT IN (5, 20))
         AND p.nm_pessoa NOT LIKE 'F%CROSBY%'
@@ -812,6 +802,7 @@ router.get('/fatuvalor-lojas',
       periodo: { dt_inicio, dt_fim },
       empresas,
       tipo: 'Lojas',
+      operacoes_permitidas: ALLOWED_OPERATIONS,
       total_bruto: parseFloat(result.total_bruto || 0),
       total_liquido: parseFloat(result.total_liquido || 0),
       total_quantidade: parseFloat(result.total_quantidade || 0),
