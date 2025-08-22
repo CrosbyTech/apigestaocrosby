@@ -579,4 +579,245 @@ router.get('/ranking-vendedores',
   })
 );
 
+// ----------------------------------------------------------------------------------------------
+
+/**
+ * @route GET /sales/fatuvalor-revenda
+ * @desc Buscar apenas valores agregados de faturamento de revenda
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa[]}
+ */
+router.get('/fatuvalor-revenda',
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio = '2025-06-01', dt_fim = '2025-07-15', cd_empresa } = req.query;
+    
+    if (!cd_empresa) {
+      return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
+    }
+
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
+    const excludedOperationsRevenda = [
+      522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 
+      2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 
+      5152, 5930, 650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 
+      5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 
+      1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 
+      1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410
+    ];
+
+    const query = `
+      SELECT
+        SUM(vfn.vl_unitbruto) as total_bruto,
+        SUM(vfn.vl_unitliquido) as total_liquido,
+        SUM(vfn.qt_faturado) as total_quantidade,
+        COUNT(*) as total_transacoes
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
+        AND pc.cd_tipoclas = 20
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+    `;
+
+    console.log(`🔍 Fatuvalor-revenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
+
+    const { rows } = await pool.query(query, params);
+    const result = rows[0];
+
+    successResponse(res, {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      tipo: 'Revenda',
+      total_bruto: parseFloat(result.total_bruto || 0),
+      total_liquido: parseFloat(result.total_liquido || 0),
+      total_quantidade: parseFloat(result.total_quantidade || 0),
+      total_transacoes: parseInt(result.total_transacoes || 0)
+    }, 'Valores de faturamento de revenda obtidos com sucesso');
+  })
+);
+
+/**
+ * @route GET /sales/fatuvalor-mtm
+ * @desc Buscar apenas valores agregados de faturamento MTM
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa[]}
+ */
+router.get('/fatuvalor-mtm',
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio = '2025-07-01', dt_fim = '2025-07-15', cd_empresa } = req.query;
+    
+    if (!cd_empresa) {
+      return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
+    }
+
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
+    const query = `
+      SELECT
+        SUM(vfn.vl_unitbruto) as total_bruto,
+        SUM(vfn.vl_unitliquido) as total_liquido,
+        SUM(vfn.qt_faturado) as total_quantidade,
+        COUNT(*) as total_transacoes
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+        AND pc.cd_tipoclas = 5
+    `;
+
+    console.log(`🔍 Fatuvalor-mtm: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
+
+    const { rows } = await pool.query(query, params);
+    const result = rows[0];
+
+    successResponse(res, {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      tipo: 'MTM',
+      total_bruto: parseFloat(result.total_bruto || 0),
+      total_liquido: parseFloat(result.total_liquido || 0),
+      total_quantidade: parseFloat(result.total_quantidade || 0),
+      total_transacoes: parseInt(result.total_transacoes || 0)
+    }, 'Valores de faturamento MTM obtidos com sucesso');
+  })
+);
+
+/**
+ * @route GET /sales/fatuvalor-franquia
+ * @desc Buscar apenas valores agregados de faturamento de franquias
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa[], nm_fantasia}
+ */
+router.get('/fatuvalor-franquia',
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio = '2025-07-01', dt_fim = '2025-07-15', cd_empresa, nm_fantasia } = req.query;
+    
+    if (!cd_empresa) {
+      return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
+    }
+
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    
+    let fantasiaWhere = '';
+    if (nm_fantasia) {
+      fantasiaWhere = `AND p.nm_fantasia = $${params.length + 1}`;
+      params.push(nm_fantasia);
+    } else {
+      fantasiaWhere = `AND p.nm_fantasia LIKE 'F%CROSBY%'`;
+    }
+
+    const query = `
+      SELECT
+        SUM(vfn.vl_unitbruto) as total_bruto,
+        SUM(vfn.vl_unitliquido) as total_liquido,
+        SUM(vfn.qt_faturado) as total_quantidade,
+        COUNT(*) as total_transacoes
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+        ${fantasiaWhere}
+    `;
+
+    console.log(`🔍 Fatuvalor-franquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
+
+    const { rows } = await pool.query(query, params);
+    const result = rows[0];
+
+    successResponse(res, {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      tipo: 'Franquia',
+      total_bruto: parseFloat(result.total_bruto || 0),
+      total_liquido: parseFloat(result.total_liquido || 0),
+      total_quantidade: parseFloat(result.total_quantidade || 0),
+      total_transacoes: parseInt(result.total_transacoes || 0)
+    }, 'Valores de faturamento de franquias obtidos com sucesso');
+  })
+);
+
+/**
+ * @route GET /sales/fatuvalor-lojas
+ * @desc Buscar apenas valores agregados de faturamento de lojas (varejo)
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa[]}
+ */
+router.get('/fatuvalor-lojas',
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio = '2025-07-01', dt_fim = '2025-07-15', cd_empresa } = req.query;
+    
+    if (!cd_empresa) {
+      return errorResponse(res, 'Parâmetro cd_empresa é obrigatório', 400, 'MISSING_PARAMETER');
+    }
+
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
+    // Operações específicas para lojas/varejo
+    const excludedOperationsLojas = [
+      522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 
+      2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 
+      5152, 5930, 650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 
+      5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 
+      1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 
+      1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410
+    ];
+
+    const query = `
+      SELECT
+        SUM(vfn.vl_unitbruto) as total_bruto,
+        SUM(vfn.vl_unitliquido) as total_liquido,
+        SUM(vfn.qt_faturado) as total_quantidade,
+        COUNT(*) as total_transacoes
+      FROM vr_fis_nfitemprod vfn
+      LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
+      WHERE vfn.dt_transacao BETWEEN $1 AND $2
+        AND vfn.cd_empresa IN (${empresaPlaceholders})
+        AND vfn.cd_operacao NOT IN (${excludedOperationsLojas.join(',')})
+        AND vfn.tp_situacao NOT IN ('C', 'X')
+        AND (pc.cd_tipoclas IS NULL OR pc.cd_tipoclas NOT IN (5, 20))
+        AND p.nm_pessoa NOT LIKE 'F%CROSBY%'
+    `;
+
+    console.log(`🔍 Fatuvalor-lojas: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
+
+    const { rows } = await pool.query(query, params);
+    const result = rows[0];
+
+    successResponse(res, {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      tipo: 'Lojas',
+      total_bruto: parseFloat(result.total_bruto || 0),
+      total_liquido: parseFloat(result.total_liquido || 0),
+      total_quantidade: parseFloat(result.total_quantidade || 0),
+      total_transacoes: parseInt(result.total_transacoes || 0)
+    }, 'Valores de faturamento de lojas obtidos com sucesso');
+  })
+);
+
 export default router;
