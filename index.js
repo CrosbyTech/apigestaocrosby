@@ -160,7 +160,9 @@ app.get('/api/docs', (req, res) => {
     'Financeiro': {
       'GET /api/financial/extrato': 'Extrato bancário com filtros',
       'GET /api/financial/extrato-totvs': 'Extrato TOTVS',
-      'GET /api/financial/contas-pagar': 'Contas a pagar',
+      'GET /api/financial/contas-pagar': 'Contas a pagar (sem fornecedor/centro de custo)',
+      'GET /api/financial/centrocusto': 'Dados de centro de custo para contas a pagar',
+      'GET /api/financial/fornecedor': 'Dados de fornecedores para contas a pagar',
       'GET /api/financial/contas-receber': 'Contas a receber',
       'GET /api/financial/saldo-conta': 'Saldo de conta bancária',
       'POST /api/financial/upload-retorno': 'Upload e processamento de arquivo de retorno bancário'

@@ -492,7 +492,7 @@ router.get('/ranking-vendedores',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const limit = parseInt(req.query.limit, 10) || 100; // Limite padrão mais razoável
     const offset = parseInt(req.query.offset, 10) || 0;
     
     const dataInicio = `${inicio} 00:00:00`;
@@ -504,6 +504,7 @@ router.get('/ranking-vendedores',
       9401,9402,9403,9404,9005,545,546,555,548,1210,9405,1205,1101
     ];
 
+    // Query otimizada com LIMIT para evitar sobrecarga
     const query = `
       SELECT
         A.CD_VENDEDOR AS vendedor,
@@ -511,23 +512,50 @@ router.get('/ranking-vendedores',
         B.CD_COMPVEND,
         SUM(
           CASE
-            WHEN B.TP_OPERACAO = 'E' AND B.TP_SITUACAO = 4 THEN B.QT_SOLICITADA
+            WHEN B.TP_OPERACAO = 'E' AND B.TP_SITUACAO = 4 THEN COALESCE(B.QT_SOLICITADA, 0)
             ELSE 0
           END
         ) AS pa_entrada,
         SUM(
           CASE
-            WHEN B.TP_OPERACAO = 'S' AND B.TP_SITUACAO = 4 THEN B.QT_SOLICITADA
+            WHEN B.TP_OPERACAO = 'S' AND B.TP_SITUACAO = 4 THEN COALESCE(B.QT_SOLICITADA, 0)
             ELSE 0
           END
         ) AS pa_saida,
         COUNT(*) FILTER (WHERE B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'S') AS transacoes_saida,
         COUNT(*) FILTER (WHERE B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'E') AS transacoes_entrada,
+        COALESCE(
+          (
+            SUM(
+              CASE
+                WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'S' THEN COALESCE(B.VL_TOTAL, 0)
+                WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'E' THEN -COALESCE(B.VL_TOTAL, 0)
+                ELSE 0
+              END
+            )
+            -
+            SUM(
+              CASE
+                WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO IN ('S', 'E') THEN COALESCE(B.VL_FRETE, 0)
+                ELSE 0
+              END
+            )
+          ), 0
+        ) AS faturamento
+      FROM PES_VENDEDOR A
+      INNER JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
+      WHERE B.TP_SITUACAO = 4
+        AND B.TP_OPERACAO IN ('S', 'E')
+        AND B.CD_GRUPOEMPRESA NOT IN (${excludedGroups.join(',')})
+        AND B.CD_OPERACAO IN (${allowedOperations.join(',')})
+        AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
+      GROUP BY A.CD_VENDEDOR, A.NM_VENDEDOR, B.CD_COMPVEND
+      HAVING COALESCE(
         (
           SUM(
             CASE
-              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'S' THEN B.VL_TOTAL
-              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'E' THEN -B.VL_TOTAL
+              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'S' THEN COALESCE(B.VL_TOTAL, 0)
+              WHEN B.TP_SITUACAO = 4 AND B.TP_OPERACAO = 'E' THEN -COALESCE(B.VL_TOTAL, 0)
               ELSE 0
             END
           )
@@ -538,44 +566,126 @@ router.get('/ranking-vendedores',
               ELSE 0
             END
           )
-        ) AS faturamento
+        ), 0
+      ) > 0
+      ORDER BY faturamento DESC
+      LIMIT $3 OFFSET $4
+    `;
+
+    // Query de contagem simplificada
+    const countQuery = `
+      SELECT COUNT(DISTINCT A.CD_VENDEDOR) as total
       FROM PES_VENDEDOR A
-      JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
+      INNER JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
       WHERE B.TP_SITUACAO = 4
         AND B.TP_OPERACAO IN ('S', 'E')
         AND B.CD_GRUPOEMPRESA NOT IN (${excludedGroups.join(',')})
         AND B.CD_OPERACAO IN (${allowedOperations.join(',')})
         AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
-      GROUP BY A.CD_VENDEDOR, A.NM_VENDEDOR, B.CD_COMPVEND
-      ORDER BY faturamento DESC
-      LIMIT $3 OFFSET $4
     `;
 
-    const countQuery = `
-      SELECT COUNT(DISTINCT A.CD_VENDEDOR) as total
+    console.log(`🔍 Ranking-vendedores: período ${dataInicio} a ${dataFim}, limit: ${limit}, offset: ${offset}`);
+
+    try {
+      const [resultado, totalResult] = await Promise.all([
+        pool.query(query, [dataInicio, dataFim, limit, offset]),
+        pool.query(countQuery, [dataInicio, dataFim])
+      ]);
+
+      const total = parseInt(totalResult.rows[0]?.total || 0, 10);
+
+      successResponse(res, {
+        total,
+        limit,
+        offset,
+        hasMore: (offset + limit) < total,
+        periodo: { inicio: dataInicio, fim: dataFim },
+        data: resultado.rows
+      }, 'Ranking de vendedores obtido com sucesso');
+    } catch (error) {
+      console.error('❌ Erro na query de ranking de vendedores:', error);
+      throw error;
+    }
+  })
+);
+
+/**
+ * @route GET /sales/ranking-vendedores-simples
+ * @desc Buscar ranking de vendedores simplificado (versão de teste)
+ * @access Public
+ * @query {inicio, fim}
+ */
+router.get('/ranking-vendedores-simples',
+  sanitizeInput,
+  validateRequired(['inicio', 'fim']),
+  validateDateFormat(['inicio', 'fim']),
+  asyncHandler(async (req, res) => {
+    const { inicio, fim } = req.query;
+    
+    const dataInicio = `${inicio} 00:00:00`;
+    const dataFim = `${fim} 23:59:59`;
+
+    // Query simplificada para teste
+    const query = `
+      SELECT
+        A.CD_VENDEDOR AS vendedor,
+        A.NM_VENDEDOR AS nome_vendedor,
+        COUNT(*) as total_transacoes,
+        SUM(COALESCE(B.VL_TOTAL, 0)) as faturamento_total
       FROM PES_VENDEDOR A
-      JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
+      INNER JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
       WHERE B.TP_SITUACAO = 4
-        AND B.TP_OPERACAO IN ('S', 'E')
-        AND B.CD_OPERACAO IN (${allowedOperations.join(',')})
+        AND B.TP_OPERACAO = 'S'
         AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
+      GROUP BY A.CD_VENDEDOR, A.NM_VENDEDOR
+      ORDER BY faturamento_total DESC
+      LIMIT 50
     `;
 
-    const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dataInicio, dataFim, limit, offset]),
-      pool.query(countQuery, [dataInicio, dataFim])
-    ]);
+    console.log(`🔍 Ranking-vendedores-simples: período ${dataInicio} a ${dataFim}`);
 
-    const total = parseInt(totalResult.rows[0].total, 10);
+    try {
+      const resultado = await pool.query(query, [dataInicio, dataFim]);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      periodo: { inicio: dataInicio, fim: dataFim },
-      data: resultado.rows
-    }, 'Ranking de vendedores obtido com sucesso');
+      successResponse(res, {
+        periodo: { inicio: dataInicio, fim: dataFim },
+        count: resultado.rows.length,
+        data: resultado.rows
+      }, 'Ranking de vendedores simplificado obtido com sucesso');
+    } catch (error) {
+      console.error('❌ Erro na query de ranking de vendedores simplificado:', error);
+      throw error;
+    }
+  })
+);
+
+/**
+ * @route GET /sales/ranking-vendedores-test
+ * @desc Teste básico de conexão e query simples
+ * @access Public
+ */
+router.get('/ranking-vendedores-test',
+  asyncHandler(async (req, res) => {
+    try {
+      // Teste simples de conexão
+      const testQuery = `
+        SELECT 
+          COUNT(*) as total_vendedores
+        FROM PES_VENDEDOR
+        LIMIT 1
+      `;
+      
+      const resultado = await pool.query(testQuery);
+      
+      successResponse(res, {
+        message: 'Teste de conexão bem-sucedido',
+        total_vendedores: resultado.rows[0]?.total_vendedores || 0,
+        timestamp: new Date().toISOString()
+      }, 'Teste de ranking de vendedores executado com sucesso');
+    } catch (error) {
+      console.error('❌ Erro no teste de ranking de vendedores:', error);
+      throw error;
+    }
   })
 );
 
