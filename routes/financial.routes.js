@@ -322,209 +322,107 @@ router.get('/contas-pagar',
 
 /**
  * @route GET /financial/centrocusto
- * @desc Buscar dados de centro de custo para contas a pagar
+ * @desc Buscar descrições de centros de custo baseado nos códigos
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {cd_ccusto[]} - Array de códigos de centros de custo
  */
 router.get('/centrocusto',
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(['cd_ccusto']),
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const { cd_ccusto } = req.query;
 
-    // Seguir o padrão de performance do contas a pagar
-    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    // Converter para array se for string única
+    let centrosCusto = Array.isArray(cd_ccusto) ? cd_ccusto : [cd_ccusto];
+    
+    // Remover valores vazios ou nulos
+    centrosCusto = centrosCusto.filter(c => c && c !== '' && c !== 'null' && c !== 'undefined');
+    
+    if (centrosCusto.length === 0) {
+      return errorResponse(res, 'Pelo menos um código de centro de custo deve ser fornecido', 400, 'MISSING_PARAMETER');
+    }
 
-    // Otimização baseada no número de empresas e período
-    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+    // Criar placeholders para a query
+    let params = [...centrosCusto];
+    let ccustoPlaceholders = centrosCusto.map((_, idx) => `$${idx + 1}`).join(',');
 
-    const query = isVeryHeavyQuery ? `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        vfd.cd_ccusto,
-        gc.ds_ccusto,
-        vfd.vl_rateio,
-        fd.dt_vencimento,
-        fd.vl_duplicata,
-        fd.tp_situacao
-      FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-        AND fd.cd_empresa = vfd.cd_empresa 
-        AND fd.cd_fornecedor = vfd.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-        AND vfd.cd_ccusto IS NOT NULL
-      ORDER BY fd.dt_vencimento DESC
-      LIMIT 50000
-    ` : `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        vfd.cd_ccusto,
-        gc.ds_ccusto,
-        vfd.vl_rateio,
-        fd.dt_vencimento,
-        fd.vl_duplicata,
-        fd.tp_situacao
-      FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-        AND fd.cd_empresa = vfd.cd_empresa 
-        AND fd.cd_fornecedor = vfd.cd_fornecedor
-      LEFT JOIN gec_ccusto gc ON vfd.cd_ccusto = gc.cd_ccusto
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-        AND vfd.cd_ccusto IS NOT NULL
-      ORDER BY fd.dt_vencimento DESC
-      ${isHeavyQuery ? 'LIMIT 100000' : ''}
+    // Query simples para buscar descrições dos centros de custo
+    const query = `
+      SELECT 
+        cd_ccusto,
+        ds_ccusto
+      FROM gec_ccusto 
+      WHERE cd_ccusto IN (${ccustoPlaceholders})
+      ORDER BY ds_ccusto
     `;
 
-    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
-    console.log(`🔍 Centro-custo: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+    console.log(`🔍 Centro-custo: buscando ${centrosCusto.length} centros de custo`);
 
-    const { rows } = await pool.query(query, params);
+    try {
+      const { rows } = await pool.query(query, params);
 
-    // Totais agregados por centro de custo
-    const totalsByCCusto = rows.reduce((acc, row) => {
-      const ccusto = row.cd_ccusto || 'Sem Centro de Custo';
-      if (!acc[ccusto]) {
-        acc[ccusto] = {
-          cd_ccusto: row.cd_ccusto,
-          ds_ccusto: row.ds_ccusto,
-          total_rateio: 0,
-          total_duplicatas: 0,
-          count: 0
-        };
-      }
-      acc[ccusto].total_rateio += parseFloat(row.vl_rateio || 0);
-      acc[ccusto].total_duplicatas += parseFloat(row.vl_duplicata || 0);
-      acc[ccusto].count += 1;
-      return acc;
-    }, {});
-
-    successResponse(res, {
-      periodo: { dt_inicio, dt_fim },
-      empresas,
-      totalsByCCusto: Object.values(totalsByCCusto),
-      count: rows.length,
-      optimized: isHeavyQuery || isVeryHeavyQuery,
-      queryType: queryType,
-      performance: {
-        isHeavyQuery,
-        isVeryHeavyQuery,
-        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
-        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
-      },
-      data: rows
-    }, `Dados de centro de custo obtidos com sucesso (${queryType})`);
+      successResponse(res, {
+        centros_custo_buscados: centrosCusto,
+        centros_custo_encontrados: rows.length,
+        data: rows
+      }, 'Descrições de centros de custo obtidas com sucesso');
+    } catch (error) {
+      console.error('❌ Erro na query de centros de custo:', error);
+      throw error;
+    }
   })
 );
 
 /**
  * @route GET /financial/fornecedor
- * @desc Buscar dados de fornecedores para contas a pagar
+ * @desc Buscar nomes de fornecedores baseado nos códigos do contas a pagar
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {cd_fornecedor[]} - Array de códigos de fornecedores
  */
 router.get('/fornecedor',
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(['cd_fornecedor']),
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const { cd_fornecedor } = req.query;
 
-    // Seguir o padrão de performance do contas a pagar
-    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    // Converter para array se for string única
+    let fornecedores = Array.isArray(cd_fornecedor) ? cd_fornecedor : [cd_fornecedor];
+    
+    // Remover valores vazios ou nulos
+    fornecedores = fornecedores.filter(f => f && f !== '' && f !== 'null' && f !== 'undefined');
+    
+    if (fornecedores.length === 0) {
+      return errorResponse(res, 'Pelo menos um código de fornecedor deve ser fornecido', 400, 'MISSING_PARAMETER');
+    }
 
-    // Otimização baseada no número de empresas e período
-    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+    // Criar placeholders para a query
+    let params = [...fornecedores];
+    let fornecedorPlaceholders = fornecedores.map((_, idx) => `$${idx + 1}`).join(',');
 
-    const query = isVeryHeavyQuery ? `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        vpf.nm_fornecedor,
-        fd.nr_duplicata,
-        fd.dt_vencimento,
-        fd.vl_duplicata,
-        fd.vl_pago,
-        fd.tp_situacao,
-        fd.dt_emissao,
-        fd.dt_liq
-      FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_vencimento DESC
-      LIMIT 50000
-    ` : `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        vpf.nm_fornecedor,
-        fd.nr_duplicata,
-        fd.dt_vencimento,
-        fd.vl_duplicata,
-        fd.vl_pago,
-        fd.tp_situacao,
-        fd.dt_emissao,
-        fd.dt_liq
-      FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_pes_fornecedor vpf ON fd.cd_fornecedor = vpf.cd_fornecedor
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_vencimento DESC
-      ${isHeavyQuery ? 'LIMIT 100000' : ''}
+    // Query simples para buscar nomes dos fornecedores
+    const query = `
+      SELECT 
+        cd_fornecedor,
+        nm_fornecedor
+      FROM vr_pes_fornecedor 
+      WHERE cd_fornecedor IN (${fornecedorPlaceholders})
+      ORDER BY nm_fornecedor
     `;
 
-    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
-    console.log(`🔍 Fornecedor: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+    console.log(`🔍 Fornecedor: buscando ${fornecedores.length} fornecedores`);
 
-    const { rows } = await pool.query(query, params);
+    try {
+      const { rows } = await pool.query(query, params);
 
-    // Totais agregados por fornecedor
-    const totalsByFornecedor = rows.reduce((acc, row) => {
-      const fornecedor = row.cd_fornecedor || 'Sem Fornecedor';
-      if (!acc[fornecedor]) {
-        acc[fornecedor] = {
-          cd_fornecedor: row.cd_fornecedor,
-          nm_fornecedor: row.nm_fornecedor,
-          total_duplicatas: 0,
-          total_pago: 0,
-          count: 0
-        };
-      }
-      acc[fornecedor].total_duplicatas += parseFloat(row.vl_duplicata || 0);
-      acc[fornecedor].total_pago += parseFloat(row.vl_pago || 0);
-      acc[fornecedor].count += 1;
-      return acc;
-    }, {});
-
-    successResponse(res, {
-      periodo: { dt_inicio, dt_fim },
-      empresas,
-      totalsByFornecedor: Object.values(totalsByFornecedor),
-      count: rows.length,
-      optimized: isHeavyQuery || isVeryHeavyQuery,
-      queryType: queryType,
-      performance: {
-        isHeavyQuery,
-        isVeryHeavyQuery,
-        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
-        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
-      },
-      data: rows
-    }, `Dados de fornecedores obtidos com sucesso (${queryType})`);
+      successResponse(res, {
+        fornecedores_buscados: fornecedores,
+        fornecedores_encontrados: rows.length,
+        data: rows
+      }, 'Nomes de fornecedores obtidos com sucesso');
+    } catch (error) {
+      console.error('❌ Erro na query de fornecedores:', error);
+      throw error;
+    }
   })
 );
 
