@@ -376,6 +376,59 @@ router.get('/centrocusto',
 );
 
 /**
+ * @route GET /financial/despesa
+ * @desc Buscar descrições de itens de despesa baseado nos códigos
+ * @access Public
+ * @query {cd_despesaitem[]} - Array de códigos de itens de despesa
+ */
+router.get('/despesa',
+  sanitizeInput,
+  validateRequired(['cd_despesaitem']),
+  asyncHandler(async (req, res) => {
+    const { cd_despesaitem } = req.query;
+
+    // Converter para array se for string única
+    let despesas = Array.isArray(cd_despesaitem) ? cd_despesaitem : [cd_despesaitem];
+    
+    // Remover valores vazios ou nulos
+    despesas = despesas.filter(d => d && d !== '' && d !== 'null' && d !== 'undefined');
+    
+    if (despesas.length === 0) {
+      return errorResponse(res, 'Pelo menos um código de item de despesa deve ser fornecido', 400, 'MISSING_PARAMETER');
+    }
+
+    // Criar placeholders para a query
+    let params = [...despesas];
+    let despesaPlaceholders = despesas.map((_, idx) => `$${idx + 1}`).join(',');
+
+    // Query simples para buscar descrições dos itens de despesa
+    const query = `
+      SELECT
+        fd.cd_despesaitem,
+        fd.ds_despesaitem
+      FROM fcp_despesaitem fd
+      WHERE fd.cd_despesaitem IN (${despesaPlaceholders})
+      ORDER BY fd.ds_despesaitem
+    `;
+
+    console.log(`🔍 Despesa: buscando ${despesas.length} itens de despesa`);
+
+    try {
+      const { rows } = await pool.query(query, params);
+
+      successResponse(res, {
+        despesas_buscadas: despesas,
+        despesas_encontradas: rows.length,
+        data: rows
+      }, 'Descrições de itens de despesa obtidas com sucesso');
+    } catch (error) {
+      console.error('❌ Erro na query de itens de despesa:', error);
+      throw error;
+    }
+  })
+);
+
+/**
  * @route GET /financial/fornecedor
  * @desc Buscar nomes de fornecedores baseado nos códigos do contas a pagar
  * @access Public

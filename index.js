@@ -163,6 +163,7 @@ app.get('/api/docs', (req, res) => {
       'GET /api/financial/contas-pagar': 'Contas a pagar (sem fornecedor/centro de custo)',
       'GET /api/financial/centrocusto': 'Buscar descrições de centros de custo por códigos',
       'GET /api/financial/fornecedor': 'Buscar nomes de fornecedores por códigos',
+      'GET /api/financial/despesa': 'Buscar descrições de itens de despesa por códigos',
       'GET /api/financial/contas-receber': 'Contas a receber',
       'GET /api/financial/saldo-conta': 'Saldo de conta bancária',
       'POST /api/financial/upload-retorno': 'Upload e processamento de arquivo de retorno bancário'
