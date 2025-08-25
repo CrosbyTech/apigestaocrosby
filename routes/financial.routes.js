@@ -247,7 +247,8 @@ router.get('/contas-pagar',
         vfd.vl_rateio,
         fd.in_aceite,
         vfd.cd_despesaitem,
-        fd.tp_previsaoreal
+        fd.tp_previsaoreal,
+        fd.cd_ccusto
       FROM vr_fcp_duplicatai fd
       LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
         AND fd.cd_empresa = vfd.cd_empresa 
@@ -277,7 +278,8 @@ router.get('/contas-pagar',
         vfd.vl_rateio,
         fd.in_aceite,
         vfd.cd_despesaitem,
-        fd.tp_previsaoreal
+        fd.tp_previsaoreal,
+        fd.cd_ccusto
       FROM vr_fcp_duplicatai fd
       LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
         AND fd.cd_empresa = vfd.cd_empresa 
