@@ -524,8 +524,7 @@ router.get('/fluxo-caixa',
         fd.vl_rateio,
         fd.in_aceite,
         fd.cd_despesaitem,
-        fd.cd_ccusto,
-        fd.nm_despesaitem
+        fd.cd_ccusto
       FROM vr_fcp_despduplicatai fd
       WHERE fd.dt_liq BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
@@ -552,8 +551,7 @@ router.get('/fluxo-caixa',
         fd.vl_rateio,
         fd.in_aceite,
         fd.cd_despesaitem,
-        fd.cd_ccusto,
-        fd.nm_despesaitem
+        fd.cd_ccusto
       FROM vr_fcp_despduplicatai fd
       WHERE fd.dt_liq BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
