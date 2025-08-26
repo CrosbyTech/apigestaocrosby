@@ -682,8 +682,9 @@ router.get('/fluxocaixa-recebimento',
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const limit = parseInt(req.query.limit, 10) || 1000;
     const offset = parseInt(req.query.offset, 10) || 0;
+    const limitPlusOne = limit + 1;
 
     const query = `
       SELECT
@@ -721,28 +722,20 @@ router.get('/fluxocaixa-recebimento',
       ORDER BY vff.dt_liq DESC
       LIMIT $4 OFFSET $5
     `;
-
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM vr_fcr_faturai vff
-      WHERE vff.dt_liq BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
-    `;
-
-    const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
-    ]);
-
-    const total = parseInt(totalResult.rows[0].total, 10);
+    
+    // Buscar limit+1 para calcular hasMore sem COUNT pesado
+    const resultado = await executeQueryWithRetry(query, [dt_inicio, dt_fim, cd_empresa, limitPlusOne, offset]);
+    const rows = resultado.rows || [];
+    const hasMore = rows.length > limit;
+    const dataRows = hasMore ? rows.slice(0, limit) : rows;
 
     successResponse(res, {
-      total,
+      total: null,
       limit,
       offset,
-      hasMore: (offset + limit) < total,
+      hasMore,
       filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
+      data: dataRows
     }, 'Fluxo de caixa de recebimentos obtido com sucesso');
   })
 );
