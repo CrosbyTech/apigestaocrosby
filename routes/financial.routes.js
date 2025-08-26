@@ -670,6 +670,84 @@ router.get('/contas-receber',
 );
 
 /**
+ * @route GET /financial/fluxocaixa-recebimento
+ * @desc Buscar recebimentos (fluxo de caixa) filtrando por data de liquidação (dt_liq)
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ */
+router.get('/fluxocaixa-recebimento',
+  sanitizeInput,
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validatePagination,
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    const query = `
+      SELECT
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nm_cliente,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.dt_cancelamento,
+        vff.dt_liq,
+        vff.tp_cobranca,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_inclusao,
+        vff.tp_baixa,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_abatimento,
+        vff.vl_pago,
+        vff.vl_desconto,
+        vff.vl_liquido,
+        vff.vl_acrescimo,
+        vff.vl_multa,
+        vff.nr_portador,
+        vff.vl_renegociacao,
+        vff.vl_corrigido,
+        vff.vl_juros,
+        vff.pr_juromes,
+        vff.pr_multa
+      FROM vr_fcr_faturai vff
+      WHERE vff.dt_liq BETWEEN $1 AND $2
+        AND vff.cd_empresa = $3
+      ORDER BY vff.dt_liq DESC
+      LIMIT $4 OFFSET $5
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM vr_fcr_faturai vff
+      WHERE vff.dt_liq BETWEEN $1 AND $2
+        AND vff.cd_empresa = $3
+    `;
+
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    successResponse(res, {
+      total,
+      limit,
+      offset,
+      hasMore: (offset + limit) < total,
+      filtros: { dt_inicio, dt_fim, cd_empresa },
+      data: resultado.rows
+    }, 'Fluxo de caixa de recebimentos obtido com sucesso');
+  })
+);
+
+/**
  * @route GET /financial/nfmanifestacao
  * @desc Buscar notas fiscais de manifestação
  * @access Public
