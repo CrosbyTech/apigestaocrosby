@@ -286,7 +286,7 @@ router.get('/contas-pagar',
         AND fd.cd_fornecedor = vfd.cd_fornecedor
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_vencimento DESC
+      ORDER BY fd.dt_liq DESC
       ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
@@ -319,6 +319,124 @@ router.get('/contas-pagar',
       },
       data: rows
     }, `Contas a pagar obtidas com sucesso (${queryType})`);
+  })
+);
+
+/**
+ * @route GET /financial/fluxocaixa-saida
+ * @desc Buscar fluxo de caixa de saída (baseado na data de liquidação)
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ */
+router.get('/fluxocaixa-saida',
+  sanitizeInput,
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+
+    // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+
+    // Otimização baseada no número de empresas e período
+    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+    const query = isVeryHeavyQuery ? `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        vfd.vl_rateio,
+        fd.in_aceite,
+        vfd.cd_despesaitem,
+        fd.tp_previsaoreal,
+        vfd.cd_ccusto
+      FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+        AND fd.cd_empresa = vfd.cd_empresa 
+        AND fd.cd_fornecedor = vfd.cd_fornecedor
+      WHERE fd.dt_liq BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_liq DESC
+      LIMIT 50000
+    ` : `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        vfd.vl_rateio,
+        fd.in_aceite,
+        vfd.cd_despesaitem,
+        fd.tp_previsaoreal,
+        vfd.cd_ccusto
+      FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+        AND fd.cd_empresa = vfd.cd_empresa 
+        AND fd.cd_fornecedor = vfd.cd_fornecedor
+      WHERE fd.dt_liq BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY fd.dt_liq DESC
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
+    `;
+
+    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
+    console.log(`🔍 Fluxocaixa-saida: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+
+    const { rows } = await pool.query(query, params);
+
+    // Totais agregados (como no fluxo de caixa)
+    const totals = rows.reduce((acc, row) => {
+      acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
+      acc.totalPago += parseFloat(row.vl_pago || 0);
+      acc.totalJuros += parseFloat(row.vl_juros || 0);
+      acc.totalDesconto += parseFloat(row.vl_desconto || 0);
+      return acc;
+    }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
+
+    successResponse(res, {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      totals,
+      count: rows.length,
+      optimized: isHeavyQuery || isVeryHeavyQuery,
+      queryType: queryType,
+      performance: {
+        isHeavyQuery,
+        isVeryHeavyQuery,
+        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
+        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+      },
+      data: rows
+    }, `Fluxo de caixa de saída obtido com sucesso (${queryType})`);
   })
 );
 
@@ -481,115 +599,7 @@ router.get('/fornecedor',
   })
 );
 
-/**
- * @route GET /financial/fluxo-caixa
- * @desc Buscar fluxo de caixa (baseado na data de liquidação)
- * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa}
- */
-router.get('/fluxo-caixa',
-  sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
-  asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
-    // Seguir o padrão de performance do contas a pagar: múltiplas empresas, sem paginação/COUNT
-    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
-
-    // Otimização baseada no número de empresas e período
-    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
-
-    const query = isVeryHeavyQuery ? `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.vl_rateio,
-        fd.in_aceite,
-        fd.cd_despesaitem,
-        fd.cd_ccusto
-      FROM vr_fcp_despduplicatai fd
-      WHERE fd.dt_liq BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_liq DESC
-      LIMIT 50000
-    ` : `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.vl_rateio,
-        fd.in_aceite,
-        fd.cd_despesaitem,
-        fd.cd_ccusto
-      FROM vr_fcp_despduplicatai fd
-      WHERE fd.dt_liq BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_liq DESC
-      ${isHeavyQuery ? 'LIMIT 100000' : ''}
-    `;
-
-    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
-    console.log(`🔍 Fluxo-caixa: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
-
-    const { rows } = await pool.query(query, params);
-
-    // Totais agregados (como no contas a pagar)
-    const totals = rows.reduce((acc, row) => {
-      acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
-      acc.totalPago += parseFloat(row.vl_pago || 0);
-      acc.totalJuros += parseFloat(row.vl_juros || 0);
-      acc.totalDesconto += parseFloat(row.vl_desconto || 0);
-      return acc;
-    }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
-
-    successResponse(res, {
-      periodo: { dt_inicio, dt_fim },
-      empresas,
-      totals,
-      count: rows.length,
-      optimized: isHeavyQuery || isVeryHeavyQuery,
-      queryType: queryType,
-      performance: {
-        isHeavyQuery,
-        isVeryHeavyQuery,
-        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
-        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
-      },
-      data: rows
-    }, `Fluxo de caixa obtido com sucesso (${queryType})`);
-  })
-);
 
 /**
  * @route GET /financial/contas-receber
@@ -670,12 +680,12 @@ router.get('/contas-receber',
 );
 
 /**
- * @route GET /financial/fluxocaixa-recebimento
- * @desc Buscar recebimentos (fluxo de caixa) filtrando por data de liquidação (dt_liq)
+ * @route GET /financial/fluxocaixa-entradas
+ * @desc Buscar fluxo de caixa de entradas (baseado na data de liquidação)
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/fluxocaixa-recebimento',
+router.get('/fluxocaixa-entradas',
   sanitizeInput,
   validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
@@ -721,7 +731,7 @@ router.get('/fluxocaixa-recebimento',
       ORDER BY vff.dt_liq DESC
       LIMIT $4 OFFSET $5
     `;
-    
+
     const countQuery = `
       SELECT COUNT(*) as total
       FROM vr_fcr_faturai vff
@@ -743,9 +753,11 @@ router.get('/fluxocaixa-recebimento',
       hasMore: (offset + limit) < total,
       filtros: { dt_inicio, dt_fim, cd_empresa },
       data: resultado.rows
-    }, 'Fluxo de caixa de recebimentos obtido com sucesso');
+    }, 'Fluxo de caixa de entradas obtido com sucesso');
   })
 );
+
+
 
 /**
  * @route GET /financial/nfmanifestacao
