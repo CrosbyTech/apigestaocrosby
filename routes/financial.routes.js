@@ -757,6 +757,69 @@ router.get('/fluxocaixa-entradas',
   })
 );
 
+/**
+ * @route GET /financial/credev-adiantamento
+ * @desc Buscar saldos de adiantamentos e crediários
+ * @access Public
+ */
+router.get('/credev-adiantamento',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const query = `
+      select
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        pp.nm_fantasia,
+        b.ds_titular,
+        case
+          a.tp_documento
+          when 10 then 'ADIANTAMENTO'
+          when 20 then 'CREDEV'
+          else a.tp_documento::text
+        end as tp_documento,
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) as vl_saldo,
+        MAX(case when a.tp_operacao = 'C' then a.dt_movim end) as dt_ultimocredito
+      from
+        vr_fcc_ctapes b
+      join vr_fcc_mov a
+        on
+        a.nr_ctapes = b.nr_ctapes
+      join pes_pesjuridica pp on
+        b.cd_pessoa = pp.cd_pessoa
+      where
+        a.in_estorno = 'F'
+        and a.dt_movim <= now()
+        and b.tp_manutencao = 2
+        and pp.nm_fantasia like 'F%-%CROSBY%'
+      group by
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        b.ds_titular,
+        a.tp_documento,
+        pp.nm_fantasia
+      having
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) <> 0
+      order by
+        vl_saldo desc
+    `;
+
+    const { rows } = await pool.query(query);
+
+    successResponse(res, {
+      count: rows.length,
+      data: rows
+    }, 'Adiantamentos e crediários obtidos com sucesso');
+  })
+);
+
 
 
 /**
