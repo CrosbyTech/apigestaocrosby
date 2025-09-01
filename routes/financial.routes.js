@@ -806,7 +806,7 @@ router.get('/credev-adiantamento',
         SUM(case
             when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
             else -coalesce(a.vl_lancto, 0)
-          end) <> 0
+          end) > 0
       order by
         vl_saldo desc
     `;
