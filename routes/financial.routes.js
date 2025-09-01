@@ -1178,4 +1178,50 @@ router.get('/infopessoa',
   })
 );
 
+/**
+ * @route GET /financial/auditor-credev
+ * @desc Buscar movimentações financeiras para auditoria de crédito e débito
+ * @access Public
+ * @query {nr_ctapes, dt_movim_ini, dt_movim_fim}
+ */
+router.get('/auditor-credev',
+  sanitizeInput,
+  validateRequired(['nr_ctapes', 'dt_movim_ini', 'dt_movim_fim']),
+  validateDateFormat(['dt_movim_ini', 'dt_movim_fim']),
+  asyncHandler(async (req, res) => {
+    const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
+
+    const query = `
+      SELECT
+        fm.cd_empresa,
+        fm.nr_ctapes,
+        fm.dt_movim,
+        fm.ds_doc,
+        fm.dt_liq,
+        fm.in_estorno,
+        fm.tp_operacao,
+        fm.ds_aux,
+        fm.vl_lancto,
+        fm.dt_movim,
+        fm.cd_operador,
+        au.nm_usuario
+      FROM
+        fcc_mov fm
+      LEFT JOIN adm_usuario au ON fm.cd_operador = au.cd_usuario
+      WHERE
+        fm.nr_ctapes = $1
+        AND fm.dt_movim BETWEEN $2 AND $3
+      ORDER BY fm.dt_movim DESC, fm.nr_ctapes
+    `;
+
+    const { rows } = await pool.query(query, [nr_ctapes, dt_movim_ini, dt_movim_fim]);
+
+    successResponse(res, {
+      filtros: { nr_ctapes, dt_movim_ini, dt_movim_fim },
+      count: rows.length,
+      data: rows
+    }, 'Dados de auditoria de crédito e débito obtidos com sucesso');
+  })
+);
+
 export default router;
