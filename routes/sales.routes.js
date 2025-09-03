@@ -420,7 +420,7 @@ router.get('/faturamento-revenda',
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.slice(0, 30).join(',')})
-        AND pc.cd_tipoclas = 20
+        AND pc.cd_tipoclas in (20,7)
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
       LIMIT 50000
@@ -449,7 +449,7 @@ router.get('/faturamento-revenda',
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
-        AND pc.cd_tipoclas = 20
+        AND pc.cd_tipoclas in (20,7)
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
       ${isHeavyQuery ? 'LIMIT 100000' : ''}
