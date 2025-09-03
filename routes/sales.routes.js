@@ -59,7 +59,8 @@ router.get('/faturamento',
         vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
@@ -80,7 +81,8 @@ router.get('/faturamento',
         vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
@@ -169,7 +171,8 @@ router.get('/faturamento-franquia',
         vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
@@ -193,7 +196,8 @@ router.get('/faturamento-franquia',
         vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
@@ -284,7 +288,8 @@ router.get('/faturamento-mtm',
         vfn.vl_unitliquido,
         vfn.vl_unitbruto,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
@@ -310,7 +315,8 @@ router.get('/faturamento-mtm',
         vfn.vl_unitliquido,
         vfn.vl_unitbruto,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
@@ -406,7 +412,8 @@ router.get('/faturamento-revenda',
         vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
@@ -434,7 +441,8 @@ router.get('/faturamento-revenda',
         vfn.vl_unitbruto,
         vfn.tp_operacao,
         vfn.nr_transacao,
-        vfn.qt_faturado
+        vfn.qt_faturado,
+        vfn.vl_freterat
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa

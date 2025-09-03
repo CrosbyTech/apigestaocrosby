@@ -224,7 +224,7 @@ router.get('/franquias-credev',
   sanitizeInput,
   validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim } = req.query;
+    const { dt_inicio, dt_fim, cd_cliente } = req.query;
     let where = [];
     let params = [];
     let idx = 1;
@@ -235,6 +235,16 @@ router.get('/franquias-credev',
     } else {
       // Período padrão se não informado
       where.push(`f.dt_emissao BETWEEN '2025-06-10' AND '2025-06-10'`);
+    }
+
+    // Filtro opcional por lista de clientes (IN)
+    if (cd_cliente) {
+      const clientes = Array.isArray(cd_cliente) ? cd_cliente : [cd_cliente];
+      if (clientes.length > 0) {
+        const placeholders = clientes.map(() => `$${idx++}`).join(',');
+        where.push(`f.cd_cliente IN (${placeholders})`);
+        params.push(...clientes);
+      }
     }
 
     where.push(`p.nm_fantasia LIKE 'F%CROSBY%'`);
