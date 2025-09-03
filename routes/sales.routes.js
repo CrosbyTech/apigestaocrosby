@@ -394,8 +394,7 @@ router.get('/faturamento-revenda',
       5152, 5930, 650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 
       5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 
       1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 
-      1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410,1926,1903,1122,1128,1913,
-      8160
+      1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410,1926,1903,1122,1128,1913,8160
     ];
 
     // Otimização baseada no número de empresas e período
@@ -428,6 +427,7 @@ router.get('/faturamento-revenda',
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.slice(0, 30).join(',')})
         AND pc.cd_tipoclas in (20,7)
+        AND pc.cd_classificacao::integer in (3,1)
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
       LIMIT 50000
@@ -457,6 +457,7 @@ router.get('/faturamento-revenda',
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
         AND pc.cd_tipoclas in (20,7)
+        AND pc.cd_classificacao::integer in (3,1)
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
       ${isHeavyQuery ? 'LIMIT 100000' : ''}
