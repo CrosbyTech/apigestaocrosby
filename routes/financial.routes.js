@@ -680,6 +680,89 @@ router.get('/contas-receber',
 );
 
 /**
+ * @route GET /financial/contas-receberemiss
+ * @desc Buscar contas a receber por data de emissão
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ */
+router.get('/contas-receberemiss',
+  sanitizeInput,
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validatePagination,
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Suporte a múltiplas empresas (IN (...))
+    const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    const empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    const idxAfterEmpresas = 3 + empresas.length; // próximo índice após empresas
+
+    const query = `
+      SELECT
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nm_cliente,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.dt_cancelamento,
+        vff.dt_liq,
+        vff.tp_cobranca,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_inclusao,
+        vff.tp_baixa,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_abatimento,
+        vff.vl_pago,
+        vff.vl_desconto,
+        vff.vl_liquido,
+        vff.vl_acrescimo,
+        vff.vl_multa,
+        vff.nr_portador,
+        vff.vl_renegociacao,
+        vff.vl_corrigido,
+        vff.vl_juros,
+        vff.pr_juromes,
+        vff.pr_multa
+      FROM vr_fcr_faturai vff
+      WHERE vff.dt_emissao BETWEEN $1 AND $2
+        AND vff.cd_empresa IN (${empresaPlaceholders})
+      ORDER BY vff.dt_emissao DESC
+      LIMIT $${idxAfterEmpresas} OFFSET $${idxAfterEmpresas + 1}
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM vr_fcr_faturai vff
+      WHERE vff.dt_emissao BETWEEN $1 AND $2
+        AND vff.cd_empresa IN (${empresaPlaceholders})
+    `;
+
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, ...empresas, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim, ...empresas])
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    successResponse(res, {
+      total,
+      limit,
+      offset,
+      hasMore: (offset + limit) < total,
+      filtros: { dt_inicio, dt_fim, cd_empresa },
+      data: resultado.rows
+    }, 'Contas a receber por emissão obtidas com sucesso');
+  })
+);
+
+/**
  * @route GET /financial/fluxocaixa-entradas
  * @desc Buscar fluxo de caixa de entradas (baseado na data de liquidação)
  * @access Public
