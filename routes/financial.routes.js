@@ -695,11 +695,6 @@ router.get('/contas-receberemiss',
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    // Suporte a múltiplas empresas (IN (...))
-    const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    const empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
-    const idxAfterEmpresas = 3 + empresas.length; // próximo índice após empresas
-
     const query = `
       SELECT
         vff.cd_empresa,
@@ -732,21 +727,21 @@ router.get('/contas-receberemiss',
         vff.pr_multa
       FROM vr_fcr_faturai vff
       WHERE vff.dt_emissao BETWEEN $1 AND $2
-        AND vff.cd_empresa IN (${empresaPlaceholders})
+        AND vff.cd_empresa = $3
       ORDER BY vff.dt_emissao DESC
-      LIMIT $${idxAfterEmpresas} OFFSET $${idxAfterEmpresas + 1}
+      LIMIT $4 OFFSET $5
     `;
 
     const countQuery = `
       SELECT COUNT(*) as total
       FROM vr_fcr_faturai vff
       WHERE vff.dt_emissao BETWEEN $1 AND $2
-        AND vff.cd_empresa IN (${empresaPlaceholders})
+        AND vff.cd_empresa = $3
     `;
 
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, ...empresas, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, ...empresas])
+      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
