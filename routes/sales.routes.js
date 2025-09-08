@@ -63,7 +63,6 @@ router.get('/faturamento',
         vfn.tp_situacao,
         vfn.vl_unitliquido,
         vfn.vl_unitbruto,
-        vfn.vl_icms,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado,
@@ -86,7 +85,6 @@ router.get('/faturamento',
         vfn.tp_situacao,
         vfn.vl_unitliquido,
         vfn.vl_unitbruto,
-        vfn.vl_icms,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado,
@@ -177,7 +175,6 @@ router.get('/faturamento-franquia',
         vfn.tp_situacao,
         vfn.vl_unitliquido,
         vfn.vl_unitbruto,
-        vfn.vl_icms,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado,
@@ -203,7 +200,6 @@ router.get('/faturamento-franquia',
         vfn.tp_situacao,
         vfn.vl_unitliquido,
         vfn.vl_unitbruto,
-        vfn.vl_icms,
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado,
@@ -757,8 +753,8 @@ router.get('/fatuvalor-revenda',
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
-        AND pc.cd_tipoclas in (20, 7)
-        AND pc.cd_classificacao::integer in (3, 1)
+        AND pc.cd_tipoclas in (20)
+        AND pc.cd_classificacao::integer in (3)
         AND vfn.tp_situacao NOT IN ('C', 'X')
       GROUP BY vfn.tp_operacao
     `;
@@ -826,8 +822,8 @@ router.get('/fatuvalor-mtm',
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
-        AND pc.cd_tipoclas in (5,20)
-        AND pc.cd_classificacao::integer in (3, 1)
+        AND pc.cd_tipoclas in (20)
+        AND pc.cd_classificacao::integer in (2)
       GROUP BY vfn.tp_operacao
     `;
 
