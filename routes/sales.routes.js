@@ -746,35 +746,48 @@ router.get('/fatuvalor-revenda',
 
     const query = `
       SELECT
-        SUM(vfn.vl_unitbruto) as total_bruto,
-        SUM(vfn.vl_unitliquido) as total_liquido,
-        SUM(vfn.vl_icms) as total_icms,
-        SUM(vfn.qt_faturado) as total_quantidade,
-        COUNT(*) as total_transacoes
+        vfn.tp_operacao,
+        SUM(vfn.vl_totalbruto) AS vlbruto,
+        SUM(vfn.vl_totalliquido) AS vlliquido,
+        SUM(vfn.vl_freterat) AS frete,
+        SUM(vfn.vl_icms) AS icms
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
-        AND pc.cd_tipoclas = 20
+        AND pc.cd_tipoclas in (20, 7)
+        AND pc.cd_classificacao::integer in (3, 1)
         AND vfn.tp_situacao NOT IN ('C', 'X')
+      GROUP BY vfn.tp_operacao
     `;
 
     console.log(`🔍 Fatuvalor-revenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
 
     const { rows } = await pool.query(query, params);
-    const result = rows[0];
+    const breakdown = rows.map(r => ({
+      tp_operacao: r.tp_operacao,
+      vlbruto: parseFloat(r.vlbruto || 0),
+      vlliquido: parseFloat(r.vlliquido || 0),
+      frete: parseFloat(r.frete || 0),
+      icms: parseFloat(r.icms || 0)
+    }));
+
+    const totals = breakdown.reduce((acc, r) => {
+      acc.total_bruto += r.vlbruto;
+      acc.total_liquido += r.vlliquido;
+      acc.total_frete += r.frete;
+      acc.total_icms += r.icms;
+      return acc;
+    }, { total_bruto: 0, total_liquido: 0, total_frete: 0, total_icms: 0 });
 
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
       tipo: 'Revenda',
-      total_bruto: parseFloat(result.total_bruto || 0),
-      total_liquido: parseFloat(result.total_liquido || 0),
-      total_icms: parseFloat(result.total_icms || 0),
-      total_quantidade: parseFloat(result.total_quantidade || 0),
-      total_transacoes: parseInt(result.total_transacoes || 0)
+      ...totals,
+      breakdown
     }, 'Valores de faturamento de revenda obtidos com sucesso');
   })
 );
@@ -801,11 +814,11 @@ router.get('/fatuvalor-mtm',
 
     const query = `
       SELECT
-        SUM(vfn.vl_unitbruto) as total_bruto,
-        SUM(vfn.vl_unitliquido) as total_liquido,
-        SUM(vfn.vl_icms) as total_icms,
-        SUM(vfn.qt_faturado) as total_quantidade,
-        COUNT(*) as total_transacoes
+        vfn.tp_operacao,
+        SUM(vfn.vl_totalbruto) AS vlbruto,
+        SUM(vfn.vl_totalliquido) AS vlliquido,
+        SUM(vfn.vl_freterat) AS frete,
+        SUM(vfn.vl_icms) AS icms
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
@@ -813,23 +826,36 @@ router.get('/fatuvalor-mtm',
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
-        AND pc.cd_tipoclas = 5
+        AND pc.cd_tipoclas in (5,20)
+        AND pc.cd_classificacao::integer in (3, 1)
+      GROUP BY vfn.tp_operacao
     `;
 
     console.log(`🔍 Fatuvalor-mtm: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
 
     const { rows } = await pool.query(query, params);
-    const result = rows[0];
+    const breakdown = rows.map(r => ({
+      tp_operacao: r.tp_operacao,
+      vlbruto: parseFloat(r.vlbruto || 0),
+      vlliquido: parseFloat(r.vlliquido || 0),
+      frete: parseFloat(r.frete || 0),
+      icms: parseFloat(r.icms || 0)
+    }));
+
+    const totals = breakdown.reduce((acc, r) => {
+      acc.total_bruto += r.vlbruto;
+      acc.total_liquido += r.vlliquido;
+      acc.total_frete += r.frete;
+      acc.total_icms += r.icms;
+      return acc;
+    }, { total_bruto: 0, total_liquido: 0, total_frete: 0, total_icms: 0 });
 
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
       tipo: 'MTM',
-      total_bruto: parseFloat(result.total_bruto || 0),
-      total_liquido: parseFloat(result.total_liquido || 0),
-      total_icms: parseFloat(result.total_icms || 0),
-      total_quantidade: parseFloat(result.total_quantidade || 0),
-      total_transacoes: parseInt(result.total_transacoes || 0)
+      ...totals,
+      breakdown
     }, 'Valores de faturamento MTM obtidos com sucesso');
   })
 );
@@ -864,35 +890,47 @@ router.get('/fatuvalor-franquia',
 
     const query = `
       SELECT
-        SUM(vfn.vl_unitbruto) as total_bruto,
-        SUM(vfn.vl_unitliquido) as total_liquido,
-        SUM(vfn.vl_icms) as total_icms,
-        SUM(vfn.qt_faturado) as total_quantidade,
-        COUNT(*) as total_transacoes
+        vfn.tp_operacao,
+        SUM(vfn.vl_totalbruto) AS vlbruto,
+        SUM(vfn.vl_totalliquido) AS vlliquido,
+        SUM(vfn.vl_freterat) AS frete,
+        SUM(vfn.vl_icms) AS icms
       FROM vr_fis_nfitemprod vfn
-      LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
+      LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         ${fantasiaWhere}
+      GROUP BY vfn.tp_operacao
     `;
 
     console.log(`🔍 Fatuvalor-franquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
 
     const { rows } = await pool.query(query, params);
-    const result = rows[0];
+    const breakdown = rows.map(r => ({
+      tp_operacao: r.tp_operacao,
+      vlbruto: parseFloat(r.vlbruto || 0),
+      vlliquido: parseFloat(r.vlliquido || 0),
+      frete: parseFloat(r.frete || 0),
+      icms: parseFloat(r.icms || 0)
+    }));
+
+    const totals = breakdown.reduce((acc, r) => {
+      acc.total_bruto += r.vlbruto;
+      acc.total_liquido += r.vlliquido;
+      acc.total_frete += r.frete;
+      acc.total_icms += r.icms;
+      return acc;
+    }, { total_bruto: 0, total_liquido: 0, total_frete: 0, total_icms: 0 });
 
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
       empresas,
       tipo: 'Franquia',
       operacoes_excluidas: EXCLUDED_OPERATIONS,
-      total_bruto: parseFloat(result.total_bruto || 0),
-      total_liquido: parseFloat(result.total_liquido || 0),
-      total_icms: parseFloat(result.total_icms || 0),
-      total_quantidade: parseFloat(result.total_quantidade || 0),
-      total_transacoes: parseInt(result.total_transacoes || 0)
+      ...totals,
+      breakdown
     }, 'Valores de faturamento de franquias obtidos com sucesso');
   })
 );
@@ -919,11 +957,10 @@ router.get('/fatuvalor-lojas',
 
     const query = `
       SELECT
+        SUM(vfn.vl_freterat) as total_frete,
         SUM(vfn.vl_unitbruto) as total_bruto,
         SUM(vfn.vl_unitliquido) as total_liquido,
-        SUM(vfn.vl_icms) as total_icms,
-        SUM(vfn.qt_faturado) as total_quantidade,
-        COUNT(*) as total_transacoes
+        SUM(vfn.vl_icms) as total_icms
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa p ON p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
