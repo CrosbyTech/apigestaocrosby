@@ -902,4 +902,36 @@ router.get('/receitaliquida-revenda',
 );
 
 
+/**
+ * @route GET /sales/vlicms
+ * @desc Buscar ICMS por transação original
+ * @access Public
+ * @query {nr_transacaoori}
+ */
+router.get('/vlicms',
+  sanitizeInput,
+  validateRequired(['nr_transacaoori']),
+  asyncHandler(async (req, res) => {
+    const { nr_transacaoori } = req.query;
+
+    const query = `
+      SELECT
+        fn.nr_transacaoori,
+        fn.tp_operacao,
+        fn.vl_icms
+      FROM fis_nf fn
+      WHERE fn.nr_transacaoori = $1
+        AND fn.tp_operacao = 'S'
+    `;
+
+    const { rows } = await pool.query(query, [nr_transacaoori]);
+
+    successResponse(res, {
+      nr_transacaoori,
+      count: rows.length,
+      data: rows
+    }, 'ICMS por transação obtido com sucesso');
+  })
+);
+
 export default router;
