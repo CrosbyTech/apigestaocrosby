@@ -901,5 +901,89 @@ router.get('/receitaliquida-revenda',
   })
 );
 
+/**
+ * @route GET /sales/vlimposto
+ * @desc Buscar valores de impostos por transação
+ * @access Public
+ * @query {nr_transacao[]}
+ */
+router.get('/vlimposto',
+  sanitizeInput,
+  validateRequired(['nr_transacao']),
+  asyncHandler(async (req, res) => {
+    const { nr_transacao } = req.query;
+    
+    if (!nr_transacao) {
+      return errorResponse(res, 'Parâmetro nr_transacao é obrigatório', 400, 'MISSING_PARAMETER');
+    }
+
+    // Converter para array se for string única
+    let transacoes = Array.isArray(nr_transacao) ? nr_transacao : [nr_transacao];
+    
+    // Validar se são números válidos
+    const transacoesValidas = transacoes.filter(t => !isNaN(parseInt(t)) && parseInt(t) > 0);
+    
+    if (transacoesValidas.length === 0) {
+      return errorResponse(res, 'Parâmetro nr_transacao deve conter números válidos', 400, 'INVALID_PARAMETER');
+    }
+
+    // Criar placeholders para a query
+    const placeholders = transacoesValidas.map((_, idx) => `$${idx + 1}`).join(',');
+    const params = transacoesValidas.map(t => parseInt(t));
+
+    const query = `
+      SELECT
+        ti.nr_transacao,
+        ti.dt_transacao,
+        ti.cd_imposto,
+        SUM(ti.vl_imposto) as valorimposto
+      FROM
+        tra_itemimposto ti
+      WHERE
+        ti.nr_transacao IN (${placeholders})
+      GROUP BY
+        ti.nr_transacao,
+        ti.cd_imposto,
+        ti.dt_transacao
+      ORDER BY
+        ti.nr_transacao,
+        ti.cd_imposto
+    `;
+
+    console.log(`🔍 Vlimposto: ${transacoesValidas.length} transações consultadas`);
+
+    const { rows } = await pool.query(query, params);
+
+    // Calcular totais por transação
+    const totaisPorTransacao = rows.reduce((acc, row) => {
+      const nrTransacao = row.nr_transacao;
+      if (!acc[nrTransacao]) {
+        acc[nrTransacao] = {
+          nr_transacao: nrTransacao,
+          dt_transacao: row.dt_transacao,
+          total_impostos: 0,
+          impostos: []
+        };
+      }
+      acc[nrTransacao].total_impostos += parseFloat(row.valorimposto || 0);
+      acc[nrTransacao].impostos.push({
+        cd_imposto: row.cd_imposto,
+        valorimposto: parseFloat(row.valorimposto || 0)
+      });
+      return acc;
+    }, {});
+
+    // Calcular total geral
+    const totalGeral = rows.reduce((acc, row) => acc + parseFloat(row.valorimposto || 0), 0);
+
+    successResponse(res, {
+      transacoes_consultadas: transacoesValidas,
+      total_geral: totalGeral,
+      count: rows.length,
+      totais_por_transacao: Object.values(totaisPorTransacao),
+      data: rows
+    }, `Valores de impostos obtidos com sucesso para ${transacoesValidas.length} transações`);
+  })
+);
 
 export default router;
