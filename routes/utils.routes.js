@@ -210,36 +210,32 @@ router.get('/cadastropessoa',
 
     const query = `
       SELECT
+        tt.cd_empresa,
+        pp.nr_cpfcnpj,
+        pp.nm_pessoa,
+        pj.nm_fantasia,
         tt.cd_operacao,
-        p.cd_pessoa,
-        p.nm_pessoa,
-        pp.nm_fantasia,
-        p.nr_cpfcnpj,
-        pt.nr_telefone,
         pc.cd_tipoclas,
-        tc.ds_tipoclas,
+        pt.ds_tipoclas,
         pc.cd_classificacao,
-        pcc.ds_classificacao,
-        tt.dt_transacao,
-        tt.cd_empresa
+        c.ds_classificacao,
+        tt.dt_transacao
       FROM
         tra_transacao tt
-      LEFT JOIN pes_pessoa p ON
-        p.cd_pessoa = tt.cd_pessoa
-      LEFT JOIN pes_pesjuridica pp ON
-        p.cd_pessoa = pp.cd_pessoa
-      LEFT JOIN pes_telefone pt ON
-        p.cd_pessoa = pt.cd_pessoa
+      LEFT JOIN pes_pessoa pp ON
+        tt.cd_pessoa = pp.cd_pessoa
       LEFT JOIN pes_pessoaclas pc ON
-        p.cd_pessoa = pc.cd_pessoa
-      LEFT JOIN pes_tipoclas tc ON
-        tc.cd_tipoclas = pc.cd_tipoclas
-      LEFT JOIN pes_classificacao pcc ON
-        tc.cd_tipoclas = pcc.cd_tipoclas
+        pp.cd_pessoa = pc.cd_pessoa
+      LEFT JOIN pes_tipoclas pt ON
+        pc.cd_tipoclas = pt.cd_tipoclas
+      LEFT JOIN pes_classificacao c ON
+        pt.cd_tipoclas = c.cd_tipoclas
+        AND pc.cd_classificacao = c.cd_classificacao
+      LEFT JOIN pes_pesjuridica pj ON
+        pp.cd_pessoa = pj.cd_pessoa
       WHERE
         tt.dt_transacao BETWEEN $1 AND $2
         AND tt.tp_operacao = 'S'
-        AND tt.tp_situacao = 4
         AND tt.cd_empresa < 6000
       ORDER BY
         tt.dt_transacao DESC
