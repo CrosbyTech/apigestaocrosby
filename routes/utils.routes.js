@@ -1,7 +1,7 @@
 import express from 'express';
 import axios from 'axios';
 import pool from '../config/database.js';
-import { sanitizeInput, validateRequired, validateDateFormat, validatePagination } from '../middlewares/validation.middleware.js';
+import { sanitizeInput, validateRequired, validateDateFormat } from '../middlewares/validation.middleware.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 
 const router = express.Router();
@@ -197,11 +197,8 @@ router.get('/cadastropessoa',
   sanitizeInput,
   validateRequired(['dt_inicio', 'dt_fim']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
-  validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim } = req.query;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 1000, 100000);
-    const offset = parseInt(req.query.offset, 10) || 0;
 
     // Observação de performance:
     // - Usa BETWEEN com parâmetros para permitir uso de índices em dt_transacao
@@ -229,33 +226,17 @@ router.get('/cadastropessoa',
       WHERE tt.dt_transacao BETWEEN $1 AND $2
         AND tt.tp_operacao = 'S'
         AND tt.tp_situacao = 4
+        AND tt.cd_empresa < 6000
       ORDER BY tt.dt_transacao DESC
-      LIMIT $3 OFFSET $4
     `;
 
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM tra_transacao tt
-      WHERE tt.dt_transacao BETWEEN $1 AND $2
-        AND tt.tp_operacao = 'S'
-        AND tt.tp_situacao = 4
-    `;
+    const params = [dt_inicio, dt_fim];
 
-    const params = [dt_inicio, dt_fim, limit, offset];
-
-    const [result, totalResult] = await Promise.all([
-      pool.query(query, params),
-      pool.query(countQuery, [dt_inicio, dt_fim])
-    ]);
-
-    const total = parseInt(totalResult.rows[0]?.total || 0, 10);
+    const result = await pool.query(query, params);
 
     successResponse(res, {
       periodo: { dt_inicio, dt_fim },
-      limit,
-      offset,
-      total,
-      hasMore: (offset + limit) < total,
+      count: result.rows.length,
       data: result.rows
     }, 'Cadastro de pessoas consultado com sucesso');
   })
