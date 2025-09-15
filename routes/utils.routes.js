@@ -188,6 +188,68 @@ router.get('/stats',
 );
 
 /**
+ * @route GET /utils/classcliente
+ * @desc Buscar tipos e classificações de clientes por códigos (igual ao padrão de /financial/centrocusto)
+ * @access Public
+ * @query {cd_tipoclas[], cd_classificacao[]}
+ */
+router.get('/classcliente',
+  sanitizeInput,
+  validateRequired(['cd_tipoclas', 'cd_classificacao']),
+  asyncHandler(async (req, res) => {
+    const { cd_tipoclas, cd_classificacao } = req.query;
+
+    // Converter para arrays se vierem como strings únicas
+    let tipos = Array.isArray(cd_tipoclas) ? cd_tipoclas : [cd_tipoclas];
+    let classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+
+    // Remover valores vazios/nulos
+    tipos = tipos.filter(v => v && v !== '' && v !== 'null' && v !== 'undefined');
+    classes = classes.filter(v => v && v !== '' && v !== 'null' && v !== 'undefined');
+
+    if (tipos.length === 0 || classes.length === 0) {
+      return errorResponse(res, 'Parâmetros cd_tipoclas e cd_classificacao devem conter ao menos um valor', 400, 'MISSING_PARAMETER');
+    }
+
+    // Placeholders e parâmetros
+    let params = [];
+    const tipoPlaceholders = tipos.map((_, idx) => `$${idx + 1}`).join(',');
+    params.push(...tipos);
+    const classPlaceholders = classes.map((_, idx) => `$${tipos.length + idx + 1}`).join(',');
+    params.push(...classes);
+
+    const query = `
+      SELECT
+        pt.cd_tipoclas,
+        pt.ds_tipoclas,
+        pc.cd_classificacao,
+        pc.ds_classificacao
+      FROM pes_tipoclas pt
+      LEFT JOIN pes_classificacao pc ON pc.cd_tipoclas = pt.cd_tipoclas
+      WHERE pt.cd_tipoclas IN (${tipoPlaceholders})
+        AND pc.cd_classificacao IN (${classPlaceholders})
+      ORDER BY pt.ds_tipoclas, pc.ds_classificacao
+    `;
+
+    console.log(`🔍 Classcliente: tipos=${tipos.length}, classes=${classes.length}`);
+
+    try {
+      const { rows } = await pool.query(query, params);
+
+      successResponse(res, {
+        tipos_buscados: tipos,
+        classes_buscadas: classes,
+        encontrados: rows.length,
+        data: rows
+      }, 'Tipos e classificações de clientes obtidos com sucesso');
+    } catch (error) {
+      console.error('❌ Erro na query de classcliente:', error);
+      throw error;
+    }
+  })
+);
+
+/**
  * @route GET /utils/cadastropessoa
  * @desc Consulta de clientes e suas classificações, paginada e indexável
  * @access Public
