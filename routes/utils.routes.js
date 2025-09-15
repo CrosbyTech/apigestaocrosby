@@ -187,61 +187,7 @@ router.get('/stats',
   })
 );
 
-/**
- * @route GET /utils/classcliente
- * @desc Buscar tipos e classificações de clientes por códigos (igual ao padrão de /financial/centrocusto)
- * @access Public
- * @query {cd_tipoclas[], cd_classificacao[]}
- */
-router.get('/classcliente',
-  sanitizeInput,
-  validateRequired(['cd_tipoclas']),
-  asyncHandler(async (req, res) => {
-    const { cd_tipoclas } = req.query;
-
-    // Converter para arrays se vierem como strings únicas
-    let tipos = Array.isArray(cd_tipoclas) ? cd_tipoclas : [cd_tipoclas];
-
-    // Remover valores vazios/nulos
-    tipos = tipos.filter(v => v && v !== '' && v !== 'null' && v !== 'undefined');
-
-    if (tipos.length === 0) {
-      return errorResponse(res, 'Parâmetro cd_tipoclas deve conter ao menos um valor', 400, 'MISSING_PARAMETER');
-    }
-
-    // Placeholders e parâmetros
-    let params = [];
-    const tipoPlaceholders = tipos.map((_, idx) => `$${idx + 1}`).join(',');
-    params.push(...tipos);
-
-    const query = `
-      SELECT
-        pt.cd_tipoclas,
-        pt.ds_tipoclas,
-        pc.cd_classificacao,
-        pc.ds_classificacao
-      FROM pes_tipoclas pt
-      LEFT JOIN pes_classificacao pc ON pc.cd_tipoclas = pt.cd_tipoclas
-      WHERE pt.cd_tipoclas IN (${tipoPlaceholders})
-      ORDER BY pt.ds_tipoclas, pc.ds_classificacao
-    `;
-
-    console.log(`🔍 Classcliente: tipos=${tipos.length}`);
-
-    try {
-      const { rows } = await pool.query(query, params);
-
-      successResponse(res, {
-        tipos_buscados: tipos,
-        encontrados: rows.length,
-        data: rows
-      }, 'Tipos e classificações de clientes obtidos com sucesso');
-    } catch (error) {
-      console.error('❌ Erro na query de classcliente:', error);
-      throw error;
-    }
-  })
-);
+// Rota /utils/classcliente removida a pedido
 
 /**
  * @route GET /utils/cadastropessoa
@@ -271,19 +217,31 @@ router.get('/cadastropessoa',
         p.nr_cpfcnpj,
         pt.nr_telefone,
         pc.cd_tipoclas,
+        tc.ds_tipoclas,
         pc.cd_classificacao,
+        pcc.ds_classificacao,
         tt.dt_transacao,
         tt.cd_empresa
-      FROM tra_transacao tt
-      LEFT JOIN pes_pessoa p ON p.cd_pessoa = tt.cd_pessoa
-      LEFT JOIN pes_pesjuridica pp ON p.cd_pessoa = pp.cd_pessoa
-      LEFT JOIN pes_telefone pt ON p.cd_pessoa = pt.cd_pessoa
-      LEFT JOIN pes_pessoaclas pc ON p.cd_pessoa = pc.cd_pessoa
-      WHERE tt.dt_transacao BETWEEN $1 AND $2
+      FROM
+        tra_transacao tt
+      LEFT JOIN pes_pessoa p ON
+        p.cd_pessoa = tt.cd_pessoa
+      LEFT JOIN pes_pesjuridica pp ON
+        p.cd_pessoa = pp.cd_pessoa
+      LEFT JOIN pes_telefone pt ON
+        p.cd_pessoa = pt.cd_pessoa
+      LEFT JOIN pes_pessoaclas pc ON
+        p.cd_pessoa = pc.cd_pessoa
+      LEFT JOIN pes_tipoclas tc ON
+        tc.cd_tipoclas = pc.cd_tipoclas
+      LEFT JOIN pes_classificacao pcc ON
+        tc.cd_tipoclas = pcc.cd_tipoclas
+      WHERE
+        tt.dt_transacao BETWEEN $1 AND $2
         AND tt.tp_operacao = 'S'
         AND tt.tp_situacao = 4
-        AND tt.cd_empresa < 6000
-      ORDER BY tt.dt_transacao DESC
+      ORDER BY
+        tt.dt_transacao DESC
     `;
 
     const params = [dt_inicio, dt_fim];
