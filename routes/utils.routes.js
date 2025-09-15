@@ -240,6 +240,7 @@ router.get('/cadastropessoa',
         tt.dt_transacao BETWEEN $1 AND $2
         AND tt.tp_operacao = 'S'
         AND tt.tp_situacao = 4
+        AND tt.cd_empresa < 6000
       ORDER BY
         tt.dt_transacao DESC
     `;
