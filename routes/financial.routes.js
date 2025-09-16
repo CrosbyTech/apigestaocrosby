@@ -1,11 +1,23 @@
-import express from 'express';
-import pool, { checkConnectionHealth, executeQueryWithRetry } from '../config/database.js';
-import { validateRequired, validateDateFormat, validatePagination, sanitizeInput } from '../middlewares/validation.middleware.js';
-import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
-import multer from 'multer';
-import { BankReturnParser } from '../utils/bankReturnParser.js';
-import fs from 'fs';
-import path from 'path';
+import express from "express";
+import pool, {
+  checkConnectionHealth,
+  executeQueryWithRetry,
+} from "../config/database.js";
+import {
+  validateRequired,
+  validateDateFormat,
+  validatePagination,
+  sanitizeInput,
+} from "../middlewares/validation.middleware.js";
+import {
+  asyncHandler,
+  successResponse,
+  errorResponse,
+} from "../utils/errorHandler.js";
+import multer from "multer";
+import { BankReturnParser } from "../utils/bankReturnParser.js";
+import fs from "fs";
+import path from "path";
 
 const router = express.Router();
 
@@ -14,14 +26,21 @@ const router = express.Router();
  * @desc Verificar saúde da conexão com o banco
  * @access Public
  */
-router.get('/health',
+router.get(
+  "/health",
   asyncHandler(async (req, res) => {
     const health = await checkConnectionHealth();
-    
+
     if (health.healthy) {
-      successResponse(res, health, 'Conexão com banco de dados saudável');
+      successResponse(res, health, "Conexão com banco de dados saudável");
     } else {
-      errorResponse(res, 'Problemas na conexão com banco de dados', 503, 'DB_CONNECTION_ERROR', health);
+      errorResponse(
+        res,
+        "Problemas na conexão com banco de dados",
+        503,
+        "DB_CONNECTION_ERROR",
+        health
+      );
     }
   })
 );
@@ -29,46 +48,46 @@ router.get('/health',
 // Configuração do multer para upload de arquivos
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = './uploads';
+    const uploadDir = "./uploads";
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + '.RET');
-  }
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + "-" + uniqueSuffix + ".RET");
+  },
 });
 
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
     // Aceitar arquivos .RET (maiúsculo e minúsculo) e arquivos de texto
     const fileName = file.originalname.toLowerCase();
-    if (fileName.endsWith('.ret') || file.mimetype === 'text/plain') {
+    if (fileName.endsWith(".ret") || file.mimetype === "text/plain") {
       cb(null, true);
     } else {
-      cb(new Error('Apenas arquivos .RET são permitidos'), false);
+      cb(new Error("Apenas arquivos .RET são permitidos"), false);
     }
-  }
+  },
   // Removidos os limites de tamanho de arquivo
 });
 
 // Configuração para upload múltiplo
-const uploadMultiple = multer({ 
+const uploadMultiple = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
     // Aceitar arquivos .RET (maiúsculo e minúsculo) e arquivos de texto
     const fileName = file.originalname.toLowerCase();
-    if (fileName.endsWith('.ret') || file.mimetype === 'text/plain') {
+    if (fileName.endsWith(".ret") || file.mimetype === "text/plain") {
       cb(null, true);
     } else {
-      cb(new Error('Apenas arquivos .RET são permitidos'), false);
+      cb(new Error("Apenas arquivos .RET são permitidos"), false);
     }
-  }
+  },
   // Removidos os limites de tamanho e quantidade de arquivos
-}).array('files'); // Campo 'files' sem limite de quantidade
+}).array("files"); // Campo 'files' sem limite de quantidade
 
 /**
  * @route GET /financial/extrato
@@ -76,7 +95,8 @@ const uploadMultiple = multer({
  * @access Public
  * @query {cd_empresa, nr_ctapes, dt_movim_ini, dt_movim_fim, limit, offset}
  */
-router.get('/extrato',
+router.get(
+  "/extrato",
   sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
@@ -84,7 +104,7 @@ router.get('/extrato',
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    let baseQuery = ' FROM fcc_extratbco fe WHERE 1=1';
+    let baseQuery = " FROM fcc_extratbco fe WHERE 1=1";
     const params = [];
     let idx = 1;
 
@@ -97,7 +117,9 @@ router.get('/extrato',
     if (nr_ctapes) {
       if (Array.isArray(nr_ctapes) && nr_ctapes.length > 0) {
         const nr_ctapes_num = nr_ctapes.map(Number);
-        baseQuery += ` AND fe.nr_ctapes IN (${nr_ctapes_num.map(() => `$${idx++}`).join(',')})`;
+        baseQuery += ` AND fe.nr_ctapes IN (${nr_ctapes_num
+          .map(() => `$${idx++}`)
+          .join(",")})`;
         params.push(...nr_ctapes_num);
       } else {
         baseQuery += ` AND fe.nr_ctapes = $${idx++}`;
@@ -128,17 +150,21 @@ router.get('/extrato',
       ORDER BY fe.dt_lancto DESC
       LIMIT $${idx++} OFFSET $${idx++}
     `;
-    
+
     const dataParams = [...params, limit, offset];
     const { rows } = await pool.query(dataQuery, dataParams);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      data: rows
-    }, 'Extrato bancário obtido com sucesso');
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        data: rows,
+      },
+      "Extrato bancário obtido com sucesso"
+    );
   })
 );
 
@@ -148,7 +174,8 @@ router.get('/extrato',
  * @access Public
  * @query {nr_ctapes, dt_movim_ini, dt_movim_fim, limit, offset}
  */
-router.get('/extrato-totvs',
+router.get(
+  "/extrato-totvs",
   sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
@@ -156,14 +183,16 @@ router.get('/extrato-totvs',
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    let baseQuery = ' FROM fcc_mov fm WHERE fm.in_estorno = $1';
-    const params = ['F']; // Filtro fixo para não estornados
+    let baseQuery = " FROM fcc_mov fm WHERE fm.in_estorno = $1";
+    const params = ["F"]; // Filtro fixo para não estornados
     let idx = 2;
 
     if (nr_ctapes) {
       let contas = Array.isArray(nr_ctapes) ? nr_ctapes : [nr_ctapes];
       if (contas.length > 1) {
-        baseQuery += ` AND fm.nr_ctapes IN (${contas.map(() => `$${idx++}`).join(',')})`;
+        baseQuery += ` AND fm.nr_ctapes IN (${contas
+          .map(() => `$${idx++}`)
+          .join(",")})`;
         params.push(...contas);
       } else {
         baseQuery += ` AND fm.nr_ctapes = $${idx++}`;
@@ -191,16 +220,20 @@ router.get('/extrato-totvs',
       ORDER BY fm.dt_movim DESC
       LIMIT $${idx++} OFFSET $${idx++}
     `;
-    
+
     const dataParams = [...params, limit, offset];
     const { rows } = await pool.query(dataQuery, dataParams);
 
-    successResponse(res, {
-      limit,
-      offset,
-      count: rows.length,
-      data: rows
-    }, 'Extrato TOTVS obtido com sucesso');
+    successResponse(
+      res,
+      {
+        limit,
+        offset,
+        count: rows.length,
+        data: rows,
+      },
+      "Extrato TOTVS obtido com sucesso"
+    );
   })
 );
 
@@ -210,23 +243,29 @@ router.get('/extrato-totvs',
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/contas-pagar',
+router.get(
+  "/contas-pagar",
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
 
     // Otimização baseada no número de empresas e período
-    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+    const isHeavyQuery =
+      empresas.length > 10 ||
+      new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery =
+      empresas.length > 20 ||
+      new Date(dt_fim) - new Date(dt_inicio) > 90 * 24 * 60 * 60 * 1000; // 90 dias
 
-    const query = isVeryHeavyQuery ? `
+    const query = isVeryHeavyQuery
+      ? `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -256,8 +295,8 @@ router.get('/contas-pagar',
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_vencimento DESC
-      LIMIT 50000
-    ` : `
+    `
+      : `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -287,38 +326,53 @@ router.get('/contas-pagar',
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_liq DESC
-      ${isHeavyQuery ? 'LIMIT 100000' : ''}
+      
     `;
 
-    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
-    console.log(`🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+    const queryType = isVeryHeavyQuery
+      ? "muito-pesada"
+      : isHeavyQuery
+      ? "pesada"
+      : "completa";
+    console.log(
+      `🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+    );
 
     const { rows } = await pool.query(query, params);
 
     // Totais agregados (como no fluxo de caixa)
-    const totals = rows.reduce((acc, row) => {
-      acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
-      acc.totalPago += parseFloat(row.vl_pago || 0);
-      acc.totalJuros += parseFloat(row.vl_juros || 0);
-      acc.totalDesconto += parseFloat(row.vl_desconto || 0);
-      return acc;
-    }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
-
-    successResponse(res, {
-      periodo: { dt_inicio, dt_fim },
-      empresas,
-      totals,
-      count: rows.length,
-      optimized: isHeavyQuery || isVeryHeavyQuery,
-      queryType: queryType,
-      performance: {
-        isHeavyQuery,
-        isVeryHeavyQuery,
-        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
-        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
+        acc.totalPago += parseFloat(row.vl_pago || 0);
+        acc.totalJuros += parseFloat(row.vl_juros || 0);
+        acc.totalDesconto += parseFloat(row.vl_desconto || 0);
+        return acc;
       },
-      data: rows
-    }, `Contas a pagar obtidas com sucesso (${queryType})`);
+      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 }
+    );
+
+    successResponse(
+      res,
+      {
+        periodo: { dt_inicio, dt_fim },
+        empresas,
+        totals,
+        count: rows.length,
+        optimized: isHeavyQuery || isVeryHeavyQuery,
+        queryType: queryType,
+        performance: {
+          isHeavyQuery,
+          isVeryHeavyQuery,
+          diasPeriodo: Math.ceil(
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+          ),
+          limiteAplicado: "sem limite",
+        },
+        data: rows,
+      },
+      `Contas a pagar obtidas com sucesso (${queryType})`
+    );
   })
 );
 
@@ -328,23 +382,29 @@ router.get('/contas-pagar',
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/fluxocaixa-saida',
+router.get(
+  "/fluxocaixa-saida",
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
 
     // Otimização baseada no número de empresas e período
-    const isHeavyQuery = empresas.length > 10 || (new Date(dt_fim) - new Date(dt_inicio)) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery = empresas.length > 20 || (new Date(dt_fim) - new Date(dt_inicio)) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+    const isHeavyQuery =
+      empresas.length > 10 ||
+      new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery =
+      empresas.length > 20 ||
+      new Date(dt_fim) - new Date(dt_inicio) > 90 * 24 * 60 * 60 * 1000; // 90 dias
 
-    const query = isVeryHeavyQuery ? `
+    const query = isVeryHeavyQuery
+      ? `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -375,7 +435,8 @@ router.get('/fluxocaixa-saida',
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_liq DESC
       LIMIT 50000
-    ` : `
+    `
+      : `
       SELECT
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -405,38 +466,57 @@ router.get('/fluxocaixa-saida',
       WHERE fd.dt_liq BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_liq DESC
-      ${isHeavyQuery ? 'LIMIT 100000' : ''}
+      ${isHeavyQuery ? "LIMIT 100000" : ""}
     `;
 
-    const queryType = isVeryHeavyQuery ? 'muito-pesada' : isHeavyQuery ? 'pesada' : 'completa';
-    console.log(`🔍 Fluxocaixa-saida: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`);
+    const queryType = isVeryHeavyQuery
+      ? "muito-pesada"
+      : isHeavyQuery
+      ? "pesada"
+      : "completa";
+    console.log(
+      `🔍 Fluxocaixa-saida: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+    );
 
     const { rows } = await pool.query(query, params);
 
     // Totais agregados (como no fluxo de caixa)
-    const totals = rows.reduce((acc, row) => {
-      acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
-      acc.totalPago += parseFloat(row.vl_pago || 0);
-      acc.totalJuros += parseFloat(row.vl_juros || 0);
-      acc.totalDesconto += parseFloat(row.vl_desconto || 0);
-      return acc;
-    }, { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 });
-
-    successResponse(res, {
-      periodo: { dt_inicio, dt_fim },
-      empresas,
-      totals,
-      count: rows.length,
-      optimized: isHeavyQuery || isVeryHeavyQuery,
-      queryType: queryType,
-      performance: {
-        isHeavyQuery,
-        isVeryHeavyQuery,
-        diasPeriodo: Math.ceil((new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)),
-        limiteAplicado: isVeryHeavyQuery ? 50000 : isHeavyQuery ? 100000 : 'sem limite'
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
+        acc.totalPago += parseFloat(row.vl_pago || 0);
+        acc.totalJuros += parseFloat(row.vl_juros || 0);
+        acc.totalDesconto += parseFloat(row.vl_desconto || 0);
+        return acc;
       },
-      data: rows
-    }, `Fluxo de caixa de saída obtido com sucesso (${queryType})`);
+      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 }
+    );
+
+    successResponse(
+      res,
+      {
+        periodo: { dt_inicio, dt_fim },
+        empresas,
+        totals,
+        count: rows.length,
+        optimized: isHeavyQuery || isVeryHeavyQuery,
+        queryType: queryType,
+        performance: {
+          isHeavyQuery,
+          isVeryHeavyQuery,
+          diasPeriodo: Math.ceil(
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+          ),
+          limiteAplicado: isVeryHeavyQuery
+            ? 50000
+            : isHeavyQuery
+            ? 100000
+            : "sem limite",
+        },
+        data: rows,
+      },
+      `Fluxo de caixa de saída obtido com sucesso (${queryType})`
+    );
   })
 );
 
@@ -446,25 +526,35 @@ router.get('/fluxocaixa-saida',
  * @access Public
  * @query {cd_ccusto[]} - Array de códigos de centros de custo
  */
-router.get('/centrocusto',
+router.get(
+  "/centrocusto",
   sanitizeInput,
-  validateRequired(['cd_ccusto']),
+  validateRequired(["cd_ccusto"]),
   asyncHandler(async (req, res) => {
     const { cd_ccusto } = req.query;
 
     // Converter para array se for string única
     let centrosCusto = Array.isArray(cd_ccusto) ? cd_ccusto : [cd_ccusto];
-    
+
     // Remover valores vazios ou nulos
-    centrosCusto = centrosCusto.filter(c => c && c !== '' && c !== 'null' && c !== 'undefined');
-    
+    centrosCusto = centrosCusto.filter(
+      (c) => c && c !== "" && c !== "null" && c !== "undefined"
+    );
+
     if (centrosCusto.length === 0) {
-      return errorResponse(res, 'Pelo menos um código de centro de custo deve ser fornecido', 400, 'MISSING_PARAMETER');
+      return errorResponse(
+        res,
+        "Pelo menos um código de centro de custo deve ser fornecido",
+        400,
+        "MISSING_PARAMETER"
+      );
     }
 
     // Criar placeholders para a query
     let params = [...centrosCusto];
-    let ccustoPlaceholders = centrosCusto.map((_, idx) => `$${idx + 1}`).join(',');
+    let ccustoPlaceholders = centrosCusto
+      .map((_, idx) => `$${idx + 1}`)
+      .join(",");
 
     // Query simples para buscar descrições dos centros de custo
     const query = `
@@ -476,18 +566,24 @@ router.get('/centrocusto',
       ORDER BY ds_ccusto
     `;
 
-    console.log(`🔍 Centro-custo: buscando ${centrosCusto.length} centros de custo`);
+    console.log(
+      `🔍 Centro-custo: buscando ${centrosCusto.length} centros de custo`
+    );
 
     try {
       const { rows } = await pool.query(query, params);
 
-      successResponse(res, {
-        centros_custo_buscados: centrosCusto,
-        centros_custo_encontrados: rows.length,
-        data: rows
-      }, 'Descrições de centros de custo obtidas com sucesso');
+      successResponse(
+        res,
+        {
+          centros_custo_buscados: centrosCusto,
+          centros_custo_encontrados: rows.length,
+          data: rows,
+        },
+        "Descrições de centros de custo obtidas com sucesso"
+      );
     } catch (error) {
-      console.error('❌ Erro na query de centros de custo:', error);
+      console.error("❌ Erro na query de centros de custo:", error);
       throw error;
     }
   })
@@ -499,25 +595,35 @@ router.get('/centrocusto',
  * @access Public
  * @query {cd_despesaitem[]} - Array de códigos de itens de despesa
  */
-router.get('/despesa',
+router.get(
+  "/despesa",
   sanitizeInput,
-  validateRequired(['cd_despesaitem']),
+  validateRequired(["cd_despesaitem"]),
   asyncHandler(async (req, res) => {
     const { cd_despesaitem } = req.query;
 
     // Converter para array se for string única
-    let despesas = Array.isArray(cd_despesaitem) ? cd_despesaitem : [cd_despesaitem];
-    
+    let despesas = Array.isArray(cd_despesaitem)
+      ? cd_despesaitem
+      : [cd_despesaitem];
+
     // Remover valores vazios ou nulos
-    despesas = despesas.filter(d => d && d !== '' && d !== 'null' && d !== 'undefined');
-    
+    despesas = despesas.filter(
+      (d) => d && d !== "" && d !== "null" && d !== "undefined"
+    );
+
     if (despesas.length === 0) {
-      return errorResponse(res, 'Pelo menos um código de item de despesa deve ser fornecido', 400, 'MISSING_PARAMETER');
+      return errorResponse(
+        res,
+        "Pelo menos um código de item de despesa deve ser fornecido",
+        400,
+        "MISSING_PARAMETER"
+      );
     }
 
     // Criar placeholders para a query
     let params = [...despesas];
-    let despesaPlaceholders = despesas.map((_, idx) => `$${idx + 1}`).join(',');
+    let despesaPlaceholders = despesas.map((_, idx) => `$${idx + 1}`).join(",");
 
     // Query simples para buscar descrições dos itens de despesa
     const query = `
@@ -534,13 +640,17 @@ router.get('/despesa',
     try {
       const { rows } = await pool.query(query, params);
 
-      successResponse(res, {
-        despesas_buscadas: despesas,
-        despesas_encontradas: rows.length,
-        data: rows
-      }, 'Descrições de itens de despesa obtidas com sucesso');
+      successResponse(
+        res,
+        {
+          despesas_buscadas: despesas,
+          despesas_encontradas: rows.length,
+          data: rows,
+        },
+        "Descrições de itens de despesa obtidas com sucesso"
+      );
     } catch (error) {
-      console.error('❌ Erro na query de itens de despesa:', error);
+      console.error("❌ Erro na query de itens de despesa:", error);
       throw error;
     }
   })
@@ -552,25 +662,37 @@ router.get('/despesa',
  * @access Public
  * @query {cd_fornecedor[]} - Array de códigos de fornecedores
  */
-router.get('/fornecedor',
+router.get(
+  "/fornecedor",
   sanitizeInput,
-  validateRequired(['cd_fornecedor']),
+  validateRequired(["cd_fornecedor"]),
   asyncHandler(async (req, res) => {
     const { cd_fornecedor } = req.query;
 
     // Converter para array se for string única
-    let fornecedores = Array.isArray(cd_fornecedor) ? cd_fornecedor : [cd_fornecedor];
-    
+    let fornecedores = Array.isArray(cd_fornecedor)
+      ? cd_fornecedor
+      : [cd_fornecedor];
+
     // Remover valores vazios ou nulos
-    fornecedores = fornecedores.filter(f => f && f !== '' && f !== 'null' && f !== 'undefined');
-    
+    fornecedores = fornecedores.filter(
+      (f) => f && f !== "" && f !== "null" && f !== "undefined"
+    );
+
     if (fornecedores.length === 0) {
-      return errorResponse(res, 'Pelo menos um código de fornecedor deve ser fornecido', 400, 'MISSING_PARAMETER');
+      return errorResponse(
+        res,
+        "Pelo menos um código de fornecedor deve ser fornecido",
+        400,
+        "MISSING_PARAMETER"
+      );
     }
 
     // Criar placeholders para a query
     let params = [...fornecedores];
-    let fornecedorPlaceholders = fornecedores.map((_, idx) => `$${idx + 1}`).join(',');
+    let fornecedorPlaceholders = fornecedores
+      .map((_, idx) => `$${idx + 1}`)
+      .join(",");
 
     // Query simples para buscar nomes dos fornecedores
     const query = `
@@ -587,19 +709,21 @@ router.get('/fornecedor',
     try {
       const { rows } = await pool.query(query, params);
 
-      successResponse(res, {
-        fornecedores_buscados: fornecedores,
-        fornecedores_encontrados: rows.length,
-        data: rows
-      }, 'Nomes de fornecedores obtidos com sucesso');
+      successResponse(
+        res,
+        {
+          fornecedores_buscados: fornecedores,
+          fornecedores_encontrados: rows.length,
+          data: rows,
+        },
+        "Nomes de fornecedores obtidos com sucesso"
+      );
     } catch (error) {
-      console.error('❌ Erro na query de fornecedores:', error);
+      console.error("❌ Erro na query de fornecedores:", error);
       throw error;
     }
   })
 );
-
-
 
 /**
  * @route GET /financial/contas-receber
@@ -607,10 +731,11 @@ router.get('/fornecedor',
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/contas-receber',
+router.get(
+  "/contas-receber",
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -663,19 +788,23 @@ router.get('/contas-receber',
 
     const [resultado, totalResult] = await Promise.all([
       pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa]),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
-    }, 'Contas a receber obtidas com sucesso');
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        filtros: { dt_inicio, dt_fim, cd_empresa },
+        data: resultado.rows,
+      },
+      "Contas a receber obtidas com sucesso"
+    );
   })
 );
 
@@ -685,10 +814,11 @@ router.get('/contas-receber',
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/contas-receberemiss',
+router.get(
+  "/contas-receberemiss",
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -741,19 +871,23 @@ router.get('/contas-receberemiss',
 
     const [resultado, totalResult] = await Promise.all([
       pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa]),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
-    }, 'Contas a receber por emissão obtidas com sucesso');
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        filtros: { dt_inicio, dt_fim, cd_empresa },
+        data: resultado.rows,
+      },
+      "Contas a receber por emissão obtidas com sucesso"
+    );
   })
 );
 
@@ -763,10 +897,11 @@ router.get('/contas-receberemiss',
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/fluxocaixa-entradas',
+router.get(
+  "/fluxocaixa-entradas",
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -819,19 +954,23 @@ router.get('/fluxocaixa-entradas',
 
     const [resultado, totalResult] = await Promise.all([
       pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa])
+      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa]),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
-    }, 'Fluxo de caixa de entradas obtido com sucesso');
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        filtros: { dt_inicio, dt_fim, cd_empresa },
+        data: resultado.rows,
+      },
+      "Fluxo de caixa de entradas obtido com sucesso"
+    );
   })
 );
 
@@ -840,7 +979,8 @@ router.get('/fluxocaixa-entradas',
  * @desc Buscar saldos de adiantamentos e crediários
  * @access Public
  */
-router.get('/credev-adiantamento',
+router.get(
+  "/credev-adiantamento",
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
@@ -891,14 +1031,16 @@ router.get('/credev-adiantamento',
 
     const { rows } = await pool.query(query);
 
-    successResponse(res, {
-      count: rows.length,
-      data: rows
-    }, 'Adiantamentos e crediários obtidos com sucesso');
+    successResponse(
+      res,
+      {
+        count: rows.length,
+        data: rows,
+      },
+      "Adiantamentos e crediários obtidos com sucesso"
+    );
   })
 );
-
-
 
 /**
  * @route GET /financial/nfmanifestacao
@@ -906,10 +1048,11 @@ router.get('/credev-adiantamento',
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
-router.get('/nfmanifestacao',
+router.get(
+  "/nfmanifestacao",
   sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -917,14 +1060,17 @@ router.get('/nfmanifestacao',
     const offset = parseInt(req.query.offset, 10) || 0;
 
     // Construir query dinamicamente para suportar múltiplas empresas
-    let baseQuery = ' FROM fis_nfmanifestacao fn WHERE fn.dt_emissao BETWEEN $1 AND $2';
+    let baseQuery =
+      " FROM fis_nfmanifestacao fn WHERE fn.dt_emissao BETWEEN $1 AND $2";
     const params = [dt_inicio, dt_fim];
     let idx = 3;
 
     if (cd_empresa) {
       if (Array.isArray(cd_empresa) && cd_empresa.length > 0) {
         const cd_empresa_num = cd_empresa.map(Number);
-        baseQuery += ` AND fn.cd_empresa IN (${cd_empresa_num.map(() => `$${idx++}`).join(',')})`;
+        baseQuery += ` AND fn.cd_empresa IN (${cd_empresa_num
+          .map(() => `$${idx++}`)
+          .join(",")})`;
         params.push(...cd_empresa_num);
       } else {
         baseQuery += ` AND fn.cd_empresa = $${idx++}`;
@@ -961,19 +1107,23 @@ router.get('/nfmanifestacao',
     const dataParams = [...params, limit, offset];
     const [resultado, totalResult] = await Promise.all([
       pool.query(query, dataParams),
-      pool.query(countQuery, params)
+      pool.query(countQuery, params),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
 
-    successResponse(res, {
-      total,
-      limit,
-      offset,
-      hasMore: (offset + limit) < total,
-      filtros: { dt_inicio, dt_fim, cd_empresa },
-      data: resultado.rows
-    }, 'Notas fiscais de manifestação obtidas com sucesso');
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        filtros: { dt_inicio, dt_fim, cd_empresa },
+        data: resultado.rows,
+      },
+      "Notas fiscais de manifestação obtidas com sucesso"
+    );
   })
 );
 
@@ -983,9 +1133,15 @@ router.get('/nfmanifestacao',
  * @access Public
  * @query {cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela}
  */
-router.get('/observacao',
+router.get(
+  "/observacao",
   sanitizeInput,
-  validateRequired(['cd_fornecedor', 'nr_duplicata', 'cd_empresa', 'nr_parcela']),
+  validateRequired([
+    "cd_fornecedor",
+    "nr_duplicata",
+    "cd_empresa",
+    "nr_parcela",
+  ]),
   asyncHandler(async (req, res) => {
     const { cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela } = req.query;
 
@@ -1004,13 +1160,22 @@ router.get('/observacao',
         AND od.nr_parcela = $4
     `;
 
-    const { rows } = await pool.query(query, [cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela]);
+    const { rows } = await pool.query(query, [
+      cd_fornecedor,
+      nr_duplicata,
+      cd_empresa,
+      nr_parcela,
+    ]);
 
-    successResponse(res, {
-      filtros: { cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela },
-      count: rows.length,
-      data: rows
-    }, 'Observações obtidas com sucesso');
+    successResponse(
+      res,
+      {
+        filtros: { cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela },
+        count: rows.length,
+        data: rows,
+      },
+      "Observações obtidas com sucesso"
+    );
   })
 );
 
@@ -1020,38 +1185,48 @@ router.get('/observacao',
  * @access Public
  * @body {file} - Arquivo .RET do banco
  */
-router.post('/upload-retorno',
-  upload.single('file'),
+router.post(
+  "/upload-retorno",
+  upload.single("file"),
   asyncHandler(async (req, res) => {
     if (!req.file) {
-      return errorResponse(res, 'Nenhum arquivo foi enviado', 400, 'NO_FILE_UPLOADED');
+      return errorResponse(
+        res,
+        "Nenhum arquivo foi enviado",
+        400,
+        "NO_FILE_UPLOADED"
+      );
     }
 
     try {
       // Ler o arquivo
-      const fileContent = fs.readFileSync(req.file.path, 'utf8');
-      
+      const fileContent = fs.readFileSync(req.file.path, "utf8");
+
       // Processar o arquivo
       const parser = new BankReturnParser();
       const result = parser.parseFile(fileContent);
-      
+
       // Adicionar informações do arquivo
       result.arquivo.nomeOriginal = req.file.originalname;
       result.arquivo.tamanho = req.file.size;
       result.arquivo.dataUpload = new Date().toISOString();
-      
+
       // Limpar arquivo temporário
       fs.unlinkSync(req.file.path);
-      
-      successResponse(res, result, 'Arquivo de retorno processado com sucesso');
-      
+
+      successResponse(res, result, "Arquivo de retorno processado com sucesso");
     } catch (error) {
       // Limpar arquivo em caso de erro
       if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
-      
-      return errorResponse(res, `Erro ao processar arquivo: ${error.message}`, 400, 'FILE_PROCESSING_ERROR');
+
+      return errorResponse(
+        res,
+        `Erro ao processar arquivo: ${error.message}`,
+        400,
+        "FILE_PROCESSING_ERROR"
+      );
     }
   })
 );
@@ -1062,20 +1237,36 @@ router.post('/upload-retorno',
  * @access Public
  * @body {files[]} - Array de arquivos .RET do banco (quantidade ilimitada)
  */
-router.post('/upload-retorno-multiplo',
+router.post(
+  "/upload-retorno-multiplo",
   (req, res, next) => {
     uploadMultiple(req, res, (err) => {
       if (err instanceof multer.MulterError) {
-        return errorResponse(res, `Erro no upload: ${err.message}`, 400, 'UPLOAD_ERROR');
+        return errorResponse(
+          res,
+          `Erro no upload: ${err.message}`,
+          400,
+          "UPLOAD_ERROR"
+        );
       } else if (err) {
-        return errorResponse(res, `Erro no upload: ${err.message}`, 400, 'UPLOAD_ERROR');
+        return errorResponse(
+          res,
+          `Erro no upload: ${err.message}`,
+          400,
+          "UPLOAD_ERROR"
+        );
       }
       next();
     });
   },
   asyncHandler(async (req, res) => {
     if (!req.files || req.files.length === 0) {
-      return errorResponse(res, 'Nenhum arquivo foi enviado', 400, 'NO_FILES_UPLOADED');
+      return errorResponse(
+        res,
+        "Nenhum arquivo foi enviado",
+        400,
+        "NO_FILES_UPLOADED"
+      );
     }
 
     const resultados = [];
@@ -1087,35 +1278,36 @@ router.post('/upload-retorno-multiplo',
     for (const file of req.files) {
       try {
         console.log(`📄 Processando arquivo: ${file.originalname}`);
-        
+
         // Ler o arquivo
-        const fileContent = fs.readFileSync(file.path, 'utf8');
-        
+        const fileContent = fs.readFileSync(file.path, "utf8");
+
         // Processar o arquivo
         const parser = new BankReturnParser();
         const result = parser.parseFile(fileContent);
-        
+
         // Adicionar informações do arquivo
         result.arquivo.nomeOriginal = file.originalname;
         result.arquivo.tamanho = file.size;
         result.arquivo.dataUpload = new Date().toISOString();
-        
+
         resultados.push(result);
         arquivosProcessados.push(file.originalname);
-        
+
         // Limpar arquivo temporário
         fs.unlinkSync(file.path);
-        
+
         console.log(`✅ Arquivo processado com sucesso: ${file.originalname}`);
-        
       } catch (error) {
-        console.log(`❌ Erro ao processar arquivo ${file.originalname}: ${error.message}`);
-        
+        console.log(
+          `❌ Erro ao processar arquivo ${file.originalname}: ${error.message}`
+        );
+
         arquivosComErro.push({
           nome: file.originalname,
-          erro: error.message
+          erro: error.message,
         });
-        
+
         // Limpar arquivo em caso de erro
         if (fs.existsSync(file.path)) {
           fs.unlinkSync(file.path);
@@ -1127,36 +1319,40 @@ router.post('/upload-retorno-multiplo',
     const totalArquivos = req.files.length;
     const sucessos = arquivosProcessados.length;
     const erros = arquivosComErro.length;
-    
+
     // Calcular saldo total (soma de todos os saldos)
     const saldoTotal = resultados.reduce((total, result) => {
       return total + (result.saldoAtual || 0);
     }, 0);
 
-    successResponse(res, {
-      resumo: {
-        totalArquivos,
-        sucessos,
-        erros,
-        saldoTotal: saldoTotal,
-        saldoTotalFormatado: saldoTotal.toLocaleString('pt-BR', {
-          style: 'currency',
-          currency: 'BRL'
-        })
+    successResponse(
+      res,
+      {
+        resumo: {
+          totalArquivos,
+          sucessos,
+          erros,
+          saldoTotal: saldoTotal,
+          saldoTotalFormatado: saldoTotal.toLocaleString("pt-BR", {
+            style: "currency",
+            currency: "BRL",
+          }),
+        },
+        arquivosProcessados,
+        arquivosComErro,
+        resultados: resultados.map((result) => ({
+          banco: result.banco,
+          agencia: result.agencia,
+          conta: result.conta,
+          dataGeracao: result.dataGeracao,
+          horaGeracao: result.horaGeracao,
+          saldoAtual: result.saldoAtual,
+          saldoFormatado: result.saldoFormatado,
+          arquivo: result.arquivo,
+        })),
       },
-      arquivosProcessados,
-      arquivosComErro,
-      resultados: resultados.map(result => ({
-        banco: result.banco,
-        agencia: result.agencia,
-        conta: result.conta,
-        dataGeracao: result.dataGeracao,
-        horaGeracao: result.horaGeracao,
-        saldoAtual: result.saldoAtual,
-        saldoFormatado: result.saldoFormatado,
-        arquivo: result.arquivo
-      }))
-    }, `Processamento concluído: ${sucessos} sucessos, ${erros} erros`);
+      `Processamento concluído: ${sucessos} sucessos, ${erros} erros`
+    );
   })
 );
 
@@ -1166,10 +1362,11 @@ router.post('/upload-retorno-multiplo',
  * @access Public
  * @query {nr_ctapes, dt_inicio, dt_fim}
  */
-router.get('/saldo-conta',
+router.get(
+  "/saldo-conta",
   sanitizeInput,
-  validateRequired(['nr_ctapes', 'dt_inicio', 'dt_fim']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  validateRequired(["nr_ctapes", "dt_inicio", "dt_fim"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_inicio, dt_fim } = req.query;
 
@@ -1191,11 +1388,15 @@ router.get('/saldo-conta',
 
     const saldo = rows[0]?.saldo || 0;
 
-    successResponse(res, {
-      filtros: { nr_ctapes, dt_inicio, dt_fim },
-      saldo: parseFloat(saldo),
-      data: rows[0]
-    }, 'Saldo de conta obtido com sucesso');
+    successResponse(
+      res,
+      {
+        filtros: { nr_ctapes, dt_inicio, dt_fim },
+        saldo: parseFloat(saldo),
+        data: rows[0],
+      },
+      "Saldo de conta obtido com sucesso"
+    );
   })
 );
 
@@ -1205,22 +1406,30 @@ router.get('/saldo-conta',
  * @access Public
  * @query {cd_pessoa} - Array de códigos de pessoa
  */
-router.get('/infopessoa',
+router.get(
+  "/infopessoa",
   sanitizeInput,
-  validateRequired(['cd_pessoa']),
+  validateRequired(["cd_pessoa"]),
   asyncHandler(async (req, res) => {
     const { cd_pessoa } = req.query;
 
     // Converter para array se for string única
     let codigosPessoa = Array.isArray(cd_pessoa) ? cd_pessoa : [cd_pessoa];
-    
+
     // Validar se há códigos de pessoa
     if (codigosPessoa.length === 0) {
-      return errorResponse(res, 'Pelo menos um código de pessoa deve ser fornecido', 400, 'MISSING_PERSON_CODE');
+      return errorResponse(
+        res,
+        "Pelo menos um código de pessoa deve ser fornecido",
+        400,
+        "MISSING_PERSON_CODE"
+      );
     }
 
     // Construir placeholders para a query IN
-    const placeholders = codigosPessoa.map((_, index) => `$${index + 1}`).join(',');
+    const placeholders = codigosPessoa
+      .map((_, index) => `$${index + 1}`)
+      .join(",");
 
     const query = `
       SELECT
@@ -1248,11 +1457,15 @@ router.get('/infopessoa',
 
     const { rows } = await pool.query(query, codigosPessoa);
 
-    successResponse(res, {
-      filtros: { cd_pessoa: codigosPessoa },
-      count: rows.length,
-      data: rows
-    }, 'Informações de pessoas obtidas com sucesso');
+    successResponse(
+      res,
+      {
+        filtros: { cd_pessoa: codigosPessoa },
+        count: rows.length,
+        data: rows,
+      },
+      "Informações de pessoas obtidas com sucesso"
+    );
   })
 );
 
@@ -1262,10 +1475,11 @@ router.get('/infopessoa',
  * @access Public
  * @query {nr_ctapes, dt_movim_ini, dt_movim_fim}
  */
-router.get('/auditor-credev',
+router.get(
+  "/auditor-credev",
   sanitizeInput,
-  validateRequired(['nr_ctapes', 'dt_movim_ini', 'dt_movim_fim']),
-  validateDateFormat(['dt_movim_ini', 'dt_movim_fim']),
+  validateRequired(["nr_ctapes", "dt_movim_ini", "dt_movim_fim"]),
+  validateDateFormat(["dt_movim_ini", "dt_movim_fim"]),
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
 
@@ -1292,13 +1506,21 @@ router.get('/auditor-credev',
       ORDER BY fm.dt_movim DESC, fm.nr_ctapes
     `;
 
-    const { rows } = await pool.query(query, [nr_ctapes, dt_movim_ini, dt_movim_fim]);
+    const { rows } = await pool.query(query, [
+      nr_ctapes,
+      dt_movim_ini,
+      dt_movim_fim,
+    ]);
 
-    successResponse(res, {
-      filtros: { nr_ctapes, dt_movim_ini, dt_movim_fim },
-      count: rows.length,
-      data: rows
-    }, 'Dados de auditoria de crédito e débito obtidos com sucesso');
+    successResponse(
+      res,
+      {
+        filtros: { nr_ctapes, dt_movim_ini, dt_movim_fim },
+        count: rows.length,
+        data: rows,
+      },
+      "Dados de auditoria de crédito e débito obtidos com sucesso"
+    );
   })
 );
 
