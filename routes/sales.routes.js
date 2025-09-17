@@ -1344,6 +1344,7 @@ router.get(
         vfn.cd_operacao,
         vfn.cd_nivel,
         vfn.ds_nivel,
+        prdvl.vl_produto,
         vfn.dt_transacao,
         vfn.tp_situacao,
         vfn.vl_unitliquido,
@@ -1358,10 +1359,15 @@ router.get(
         p.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN vr_pes_pessoaclas pc ON
         vfn.cd_pessoa = pc.cd_pessoa
+      LEFT JOIN vr_prd_valorprod prdvl ON
+        vfn.cd_produto = prdvl.cd_produto
       WHERE
         vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN ${empresasFixas}
         AND vfn.cd_operacao NOT IN ${excludedOps}
+        AND prdvl.cd_valor = 3
+        AND prdvl.cd_empresa = 1
+        AND prdvl.tp_valor = 'C'
         AND pc.cd_tipoclas = 20
         AND pc.cd_classificacao::integer IN (${classPlaceholders})
         AND vfn.tp_situacao NOT IN ('C', 'X')
