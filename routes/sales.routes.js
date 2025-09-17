@@ -89,12 +89,17 @@ router.get(
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado,
-        vfn.vl_freterat
+        vfn.vl_freterat,
+        prdvl.vl_produto
       FROM vr_fis_nfitemprod vfn
+      LEFT JOIN vr_prd_valorprod prdvl ON vfn.cd_produto = prdvl.cd_produto
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(",")})
         AND vfn.tp_situacao NOT IN ('C', 'X')
+        AND prdvl.cd_valor = 3
+        AND prdvl.cd_empresa = 1
+        AND prdvl.tp_valor = 'C'
       ORDER BY vfn.dt_transacao DESC
       LIMIT 50000
     `
@@ -112,12 +117,17 @@ router.get(
         vfn.tp_operacao,
         vfn.nr_transacao,
         vfn.qt_faturado,
-        vfn.vl_freterat
+        vfn.vl_freterat,
+        prdvl.vl_produto
       FROM vr_fis_nfitemprod vfn
+      LEFT JOIN vr_prd_valorprod prdvl ON vfn.cd_produto = prdvl.cd_produto
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(",")})
         AND vfn.tp_situacao NOT IN ('C', 'X')
+        AND prdvl.cd_valor = 3
+        AND prdvl.cd_empresa = 1
+        AND prdvl.tp_valor = 'C'
       ORDER BY vfn.dt_transacao DESC
       ${isHeavyQuery ? "LIMIT 100000" : ""}
     `;
