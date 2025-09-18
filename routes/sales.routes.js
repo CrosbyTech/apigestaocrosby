@@ -1485,7 +1485,8 @@ router.get(
         mn.vl_unitbruto,
         mn.tp_operacao,
         mn.nr_transacao,
-        mn.qt_faturado
+        mn.qt_faturado,
+        mn.vl_freterat
       FROM
         mv_nfitemprod mn
       WHERE
@@ -1514,7 +1515,8 @@ router.get(
         mn.vl_unitbruto,
         mn.tp_operacao,
         mn.nr_transacao,
-        mn.qt_faturado
+        mn.qt_faturado,
+        mn.vl_freterat
       FROM
         mv_nfitemprod mn
       WHERE
