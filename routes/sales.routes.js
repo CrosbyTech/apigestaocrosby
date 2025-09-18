@@ -1495,7 +1495,7 @@ router.get(
         ${classWhere}
       ORDER BY
         mn.dt_transacao DESC
-      LIMIT 50000
+      LIMIT 500000
     `
       : `
       SELECT
@@ -1525,7 +1525,7 @@ router.get(
         ${classWhere}
       ORDER BY
         mn.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 100000" : ""}
+      ${isHeavyQuery ? "LIMIT 1000000" : ""}
     `;
 
     const queryType = isVeryHeavyQuery
@@ -1568,9 +1568,9 @@ router.get(
             (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
           ),
           limiteAplicado: isVeryHeavyQuery
-            ? 50000
+            ? 500000
             : isHeavyQuery
-            ? 100000
+            ? 1000000
             : "sem limite",
         },
         data: rows,
