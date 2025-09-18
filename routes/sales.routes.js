@@ -1405,4 +1405,177 @@ router.get(
   })
 );
 
+/**
+ * @route GET /sales/cmv
+ * @desc Consulta CMV usando view materializada mv_nfitemprod (otimizada)
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa[], cd_classificacao[]}
+ */
+router.get(
+  "/cmv",
+  sanitizeInput,
+  validateDateFormat(["dt_inicio", "dt_fim"]),
+  asyncHandler(async (req, res) => {
+    const {
+      dt_inicio = "2025-01-01",
+      dt_fim = "2025-09-18",
+      cd_empresa,
+      cd_classificacao,
+    } = req.query;
+
+    // Se cd_empresa não for fornecido, usar as empresas fixas do SQL original
+    let empresas;
+    let params;
+    let empresaPlaceholders;
+
+    if (cd_empresa) {
+      empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+      params = [dt_inicio, dt_fim, ...empresas];
+      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    } else {
+      // Usar as empresas fixas do SQL original
+      empresas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
+      params = [dt_inicio, dt_fim];
+      empresaPlaceholders = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+    }
+
+    // Processar classificações
+    let classes = [];
+    let classPlaceholders = "";
+    let classWhere = "";
+    
+    if (cd_classificacao) {
+      classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+      classes = classes.filter(
+        (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+      );
+      
+      if (classes.length > 0) {
+        const startIdx = cd_empresa ? 3 + empresas.length : 3;
+        classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
+        classWhere = `AND mn.cd_classificacao::integer IN (${classPlaceholders})`;
+        params.push(...classes.map((c) => parseInt(c, 10)));
+      }
+    }
+
+    // Otimização baseada no número de empresas e período (igual à rota faturamento)
+    const isHeavyQuery =
+      empresas.length > 10 ||
+      new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const isVeryHeavyQuery =
+      empresas.length > 20 ||
+      new Date(dt_fim) - new Date(dt_inicio) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+    const query = isVeryHeavyQuery
+      ? `
+      SELECT
+        mn.cd_empresa,
+        mn.nm_grupoempresa,
+        mn.cd_pessoa,
+        mn.nm_pessoa,
+        mn.cd_tipoclas,
+        mn.cd_classificacao,
+        mn.cd_operacao,
+        mn.cd_nivel,
+        mn.ds_nivel,
+        mn.vl_produto,
+        mn.dt_transacao,
+        mn.tp_situacao,
+        mn.vl_unitliquido,
+        mn.vl_unitbruto,
+        mn.tp_operacao,
+        mn.nr_transacao,
+        mn.qt_faturado
+      FROM
+        mv_nfitemprod mn
+      WHERE
+        mn.dt_transacao BETWEEN $1 AND $2
+        AND mn.cd_empresa IN ${empresaPlaceholders}
+        ${classWhere}
+      ORDER BY
+        mn.dt_transacao DESC
+      LIMIT 50000
+    `
+      : `
+      SELECT
+        mn.cd_empresa,
+        mn.nm_grupoempresa,
+        mn.cd_pessoa,
+        mn.nm_pessoa,
+        mn.cd_tipoclas,
+        mn.cd_classificacao,
+        mn.cd_operacao,
+        mn.cd_nivel,
+        mn.ds_nivel,
+        mn.vl_produto,
+        mn.dt_transacao,
+        mn.tp_situacao,
+        mn.vl_unitliquido,
+        mn.vl_unitbruto,
+        mn.tp_operacao,
+        mn.nr_transacao,
+        mn.qt_faturado
+      FROM
+        mv_nfitemprod mn
+      WHERE
+        mn.dt_transacao BETWEEN $1 AND $2
+        AND mn.cd_empresa IN ${empresaPlaceholders}
+        ${classWhere}
+      ORDER BY
+        mn.dt_transacao DESC
+      ${isHeavyQuery ? "LIMIT 100000" : ""}
+    `;
+
+    const queryType = isVeryHeavyQuery
+      ? "muito-pesada"
+      : isHeavyQuery
+      ? "pesada"
+      : "completa";
+    console.log(
+      `🔍 CMV: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`
+    );
+
+    const { rows } = await pool.query(query, params);
+
+    // Totais agregados (como no faturamento)
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.totalBruto += parseFloat(row.vl_unitbruto || 0);
+        acc.totalLiquido += parseFloat(row.vl_unitliquido || 0);
+        acc.totalQuantidade += parseFloat(row.qt_faturado || 0);
+        acc.totalProduto += parseFloat(row.vl_produto || 0);
+        return acc;
+      },
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 }
+    );
+
+    successResponse(
+      res,
+      {
+        periodo: { dt_inicio, dt_fim },
+        empresas,
+        classes: classes.length > 0 ? classes : "todas",
+        totals,
+        count: rows.length,
+        optimized: isHeavyQuery || isVeryHeavyQuery,
+        queryType: queryType,
+        performance: {
+          isHeavyQuery,
+          isVeryHeavyQuery,
+          diasPeriodo: Math.ceil(
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+          ),
+          limiteAplicado: isVeryHeavyQuery
+            ? 50000
+            : isHeavyQuery
+            ? 100000
+            : "sem limite",
+        },
+        data: rows,
+      },
+      `CMV obtido com sucesso usando view materializada (${queryType})`
+    );
+  })
+);
+
 export default router;
