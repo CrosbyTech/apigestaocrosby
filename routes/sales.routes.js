@@ -1451,7 +1451,8 @@ router.get(
       );
       
       if (classes.length > 0) {
-        const startIdx = cd_empresa ? 3 + empresas.length : 3;
+        // Calcular o índice correto baseado nos parâmetros já adicionados
+        const startIdx = params.length + 1; // +1 porque os índices começam em 1
         classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
         classWhere = `AND mn.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
@@ -1626,7 +1627,8 @@ router.get(
       );
       
       if (classes.length > 0) {
-        const startIdx = cd_empresa ? 3 + empresas.length : 3;
+        // Calcular o índice correto baseado nos parâmetros já adicionados
+        const startIdx = params.length + 1; // +1 porque os índices começam em 1
         classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
         classWhere = `AND c.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
