@@ -1664,7 +1664,7 @@ router.get(
         cmvvarejo c
       WHERE
         c.dt_transacao BETWEEN $1 AND $2
-        AND c.cd_empresa IN ${empresaPlaceholders}
+        AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
       ORDER BY
         c.dt_transacao DESC
@@ -1690,7 +1690,7 @@ router.get(
         cmvvarejo c
       WHERE
         c.dt_transacao BETWEEN $1 AND $2
-        AND c.cd_empresa IN ${empresaPlaceholders}
+        AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
       ORDER BY
         c.dt_transacao DESC
