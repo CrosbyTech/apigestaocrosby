@@ -438,6 +438,7 @@ router.get(
       where
         fd.dt_emissao between $1 and $2
         and fd.cd_empresa in (${empresaPlaceholders})
+        and fd.tp_situacao = 'N'
       group by
         fd.cd_empresa,
         fd.cd_fornecedor,
@@ -495,6 +496,7 @@ router.get(
       where
         fd.dt_emissao between $1 and $2
         and fd.cd_empresa in (${empresaPlaceholders})
+        and fd.tp_situacao = 'N'
       group by
         fd.cd_empresa,
         fd.cd_fornecedor,
