@@ -69,8 +69,9 @@ import {
 
 const router = express.Router();
 
-// Cache simples para resultados DRE (em produção usar Redis)
+// Cache simples para resultados DRE e Auditoria (em produção usar Redis)
 const dreCache = new Map();
+const auditoriaCache = new Map();
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
 
 // Função para limpar cache expirado
@@ -79,6 +80,11 @@ const cleanExpiredCache = () => {
   for (const [key, value] of dreCache.entries()) {
     if (now - value.timestamp > CACHE_TTL) {
       dreCache.delete(key);
+    }
+  }
+  for (const [key, value] of auditoriaCache.entries()) {
+    if (now - value.timestamp > CACHE_TTL) {
+      auditoriaCache.delete(key);
     }
   }
 };
@@ -2587,7 +2593,7 @@ router.get(
 
 /**
  * @route GET /sales/auditoria-transacoes
- * @desc Auditoria de transações similar ao DADOSTOTVS.TXT - agrupa por operações
+ * @desc Auditoria de transações similar ao DADOSTOTVS.TXT - versão otimizada com cache e agregação
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
@@ -2602,65 +2608,81 @@ router.get(
       cd_empresa,
     } = req.query;
 
-    if (!cd_empresa) {
-      return errorResponse(
+    // Empresas padrão se não especificadas
+    const empresas = cd_empresa 
+      ? (Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa])
+      : [1, 2, 6, 7, 11, 31, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 111, 200, 311, 600, 650, 700, 750, 850, 890, 910, 920, 930, 940, 950, 960, 970, 980, 990];
+
+    // Verificar cache primeiro
+    const cacheKey = `auditoria_${dt_inicio}_${dt_fim}_${JSON.stringify(empresas)}`;
+    const cachedResult = auditoriaCache.get(cacheKey);
+
+    if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_TTL) {
+      console.log(`📦 AUDITORIA: Retornando dados do cache para ${cacheKey}`);
+      return successResponse(
         res,
-        'Parâmetro cd_empresa é obrigatório',
-        400,
-        'MISSING_PARAMETER',
+        {
+          ...cachedResult.data,
+          cached: true,
+          cacheAge: Math.round((Date.now() - cachedResult.timestamp) / 1000),
+        },
+        'Auditoria de transações do cache (consulta otimizada)',
       );
     }
 
-    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
-
-    // Query para agrupar por operação e tipo de operação (similar ao DADOSTOTVS.TXT)
-    const query = `
-      SELECT 
-        vfn.cd_operacao,
-        vfn.tp_operacao,
-        COUNT(DISTINCT vfn.nr_transacao) as nr_transacoes,
-        SUM(vfn.qt_faturado) as quantidade_total,
-        SUM(vfn.vl_unitbruto * vfn.qt_faturado + COALESCE(vfn.vl_freterat, 0)) as valor_bruto,
-        SUM(vfn.vl_unitliquido * vfn.qt_faturado + COALESCE(vfn.vl_freterat, 0)) as valor_liquido,
-        -- Classificar por tipo de operação para agrupamento
-        CASE 
-          WHEN vfn.tp_operacao = 'S' AND vfn.cd_operacao IN (512, 545, 546, 548, 5102) THEN 'VENDA'
-          WHEN vfn.tp_operacao = 'E' AND vfn.cd_operacao IN (21, 555) THEN 'DEVOLUCAO VENDA'
-          WHEN vfn.cd_operacao IN (5152) THEN 'TRANSFERENCIA SAIDA'
-          WHEN vfn.cd_operacao IN (1152, 1153) THEN 'TRANSFERENCIA ENTRADA'
-          WHEN vfn.cd_operacao IN (599, 2008, 5920, 5930) THEN 'OUTRAS SAIDAS'
-          ELSE 'OUTRAS OPERACOES'
-        END as categoria_operacao
-      FROM vr_fis_nfitemprod vfn
-      LEFT JOIN vr_prd_valorprod prdvl ON vfn.cd_produto = prdvl.cd_produto
-      WHERE vfn.dt_transacao BETWEEN $1 AND $2
-        AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.tp_situacao NOT IN ('C', 'X')
-        AND prdvl.cd_valor = 3
-        AND prdvl.cd_empresa = 1
-        AND prdvl.tp_valor = 'C'
-      GROUP BY 
-        vfn.cd_operacao, 
-        vfn.tp_operacao,
-        categoria_operacao
-      ORDER BY 
-        categoria_operacao,
-        vfn.cd_operacao
-    `;
-
+    const startTime = Date.now();
     console.log(
-      `🔍 Auditoria Transações: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`,
+      `🚀 AUDITORIA: Executando consulta otimizada para ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`,
     );
+
+    const empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    const params = [dt_inicio, dt_fim, ...empresas];
+
+    // Query otimizada com agregação direta e sem JOINs desnecessários
+    const query = `
+      WITH operacoes_agregadas AS (
+        SELECT 
+          cd_operacao,
+          tp_operacao,
+          COUNT(DISTINCT nr_transacao) as nr_transacoes,
+          SUM(qt_faturado) as quantidade_total,
+          SUM(vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)) as valor_bruto,
+          SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)) as valor_liquido,
+          -- Classificação otimizada por operação
+          CASE 
+            WHEN tp_operacao = 'S' AND cd_operacao IN (300, 5102, 512, 1407, 1409, 5107, 5110, 5106, 521) THEN 'VENDA'
+            WHEN tp_operacao = 'E' AND cd_operacao IN (1202, 1204, 1950, 1999) THEN 'DEVOLUCAO VENDA'
+            WHEN cd_operacao IN (5152) THEN 'TRANSFERENCIA SAIDA'
+            WHEN cd_operacao IN (1152, 1153) THEN 'TRANSFERENCIA ENTRADA'
+            WHEN cd_operacao IN (599, 2008, 5920, 5930) THEN 'OUTRAS SAIDAS'
+            ELSE 'OUTRAS OPERACOES'
+          END as categoria_operacao
+        FROM vr_fis_nfitemprod
+        WHERE dt_transacao BETWEEN $1 AND $2
+          AND cd_empresa IN (${empresaPlaceholders})
+          AND tp_situacao NOT IN ('C', 'X')
+        GROUP BY cd_operacao, tp_operacao
+      )
+      SELECT * FROM operacoes_agregadas
+      ORDER BY categoria_operacao, cd_operacao
+    `;
 
     const { rows } = await pool.query(query, params);
 
-    // Agrupar dados por categoria para estrutura similar ao DADOSTOTVS.TXT
-    const dadosAgrupados = rows.reduce((acc, row) => {
+    // Agrupar dados por categoria de forma eficiente
+    const dadosAgrupados = {};
+    const totaisGerais = {
+      nr_transacoes: 0,
+      quantidade_total: 0,
+      valor_bruto: 0,
+      valor_liquido: 0,
+    };
+
+    rows.forEach(row => {
       const categoria = row.categoria_operacao;
-      if (!acc[categoria]) {
-        acc[categoria] = {
+      
+      if (!dadosAgrupados[categoria]) {
+        dadosAgrupados[categoria] = {
           operacoes: [],
           totais: {
             nr_transacoes: 0,
@@ -2671,54 +2693,62 @@ router.get(
         };
       }
 
-      acc[categoria].operacoes.push({
+      const operacao = {
         cd_operacao: row.cd_operacao,
         tp_operacao: row.tp_operacao,
         nr_transacoes: parseInt(row.nr_transacoes),
         quantidade_total: parseFloat(row.quantidade_total),
         valor_bruto: parseFloat(row.valor_bruto),
         valor_liquido: parseFloat(row.valor_liquido),
-      });
+      };
 
-      // Somar totais da categoria
-      acc[categoria].totais.nr_transacoes += parseInt(row.nr_transacoes);
-      acc[categoria].totais.quantidade_total += parseFloat(
-        row.quantidade_total,
-      );
-      acc[categoria].totais.valor_bruto += parseFloat(row.valor_bruto);
-      acc[categoria].totais.valor_liquido += parseFloat(row.valor_liquido);
+      dadosAgrupados[categoria].operacoes.push(operacao);
 
-      return acc;
-    }, {});
+      // Acumular totais da categoria
+      dadosAgrupados[categoria].totais.nr_transacoes += operacao.nr_transacoes;
+      dadosAgrupados[categoria].totais.quantidade_total += operacao.quantidade_total;
+      dadosAgrupados[categoria].totais.valor_bruto += operacao.valor_bruto;
+      dadosAgrupados[categoria].totais.valor_liquido += operacao.valor_liquido;
 
-    // Calcular totais gerais
-    const totaisGerais = Object.values(dadosAgrupados).reduce(
-      (acc, categoria) => {
-        acc.nr_transacoes += categoria.totais.nr_transacoes;
-        acc.quantidade_total += categoria.totais.quantidade_total;
-        acc.valor_bruto += categoria.totais.valor_bruto;
-        acc.valor_liquido += categoria.totais.valor_liquido;
-        return acc;
-      },
-      {
-        nr_transacoes: 0,
-        quantidade_total: 0,
-        valor_bruto: 0,
-        valor_liquido: 0,
-      },
+      // Acumular totais gerais
+      totaisGerais.nr_transacoes += operacao.nr_transacoes;
+      totaisGerais.quantidade_total += operacao.quantidade_total;
+      totaisGerais.valor_bruto += operacao.valor_bruto;
+      totaisGerais.valor_liquido += operacao.valor_liquido;
+    });
+
+    const queryTime = Date.now() - startTime;
+    console.log(
+      `✅ AUDITORIA: Consulta concluída em ${queryTime}ms - ${rows.length} operações processadas`,
     );
+
+    const responseData = {
+      periodo: { dt_inicio, dt_fim },
+      empresas,
+      categorias: dadosAgrupados,
+      totais_gerais: totaisGerais,
+      count: rows.length,
+      estrutura_similar_dadostotvs: true,
+      performance: {
+        queryType: 'otimizada-agregada',
+        tempo_execucao: `${queryTime}ms`,
+        cached: false,
+        registros_processados: rows.length,
+      },
+    };
+
+    // Salvar no cache
+    auditoriaCache.set(cacheKey, {
+      data: responseData,
+      timestamp: Date.now(),
+    });
+
+    console.log(`💾 AUDITORIA: Dados salvos no cache - ${cacheKey}`);
 
     successResponse(
       res,
-      {
-        periodo: { dt_inicio, dt_fim },
-        empresas,
-        categorias: dadosAgrupados,
-        totais_gerais: totaisGerais,
-        count: rows.length,
-        estrutura_similar_dadostotvs: true,
-      },
-      'Auditoria de transações obtida com sucesso',
+      responseData,
+      'Auditoria de transações obtida com sucesso (consulta otimizada)',
     );
   }),
 );
