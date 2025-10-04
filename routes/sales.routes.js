@@ -1,3 +1,42 @@
+import express from 'express';
+import pool from '../config/database.js';
+import {
+  validateRequired,
+  validateDateFormat,
+  validatePagination,
+  sanitizeInput,
+} from '../middlewares/validation.middleware.js';
+import {
+  asyncHandler,
+  successResponse,
+  errorResponse,
+} from '../utils/errorHandler.js';
+
+const router = express.Router();
+
+// Cache simples para resultados DRE e Auditoria (em produção usar Redis)
+const dreCache = new Map();
+const auditoriaCache = new Map();
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
+// Função para limpar cache expirado
+const cleanExpiredCache = () => {
+  const now = Date.now();
+  for (const [key, value] of dreCache.entries()) {
+    if (now - value.timestamp > CACHE_TTL) {
+      dreCache.delete(key);
+    }
+  }
+  for (const [key, value] of auditoriaCache.entries()) {
+    if (now - value.timestamp > CACHE_TTL) {
+      auditoriaCache.delete(key);
+    }
+  }
+};
+
+// Limpar cache a cada 10 minutos
+setInterval(cleanExpiredCache, 10 * 60 * 1000);
+
 /**
  * @route GET /sales/transacoes-por-operacao
  * @desc Buscar todas as transações de uma operação específica
@@ -53,49 +92,9 @@ router.get(
     );
   }),
 );
-import express from 'express';
-import pool from '../config/database.js';
-import {
-  validateRequired,
-  validateDateFormat,
-  validatePagination,
-  sanitizeInput,
-} from '../middlewares/validation.middleware.js';
-import {
-  asyncHandler,
-  successResponse,
-  errorResponse,
-} from '../utils/errorHandler.js';
-
-const router = express.Router();
-
-// Cache simples para resultados DRE e Auditoria (em produção usar Redis)
-const dreCache = new Map();
-const auditoriaCache = new Map();
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
-
-// Função para limpar cache expirado
-const cleanExpiredCache = () => {
-  const now = Date.now();
-  for (const [key, value] of dreCache.entries()) {
-    if (now - value.timestamp > CACHE_TTL) {
-      dreCache.delete(key);
-    }
-  }
-  for (const [key, value] of auditoriaCache.entries()) {
-    if (now - value.timestamp > CACHE_TTL) {
-      auditoriaCache.delete(key);
-    }
-  }
-};
-
-// Limpar cache a cada 10 minutos
-setInterval(cleanExpiredCache, 10 * 60 * 1000);
-
-
-export default router;
 
 /**
+ * @route GET /sales/faturamento
  * @desc Buscar dados de faturamento geral (todas as operações)
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa[]}
@@ -2611,12 +2610,20 @@ router.get(
     } = req.query;
 
     // Empresas padrão se não especificadas
-    const empresas = cd_empresa 
-      ? (Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa])
-      : [1, 2, 6, 7, 11, 31, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 111, 200, 311, 600, 650, 700, 750, 850, 890, 910, 920, 930, 940, 950, 960, 970, 980, 990];
+    const empresas = cd_empresa
+      ? Array.isArray(cd_empresa)
+        ? cd_empresa
+        : [cd_empresa]
+      : [
+          1, 2, 6, 7, 11, 31, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98,
+          99, 100, 101, 111, 200, 311, 600, 650, 700, 750, 850, 890, 910, 920,
+          930, 940, 950, 960, 970, 980, 990,
+        ];
 
     // Verificar cache primeiro
-    const cacheKey = `auditoria_${dt_inicio}_${dt_fim}_${JSON.stringify(empresas)}`;
+    const cacheKey = `auditoria_${dt_inicio}_${dt_fim}_${JSON.stringify(
+      empresas,
+    )}`;
     const cachedResult = auditoriaCache.get(cacheKey);
 
     if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_TTL) {
@@ -2637,7 +2644,9 @@ router.get(
       `🚀 AUDITORIA: Executando consulta otimizada para ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`,
     );
 
-    const empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
+    const empresaPlaceholders = empresas
+      .map((_, idx) => `$${3 + idx}`)
+      .join(',');
     const params = [dt_inicio, dt_fim, ...empresas];
 
     // Query otimizada com agregação direta e sem JOINs desnecessários
@@ -2680,9 +2689,9 @@ router.get(
       valor_liquido: 0,
     };
 
-    rows.forEach(row => {
+    rows.forEach((row) => {
       const categoria = row.categoria_operacao;
-      
+
       if (!dadosAgrupados[categoria]) {
         dadosAgrupados[categoria] = {
           operacoes: [],
@@ -2708,7 +2717,8 @@ router.get(
 
       // Acumular totais da categoria
       dadosAgrupados[categoria].totais.nr_transacoes += operacao.nr_transacoes;
-      dadosAgrupados[categoria].totais.quantidade_total += operacao.quantidade_total;
+      dadosAgrupados[categoria].totais.quantidade_total +=
+        operacao.quantidade_total;
       dadosAgrupados[categoria].totais.valor_bruto += operacao.valor_bruto;
       dadosAgrupados[categoria].totais.valor_liquido += operacao.valor_liquido;
 
@@ -2755,4 +2765,4 @@ router.get(
   }),
 );
 
-// ...existing code...
+export default router;
