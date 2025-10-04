@@ -92,7 +92,8 @@ const cleanExpiredCache = () => {
 // Limpar cache a cada 10 minutos
 setInterval(cleanExpiredCache, 10 * 60 * 1000);
 
-// ...existing code...
+
+export default router;
 
 /**
  * @desc Buscar dados de faturamento geral (todas as operações)
