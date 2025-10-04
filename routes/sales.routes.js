@@ -1,18 +1,35 @@
-import express from "express";
-import pool from "../config/database.js";
+import express from 'express';
+import pool from '../config/database.js';
 import {
   validateRequired,
   validateDateFormat,
   validatePagination,
   sanitizeInput,
-} from "../middlewares/validation.middleware.js";
+} from '../middlewares/validation.middleware.js';
 import {
   asyncHandler,
   successResponse,
   errorResponse,
-} from "../utils/errorHandler.js";
+} from '../utils/errorHandler.js';
 
 const router = express.Router();
+
+// Cache simples para resultados DRE (em produção usar Redis)
+const dreCache = new Map();
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
+// Função para limpar cache expirado
+const cleanExpiredCache = () => {
+  const now = Date.now();
+  for (const [key, value] of dreCache.entries()) {
+    if (now - value.timestamp > CACHE_TTL) {
+      dreCache.delete(key);
+    }
+  }
+};
+
+// Limpar cache a cada 10 minutos
+setInterval(cleanExpiredCache, 10 * 60 * 1000);
 
 // Operações permitidas para faturamento (INCLUSIVAS)
 const ALLOWED_OPERATIONS = [
@@ -22,14 +39,14 @@ const ALLOWED_OPERATIONS = [
 
 const EXCLUDED_OPERATIONS = [
   1152, 590, 5153, 660, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111,
-  2009, 5152, 6029, 530, 5152, 5930, 650, 5010, 600, 40, 1557, 8600, 5910,
+  2009, 5152, 6029, 530, 5152, 5930, 650, 5010, 600, 620, 40, 1557, 8600, 5910,
   3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 1552, 51,
   1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 1556, 9200, 8002,
   2551, 1557, 8160, 2004, 5912, 1410, 5914, 1407, 5102, 520, 300, 200, 512,
   1402, 1405, 1409, 5110, 5113, 17, 21, 401, 1201, 1202, 1204, 1206, 1950, 1999,
   2203, 522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 2008,
   536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930,
-  650, 5010, 600, 40, 1557, 2505, 8600, 590, 5153, 660, 5910, 3336, 9003,
+  650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 5910, 3336, 9003,
   9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 1552, 51, 1556, 2500,
   1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 1556, 9200, 8002, 2551, 1557,
   8160, 2004, 5912, 1410, 1926, 1903, 1122, 1128, 1913, 529, 8160,
@@ -42,29 +59,29 @@ const EXCLUDED_OPERATIONS = [
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
 router.get(
-  "/faturamento",
+  '/faturamento',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-07-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-07-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
     } = req.query;
 
     if (!cd_empresa) {
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
     // Otimização baseada no número de empresas e período
     const isHeavyQuery =
@@ -95,7 +112,7 @@ router.get(
       LEFT JOIN vr_prd_valorprod prdvl ON vfn.cd_produto = prdvl.cd_produto
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(",")})
+        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND prdvl.cd_valor = 3
         AND prdvl.cd_empresa = 1
@@ -123,22 +140,22 @@ router.get(
       LEFT JOIN vr_prd_valorprod prdvl ON vfn.cd_produto = prdvl.cd_produto
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(",")})
+        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND prdvl.cd_valor = 3
         AND prdvl.cd_empresa = 1
         AND prdvl.tp_valor = 'C'
       ORDER BY vfn.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 100000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Faturamento (INCLUSIVO): ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Faturamento (INCLUSIVO): ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -151,7 +168,7 @@ router.get(
         acc.totalQuantidade += parseFloat(row.qt_faturado || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 },
     );
 
     successResponse(
@@ -168,19 +185,19 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
             ? 50000
             : isHeavyQuery
             ? 100000
-            : "sem limite",
+            : 'sem limite',
         },
         data: rows,
       },
-      `Dados de faturamento obtidos com sucesso (${queryType}) - Operações INCLUSIVAS`
+      `Dados de faturamento obtidos com sucesso (${queryType}) - Operações INCLUSIVAS`,
     );
-  })
+  }),
 );
 
 /**
@@ -190,13 +207,13 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], nm_fantasia}
  */
 router.get(
-  "/faturamento-franquia",
+  '/faturamento-franquia',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-07-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-07-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
       nm_fantasia,
     } = req.query;
@@ -204,18 +221,18 @@ router.get(
     if (!cd_empresa) {
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    let fantasiaWhere = "";
+    let fantasiaWhere = '';
     if (nm_fantasia) {
       fantasiaWhere = `AND p.nm_fantasia = $${params.length + 1}`;
       params.push(nm_fantasia);
@@ -253,7 +270,7 @@ router.get(
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 15).join(
-          ","
+          ',',
         )})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         ${fantasiaWhere}
@@ -281,28 +298,28 @@ router.get(
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 20).join(
-          ","
+          ',',
         )})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         ${fantasiaWhere}
       ORDER BY vfn.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 100000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Faturamento-franquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Faturamento-franquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
 
     // Agrupar por fantasia
     const groupedData = rows.reduce((acc, row) => {
-      const fantasia = row.nm_fantasia || "Sem Fantasia";
+      const fantasia = row.nm_fantasia || 'Sem Fantasia';
       if (!acc[fantasia]) {
         acc[fantasia] = {
           nm_fantasia: fantasia,
@@ -329,19 +346,19 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
             ? 50000
             : isHeavyQuery
             ? 100000
-            : "sem limite",
+            : 'sem limite',
         },
         groupedData: Object.values(groupedData),
       },
-      `Faturamento de franquias obtido com sucesso (${queryType})`
+      `Faturamento de franquias obtido com sucesso (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -351,29 +368,29 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
 router.get(
-  "/faturamento-mtm",
+  '/faturamento-mtm',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-07-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-07-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
     } = req.query;
 
     if (!cd_empresa) {
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
     // Otimização baseada no número de empresas e período
     const isHeavyQuery =
@@ -407,7 +424,7 @@ router.get(
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 20).join(
-          ","
+          ',',
         )})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND pc.cd_tipoclas = 5
@@ -437,21 +454,21 @@ router.get(
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 25).join(
-          ","
+          ',',
         )})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND pc.cd_tipoclas = 5
       ORDER BY vfn.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 100000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Faturamento-mtm: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Faturamento-mtm: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -464,7 +481,7 @@ router.get(
         acc.totalQuantidade += parseFloat(row.qt_faturado || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 },
     );
 
     successResponse(
@@ -472,7 +489,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        tipo: "MTM",
+        tipo: 'MTM',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -481,19 +498,19 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
             ? 50000
             : isHeavyQuery
             ? 100000
-            : "sem limite",
+            : 'sem limite',
         },
         data: rows,
       },
-      `Faturamento MTM obtido com sucesso (${queryType})`
+      `Faturamento MTM obtido com sucesso (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -503,34 +520,34 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
 router.get(
-  "/faturamento-revenda",
+  '/faturamento-revenda',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-06-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-06-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
     } = req.query;
 
     if (!cd_empresa) {
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     // Seguir o padrão de performance do contas-pagar: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
     const excludedOperationsRevenda = [
       522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 2008,
       536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930,
-      650, 5010, 600, 40, 1557, 2505, 8600, 590, 5153, 660, 5910, 3336,
+      650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 5910, 3336,
       9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 1552, 51,
       1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 1556, 9200,
       8002, 2551, 1557, 8160, 2004, 5912, 1410, 1926, 1903, 1122, 1128, 1913,
@@ -572,7 +589,7 @@ router.get(
         AND vfn.cd_empresa IN (${empresaPlaceholders})
         AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda
           .slice(0, 30)
-          .join(",")})
+          .join(',')})
         AND pc.cd_tipoclas in (20,7)
         AND pc.cd_classificacao::integer in (3,1)
         AND vfn.tp_situacao NOT IN ('C', 'X')
@@ -603,21 +620,21 @@ router.get(
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(",")})
+        AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
         AND pc.cd_tipoclas in (20,7)
         AND pc.cd_classificacao::integer in (3,1)
         AND vfn.tp_situacao NOT IN ('C', 'X')
       ORDER BY vfn.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 100000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Faturamento-revenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Faturamento-revenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -630,7 +647,7 @@ router.get(
         acc.totalQuantidade += parseFloat(row.qt_faturado || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0 },
     );
 
     successResponse(
@@ -638,7 +655,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        tipo: "Revenda",
+        tipo: 'Revenda',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -647,19 +664,19 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
             ? 50000
             : isHeavyQuery
             ? 100000
-            : "sem limite",
+            : 'sem limite',
         },
         data: rows,
       },
-      `Faturamento de revenda obtido com sucesso (${queryType})`
+      `Faturamento de revenda obtido com sucesso (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -669,10 +686,10 @@ router.get(
  * @query {inicio, fim, limit, offset}
  */
 router.get(
-  "/ranking-vendedores",
+  '/ranking-vendedores',
   sanitizeInput,
-  validateRequired(["inicio", "fim"]),
-  validateDateFormat(["inicio", "fim"]),
+  validateRequired(['inicio', 'fim']),
+  validateDateFormat(['inicio', 'fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
@@ -733,8 +750,8 @@ router.get(
       INNER JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
       WHERE B.TP_SITUACAO = 4
         AND B.TP_OPERACAO IN ('S', 'E')
-        AND B.CD_GRUPOEMPRESA NOT IN (${excludedGroups.join(",")})
-        AND B.CD_OPERACAO IN (${allowedOperations.join(",")})
+        AND B.CD_GRUPOEMPRESA NOT IN (${excludedGroups.join(',')})
+        AND B.CD_OPERACAO IN (${allowedOperations.join(',')})
         AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
       GROUP BY A.CD_VENDEDOR, A.NM_VENDEDOR, B.CD_COMPVEND
       HAVING COALESCE(
@@ -766,13 +783,13 @@ router.get(
       INNER JOIN TRA_TRANSACAO B ON A.CD_VENDEDOR = B.CD_COMPVEND
       WHERE B.TP_SITUACAO = 4
         AND B.TP_OPERACAO IN ('S', 'E')
-        AND B.CD_GRUPOEMPRESA NOT IN (${excludedGroups.join(",")})
-        AND B.CD_OPERACAO IN (${allowedOperations.join(",")})
+        AND B.CD_GRUPOEMPRESA NOT IN (${excludedGroups.join(',')})
+        AND B.CD_OPERACAO IN (${allowedOperations.join(',')})
         AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
     `;
 
     console.log(
-      `🔍 Ranking-vendedores: período ${dataInicio} a ${dataFim}, limit: ${limit}, offset: ${offset}`
+      `🔍 Ranking-vendedores: período ${dataInicio} a ${dataFim}, limit: ${limit}, offset: ${offset}`,
     );
 
     try {
@@ -793,13 +810,13 @@ router.get(
           periodo: { inicio: dataInicio, fim: dataFim },
           data: resultado.rows,
         },
-        "Ranking de vendedores obtido com sucesso"
+        'Ranking de vendedores obtido com sucesso',
       );
     } catch (error) {
-      console.error("❌ Erro na query de ranking de vendedores:", error);
+      console.error('❌ Erro na query de ranking de vendedores:', error);
       throw error;
     }
-  })
+  }),
 );
 
 /**
@@ -809,10 +826,10 @@ router.get(
  * @query {inicio, fim}
  */
 router.get(
-  "/ranking-vendedores-simples",
+  '/ranking-vendedores-simples',
   sanitizeInput,
-  validateRequired(["inicio", "fim"]),
-  validateDateFormat(["inicio", "fim"]),
+  validateRequired(['inicio', 'fim']),
+  validateDateFormat(['inicio', 'fim']),
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
 
@@ -837,7 +854,7 @@ router.get(
     `;
 
     console.log(
-      `🔍 Ranking-vendedores-simples: período ${dataInicio} a ${dataFim}`
+      `🔍 Ranking-vendedores-simples: período ${dataInicio} a ${dataFim}`,
     );
 
     try {
@@ -850,16 +867,16 @@ router.get(
           count: resultado.rows.length,
           data: resultado.rows,
         },
-        "Ranking de vendedores simplificado obtido com sucesso"
+        'Ranking de vendedores simplificado obtido com sucesso',
       );
     } catch (error) {
       console.error(
-        "❌ Erro na query de ranking de vendedores simplificado:",
-        error
+        '❌ Erro na query de ranking de vendedores simplificado:',
+        error,
       );
       throw error;
     }
-  })
+  }),
 );
 
 /**
@@ -868,7 +885,7 @@ router.get(
  * @access Public
  */
 router.get(
-  "/ranking-vendedores-test",
+  '/ranking-vendedores-test',
   asyncHandler(async (req, res) => {
     try {
       // Teste simples de conexão
@@ -884,17 +901,17 @@ router.get(
       successResponse(
         res,
         {
-          message: "Teste de conexão bem-sucedido",
+          message: 'Teste de conexão bem-sucedido',
           total_vendedores: resultado.rows[0]?.total_vendedores || 0,
           timestamp: new Date().toISOString(),
         },
-        "Teste de ranking de vendedores executado com sucesso"
+        'Teste de ranking de vendedores executado com sucesso',
       );
     } catch (error) {
-      console.error("❌ Erro no teste de ranking de vendedores:", error);
+      console.error('❌ Erro no teste de ranking de vendedores:', error);
       throw error;
     }
-  })
+  }),
 );
 
 // ----------------------------------------------------------------------------------------------
@@ -906,28 +923,28 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
 router.get(
-  "/receitaliquida-faturamento",
+  '/receitaliquida-faturamento',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-07-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-07-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
     } = req.query;
     if (!cd_empresa)
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
 
     const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     const params = [dt_inicio, dt_fim, ...empresas];
     const empresaPlaceholders = empresas
       .map((_, idx) => `$${3 + idx}`)
-      .join(",");
+      .join(',');
 
     const query = `
       SELECT
@@ -946,7 +963,7 @@ router.get(
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(",")})
+        AND vfn.cd_operacao IN (${ALLOWED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
     `;
 
@@ -956,13 +973,13 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        tipo: "Faturamento",
+        tipo: 'Faturamento',
         count: rows.length,
         data: rows,
       },
-      "Receita líquida - faturamento obtida com sucesso"
+      'Receita líquida - faturamento obtida com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -972,31 +989,31 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], nm_fantasia}
  */
 router.get(
-  "/receitaliquida-franquias",
+  '/receitaliquida-franquias',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-07-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-07-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
       nm_fantasia,
     } = req.query;
     if (!cd_empresa)
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
 
     const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     const params = [dt_inicio, dt_fim, ...empresas];
     const empresaPlaceholders = empresas
       .map((_, idx) => `$${3 + idx}`)
-      .join(",");
+      .join(',');
 
-    let fantasiaWhere = "";
+    let fantasiaWhere = '';
     if (nm_fantasia) {
       fantasiaWhere = `AND pj.nm_fantasia = $${params.length + 1}`;
       params.push(nm_fantasia);
@@ -1022,7 +1039,7 @@ router.get(
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(",")})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         ${fantasiaWhere}
     `;
@@ -1033,13 +1050,13 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        tipo: "Franquias",
+        tipo: 'Franquias',
         count: rows.length,
         data: rows,
       },
-      "Receita líquida - franquias obtida com sucesso"
+      'Receita líquida - franquias obtida com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1049,28 +1066,28 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
 router.get(
-  "/receitaliquida-mtm",
+  '/receitaliquida-mtm',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-07-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-07-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
     } = req.query;
     if (!cd_empresa)
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
 
     const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     const params = [dt_inicio, dt_fim, ...empresas];
     const empresaPlaceholders = empresas
       .map((_, idx) => `$${3 + idx}`)
-      .join(",");
+      .join(',');
 
     const query = `
       SELECT
@@ -1089,7 +1106,7 @@ router.get(
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(",")})
+        AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
         AND vfn.tp_situacao NOT IN ('C', 'X')
         AND pc.cd_tipoclas = 5
     `;
@@ -1100,13 +1117,13 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        tipo: "MTM",
+        tipo: 'MTM',
         count: rows.length,
         data: rows,
       },
-      "Receita líquida - MTM obtida com sucesso"
+      'Receita líquida - MTM obtida com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1116,33 +1133,33 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[]}
  */
 router.get(
-  "/receitaliquida-revenda",
+  '/receitaliquida-revenda',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-06-01",
-      dt_fim = "2025-07-15",
+      dt_inicio = '2025-06-01',
+      dt_fim = '2025-07-15',
       cd_empresa,
     } = req.query;
     if (!cd_empresa)
       return errorResponse(
         res,
-        "Parâmetro cd_empresa é obrigatório",
+        'Parâmetro cd_empresa é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
 
     const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     const params = [dt_inicio, dt_fim, ...empresas];
     const empresaPlaceholders = empresas
       .map((_, idx) => `$${3 + idx}`)
-      .join(",");
+      .join(',');
 
     const excludedOperationsRevenda = [
       522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 2008,
       536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 5152, 5930,
-      650, 5010, 600, 40, 1557, 2505, 8600, 590, 5153, 660, 5910, 3336,
+      650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 5910, 3336,
       9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 1552, 51,
       1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 1556, 9200,
       8002, 2551, 1557, 8160, 2004, 5912, 1410, 1926, 1903, 1122, 1128, 1913,
@@ -1166,7 +1183,7 @@ router.get(
       LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
       WHERE vfn.dt_transacao BETWEEN $1 AND $2
         AND vfn.cd_empresa IN (${empresaPlaceholders})
-        AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(",")})
+        AND vfn.cd_operacao NOT IN (${excludedOperationsRevenda.join(',')})
         AND pc.cd_tipoclas in (20,7)
         AND pc.cd_classificacao::integer in (3,1)
         AND vfn.tp_situacao NOT IN ('C', 'X')
@@ -1178,13 +1195,13 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        tipo: "Revenda",
+        tipo: 'Revenda',
         count: rows.length,
         data: rows,
       },
-      "Receita líquida - revenda obtida com sucesso"
+      'Receita líquida - revenda obtida com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1194,18 +1211,18 @@ router.get(
  * @query {nr_transacao[]}
  */
 router.get(
-  "/vlimposto",
+  '/vlimposto',
   sanitizeInput,
-  validateRequired(["nr_transacao"]),
+  validateRequired(['nr_transacao']),
   asyncHandler(async (req, res) => {
     const { nr_transacao } = req.query;
 
     if (!nr_transacao) {
       return errorResponse(
         res,
-        "Parâmetro nr_transacao é obrigatório",
+        'Parâmetro nr_transacao é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
@@ -1216,22 +1233,22 @@ router.get(
 
     // Validar se são números válidos
     const transacoesValidas = transacoes.filter(
-      (t) => !isNaN(parseInt(t)) && parseInt(t) > 0
+      (t) => !isNaN(parseInt(t)) && parseInt(t) > 0,
     );
 
     if (transacoesValidas.length === 0) {
       return errorResponse(
         res,
-        "Parâmetro nr_transacao deve conter números válidos",
+        'Parâmetro nr_transacao deve conter números válidos',
         400,
-        "INVALID_PARAMETER"
+        'INVALID_PARAMETER',
       );
     }
 
     // Criar placeholders para a query
     const placeholders = transacoesValidas
       .map((_, idx) => `$${idx + 1}`)
-      .join(",");
+      .join(',');
     const params = transacoesValidas.map((t) => parseInt(t));
 
     const query = `
@@ -1254,7 +1271,7 @@ router.get(
     `;
 
     console.log(
-      `🔍 Vlimposto: ${transacoesValidas.length} transações consultadas`
+      `🔍 Vlimposto: ${transacoesValidas.length} transações consultadas`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -1281,7 +1298,7 @@ router.get(
     // Calcular total geral
     const totalGeral = rows.reduce(
       (acc, row) => acc + parseFloat(row.valorimposto || 0),
-      0
+      0,
     );
 
     successResponse(
@@ -1293,9 +1310,9 @@ router.get(
         totais_por_transacao: Object.values(totaisPorTransacao),
         data: rows,
       },
-      `Valores de impostos obtidos com sucesso para ${transacoesValidas.length} transações`
+      `Valores de impostos obtidos com sucesso para ${transacoesValidas.length} transações`,
     );
-  })
+  }),
 );
 
 /**
@@ -1305,10 +1322,10 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_classificacao[]}
  */
 router.get(
-  "/cmvtest",
+  '/cmvtest',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_classificacao"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_classificacao']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_classificacao } = req.query;
 
@@ -1317,27 +1334,27 @@ router.get(
       ? cd_classificacao
       : [cd_classificacao];
     classes = classes.filter(
-      (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+      (v) => v !== undefined && v !== null && `${v}`.trim() !== '',
     );
     if (classes.length === 0) {
       return errorResponse(
         res,
-        "Parâmetro cd_classificacao deve conter ao menos um valor",
+        'Parâmetro cd_classificacao deve conter ao menos um valor',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     // Placeholders para classificações
-    const classPlaceholders = classes.map((_, idx) => `$${3 + idx}`).join(",");
+    const classPlaceholders = classes.map((_, idx) => `$${3 + idx}`).join(',');
     const params = [dt_inicio, dt_fim, ...classes.map((c) => parseInt(c, 10))];
 
     // Lista fixa de empresas e operações (conforme SQL fornecido)
-    const empresasFixas = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+    const empresasFixas = '(1, 2, 6, 11, 31, 75, 85, 92, 99)';
     const excludedOps = `(
       522, 9001, 9009, 9027, 9017, 2, 1, 548, 555, 521, 599, 1152, 9200, 
       2008, 536, 1153, 599, 5920, 5930, 1711, 7111, 2009, 5152, 6029, 530, 
-      5152, 5930, 650, 5010, 600, 40, 1557, 2505, 8600, 590, 5153, 660, 
+      5152, 5930, 650, 5010, 600, 620, 40, 1557, 2505, 8600, 590, 5153, 660, 
       5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536, 
       1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553, 
       1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410, 1926, 1903, 1122, 1128, 1913, 8160, 10, 529
@@ -1386,7 +1403,7 @@ router.get(
     `;
 
     console.log(
-      `🔍 CMVTest: período ${dt_inicio} a ${dt_fim}, classes=${classes.length}`
+      `🔍 CMVTest: período ${dt_inicio} a ${dt_fim}, classes=${classes.length}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -1400,9 +1417,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "CMV teste obtido com sucesso"
+      'CMV teste obtido com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1412,13 +1429,13 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], cd_classificacao[]}
  */
 router.get(
-  "/cmv",
+  '/cmv',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-01-01",
-      dt_fim = "2025-09-18",
+      dt_inicio = '2025-01-01',
+      dt_fim = '2025-09-18',
       cd_empresa,
       cd_classificacao,
     } = req.query;
@@ -1431,29 +1448,33 @@ router.get(
     if (cd_empresa) {
       empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
       params = [dt_inicio, dt_fim, ...empresas];
-      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
     } else {
       // Usar as empresas fixas do SQL original
       empresas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
       params = [dt_inicio, dt_fim];
-      empresaPlaceholders = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+      empresaPlaceholders = '(1, 2, 6, 11, 31, 75, 85, 92, 99)';
     }
 
     // Processar classificações
     let classes = [];
-    let classPlaceholders = "";
-    let classWhere = "";
-    
+    let classPlaceholders = '';
+    let classWhere = '';
+
     if (cd_classificacao) {
-      classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+      classes = Array.isArray(cd_classificacao)
+        ? cd_classificacao
+        : [cd_classificacao];
       classes = classes.filter(
-        (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+        (v) => v !== undefined && v !== null && `${v}`.trim() !== '',
       );
-      
+
       if (classes.length > 0) {
         // Calcular o índice correto baseado nos parâmetros já adicionados
         const startIdx = params.length + 1; // +1 porque os índices começam em 1
-        classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
+        classPlaceholders = classes
+          .map((_, idx) => `$${startIdx + idx}`)
+          .join(',');
         classWhere = `AND mn.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
       }
@@ -1526,16 +1547,16 @@ router.get(
         ${classWhere}
       ORDER BY
         mn.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 1000000" : ""}
+      ${isHeavyQuery ? 'LIMIT 1000000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 CMV: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`
+      `🔍 CMV: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -1549,7 +1570,7 @@ router.get(
         acc.totalProduto += parseFloat(row.vl_produto || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 },
     );
 
     successResponse(
@@ -1557,7 +1578,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        classes: classes.length > 0 ? classes : "todas",
+        classes: classes.length > 0 ? classes : 'todas',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -1566,19 +1587,19 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
             ? 500000
             : isHeavyQuery
             ? 1000000
-            : "sem limite",
+            : 'sem limite',
         },
         data: rows,
       },
-      `CMV obtido com sucesso usando view materializada (${queryType})`
+      `CMV obtido com sucesso usando view materializada (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -1588,13 +1609,13 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], cd_classificacao[]}
  */
 router.get(
-  "/cmvvarejo",
+  '/cmvvarejo',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-01-01",
-      dt_fim = "2025-09-18",
+      dt_inicio = '2025-01-01',
+      dt_fim = '2025-09-18',
       cd_empresa,
       cd_classificacao,
     } = req.query;
@@ -1607,35 +1628,40 @@ router.get(
     if (cd_empresa) {
       empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
       params = [dt_inicio, dt_fim, ...empresas];
-      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
     } else {
       // Usar as empresas fixas do SQL original
       empresas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
       params = [dt_inicio, dt_fim];
-      empresaPlaceholders = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+      empresaPlaceholders = '(1, 2, 6, 11, 31, 75, 85, 92, 99)';
     }
 
     // Processar classificações
     let classes = [];
-    let classPlaceholders = "";
-    let classWhere = "";
-    
+    let classPlaceholders = '';
+    let classWhere = '';
+
     if (cd_classificacao) {
-      classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+      classes = Array.isArray(cd_classificacao)
+        ? cd_classificacao
+        : [cd_classificacao];
       classes = classes.filter(
-        (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+        (v) => v !== undefined && v !== null && `${v}`.trim() !== '',
       );
-      
+
       if (classes.length > 0) {
         // Calcular o índice correto baseado nos parâmetros já adicionados
         const startIdx = params.length + 1; // +1 porque os índices começam em 1
-        classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
+        classPlaceholders = classes
+          .map((_, idx) => `$${startIdx + idx}`)
+          .join(',');
         classWhere = `AND c.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
       }
     }
 
-    // Otimização baseada no número de empresas e período (igual à rota faturamento)
+    // Otimização: Para DRE não precisamos de ORDER BY, apenas dos dados para cálculo
+    // Reduzir LIMIT para evitar timeouts, focando em performance
     const isHeavyQuery =
       empresas.length > 10 ||
       new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
@@ -1666,9 +1692,7 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      LIMIT 500000
+      LIMIT 100000
     `
       : `
       SELECT
@@ -1692,18 +1716,16 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 1000000" : ""}
+      ${isHeavyQuery ? 'LIMIT 200000' : 'LIMIT 300000'}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 CMVVarejo: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`
+      `🔍 CMVVarejo: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -1717,7 +1739,7 @@ router.get(
         acc.totalProduto += parseFloat(row.vl_produto || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 },
     );
 
     successResponse(
@@ -1725,7 +1747,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        classes: classes.length > 0 ? classes : "todas",
+        classes: classes.length > 0 ? classes : 'todas',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -1734,19 +1756,20 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
-            ? 500000
+            ? '100k (otimizado)'
             : isHeavyQuery
-            ? 1000000
-            : "sem limite",
+            ? '200k (otimizado)'
+            : '300k (otimizado)',
+          orderByRemovido: true,
         },
         data: rows,
       },
-      `CMV Varejo obtido com sucesso usando view cmvvarejo (${queryType})`
+      `CMV Varejo obtido com sucesso usando view cmvvarejo (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -1756,13 +1779,13 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], cd_classificacao[]}
  */
 router.get(
-  "/cmvfranquia",
+  '/cmvfranquia',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-01-01",
-      dt_fim = "2025-09-18",
+      dt_inicio = '2025-01-01',
+      dt_fim = '2025-09-18',
       cd_empresa,
       cd_classificacao,
     } = req.query;
@@ -1775,35 +1798,39 @@ router.get(
     if (cd_empresa) {
       empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
       params = [dt_inicio, dt_fim, ...empresas];
-      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
     } else {
       // Usar as empresas fixas do SQL original
       empresas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
       params = [dt_inicio, dt_fim];
-      empresaPlaceholders = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+      empresaPlaceholders = '(1, 2, 6, 11, 31, 75, 85, 92, 99)';
     }
 
     // Processar classificações
     let classes = [];
-    let classPlaceholders = "";
-    let classWhere = "";
-    
+    let classPlaceholders = '';
+    let classWhere = '';
+
     if (cd_classificacao) {
-      classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+      classes = Array.isArray(cd_classificacao)
+        ? cd_classificacao
+        : [cd_classificacao];
       classes = classes.filter(
-        (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+        (v) => v !== undefined && v !== null && `${v}`.trim() !== '',
       );
-      
+
       if (classes.length > 0) {
         // Calcular o índice correto baseado nos parâmetros já adicionados
         const startIdx = params.length + 1; // +1 porque os índices começam em 1
-        classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
+        classPlaceholders = classes
+          .map((_, idx) => `$${startIdx + idx}`)
+          .join(',');
         classWhere = `AND c.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
       }
     }
 
-    // Otimização baseada no número de empresas e período (igual à rota faturamento)
+    // Otimização: Para DRE não precisamos de ORDER BY, apenas dos dados para cálculo
     const isHeavyQuery =
       empresas.length > 10 ||
       new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
@@ -1838,9 +1865,7 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      LIMIT 500000
+      LIMIT 100000
     `
       : `
       SELECT
@@ -1868,18 +1893,16 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 1000000" : ""}
+      ${isHeavyQuery ? 'LIMIT 200000' : 'LIMIT 300000'}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 CMVFranquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`
+      `🔍 CMVFranquia: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -1893,7 +1916,7 @@ router.get(
         acc.totalProduto += parseFloat(row.vl_produto || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 },
     );
 
     successResponse(
@@ -1901,7 +1924,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        classes: classes.length > 0 ? classes : "todas",
+        classes: classes.length > 0 ? classes : 'todas',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -1910,19 +1933,20 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
-            ? 500000
+            ? '100k (otimizado)'
             : isHeavyQuery
-            ? 1000000
-            : "sem limite",
+            ? '200k (otimizado)'
+            : '300k (otimizado)',
+          orderByRemovido: true,
         },
         data: rows,
       },
-      `CMV Franquia obtido com sucesso usando view cmvfranquia (${queryType})`
+      `CMV Franquia obtido com sucesso usando view cmvfranquia (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -1932,13 +1956,13 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], cd_classificacao[]}
  */
 router.get(
-  "/cmvmultimarcas",
+  '/cmvmultimarcas',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-01-01",
-      dt_fim = "2025-09-18",
+      dt_inicio = '2025-01-01',
+      dt_fim = '2025-09-18',
       cd_empresa,
       cd_classificacao,
     } = req.query;
@@ -1951,29 +1975,33 @@ router.get(
     if (cd_empresa) {
       empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
       params = [dt_inicio, dt_fim, ...empresas];
-      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
     } else {
       // Usar as empresas fixas do SQL original
       empresas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
       params = [dt_inicio, dt_fim];
-      empresaPlaceholders = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+      empresaPlaceholders = '(1, 2, 6, 11, 31, 75, 85, 92, 99)';
     }
 
     // Processar classificações
     let classes = [];
-    let classPlaceholders = "";
-    let classWhere = "";
-    
+    let classPlaceholders = '';
+    let classWhere = '';
+
     if (cd_classificacao) {
-      classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+      classes = Array.isArray(cd_classificacao)
+        ? cd_classificacao
+        : [cd_classificacao];
       classes = classes.filter(
-        (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+        (v) => v !== undefined && v !== null && `${v}`.trim() !== '',
       );
-      
+
       if (classes.length > 0) {
         // Calcular o índice correto baseado nos parâmetros já adicionados
         const startIdx = params.length + 1; // +1 porque os índices começam em 1
-        classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
+        classPlaceholders = classes
+          .map((_, idx) => `$${startIdx + idx}`)
+          .join(',');
         classWhere = `AND c.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
       }
@@ -2014,9 +2042,7 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      LIMIT 500000
+      LIMIT 50000
     `
       : `
       SELECT
@@ -2044,18 +2070,16 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 1000000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : 'LIMIT 150000'}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 CMVMulti-marcas: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`
+      `🔍 CMVMulti-marcas: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -2069,7 +2093,7 @@ router.get(
         acc.totalProduto += parseFloat(row.vl_produto || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 },
     );
 
     successResponse(
@@ -2077,7 +2101,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        classes: classes.length > 0 ? classes : "todas",
+        classes: classes.length > 0 ? classes : 'todas',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -2086,19 +2110,20 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
-            ? 500000
+            ? '50k (otimizado)'
             : isHeavyQuery
-            ? 1000000
-            : "sem limite",
+            ? '100k (otimizado)'
+            : '150k (otimizado)',
+          orderByRemovido: true,
         },
         data: rows,
       },
-      `CMV Multi-marcas obtido com sucesso usando view cmvmultimarcas (${queryType})`
+      `CMV Multi-marcas obtido com sucesso usando view cmvmultimarcas (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -2108,13 +2133,13 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa[], cd_classificacao[]}
  */
 router.get(
-  "/cmvrevenda",
+  '/cmvrevenda',
   sanitizeInput,
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
-      dt_inicio = "2025-01-01",
-      dt_fim = "2025-09-18",
+      dt_inicio = '2025-01-01',
+      dt_fim = '2025-09-18',
       cd_empresa,
       cd_classificacao,
     } = req.query;
@@ -2127,29 +2152,33 @@ router.get(
     if (cd_empresa) {
       empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
       params = [dt_inicio, dt_fim, ...empresas];
-      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+      empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
     } else {
       // Usar as empresas fixas do SQL original
       empresas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
       params = [dt_inicio, dt_fim];
-      empresaPlaceholders = "(1, 2, 6, 11, 31, 75, 85, 92, 99)";
+      empresaPlaceholders = '(1, 2, 6, 11, 31, 75, 85, 92, 99)';
     }
 
     // Processar classificações
     let classes = [];
-    let classPlaceholders = "";
-    let classWhere = "";
-    
+    let classPlaceholders = '';
+    let classWhere = '';
+
     if (cd_classificacao) {
-      classes = Array.isArray(cd_classificacao) ? cd_classificacao : [cd_classificacao];
+      classes = Array.isArray(cd_classificacao)
+        ? cd_classificacao
+        : [cd_classificacao];
       classes = classes.filter(
-        (v) => v !== undefined && v !== null && `${v}`.trim() !== ""
+        (v) => v !== undefined && v !== null && `${v}`.trim() !== '',
       );
-      
+
       if (classes.length > 0) {
         // Calcular o índice correto baseado nos parâmetros já adicionados
         const startIdx = params.length + 1; // +1 porque os índices começam em 1
-        classPlaceholders = classes.map((_, idx) => `$${startIdx + idx}`).join(",");
+        classPlaceholders = classes
+          .map((_, idx) => `$${startIdx + idx}`)
+          .join(',');
         classWhere = `AND c.cd_classificacao::integer IN (${classPlaceholders})`;
         params.push(...classes.map((c) => parseInt(c, 10)));
       }
@@ -2190,9 +2219,7 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      LIMIT 500000
+      LIMIT 50000
     `
       : `
       SELECT
@@ -2220,18 +2247,16 @@ router.get(
         c.dt_transacao BETWEEN $1 AND $2
         AND c.cd_empresa IN (${empresaPlaceholders})
         ${classWhere}
-      ORDER BY
-        c.dt_transacao DESC
-      ${isHeavyQuery ? "LIMIT 1000000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : 'LIMIT 150000'}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 CMVRevenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`
+      `🔍 CMVRevenda: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, classes=${classes.length}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -2245,7 +2270,7 @@ router.get(
         acc.totalProduto += parseFloat(row.vl_produto || 0);
         return acc;
       },
-      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 }
+      { totalBruto: 0, totalLiquido: 0, totalQuantidade: 0, totalProduto: 0 },
     );
 
     successResponse(
@@ -2253,7 +2278,7 @@ router.get(
       {
         periodo: { dt_inicio, dt_fim },
         empresas,
-        classes: classes.length > 0 ? classes : "todas",
+        classes: classes.length > 0 ? classes : 'todas',
         totals,
         count: rows.length,
         optimized: isHeavyQuery || isVeryHeavyQuery,
@@ -2262,19 +2287,272 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
-            ? 500000
+            ? '50k (otimizado)'
             : isHeavyQuery
-            ? 1000000
-            : "sem limite",
+            ? '100k (otimizado)'
+            : '150k (otimizado)',
+          orderByRemovido: true,
         },
         data: rows,
       },
-      `CMV Revenda obtido com sucesso usando view cmvrevenda (${queryType})`
+      `CMV Revenda obtido com sucesso usando view cmvrevenda (${queryType})`,
     );
-  })
+  }),
+);
+
+/**
+ * @route GET /sales/dre-data
+ * @desc Rota consolidada para DRE - executa todas as 4 consultas CMV em paralelo no backend
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_empresa[]}
+ */
+router.get(
+  '/dre-data',
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const {
+      dt_inicio = '2025-01-01',
+      dt_fim = '2025-09-18',
+      cd_empresa,
+    } = req.query;
+
+    // Empresas para CMV (Varejo usa lista específica, outros usam fixa)
+    const empresasVarejo = cd_empresa
+      ? Array.isArray(cd_empresa)
+        ? cd_empresa
+        : [cd_empresa]
+      : [
+          1, 2, 6, 7, 11, 31, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98,
+          99, 100, 101, 111, 200, 311, 600, 650, 700, 750, 850, 890, 910, 920,
+          930, 940, 950, 960, 970, 980, 990,
+        ];
+
+    const empresasFixas = [1, 2, 6, 11, 31, 75, 85, 92, 99];
+
+    // Otimização: queries agregadas em vez de retornar todos os registros
+    const createAggregatedQuery = (
+      viewName,
+      empresas,
+      classificacao = null,
+    ) => {
+      const empresaList = empresas.join(',');
+      const classFilter = classificacao
+        ? `AND cd_classificacao::integer = ${classificacao}`
+        : '';
+
+      return `
+        SELECT 
+          '${viewName}' as canal,
+          COUNT(*) as total_registros,
+          SUM(CASE WHEN tp_operacao = 'S' THEN vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0) ELSE 0 END) as receita_bruta,
+          SUM(CASE WHEN tp_operacao = 'E' THEN ABS(vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)) ELSE 0 END) as devolucoes,
+          SUM(CASE WHEN tp_operacao = 'S' THEN vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0) ELSE 0 END) as receita_liquida,
+          SUM(CASE WHEN tp_operacao = 'S' THEN vl_produto * qt_faturado ELSE 0 END) as cmv_total,
+          ARRAY_AGG(DISTINCT CASE WHEN tp_operacao = 'S' THEN nr_transacao END) FILTER (WHERE tp_operacao = 'S' AND nr_transacao IS NOT NULL) as nr_transacoes
+        FROM ${viewName}
+        WHERE dt_transacao BETWEEN $1 AND $2
+          AND cd_empresa IN (${empresaList})
+          AND tp_situacao NOT IN ('C', 'X')
+          ${classFilter}
+      `;
+    };
+
+    const params = [dt_inicio, dt_fim];
+
+    // Verificar cache primeiro
+    const cacheKey = `dre_${dt_inicio}_${dt_fim}_${JSON.stringify(cd_empresa)}`;
+    const cachedResult = dreCache.get(cacheKey);
+
+    if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_TTL) {
+      console.log(`📦 DRE-DATA: Retornando dados do cache para ${cacheKey}`);
+      return successResponse(
+        res,
+        {
+          ...cachedResult.data,
+          cached: true,
+          cacheAge: Math.round((Date.now() - cachedResult.timestamp) / 1000),
+        },
+        'Dados DRE consolidados do cache (consultas paralelas agregadas)',
+      );
+    }
+
+    try {
+      console.log(
+        `🚀 DRE-DATA: Executando consultas consolidadas em paralelo para período ${dt_inicio} a ${dt_fim}`,
+      );
+
+      // Executar todas as 4 consultas CMV em paralelo no backend
+      const [varejoResult, multimarcasResult, franquiasResult, revendaResult] =
+        await Promise.all([
+          pool.query(
+            createAggregatedQuery('cmvvarejo', empresasVarejo),
+            params,
+          ),
+          pool.query(
+            createAggregatedQuery('cmvmultimarcas', empresasFixas, 2),
+            params,
+          ),
+          pool.query(
+            createAggregatedQuery('cmvfranquia', empresasFixas, 4),
+            params,
+          ),
+          pool.query(
+            createAggregatedQuery('cmvrevenda', empresasFixas, 3),
+            params,
+          ),
+        ]);
+
+      // Processar resultados
+      const processResult = (result, canal) => {
+        const row = result.rows[0] || {};
+        return {
+          canal,
+          totalRegistros: parseInt(row.total_registros) || 0,
+          receitaBruta: parseFloat(row.receita_bruta) || 0,
+          devolucoes: parseFloat(row.devolucoes) || 0,
+          receitaLiquida: parseFloat(row.receita_liquida) || 0,
+          cmvTotal: parseFloat(row.cmv_total) || 0,
+          nrTransacoes: row.nr_transacoes || [],
+        };
+      };
+
+      const varejo = processResult(varejoResult, 'varejo');
+      const multimarcas = processResult(multimarcasResult, 'multimarcas');
+      const franquias = processResult(franquiasResult, 'franquias');
+      const revenda = processResult(revendaResult, 'revenda');
+
+      // Totais consolidados
+      const totals = {
+        receitaBrutaTotal:
+          varejo.receitaBruta +
+          multimarcas.receitaBruta +
+          franquias.receitaBruta +
+          revenda.receitaBruta,
+        devolucoesTotal:
+          varejo.devolucoes +
+          multimarcas.devolucoes +
+          franquias.devolucoes +
+          revenda.devolucoes,
+        receitaLiquidaTotal:
+          varejo.receitaLiquida +
+          multimarcas.receitaLiquida +
+          franquias.receitaLiquida +
+          revenda.receitaLiquida,
+        cmvTotal:
+          varejo.cmvTotal +
+          multimarcas.cmvTotal +
+          franquias.cmvTotal +
+          revenda.cmvTotal,
+        registrosTotal:
+          varejo.totalRegistros +
+          multimarcas.totalRegistros +
+          franquias.totalRegistros +
+          revenda.totalRegistros,
+      };
+
+      // Vendas Brutas = Receita Bruta + Devoluções (conforme DRE.jsx)
+      totals.vendasBrutasTotal =
+        totals.receitaBrutaTotal + totals.devolucoesTotal;
+
+      // Lucro Bruto = Receita Líquida - CMV
+      totals.lucroBrutoTotal = totals.receitaLiquidaTotal - totals.cmvTotal;
+
+      console.log(
+        `✅ DRE-DATA: Consultas consolidadas concluídas - ${totals.registrosTotal} registros processados`,
+      );
+
+      const responseData = {
+        periodo: { dt_inicio, dt_fim },
+        empresas: {
+          varejo: empresasVarejo.length,
+          outros: empresasFixas.length,
+        },
+        canais: {
+          varejo,
+          multimarcas,
+          franquias,
+          revenda,
+        },
+        totals,
+        performance: {
+          queryType: 'consolidada-agregada',
+          backend_parallel: true,
+          dados_pre_processados: true,
+          tempo_estimado: '5-10s',
+        },
+      };
+
+      // Salvar no cache
+      dreCache.set(cacheKey, {
+        data: responseData,
+        timestamp: Date.now(),
+      });
+
+      console.log(`💾 DRE-DATA: Dados salvos no cache - ${cacheKey}`);
+
+      successResponse(
+        res,
+        responseData,
+        'Dados DRE consolidados obtidos com sucesso (consultas paralelas agregadas)',
+      );
+    } catch (error) {
+      console.error('Erro na rota DRE consolidada:', error);
+      throw error;
+    }
+  }),
+);
+
+/**
+ * @route DELETE /sales/dre-cache
+ * @desc Limpar cache DRE
+ * @access Public
+ */
+router.delete(
+  '/dre-cache',
+  asyncHandler(async (req, res) => {
+    const cacheSize = dreCache.size;
+    dreCache.clear();
+
+    successResponse(
+      res,
+      {
+        cleared: cacheSize,
+        timestamp: new Date().toISOString(),
+      },
+      `Cache DRE limpo - ${cacheSize} entradas removidas`,
+    );
+  }),
+);
+
+/**
+ * @route GET /sales/dre-cache/stats
+ * @desc Estatísticas do cache DRE
+ * @access Public
+ */
+router.get(
+  '/dre-cache/stats',
+  asyncHandler(async (req, res) => {
+    const now = Date.now();
+    const cacheStats = Array.from(dreCache.entries()).map(([key, value]) => ({
+      key,
+      age: Math.round((now - value.timestamp) / 1000),
+      expired: now - value.timestamp > CACHE_TTL,
+    }));
+
+    successResponse(
+      res,
+      {
+        total: dreCache.size,
+        ttl: CACHE_TTL / 1000,
+        entries: cacheStats,
+      },
+      'Estatísticas do cache DRE',
+    );
+  }),
 );
 
 export default router;
