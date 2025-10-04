@@ -1,3 +1,58 @@
+/**
+ * @route GET /sales/transacoes-por-operacao
+ * @desc Buscar todas as transações de uma operação específica
+ * @access Public
+ * @query {cd_operacao, dt_inicio, dt_fim, cd_empresa[]}
+ */
+router.get(
+  '/transacoes-por-operacao',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { cd_operacao, dt_inicio, dt_fim, cd_empresa } = req.query;
+    if (!cd_operacao) {
+      return errorResponse(
+        res,
+        'Parâmetro cd_operacao é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+    let params = [cd_operacao];
+    let where = 'vfn.cd_operacao = $1';
+    let idx = 2;
+    if (dt_inicio && dt_fim) {
+      where += ` AND vfn.dt_transacao BETWEEN $${idx} AND $${idx + 1}`;
+      params.push(dt_inicio, dt_fim);
+      idx += 2;
+    }
+    if (cd_empresa) {
+      const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+      where += ` AND vfn.cd_empresa IN (${empresas
+        .map((_, i) => `$${idx + i}`)
+        .join(',')})`;
+      params.push(...empresas);
+    }
+    const query = `
+      SELECT
+        vfn.nr_transacao,
+        vfn.vl_unitliquido * vfn.qt_faturado + COALESCE(vfn.vl_freterat, 0) as valor_liquido,
+        vfn.vl_unitbruto * vfn.qt_faturado + COALESCE(vfn.vl_freterat, 0) as valor_bruto,
+        vfn.dt_transacao,
+        vfn.cd_empresa,
+        vfn.nm_grupoempresa
+      FROM vr_fis_nfitemprod vfn
+      WHERE ${where}
+      ORDER BY vfn.dt_transacao DESC
+      LIMIT 1000
+    `;
+    const { rows } = await pool.query(query, params);
+    successResponse(
+      res,
+      { transacoes: rows },
+      'Transações da operação obtidas com sucesso',
+    );
+  }),
+);
 import express from 'express';
 import pool from '../config/database.js';
 import {
@@ -2595,7 +2650,9 @@ router.get(
         vfn.cd_operacao
     `;
 
-    console.log(`🔍 Auditoria Transações: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`);
+    console.log(
+      `🔍 Auditoria Transações: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`,
+    );
 
     const { rows } = await pool.query(query, params);
 
@@ -2609,8 +2666,8 @@ router.get(
             nr_transacoes: 0,
             quantidade_total: 0,
             valor_bruto: 0,
-            valor_liquido: 0
-          }
+            valor_liquido: 0,
+          },
         };
       }
 
@@ -2620,12 +2677,14 @@ router.get(
         nr_transacoes: parseInt(row.nr_transacoes),
         quantidade_total: parseFloat(row.quantidade_total),
         valor_bruto: parseFloat(row.valor_bruto),
-        valor_liquido: parseFloat(row.valor_liquido)
+        valor_liquido: parseFloat(row.valor_liquido),
       });
 
       // Somar totais da categoria
       acc[categoria].totais.nr_transacoes += parseInt(row.nr_transacoes);
-      acc[categoria].totais.quantidade_total += parseFloat(row.quantidade_total);
+      acc[categoria].totais.quantidade_total += parseFloat(
+        row.quantidade_total,
+      );
       acc[categoria].totais.valor_bruto += parseFloat(row.valor_bruto);
       acc[categoria].totais.valor_liquido += parseFloat(row.valor_liquido);
 
@@ -2633,18 +2692,21 @@ router.get(
     }, {});
 
     // Calcular totais gerais
-    const totaisGerais = Object.values(dadosAgrupados).reduce((acc, categoria) => {
-      acc.nr_transacoes += categoria.totais.nr_transacoes;
-      acc.quantidade_total += categoria.totais.quantidade_total;
-      acc.valor_bruto += categoria.totais.valor_bruto;
-      acc.valor_liquido += categoria.totais.valor_liquido;
-      return acc;
-    }, {
-      nr_transacoes: 0,
-      quantidade_total: 0,
-      valor_bruto: 0,
-      valor_liquido: 0
-    });
+    const totaisGerais = Object.values(dadosAgrupados).reduce(
+      (acc, categoria) => {
+        acc.nr_transacoes += categoria.totais.nr_transacoes;
+        acc.quantidade_total += categoria.totais.quantidade_total;
+        acc.valor_bruto += categoria.totais.valor_bruto;
+        acc.valor_liquido += categoria.totais.valor_liquido;
+        return acc;
+      },
+      {
+        nr_transacoes: 0,
+        quantidade_total: 0,
+        valor_bruto: 0,
+        valor_liquido: 0,
+      },
+    );
 
     successResponse(
       res,
@@ -2654,9 +2716,9 @@ router.get(
         categorias: dadosAgrupados,
         totais_gerais: totaisGerais,
         count: rows.length,
-        estrutura_similar_dadostotvs: true
+        estrutura_similar_dadostotvs: true,
       },
-      'Auditoria de transações obtida com sucesso'
+      'Auditoria de transações obtida com sucesso',
     );
   }),
 );
