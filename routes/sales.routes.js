@@ -92,8 +92,9 @@ const cleanExpiredCache = () => {
 // Limpar cache a cada 10 minutos
 setInterval(cleanExpiredCache, 10 * 60 * 1000);
 
+// ...existing code...
+
 /**
- * @route GET /sales/faturamento
  * @desc Buscar dados de faturamento geral (todas as operações)
  * @access Public
  * @query {dt_inicio, dt_fim, cd_empresa[]}
@@ -2753,4 +2754,4 @@ router.get(
   }),
 );
 
-export default router;
+// ...existing code...
