@@ -2767,21 +2767,21 @@ router.get(
             -- Classificação otimizada por operação
             CASE
           -- VENDA
-          WHEN cd_operacao IN (1101,1206,852,854,815,200,300,400,510,511,512,521,522,545,546,548,660,661,960,961,1400,1402,1403,1405,1406,5102,5106,5107,5110,5111,5113) THEN 'VENDA'
+          WHEN cd_operacao IN (200,300,400,510,511,512,521,522,545,546,548,660,661,960,961,1400,1402,1403,1405,1406,5102,5106,5107,5110,5111,5113) THEN 'VENDA'
           -- DEVOLUCAO VENDA
-          WHEN cd_operacao IN (1948,1952,1,2,17,21,401,555,1017,1201,1202,1204,1209,1210,1950,1999,2203,2204,2207,9005,9991) THEN 'DEVOLUCAO VENDA'
+          WHEN cd_operacao IN (1,2,17,21,401,555,1017,1201,1202,1204,1209,1210,1950,1999,2203,2204,2207,9005,9991) THEN 'DEVOLUCAO VENDA'
           -- COMPRA
           WHEN cd_operacao IN (10,662,1102,1103,1122,1126,1128,1556,1558,9052,9200) THEN 'COMPRA'
           -- DEVOLUCAO COMPRA
           WHEN cd_operacao IN (9003) THEN 'DEVOLUCAO COMPRA'
           -- TRANSFERENCIA SAIDA
-          WHEN cd_operacao IN (2008,530,711,4002,5152,5153,6029) THEN 'TRANSFERENCIA SAIDA'
+          WHEN cd_operacao IN (530,711,4002,5152,5153,6029) THEN 'TRANSFERENCIA SAIDA'
           -- TRANSFERENCIA ENTRADA
-          WHEN cd_operacao IN (8001,4,536,1152,1153,3336,4001) THEN 'TRANSFERENCIA ENTRADA'
+          WHEN cd_operacao IN (4,536,1152,1153,3336,4001) THEN 'TRANSFERENCIA ENTRADA'
           -- OUTRAS SAIDAS
-          WHEN cd_operacao IN (8602,9026,8602,9033,9035,9038,5557,5912,5950,9025,2500,2505,1711,1650,1590,1530,530,1902,40,1040,36,590,599,600,1916,1959,5909,5910,5914,5920,620,6913,6905,6908,6914,6949) THEN 'OUTRAS SAIDAS'
+          WHEN cd_operacao IN (590,599,600,1916,1959,5909,5910,5914,5920,620,6913,6905,6908,6914,6949) THEN 'OUTRAS SAIDAS'
           -- OUTRAS ENTRADAS
-          WHEN cd_operacao IN (2510,3001,3002,5254,1902,1911,1925,529,1127,1557,1912,1947,1949,1951,1954,1956,1957,1958,2551,2914,8160) THEN 'OUTRAS ENTRADAS'
+          WHEN cd_operacao IN (529,1127,1557,1912,1947,1949,1951,1954,1956,1957,1958,2551,2914,8160) THEN 'OUTRAS ENTRADAS'
           -- SERVICO ENTRADA
           WHEN cd_operacao IN (1124,1125,2004,7000) THEN 'SERVICO ENTRADA'
           ELSE 'OUTRAS OPERACOES'
@@ -2943,6 +2943,162 @@ router.get(
       responseData,
       'Auditoria de transações obtida com sucesso (consulta otimizada)',
     );
+  }),
+);
+
+/**
+ * @route GET /sales/transacoes-detalhes
+ * @desc Rota otimizada para buscar detalhes de transações para modais
+ * @access Public
+ * @query {nr_transacao, cd_empresa, dt_inicio, dt_fim}
+ */
+router.get(
+  '/transacoes-detalhes',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { nr_transacao, cd_empresa, dt_inicio, dt_fim } = req.query;
+
+    if (!nr_transacao) {
+      return errorResponse(
+        res,
+        'Parâmetro nr_transacao é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    // Cache key para esta consulta específica
+    const cacheKey = `transacao_${nr_transacao}_${cd_empresa}`;
+    const cachedResult = dreCache.get(cacheKey);
+
+    if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_TTL) {
+      console.log(`📦 TRANSACOES-DETALHES: Cache hit para ${cacheKey}`);
+      return successResponse(
+        res,
+        {
+          ...cachedResult.data,
+          cached: true,
+          cacheAge: Math.round((Date.now() - cachedResult.timestamp) / 1000),
+        },
+        'Detalhes da transação obtidos do cache',
+      );
+    }
+
+    let params = [nr_transacao];
+    let where = 'vfn.nr_transacao = $1';
+    let idx = 2;
+
+    if (cd_empresa) {
+      where += ` AND vfn.cd_empresa = $${idx}`;
+      params.push(cd_empresa);
+      idx++;
+    }
+
+    if (dt_inicio && dt_fim) {
+      where += ` AND vfn.dt_transacao BETWEEN $${idx} AND $${idx + 1}`;
+      params.push(dt_inicio, dt_fim);
+    }
+
+    // Query otimizada com apenas os campos necessários para o modal
+    const query = `
+        SELECT
+          vfn.cd_empresa,
+          vfn.nr_transacao,
+          vfn.cd_pessoa,
+          COALESCE(pj.nm_fantasia, pp.nm_pessoa, 'Cliente não identificado') as nm_pessoa,
+          vfn.qt_faturado,
+          vfn.vl_unitliquido,
+          vfn.vl_unitbruto,
+          vfn.vl_freterat,
+          vfn.dt_transacao,
+          vfn.cd_produto,
+          vfn.ds_produto
+        FROM vr_fis_nfitemprod vfn
+        LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
+        LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
+        WHERE ${where}
+          AND vfn.tp_situacao NOT IN ('C', 'X')
+        ORDER BY vfn.cd_produto
+        LIMIT 500
+      `;
+
+    console.log(
+      `🔍 TRANSACOES-DETALHES: Buscando detalhes para transação ${nr_transacao}`,
+    );
+
+    try {
+      const { rows } = await pool.query(query, params);
+
+      if (rows.length === 0) {
+        return successResponse(
+          res,
+          { transacao: nr_transacao, itens: [] },
+          'Nenhum item encontrado para esta transação',
+        );
+      }
+
+      // Calcular totais
+      const totals = rows.reduce(
+        (acc, item) => {
+          const qtd = parseFloat(item.qt_faturado || 0);
+          const vlLiq = parseFloat(item.vl_unitliquido || 0);
+          const vlBruto = parseFloat(item.vl_unitbruto || 0);
+          const frete = parseFloat(item.vl_freterat || 0);
+
+          acc.totalQuantidade += qtd;
+          acc.totalLiquido += vlLiq * qtd + frete;
+          acc.totalBruto += vlBruto * qtd + frete;
+          acc.totalItens += 1;
+
+          return acc;
+        },
+        { totalQuantidade: 0, totalLiquido: 0, totalBruto: 0, totalItens: 0 },
+      );
+
+      const responseData = {
+        transacao: nr_transacao,
+        cd_empresa: rows[0].cd_empresa,
+        cd_pessoa: rows[0].cd_pessoa,
+        nm_pessoa: rows[0].nm_pessoa,
+        dt_transacao: rows[0].dt_transacao,
+        totals,
+        itens: rows.map((item) => ({
+          cd_produto: item.cd_produto,
+          ds_produto: item.ds_produto,
+          qt_faturado: parseFloat(item.qt_faturado || 0),
+          vl_unitliquido: parseFloat(item.vl_unitliquido || 0),
+          vl_unitbruto: parseFloat(item.vl_unitbruto || 0),
+          vl_freterat: parseFloat(item.vl_freterat || 0),
+          total_liquido:
+            parseFloat(item.vl_unitliquido || 0) *
+              parseFloat(item.qt_faturado || 0) +
+            parseFloat(item.vl_freterat || 0),
+          total_bruto:
+            parseFloat(item.vl_unitbruto || 0) *
+              parseFloat(item.qt_faturado || 0) +
+            parseFloat(item.vl_freterat || 0),
+        })),
+      };
+
+      // Salvar no cache
+      dreCache.set(cacheKey, {
+        data: responseData,
+        timestamp: Date.now(),
+      });
+
+      console.log(
+        `✅ TRANSACOES-DETALHES: ${rows.length} itens encontrados para transação ${nr_transacao}`,
+      );
+
+      successResponse(
+        res,
+        responseData,
+        `Detalhes da transação ${nr_transacao} obtidos com sucesso`,
+      );
+    } catch (error) {
+      console.error('Erro ao buscar detalhes da transação:', error);
+      throw error;
+    }
   }),
 );
 
