@@ -82,11 +82,10 @@ router.get(
         vfn.cd_nivel,
         vfn.ds_nivel,
         vfn.cd_pessoa,
-        COALESCE(pj.nm_fantasia, pf.nm_pessoa, pp.nm_pessoa) as nm_pessoa
+        COALESCE(pj.nm_fantasia, pp.nm_pessoa, pp.nm_pessoa) as nm_pessoa
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
-      LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
-      LEFT JOIN pes_pesfisica pf ON pf.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN pes_pesjuridica pj ON pp.cd_pessoa = vfn.cd_pessoa
       WHERE ${where}
       ORDER BY vfn.dt_transacao DESC
       LIMIT 1000
@@ -141,10 +140,9 @@ router.get(
           vfn.*,
           vfn.vl_unitliquido * vfn.qt_faturado + COALESCE(vfn.vl_freterat,0) as valor_liquido,
           vfn.vl_unitbruto * vfn.qt_faturado + COALESCE(vfn.vl_freterat,0) as valor_bruto,
-          COALESCE(pj.nm_fantasia, pf.nm_pessoa, pp.nm_pessoa) as nm_pessoa
+          COALESCE(pj.nm_fantasia, pp.nm_pessoa, pp.nm_pessoa) as nm_pessoa
         FROM vr_fis_nfitemprod vfn
   LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
-        LEFT JOIN pes_pessoafisica pf ON pf.cd_pessoa = vfn.cd_pessoa
         LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
         WHERE ${where}
         ORDER BY vfn.dt_transacao DESC
