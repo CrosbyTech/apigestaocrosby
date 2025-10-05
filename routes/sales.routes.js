@@ -83,10 +83,11 @@ router.get(
         vfn.cd_nivel,
         vfn.ds_nivel,
         vfn.cd_pessoa,
-        COALESCE(pj.nm_fantasia, pp.nm_pessoa, pp.nm_pessoa) as nm_pessoa
+        COALESCE(pj.nm_fantasia, pf.nm_pessoa, pp.nm_pessoa) as nm_pessoa
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN pes_pessoafisica pf ON pf.cd_pessoa = vfn.cd_pessoa
       WHERE ${where}
       ORDER BY vfn.dt_transacao DESC
       LIMIT 1000
@@ -148,9 +149,10 @@ router.get(
           vfn.cd_nivel,
           vfn.ds_nivel,
           vfn.cd_pessoa,
-          COALESCE(pj.nm_fantasia, pp.nm_pessoa, pp.nm_pessoa) as nm_pessoa
+          COALESCE(pj.nm_fantasia, pf.nm_pessoa, pp.nm_pessoa) as nm_pessoa
         FROM vr_fis_nfitemprod vfn
         LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
+        LEFT JOIN pes_pessoafisica pf ON pf.cd_pessoa = vfn.cd_pessoa
         LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
         WHERE ${where}
         ORDER BY vfn.dt_transacao DESC
@@ -2736,6 +2738,8 @@ router.get(
           SUM(qt_faturado) as quantidade_total,
           SUM(vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)) as valor_bruto,
           SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)) as valor_liquido,
+          -- Ticket médio protegido contra divisão por zero
+          CASE WHEN SUM(qt_faturado) = 0 THEN 0 ELSE SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)) / NULLIF(SUM(qt_faturado),0) END as ticket_medio,
           -- Classificação otimizada por operação
           CASE 
             WHEN tp_operacao = 'S' AND cd_operacao IN (300, 5102, 512, 1407, 1409, 5107, 5110, 5106, 521) THEN 'VENDA'
@@ -2798,6 +2802,7 @@ router.get(
         quantidade_total: safeFloat(row.quantidade_total),
         valor_bruto: safeFloat(row.valor_bruto),
         valor_liquido: safeFloat(row.valor_liquido),
+        ticket_medio: safeFloat(row.ticket_medio),
       };
 
       dadosAgrupados[categoria].operacoes.push(operacao);
