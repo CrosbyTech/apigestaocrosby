@@ -2768,27 +2768,25 @@ router.get(
             ), 0) as valor_liquido,
             -- Classificação otimizada por operação
             CASE
-              -- VENDA
-              WHEN cd_operacao IN (200,300,510,511,512,521,522,545,546,548,815,852,5102,5106,5107,5110,5111,5113,661) THEN 'VENDA'
-              -- DEVOLUCAO VENDA
-              WHEN cd_operacao IN (1,2,17,21,401,555,1202,1204,1209,1210,1950,1952,2204,9005) THEN 'DEVOLUCAO VENDA'
-              -- COMPRA
-              WHEN cd_operacao IN (1102,1122,1126,1128,1556,9200) THEN 'COMPRA'
-              -- DEVOLUCAO COMPRA
-              WHEN cd_operacao IN (690) THEN 'DEVOLUCAO COMPRA'
-              -- TRANSFERENCIA SAIDA
-              WHEN cd_operacao IN (530,711,4002,5152,5153,6029) THEN 'TRANSFERENCIA SAIDA'
-              -- TRANSFERENCIA ENTRADA
-              WHEN cd_operacao IN (536,1152,1153,3336,4001) THEN 'TRANSFERENCIA ENTRADA'
-              -- OUTRAS SAIDAS
-              WHEN cd_operacao IN (590,600,620,650,5552,5557,5909,5910,5914,5920,5950,9025) THEN 'OUTRAS SAIDAS'
-              -- OUTRAS ENTRADAS
-              WHEN cd_operacao IN (40,1127,1557,1911,1948,1949,1956,2551,8160) THEN 'OUTRAS ENTRADAS'
-              -- CONDICIONAL ENTRADA
-              WHEN cd_operacao IN (8700) THEN 'CONDICIONAL ENTRADA'
-              -- SERVICO ENTRADA
-              WHEN cd_operacao IN (1124,7000) THEN 'SERVICO ENTRADA'
-              ELSE 'OUTRAS OPERACOES'
+          -- VENDA
+          WHEN cd_operacao IN (200,300,400,510,511,512,521,522,545,546,548,660,661,960,961,1400,1402,1403,1405,1406,5102,5106,5107,5110,5111,5113) THEN 'VENDA'
+          -- DEVOLUCAO VENDA
+          WHEN cd_operacao IN (1,2,17,21,401,555,1017,1201,1202,1204,1209,1210,1950,1999,2203,2204,2207,9005,9991) THEN 'DEVOLUCAO VENDA'
+          -- COMPRA
+          WHEN cd_operacao IN (10,662,1102,1103,1122,1126,1128,1556,1558,9052,9200) THEN 'COMPRA'
+          -- DEVOLUCAO COMPRA
+          WHEN cd_operacao IN (9003) THEN 'DEVOLUCAO COMPRA'
+          -- TRANSFERENCIA SAIDA
+          WHEN cd_operacao IN (530,711,4002,5152,5153,6029) THEN 'TRANSFERENCIA SAIDA'
+          -- TRANSFERENCIA ENTRADA
+          WHEN cd_operacao IN (4,536,1152,1153,3336,4001) THEN 'TRANSFERENCIA ENTRADA'
+          -- OUTRAS SAIDAS
+          WHEN cd_operacao IN (590,599,600,1916,1959,5909,5910,5914,5920,620,6913,6905,6908,6914,6949) THEN 'OUTRAS SAIDAS'
+          -- OUTRAS ENTRADAS
+          WHEN cd_operacao IN (529,1127,1557,1912,1947,1949,1951,1954,1956,1957,1958,2551,2914,8160) THEN 'OUTRAS ENTRADAS'
+          -- SERVICO ENTRADA
+          WHEN cd_operacao IN (1124,1125,2004,7000) THEN 'SERVICO ENTRADA'
+          ELSE 'OUTRAS OPERACOES'
             END as categoria_operacao
           FROM vr_fis_nfitemprod
           WHERE dt_transacao BETWEEN $1 AND $2
