@@ -2744,18 +2744,16 @@ router.get(
       .join(',');
     const params = [dt_inicio, dt_fim, ...empresas];
 
-    // Query otimizada com agregação direta e sem JOINs desnecessários
+    // Query simplificada sem cálculos de divisão para evitar division by zero
     const query = `
       WITH operacoes_agregadas AS (
         SELECT 
           cd_operacao,
           tp_operacao,
           COUNT(DISTINCT nr_transacao) as nr_transacoes,
-          SUM(qt_faturado) as quantidade_total,
-          SUM(vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)) as valor_bruto,
-          SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)) as valor_liquido,
-          -- Ticket médio protegido contra divisão por zero
-          CASE WHEN SUM(qt_faturado) = 0 THEN 0 ELSE SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)) / NULLIF(SUM(qt_faturado),0) END as ticket_medio,
+          COALESCE(SUM(qt_faturado), 0) as quantidade_total,
+          COALESCE(SUM(vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)), 0) as valor_bruto,
+          COALESCE(SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)), 0) as valor_liquido,
           -- Classificação otimizada por operação
           CASE 
             WHEN tp_operacao = 'S' AND cd_operacao IN (300, 5102, 512, 1407, 1409, 5107, 5110, 5106, 521) THEN 'VENDA'
@@ -2769,9 +2767,13 @@ router.get(
         WHERE dt_transacao BETWEEN $1 AND $2
           AND cd_empresa IN (${empresaPlaceholders})
           AND tp_situacao NOT IN ('C', 'X')
+          AND vl_unitbruto IS NOT NULL
+          AND vl_unitliquido IS NOT NULL
+          AND qt_faturado IS NOT NULL
         GROUP BY cd_operacao, tp_operacao
       )
       SELECT * FROM operacoes_agregadas
+      WHERE quantidade_total > 0
       ORDER BY categoria_operacao, cd_operacao
     `;
 
@@ -2818,7 +2820,11 @@ router.get(
         quantidade_total: safeFloat(row.quantidade_total),
         valor_bruto: safeFloat(row.valor_bruto),
         valor_liquido: safeFloat(row.valor_liquido),
-        ticket_medio: safeFloat(row.ticket_medio),
+        // Calcular ticket médio no JavaScript de forma segura
+        ticket_medio:
+          row.quantidade_total && row.quantidade_total > 0
+            ? safeFloat(row.valor_liquido) / safeFloat(row.quantidade_total)
+            : 0,
       };
 
       dadosAgrupados[categoria].operacoes.push(operacao);
