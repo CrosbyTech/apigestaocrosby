@@ -85,9 +85,9 @@ router.get(
           vfn.cd_pessoa,
           COALESCE(pj.nm_fantasia, pp.nm_pessoa) as nm_pessoa
         FROM vr_fis_nfitemprod vfn
-        LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
-        LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
-        WHERE ${where}
+  LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
+  LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
+  WHERE ${where}
         ORDER BY vfn.dt_transacao DESC
         LIMIT 1000
       `;
