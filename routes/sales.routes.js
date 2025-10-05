@@ -86,7 +86,7 @@ router.get(
       FROM vr_fis_nfitemprod vfn
       LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
       LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
-      LEFT JOIN pes_pessoafisica pf ON pf.cd_pessoa = vfn.cd_pessoa
+      LEFT JOIN pes_pesfisica pf ON pf.cd_pessoa = vfn.cd_pessoa
       WHERE ${where}
       ORDER BY vfn.dt_transacao DESC
       LIMIT 1000
