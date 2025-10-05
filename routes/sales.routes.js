@@ -2744,16 +2744,28 @@ router.get(
       .join(',');
     const params = [dt_inicio, dt_fim, ...empresas];
 
-    // Query simplificada sem cálculos de divisão para evitar division by zero
+    // Query super simplificada para evitar qualquer divisão por zero
     const query = `
       WITH operacoes_agregadas AS (
         SELECT 
           cd_operacao,
           tp_operacao,
           COUNT(DISTINCT nr_transacao) as nr_transacoes,
-          COALESCE(SUM(qt_faturado), 0) as quantidade_total,
-          COALESCE(SUM(vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)), 0) as valor_bruto,
-          COALESCE(SUM(vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)), 0) as valor_liquido,
+          COALESCE(SUM(CASE WHEN qt_faturado IS NOT NULL AND qt_faturado != 0 THEN qt_faturado ELSE 0 END), 0) as quantidade_total,
+          COALESCE(SUM(
+            CASE 
+              WHEN vl_unitbruto IS NOT NULL AND qt_faturado IS NOT NULL AND qt_faturado != 0 
+              THEN vl_unitbruto * qt_faturado + COALESCE(vl_freterat, 0)
+              ELSE 0 
+            END
+          ), 0) as valor_bruto,
+          COALESCE(SUM(
+            CASE 
+              WHEN vl_unitliquido IS NOT NULL AND qt_faturado IS NOT NULL AND qt_faturado != 0 
+              THEN vl_unitliquido * qt_faturado + COALESCE(vl_freterat, 0)
+              ELSE 0 
+            END
+          ), 0) as valor_liquido,
           -- Classificação otimizada por operação
           CASE 
             WHEN tp_operacao = 'S' AND cd_operacao IN (300, 5102, 512, 1407, 1409, 5107, 5110, 5106, 521) THEN 'VENDA'
@@ -2770,14 +2782,46 @@ router.get(
           AND vl_unitbruto IS NOT NULL
           AND vl_unitliquido IS NOT NULL
           AND qt_faturado IS NOT NULL
+          AND qt_faturado != 0
         GROUP BY cd_operacao, tp_operacao
+        HAVING SUM(CASE WHEN qt_faturado IS NOT NULL AND qt_faturado != 0 THEN qt_faturado ELSE 0 END) > 0
       )
       SELECT * FROM operacoes_agregadas
-      WHERE quantidade_total > 0
       ORDER BY categoria_operacao, cd_operacao
     `;
 
-    const { rows } = await pool.query(query, params);
+    let rows;
+    try {
+      console.log(
+        `🔍 AUDITORIA: Executando query para ${empresas.length} empresas...`,
+      );
+      const result = await pool.query(query, params);
+      rows = result.rows;
+      console.log(
+        `✅ AUDITORIA: Query executada com sucesso, ${rows.length} registros retornados`,
+      );
+    } catch (err) {
+      console.error('❌ ERRO SQL na auditoria-transacoes:', {
+        message: err.message,
+        detail: err.detail,
+        hint: err.hint,
+        position: err.position,
+        code: err.code,
+        query: query,
+        params: params,
+      });
+
+      // Retornar erro detalhado para debug
+      return res.status(500).json({
+        error: 'Erro ao executar consulta SQL de auditoria',
+        message: err.message,
+        detail: err.detail,
+        hint: err.hint,
+        position: err.position,
+        code: err.code,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     // Agrupar dados por categoria de forma eficiente
     const dadosAgrupados = {};
