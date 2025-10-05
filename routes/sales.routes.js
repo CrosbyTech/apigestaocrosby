@@ -92,7 +92,23 @@ router.get(
       ORDER BY vfn.dt_transacao DESC
       LIMIT 1000
     `;
-    const { rows } = await pool.query(query, params);
+    let rows;
+    try {
+      const result = await pool.query(query, params);
+      rows = result.rows;
+    } catch (err) {
+      console.error('Erro SQL na auditoria-transacoes:', err);
+      return res.status(500).json({
+        error: 'Erro ao executar consulta SQL',
+        message: err.message,
+        detail: err.detail,
+        hint: err.hint,
+        position: err.position,
+        stack: err.stack,
+        query: query,
+        params: params,
+      });
+    }
     successResponse(
       res,
       { transacoes: rows },
