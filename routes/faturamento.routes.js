@@ -47,10 +47,10 @@ router.get('/varejo',
 
     const result = await pool.query(query, queryParams);
     
-    res.json(successResponse('Faturamento varejo recuperado com sucesso', {
+    return successResponse(res, {
       data: result.rows,
       total: result.rows.length
-    }));
+    }, 'Faturamento varejo recuperado com sucesso');
   })
 );
 
@@ -88,10 +88,10 @@ router.get('/mtm',
 
     const result = await pool.query(query, queryParams);
     
-    res.json(successResponse('Faturamento MTM recuperado com sucesso', {
+    return successResponse(res, {
       data: result.rows,
       total: result.rows.length
-    }));
+    }, 'Faturamento MTM recuperado com sucesso');
   })
 );
 
@@ -129,10 +129,10 @@ router.get('/franquias',
 
     const result = await pool.query(query, queryParams);
     
-    res.json(successResponse('Faturamento franquias recuperado com sucesso', {
+    return successResponse(res, {
       data: result.rows,
       total: result.rows.length
-    }));
+    }, 'Faturamento franquias recuperado com sucesso');
   })
 );
 
@@ -170,10 +170,10 @@ router.get('/revenda',
 
     const result = await pool.query(query, queryParams);
     
-    res.json(successResponse('Faturamento revenda recuperado com sucesso', {
+    return successResponse(res, {
       data: result.rows,
       total: result.rows.length
-    }));
+    }, 'Faturamento revenda recuperado com sucesso');
   })
 );
 
@@ -267,7 +267,7 @@ router.get('/consolidado',
       revenda: revendaResult.rows
     };
 
-    res.json(successResponse('Faturamento consolidado recuperado com sucesso', data));
+    return successResponse(res, data, 'Faturamento consolidado recuperado com sucesso');
   })
 );
 
