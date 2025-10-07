@@ -820,7 +820,8 @@ router.get(
   validatePagination,
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 100; // Limite padrão mais razoável
+    const limit =
+      req.query.limit !== undefined ? parseInt(req.query.limit, 10) : undefined; // Sem limite padrão
     const offset = parseInt(req.query.offset, 10) || 0;
 
     const dataInicio = `${inicio} 00:00:00`;
@@ -900,7 +901,7 @@ router.get(
           ), 0
         ) > 0
         ORDER BY faturamento DESC
-        LIMIT $3 OFFSET $4
+  ${limit !== undefined ? `LIMIT $3 OFFSET $4` : ''}
       `;
 
     // Query de contagem simplificada
@@ -2943,162 +2944,6 @@ router.get(
       responseData,
       'Auditoria de transações obtida com sucesso (consulta otimizada)',
     );
-  }),
-);
-
-/**
- * @route GET /sales/transacoes-detalhes
- * @desc Rota otimizada para buscar detalhes de transações para modais
- * @access Public
- * @query {nr_transacao, cd_empresa, dt_inicio, dt_fim}
- */
-router.get(
-  '/transacoes-detalhes',
-  sanitizeInput,
-  asyncHandler(async (req, res) => {
-    const { nr_transacao, cd_empresa, dt_inicio, dt_fim } = req.query;
-
-    if (!nr_transacao) {
-      return errorResponse(
-        res,
-        'Parâmetro nr_transacao é obrigatório',
-        400,
-        'MISSING_PARAMETER',
-      );
-    }
-
-    // Cache key para esta consulta específica
-    const cacheKey = `transacao_${nr_transacao}_${cd_empresa}`;
-    const cachedResult = dreCache.get(cacheKey);
-
-    if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_TTL) {
-      console.log(`📦 TRANSACOES-DETALHES: Cache hit para ${cacheKey}`);
-      return successResponse(
-        res,
-        {
-          ...cachedResult.data,
-          cached: true,
-          cacheAge: Math.round((Date.now() - cachedResult.timestamp) / 1000),
-        },
-        'Detalhes da transação obtidos do cache',
-      );
-    }
-
-    let params = [nr_transacao];
-    let where = 'vfn.nr_transacao = $1';
-    let idx = 2;
-
-    if (cd_empresa) {
-      where += ` AND vfn.cd_empresa = $${idx}`;
-      params.push(cd_empresa);
-      idx++;
-    }
-
-    if (dt_inicio && dt_fim) {
-      where += ` AND vfn.dt_transacao BETWEEN $${idx} AND $${idx + 1}`;
-      params.push(dt_inicio, dt_fim);
-    }
-
-    // Query otimizada com apenas os campos necessários para o modal
-    const query = `
-        SELECT
-          vfn.cd_empresa,
-          vfn.nr_transacao,
-          vfn.cd_pessoa,
-          COALESCE(pj.nm_fantasia, pp.nm_pessoa, 'Cliente não identificado') as nm_pessoa,
-          vfn.qt_faturado,
-          vfn.vl_unitliquido,
-          vfn.vl_unitbruto,
-          vfn.vl_freterat,
-          vfn.dt_transacao,
-          vfn.cd_produto,
-          vfn.ds_produto
-        FROM vr_fis_nfitemprod vfn
-        LEFT JOIN pes_pesjuridica pj ON pj.cd_pessoa = vfn.cd_pessoa
-        LEFT JOIN pes_pessoa pp ON pp.cd_pessoa = vfn.cd_pessoa
-        WHERE ${where}
-          AND vfn.tp_situacao NOT IN ('C', 'X')
-        ORDER BY vfn.cd_produto
-        LIMIT 500
-      `;
-
-    console.log(
-      `🔍 TRANSACOES-DETALHES: Buscando detalhes para transação ${nr_transacao}`,
-    );
-
-    try {
-      const { rows } = await pool.query(query, params);
-
-      if (rows.length === 0) {
-        return successResponse(
-          res,
-          { transacao: nr_transacao, itens: [] },
-          'Nenhum item encontrado para esta transação',
-        );
-      }
-
-      // Calcular totais
-      const totals = rows.reduce(
-        (acc, item) => {
-          const qtd = parseFloat(item.qt_faturado || 0);
-          const vlLiq = parseFloat(item.vl_unitliquido || 0);
-          const vlBruto = parseFloat(item.vl_unitbruto || 0);
-          const frete = parseFloat(item.vl_freterat || 0);
-
-          acc.totalQuantidade += qtd;
-          acc.totalLiquido += vlLiq * qtd + frete;
-          acc.totalBruto += vlBruto * qtd + frete;
-          acc.totalItens += 1;
-
-          return acc;
-        },
-        { totalQuantidade: 0, totalLiquido: 0, totalBruto: 0, totalItens: 0 },
-      );
-
-      const responseData = {
-        transacao: nr_transacao,
-        cd_empresa: rows[0].cd_empresa,
-        cd_pessoa: rows[0].cd_pessoa,
-        nm_pessoa: rows[0].nm_pessoa,
-        dt_transacao: rows[0].dt_transacao,
-        totals,
-        itens: rows.map((item) => ({
-          cd_produto: item.cd_produto,
-          ds_produto: item.ds_produto,
-          qt_faturado: parseFloat(item.qt_faturado || 0),
-          vl_unitliquido: parseFloat(item.vl_unitliquido || 0),
-          vl_unitbruto: parseFloat(item.vl_unitbruto || 0),
-          vl_freterat: parseFloat(item.vl_freterat || 0),
-          total_liquido:
-            parseFloat(item.vl_unitliquido || 0) *
-              parseFloat(item.qt_faturado || 0) +
-            parseFloat(item.vl_freterat || 0),
-          total_bruto:
-            parseFloat(item.vl_unitbruto || 0) *
-              parseFloat(item.qt_faturado || 0) +
-            parseFloat(item.vl_freterat || 0),
-        })),
-      };
-
-      // Salvar no cache
-      dreCache.set(cacheKey, {
-        data: responseData,
-        timestamp: Date.now(),
-      });
-
-      console.log(
-        `✅ TRANSACOES-DETALHES: ${rows.length} itens encontrados para transação ${nr_transacao}`,
-      );
-
-      successResponse(
-        res,
-        responseData,
-        `Detalhes da transação ${nr_transacao} obtidos com sucesso`,
-      );
-    } catch (error) {
-      console.error('Erro ao buscar detalhes da transação:', error);
-      throw error;
-    }
   }),
 );
 
