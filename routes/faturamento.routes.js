@@ -1,0 +1,274 @@
+import express from 'express';
+import pool from '../config/database.js';
+import {
+  validateRequired,
+  validateDateFormat,
+  sanitizeInput,
+} from '../middlewares/validation.middleware.js';
+import {
+  asyncHandler,
+  successResponse,
+  errorResponse,
+} from '../utils/errorHandler.js';
+
+const router = express.Router();
+
+// Endpoint para buscar faturamento do varejo
+router.get('/varejo', 
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+    
+    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
+    let queryParams = [dataInicio, dataFim];
+    
+    if (cd_empresa) {
+      // Se cd_empresa é uma string com vírgulas, trata como array
+      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
+      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        f.cd_empresa,
+        SUM(f.vendas) as vendas,
+        SUM(f.devolucoes) as devolucoes,
+        SUM(f.total) as venda_liquida,
+        SUM(f.frete) as frete,
+        SUM(f.total + f.frete) as total
+      FROM faturamentovarejo f
+      ${whereClause}
+      GROUP BY f.cd_empresa
+      ORDER BY f.cd_empresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+    
+    res.json(successResponse('Faturamento varejo recuperado com sucesso', {
+      data: result.rows,
+      total: result.rows.length
+    }));
+  })
+);
+
+// Endpoint para buscar faturamento MTM (multimarcas)
+router.get('/mtm', 
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+    
+    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
+    let queryParams = [dataInicio, dataFim];
+    
+    if (cd_empresa) {
+      // Se cd_empresa é uma string com vírgulas, trata como array
+      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
+      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        f.cd_empresa,
+        SUM(f.vendas) as vendas,
+        SUM(f.devolucoes) as devolucoes,
+        SUM(f.total) as venda_liquida,
+        SUM(f.frete) as frete,
+        SUM(f.total + f.frete) as total
+      FROM faturamentomtm f
+      ${whereClause}
+      GROUP BY f.cd_empresa
+      ORDER BY f.cd_empresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+    
+    res.json(successResponse('Faturamento MTM recuperado com sucesso', {
+      data: result.rows,
+      total: result.rows.length
+    }));
+  })
+);
+
+// Endpoint para buscar faturamento de franquias
+router.get('/franquias', 
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+    
+    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
+    let queryParams = [dataInicio, dataFim];
+    
+    if (cd_empresa) {
+      // Se cd_empresa é uma string com vírgulas, trata como array
+      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
+      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        f.cd_empresa,
+        SUM(f.vendas) as vendas,
+        SUM(f.devolucoes) as devolucoes,
+        SUM(f.total) as venda_liquida,
+        SUM(f.frete) as frete,
+        SUM(f.total + f.frete) as total
+      FROM faturamentofranquia f
+      ${whereClause}
+      GROUP BY f.cd_empresa
+      ORDER BY f.cd_empresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+    
+    res.json(successResponse('Faturamento franquias recuperado com sucesso', {
+      data: result.rows,
+      total: result.rows.length
+    }));
+  })
+);
+
+// Endpoint para buscar faturamento de revenda
+router.get('/revenda', 
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+    
+    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
+    let queryParams = [dataInicio, dataFim];
+    
+    if (cd_empresa) {
+      // Se cd_empresa é uma string com vírgulas, trata como array
+      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
+      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        f.cd_empresa,
+        SUM(f.vendas) as vendas,
+        SUM(f.devolucoes) as devolucoes,
+        SUM(f.total) as venda_liquida,
+        SUM(f.frete) as frete,
+        SUM(f.total + f.frete) as total
+      FROM faturamentorevenda f
+      ${whereClause}
+      GROUP BY f.cd_empresa
+      ORDER BY f.cd_empresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+    
+    res.json(successResponse('Faturamento revenda recuperado com sucesso', {
+      data: result.rows,
+      total: result.rows.length
+    }));
+  })
+);
+
+// Endpoint consolidado para buscar todos os tipos de faturamento
+router.get('/consolidado', 
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+    
+    let whereClause = 'WHERE dt_transacao BETWEEN $1 AND $2';
+    let queryParams = [dataInicio, dataFim];
+    
+    if (cd_empresa) {
+      // Se cd_empresa é uma string com vírgulas, trata como array
+      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
+      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      whereClause += ` AND cd_empresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    // Queries para cada tipo de faturamento
+    const varejoQuery = `
+      SELECT 
+        'varejo' as tipo,
+        cd_empresa,
+        SUM(vendas) as vendas,
+        SUM(devolucoes) as devolucoes,
+        SUM(total) as venda_liquida,
+        SUM(frete) as frete,
+        SUM(total + frete) as total
+      FROM faturamentovarejo 
+      ${whereClause}
+      GROUP BY cd_empresa
+    `;
+
+    const mtmQuery = `
+      SELECT 
+        'mtm' as tipo,
+        cd_empresa,
+        SUM(vendas) as vendas,
+        SUM(devolucoes) as devolucoes,
+        SUM(total) as venda_liquida,
+        SUM(frete) as frete,
+        SUM(total + frete) as total
+      FROM faturamentomtm 
+      ${whereClause}
+      GROUP BY cd_empresa
+    `;
+
+    const franquiasQuery = `
+      SELECT 
+        'franquias' as tipo,
+        cd_empresa,
+        SUM(vendas) as vendas,
+        SUM(devolucoes) as devolucoes,
+        SUM(total) as venda_liquida,
+        SUM(frete) as frete,
+        SUM(total + frete) as total
+      FROM faturamentofranquia 
+      ${whereClause}
+      GROUP BY cd_empresa
+    `;
+
+    const revendaQuery = `
+      SELECT 
+        'revenda' as tipo,
+        cd_empresa,
+        SUM(vendas) as vendas,
+        SUM(devolucoes) as devolucoes,
+        SUM(total) as venda_liquida,
+        SUM(frete) as frete,
+        SUM(total + frete) as total
+      FROM faturamentorevenda 
+      ${whereClause}
+      GROUP BY cd_empresa
+    `;
+
+    // Executar todas as queries em paralelo
+    const [varejoResult, mtmResult, franquiasResult, revendaResult] = await Promise.all([
+      pool.query(varejoQuery, queryParams),
+      pool.query(mtmQuery, queryParams),
+      pool.query(franquiasQuery, queryParams),
+      pool.query(revendaQuery, queryParams)
+    ]);
+
+    const data = {
+      varejo: varejoResult.rows,
+      mtm: mtmResult.rows,
+      franquias: franquiasResult.rows,
+      revenda: revendaResult.rows
+    };
+
+    res.json(successResponse('Faturamento consolidado recuperado com sucesso', data));
+  })
+);
+
+export default router;
