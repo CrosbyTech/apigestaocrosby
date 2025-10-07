@@ -20,6 +20,7 @@ import salesRoutes from './routes/sales.routes.js';
 import companyRoutes from './routes/company.routes.js';
 import franchiseRoutes from './routes/franchise.routes.js';
 import utilsRoutes from './routes/utils.routes.js';
+import faturamentoRoutes from './routes/faturamento.routes.js';
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -30,55 +31,37 @@ const app = express();
 // CONFIGURAÇÕES DE SEGURANÇA E MIDDLEWARE
 // =============================================================================
 
-// Configurar trust proxy para Render (proxies reversos)
-app.set('trust proxy', 1);
-
 // Helmet para segurança básica
-app.use(helmet({
-  contentSecurityPolicy: false // Desabilita CSP para APIs
-}));
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Desabilita CSP para APIs
+  }),
+);
 
-// Rate limiting otimizado para proxies (Render)
+// Rate limiting - muito permissivo para consultas grandes
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: process.env.NODE_ENV === 'production' ? 10000 : 50000, // Muito permissivo
   message: {
     error: 'RATE_LIMIT_EXCEEDED',
     message: 'Muitas requisições. Tente novamente em 15 minutos.',
-    retryAfter: '15 minutes'
+    retryAfter: '15 minutes',
   },
   standardHeaders: true,
   legacyHeaders: false,
-  // Configuração específica para proxies reversos - usar número em vez de boolean
-  trustProxy: 1,
-  skip: (req) => {
-    // Skip para requests de health check
-    return req.path === '/api/utils/health' || req.path === '/';
-  }
 });
 app.use('/api/', limiter);
 
 // CORS configurado para permitir qualquer origem
-app.use(cors({
-  origin: '*',
-  credentials: false,
-  optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
-}));
-
-// Middleware manual para garantir CORS em todas as requisições
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Origin');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  next();
-});
+app.use(
+  cors({
+    origin: '*',
+    credentials: false,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  }),
+);
 
 // Compressão de respostas
 app.use(compression());
@@ -91,16 +74,20 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Parsing de JSON com limite de tamanho
-app.use(express.json({ 
-  limit: '10mb',
-  strict: true 
-}));
+app.use(
+  express.json({
+    limit: '10mb',
+    strict: true,
+  }),
+);
 
 // Parsing de URL encoded
-app.use(express.urlencoded({ 
-  extended: true, 
-  limit: '10mb' 
-}));
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: '10mb',
+  }),
+);
 
 // Sanitização global de entrada
 app.use(sanitizeInput);
@@ -117,16 +104,17 @@ app.get('/', (req, res) => {
     status: 'online',
     timestamp: new Date().toISOString(),
     docs: '/api/docs',
-    health: '/api/utils/health'
+    health: '/api/utils/health',
   });
 });
 
 // Rotas da API organizadas por módulos
 app.use('/api/financial', financialRoutes); // Dados financeiros
-app.use('/api/sales', salesRoutes);         // Vendas e faturamento
-app.use('/api/company', companyRoutes);     // Empresas e lojas
+app.use('/api/sales', salesRoutes); // Vendas e faturamento
+app.use('/api/company', companyRoutes); // Empresas e lojas
 app.use('/api/franchise', franchiseRoutes); // Franquias
-app.use('/api/utils', utilsRoutes);         // Utilitários e autocomplete
+app.use('/api/utils', utilsRoutes); // Utilitários e autocomplete
+app.use('/api/faturamento', faturamentoRoutes); // Faturamento das lojas
 
 // =============================================================================
 // ROTAS DE COMPATIBILIDADE (MANTER TEMPORARIAMENTE)
@@ -155,48 +143,46 @@ app.get('/api/docs', (req, res) => {
       version: '2.1.0',
       description: 'API para sistema de gestão - Autenticação via Supabase',
       baseURL: '/api',
-      authentication: 'Gerenciada externamente via Supabase'
+      authentication: 'Gerenciada externamente via Supabase',
     },
-    'Financeiro': {
+    Financeiro: {
       'GET /api/financial/extrato': 'Extrato bancário com filtros',
-      'GET /api/financial/extrato-totvs': 'Extrato TOTVS',
-      'GET /api/financial/contas-pagar': 'Contas a pagar (sem fornecedor/centro de custo)',
-      'GET /api/financial/centrocusto': 'Buscar descrições de centros de custo por códigos',
-      'GET /api/financial/fornecedor': 'Buscar nomes de fornecedores por códigos',
-      'GET /api/financial/despesa': 'Buscar descrições de itens de despesa por códigos',
+
+      'GET /api/financial/contas-pagar': 'Contas a pagar',
       'GET /api/financial/contas-receber': 'Contas a receber',
-      'GET /api/financial/saldo-conta': 'Saldo de conta bancária',
-      'POST /api/financial/upload-retorno': 'Upload e processamento de arquivo de retorno bancário'
+      'GET /api/financial/fluxo-caixa': 'Fluxo de caixa com múltiplas empresas',
     },
-    'Vendas': {
+    Vendas: {
       'GET /api/sales/faturamento': 'Faturamento geral',
       'GET /api/sales/faturamento-franquia': 'Faturamento de franquias',
       'GET /api/sales/faturamento-mtm': 'Faturamento MTM',
       'GET /api/sales/faturamento-revenda': 'Faturamento de revenda',
-      'GET /api/sales/ranking-vendedores': 'Ranking de vendedores'
+      'GET /api/sales/ranking-vendedores': 'Ranking de vendedores',
     },
-    'Empresas': {
+    Empresas: {
       'GET /api/company/empresas': 'Lista de empresas',
       'GET /api/company/grupo-empresas': 'Grupos de empresas',
       'GET /api/company/faturamento-lojas': 'Faturamento por lojas',
       'GET /api/company/expedicao': 'Dados de expedição',
-      'GET /api/company/pcp': 'Dados de PCP'
+      'GET /api/company/pcp': 'Dados de PCP',
     },
-    'Franquias': {
+    Franquias: {
       'GET /api/franchise/consulta-fatura': 'Consultar faturas de franquias',
-      'GET /api/franchise/fundo-propaganda': 'Fundo de propaganda',
-      'GET /api/franchise/franquias-credev': 'Franquias crédito/débito'
+
+      'GET /api/franchise/franquias-credev': 'Franquias crédito/débito',
     },
-    'Utilitários': {
+    Utilitários: {
       'GET /api/utils/health': 'Health check da aplicação',
       'GET /api/utils/stats': 'Estatísticas do sistema',
-      'GET /api/utils/autocomplete/nm_fantasia': 'Autocomplete de nomes fantasia',
-      'GET /api/utils/autocomplete/nm_grupoempresa': 'Autocomplete de grupos empresa'
+      'GET /api/utils/autocomplete/nm_fantasia':
+        'Autocomplete de nomes fantasia',
+      'GET /api/utils/autocomplete/nm_grupoempresa':
+        'Autocomplete de grupos empresa',
     },
-    'Nota': {
-      'Autenticação': 'Sistema de login gerenciado externamente via Supabase',
-      'Acesso': 'Todas as rotas são públicas - controle de acesso no frontend'
-    }
+    Nota: {
+      Autenticação: 'Sistema de login gerenciado externamente via Supabase',
+      Acesso: 'Todas as rotas são públicas - controle de acesso no frontend',
+    },
   };
 
   res.json(routes);
@@ -213,7 +199,7 @@ app.use('*', (req, res) => {
     message: 'Rota não encontrada',
     path: req.originalUrl,
     method: req.method,
-    availableEndpoints: '/api/docs'
+    availableEndpoints: '/api/docs',
   });
 });
 
@@ -229,10 +215,10 @@ const PORT = process.env.PORT || 4000;
 // Graceful shutdown
 const gracefulShutdown = (signal) => {
   logger.info(`Recebido sinal ${signal}. Encerrando servidor graciosamente...`);
-  
+
   server.close(async () => {
     logger.info('Servidor HTTP fechado.');
-    
+
     try {
       await closePool();
       logger.info('Pool de conexões do banco fechado.');
@@ -246,20 +232,22 @@ const gracefulShutdown = (signal) => {
 
 const server = app.listen(PORT, async () => {
   logger.info(`🚀 Servidor rodando na porta ${PORT}`);
-  logger.info(`📚 Documentação disponível em http://localhost:${PORT}/api/docs`);
+  logger.info(
+    `📚 Documentação disponível em http://localhost:${PORT}/api/docs`,
+  );
   logger.info(`🏥 Health check em http://localhost:${PORT}/api/utils/health`);
   logger.info(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
-  
-  // Configurações do servidor HTTP com timeout de 1 hora
-  server.timeout = 3600000; // 1 hora timeout para requisições
-  server.keepAliveTimeout = 65000; // 65 segundos para keep-alive
-  server.headersTimeout = 66000; // 66 segundos para headers
-  logger.info('⚙️  Timeouts do servidor configurados para 1 hora');
-  
+
+  // Remover timeout do servidor HTTP (ilimitado)
+  server.timeout = 0; // Sem timeout para requisições
+  server.keepAliveTimeout = 0; // Sem timeout para keep-alive
+  server.headersTimeout = 0; // Sem timeout para headers
+  logger.info('♾️  Timeouts do servidor removidos - requisições ilimitadas');
+
   // Testar conexão com banco de dados na inicialização
   const dbConnected = await testConnection();
   if (dbConnected) {
-    logger.info('🗄️  Banco de dados conectado com sucesso');
+    logger.info('🗄️  Banco de dados conectado com sucesso - SEM TIMEOUTS');
   } else {
     logger.error('❌ Falha na conexão com banco de dados');
   }
