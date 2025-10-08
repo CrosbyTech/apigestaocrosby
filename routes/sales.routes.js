@@ -810,7 +810,7 @@ router.get(
  * @route GET /sales/ranking-vendedores
  * @desc Buscar ranking de vendedores por período
  * @access Public
- * @query {inicio, fim, limit, offset}
+ * @query {inicio, fim, offset}
  */
 router.get(
   '/ranking-vendedores',
@@ -820,8 +820,6 @@ router.get(
   validatePagination,
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
-    const limit =
-      req.query.limit !== undefined ? parseInt(req.query.limit, 10) : undefined; // Sem limite padrão
     const offset = parseInt(req.query.offset, 10) || 0;
 
     const dataInicio = `${inicio} 00:00:00`;
@@ -901,7 +899,6 @@ router.get(
           ), 0
         ) > 0
         ORDER BY faturamento DESC
-  ${limit !== undefined ? `LIMIT $3 OFFSET $4` : ''}
       `;
 
     // Query de contagem simplificada
@@ -917,12 +914,12 @@ router.get(
       `;
 
     console.log(
-      `🔍 Ranking-vendedores: período ${dataInicio} a ${dataFim}, limit: ${limit}, offset: ${offset}`,
+      `🔍 Ranking-vendedores: período ${dataInicio} a ${dataFim}, offset: ${offset}`,
     );
 
     try {
       const [resultado, totalResult] = await Promise.all([
-        pool.query(query, [dataInicio, dataFim, limit, offset]),
+        pool.query(query, [dataInicio, dataFim]),
         pool.query(countQuery, [dataInicio, dataFim]),
       ]);
 
@@ -932,9 +929,7 @@ router.get(
         res,
         {
           total,
-          limit,
           offset,
-          hasMore: offset + limit < total,
           periodo: { inicio: dataInicio, fim: dataFim },
           data: resultado.rows,
         },
@@ -978,7 +973,6 @@ router.get(
           AND B.DT_TRANSACAO BETWEEN $1::timestamp AND $2::timestamp
         GROUP BY A.CD_VENDEDOR, A.NM_VENDEDOR
         ORDER BY faturamento_total DESC
-        LIMIT 50
       `;
 
     console.log(
