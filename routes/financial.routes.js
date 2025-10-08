@@ -1238,6 +1238,222 @@ router.get(
 );
 
 /**
+ * @route GET /financial/credev-revenda
+ * @desc Buscar saldos de crediários de revenda
+ * @access Public
+ */
+router.get(
+  "/credev-revenda",
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const query = `
+      select
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        pp.nm_pessoa,
+        case
+          a.tp_documento
+          when 10 then 'ADIANTAMENTO'
+          when 20 then 'CREDEV'
+          else a.tp_documento::text
+        end as tp_documento,
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) as vl_saldo,
+        MAX(case when a.tp_operacao = 'C' then a.dt_movim end) as dt_ultimocredito
+      from
+        vr_fcc_ctapes b
+      join vr_fcc_mov a
+        on
+        a.nr_ctapes = b.nr_ctapes
+      join pes_pessoa pp on
+        b.cd_pessoa = pp.cd_pessoa
+        and a.cd_operador = pp.cd_operador
+      left join vr_pes_pessoaclas pc on
+        pc.cd_pessoa = b.cd_pessoa
+      where
+        a.in_estorno = 'F'
+        and a.dt_movim <= now()
+        and b.tp_manutencao = 2
+        and pc.cd_tipoclas = 20
+        and pc.cd_classificacao::integer = 3
+      group by
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        b.ds_titular,
+        a.tp_documento,
+        pp.nm_pessoa
+      having
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) > 0
+      order by
+        vl_saldo desc
+    `;
+
+    const { rows } = await pool.query(query);
+
+    successResponse(
+      res,
+      {
+        count: rows.length,
+        data: rows,
+      },
+      "Crediários de revenda obtidos com sucesso"
+    );
+  })
+);
+
+/**
+ * @route GET /financial/credev-varejo
+ * @desc Buscar saldos de crediários de varejo
+ * @access Public
+ */
+router.get(
+  "/credev-varejo",
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const query = `
+      select
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        pp.nm_pessoa,
+        pc.cd_operacao,
+        case
+          a.tp_documento
+          when 10 then 'ADIANTAMENTO'
+          when 20 then 'CREDEV'
+          else a.tp_documento::text
+        end as tp_documento,
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) as vl_saldo,
+        MAX(case when a.tp_operacao = 'C' then a.dt_movim end) as dt_ultimocredito
+      from
+        vr_fcc_ctapes b
+      join vr_fcc_mov a
+        on
+        a.nr_ctapes = b.nr_ctapes
+      join pes_pessoa pp on
+        b.cd_pessoa = pp.cd_pessoa
+        and a.cd_operador = pp.cd_operador
+      left join tra_transacao pc on
+        pc.cd_pessoa = b.cd_pessoa
+      where
+        a.in_estorno = 'F'
+        and a.dt_movim <= now()
+        and b.tp_manutencao = 2
+        and pc.cd_operacao in (555, 510, 511, 548, 545, 546, 2, 1)
+        and pc.dt_transacao between '2024-01-01' and '2025-10-01'
+        and b.cd_empresa in (5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97)
+      group by
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        b.ds_titular,
+        a.tp_documento,
+        pp.nm_pessoa,
+        pc.cd_operacao
+      having
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) > 0
+      order by
+        vl_saldo desc
+    `;
+
+    const { rows } = await pool.query(query);
+
+    successResponse(
+      res,
+      {
+        count: rows.length,
+        data: rows,
+      },
+      "Crediários de varejo obtidos com sucesso"
+    );
+  })
+);
+
+/**
+ * @route GET /financial/credev-mtm
+ * @desc Buscar saldos de crediários de MTM
+ * @access Public
+ */
+router.get(
+  "/credev-mtm",
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const query = `
+      select
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        pp.nm_pessoa,
+        case
+          a.tp_documento
+          when 10 then 'ADIANTAMENTO'
+          when 20 then 'CREDEV'
+          else a.tp_documento::text
+        end as tp_documento,
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) as vl_saldo,
+        MAX(case when a.tp_operacao = 'C' then a.dt_movim end) as dt_ultimocredito
+      from
+        vr_fcc_ctapes b
+      join vr_fcc_mov a
+        on
+        a.nr_ctapes = b.nr_ctapes
+      join pes_pessoa pp on
+        b.cd_pessoa = pp.cd_pessoa
+        and a.cd_operador = pp.cd_operador
+      left join vr_pes_pessoaclas pc on
+        pc.cd_pessoa = b.cd_pessoa
+      where
+        a.in_estorno = 'F'
+        and a.dt_movim <= now()
+        and b.tp_manutencao = 2
+        and pc.cd_tipoclas = 20
+        and pc.cd_classificacao::integer = 2
+      group by
+        b.cd_empresa,
+        b.nr_ctapes,
+        b.cd_pessoa,
+        b.ds_titular,
+        a.tp_documento,
+        pp.nm_pessoa
+      having
+        SUM(case
+            when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
+            else -coalesce(a.vl_lancto, 0)
+          end) > 0
+      order by
+        vl_saldo desc
+    `;
+
+    const { rows } = await pool.query(query);
+
+    successResponse(
+      res,
+      {
+        count: rows.length,
+        data: rows,
+      },
+      "Crediários de MTM obtidos com sucesso"
+    );
+  })
+);
+
+/**
  * @route GET /financial/nfmanifestacao
  * @desc Buscar notas fiscais de manifestação
  * @access Public
