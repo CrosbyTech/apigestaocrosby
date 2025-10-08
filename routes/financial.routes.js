@@ -1270,7 +1270,6 @@ router.get(
         a.nr_ctapes = b.nr_ctapes
       join pes_pessoa pp on
         b.cd_pessoa = pp.cd_pessoa
-        and a.cd_operador = pp.cd_operador
       left join vr_pes_pessoaclas pc on
         pc.cd_pessoa = b.cd_pessoa
       where
@@ -1341,16 +1340,11 @@ router.get(
         a.nr_ctapes = b.nr_ctapes
       join pes_pessoa pp on
         b.cd_pessoa = pp.cd_pessoa
-        and a.cd_operador = pp.cd_operador
-      left join tra_transacao pc on
-        pc.cd_pessoa = b.cd_pessoa
       where
         a.in_estorno = 'F'
         and a.dt_movim <= now()
         and b.tp_manutencao = 2
-        and pc.cd_operacao in (555, 510, 511, 548, 545, 546, 2, 1)
-        and pc.dt_transacao between '2024-01-01' and '2025-10-01'
-        and b.cd_empresa in (5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97)
+        and b.cd_empresa in (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97)
       group by
         b.cd_empresa,
         b.nr_ctapes,
@@ -1413,7 +1407,6 @@ router.get(
         a.nr_ctapes = b.nr_ctapes
       join pes_pessoa pp on
         b.cd_pessoa = pp.cd_pessoa
-        and a.cd_operador = pp.cd_operador
       left join vr_pes_pessoaclas pc on
         pc.cd_pessoa = b.cd_pessoa
       where
