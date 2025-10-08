@@ -1357,8 +1357,7 @@ router.get(
         b.cd_pessoa,
         b.ds_titular,
         a.tp_documento,
-        pp.nm_pessoa,
-        pc.cd_operacao
+        pp.nm_pessoa
       having
         SUM(case
             when a.tp_operacao = 'C' then coalesce(a.vl_lancto, 0)
