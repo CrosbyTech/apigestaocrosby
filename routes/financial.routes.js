@@ -1323,7 +1323,6 @@ router.get(
         b.nr_ctapes,
         b.cd_pessoa,
         pp.nm_pessoa,
-        pc.cd_operacao,
         case
           a.tp_documento
           when 10 then 'ADIANTAMENTO'
