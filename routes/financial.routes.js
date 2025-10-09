@@ -1318,9 +1318,9 @@ router.get(
   asyncHandler(async (req, res) => {
     const query = `
       select
+        b.cd_pessoa,
         b.cd_empresa,
         b.nr_ctapes,
-        b.cd_pessoa,
         pp.nm_pessoa,
         case
           a.tp_documento
@@ -1340,11 +1340,17 @@ router.get(
         a.nr_ctapes = b.nr_ctapes
       join pes_pessoa pp on
         b.cd_pessoa = pp.cd_pessoa
+      join pes_pessoaclas pc on
+        pp.cd_pessoa = pc.cd_pessoa
       where
         a.in_estorno = 'F'
         and a.dt_movim <= now()
         and b.tp_manutencao = 2
         and b.cd_empresa in (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97)
+        and (
+        (pc.cd_tipoclas = 20
+        and pc.cd_classificacao::integer = 1)
+        or (pc.cd_tipoclas = 55))
       group by
         b.cd_empresa,
         b.nr_ctapes,
