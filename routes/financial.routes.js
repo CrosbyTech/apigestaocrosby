@@ -1272,6 +1272,104 @@ router.get(
 );
 
 /**
+ * @route GET /financial/inadimplentes-franquias
+ * @desc Buscar inadimplentes de franquias CROSBY
+ * @access Public
+ * @query {dt_inicio, dt_fim, limit, offset}
+ */
+router.get(
+  "/inadimplentes-franquias",
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validatePagination,
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim } = req.query;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    const query = `
+      SELECT
+        vff.cd_cliente,
+        vff.cd_empresa,
+        vff.nr_fat,
+        vff.nm_cliente,
+        pp.nm_fantasia,
+        pp.ds_uf,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.dt_cancelamento,
+        vff.dt_liq,
+        vff.tp_cobranca,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_inclusao,
+        vff.tp_baixa,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_abatimento,
+        vff.vl_pago,
+        vff.vl_desconto,
+        vff.vl_liquido,
+        vff.vl_acrescimo,
+        vff.vl_multa,
+        vff.nr_portador,
+        vff.vl_renegociacao,
+        vff.vl_corrigido,
+        vff.vl_juros,
+        vff.pr_juromes,
+        vff.pr_multa
+      FROM vr_fcr_faturai vff
+      LEFT JOIN vr_pes_pessoaclas vpp ON vff.cd_cliente = vpp.cd_pessoa
+      LEFT JOIN pes_pesjuridica pp ON vpp.cd_pessoa = pp.cd_pessoa
+      WHERE vff.dt_emissao BETWEEN $1 AND $2
+        AND vff.dt_vencimento < CURRENT_DATE
+        AND vff.dt_liq IS NULL
+        AND vff.dt_cancelamento IS NULL
+        AND vff.vl_pago = 0
+        AND pp.nm_fantasia LIKE '%F%CROSBY%'
+      ORDER BY vff.dt_emissao DESC
+      LIMIT $3 OFFSET $4
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM vr_fcr_faturai vff
+      LEFT JOIN vr_pes_pessoaclas vpp ON vff.cd_cliente = vpp.cd_pessoa
+      LEFT JOIN pes_pesjuridica pp ON vpp.cd_pessoa = pp.cd_pessoa
+      WHERE vff.dt_emissao BETWEEN $1 AND $2
+        AND vff.dt_vencimento < CURRENT_DATE
+        AND vff.dt_liq IS NULL
+        AND vff.dt_cancelamento IS NULL
+        AND vff.vl_pago = 0
+        AND pp.nm_fantasia LIKE '%F%CROSBY%'
+    `;
+
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, [dt_inicio, dt_fim, limit, offset]),
+      pool.query(countQuery, [dt_inicio, dt_fim]),
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        filtros: { dt_inicio, dt_fim },
+        data: resultado.rows,
+      },
+      "Inadimplentes de franquias obtidos com sucesso"
+    );
+  })
+);
+
+/**
  * @route GET /financial/credev-adiantamento
  * @desc Buscar saldos de adiantamentos e crediários
  * @access Public
