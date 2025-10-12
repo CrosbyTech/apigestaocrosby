@@ -122,28 +122,59 @@ router.get('/mtm',
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 5000, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
     }
 
     const query = `
       SELECT
         fisnf.dt_transacao,
         fisnf.cd_grupoempresa,
-        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
-          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_saida,
-        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E'
-          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_entrada,
-        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
-          THEN fisnf.qt_faturado * prdvl.vl_produto ELSE 0 END), 0) AS cmv
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_entrada,
+        COALESCE(SUM(
+          CASE
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_entrada,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto
       FROM
         vr_fis_nfitemprod fisnf
-      LEFT JOIN prd_valor prdvl ON
-        fisnf.cd_produto = prdvl.cd_produto
       WHERE
         fisnf.dt_transacao BETWEEN $1 AND $2
-        AND prdvl.cd_valor = 3
-        AND prdvl.cd_empresa = 1
-        AND prdvl.tp_valor = 'C'
         ${empresaWhereClause}
         AND fisnf.tp_situacao NOT IN ('C', 'X')
         AND fisnf.vl_unitbruto IS NOT NULL
@@ -290,28 +321,59 @@ router.get('/revenda',
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 5000, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
     }
 
     const query = `
       SELECT
-        fisnf.dt_transacao,
         fisnf.cd_grupoempresa,
-        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
-          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_saida,
-        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E'
-          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_entrada,
-        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
-          THEN fisnf.qt_faturado * prdvl.vl_produto ELSE 0 END), 0) AS cmv
+        fisnf.dt_transacao,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_entrada,
+        COALESCE(SUM(
+          CASE
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_entrada,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto
       FROM
         vr_fis_nfitemprod fisnf
-      LEFT JOIN prd_valor prdvl ON
-        fisnf.cd_produto = prdvl.cd_produto
       WHERE
         fisnf.dt_transacao BETWEEN $1 AND $2
-        AND prdvl.cd_valor = 3
-        AND prdvl.cd_empresa = 1
-        AND prdvl.tp_valor = 'C'
         ${empresaWhereClause}
         AND fisnf.tp_situacao NOT IN ('C', 'X')
         AND fisnf.vl_unitbruto IS NOT NULL
@@ -333,8 +395,8 @@ router.get('/revenda',
                 AND vpp.cd_classificacao::integer = 1)
             )
         )
-      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
-      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      GROUP BY fisnf.cd_grupoempresa, fisnf.dt_transacao
+      ORDER BY fisnf.cd_grupoempresa, fisnf.dt_transacao
     `;
 
     const result = await pool.query(query, queryParams);
