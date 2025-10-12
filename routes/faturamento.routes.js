@@ -20,30 +20,79 @@ router.get('/varejo',
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
     
-    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
     let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
     
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
       const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
       const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
-      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
+    } else {
+      // Lista padrão de empresas
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 5000, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
     }
 
     const query = `
       SELECT
-        f.cd_empresa,
-        f.nm_grupoempresa,
-        SUM(f.vendas) as vendas,
-        SUM(f.devolucoes) as devolucoes,
-        SUM(f.total) as venda_liquida,
-        SUM(f.frete) as frete,
-        SUM(f.total + f.frete) as total
-      FROM faturamentovarejo f
-      ${whereClause}
-      GROUP BY f.cd_empresa, f.nm_grupoempresa
-      ORDER BY f.cd_empresa
+        fisnf.cd_grupoempresa,
+        fisnf.dt_transacao,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_entrada,
+        COALESCE(SUM(
+          CASE
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_entrada,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto
+      FROM
+        vr_fis_nfitemprod fisnf
+      WHERE
+        fisnf.dt_transacao BETWEEN $1 AND $2
+        ${empresaWhereClause}
+        AND fisnf.tp_situacao NOT IN ('C', 'X')
+        AND fisnf.vl_unitbruto IS NOT NULL
+        AND fisnf.vl_unitliquido IS NOT NULL
+        AND fisnf.qt_faturado IS NOT NULL
+        AND fisnf.qt_faturado != 0
+        AND fisnf.cd_operacao IN (1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 8750, 9017, 9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205, 1101)
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
@@ -62,30 +111,62 @@ router.get('/mtm',
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
     
-    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
     let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
     
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
       const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
       const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
-      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
+    } else {
+      // Lista padrão de empresas
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
       SELECT
-        f.cd_empresa,
-        f.nm_grupoempresa,
-        SUM(f.vendas) as vendas,
-        SUM(f.devolucoes) as devolucoes,
-        SUM(f.total) as venda_liquida,
-        SUM(f.frete) as frete,
-        SUM(f.total + f.frete) as total
-      FROM faturamentomtm f
-      ${whereClause}
-      GROUP BY f.cd_empresa, f.nm_grupoempresa
-      ORDER BY f.cd_empresa
+        fisnf.dt_transacao,
+        fisnf.cd_grupoempresa,
+        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
+          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_saida,
+        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E'
+          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_entrada,
+        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
+          THEN fisnf.qt_faturado * prdvl.vl_produto ELSE 0 END), 0) AS cmv
+      FROM
+        vr_fis_nfitemprod fisnf
+      LEFT JOIN prd_valor prdvl ON
+        fisnf.cd_produto = prdvl.cd_produto
+      WHERE
+        fisnf.dt_transacao BETWEEN $1 AND $2
+        AND prdvl.cd_valor = 3
+        AND prdvl.cd_empresa = 1
+        AND prdvl.tp_valor = 'C'
+        ${empresaWhereClause}
+        AND fisnf.tp_situacao NOT IN ('C', 'X')
+        AND fisnf.vl_unitbruto IS NOT NULL
+        AND fisnf.vl_unitliquido IS NOT NULL
+        AND fisnf.qt_faturado IS NOT NULL
+        AND fisnf.qt_faturado != 0
+        AND fisnf.cd_operacao IN (1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204, 2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660, 661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102, 5106, 5107, 5110, 5111, 5113)
+        AND EXISTS (
+          SELECT
+            1
+          FROM
+            vr_pes_pessoaclas vpp
+          WHERE
+            vpp.cd_pessoa = fisnf.cd_pessoatra
+            AND (
+              (vpp.cd_tipoclas = 20
+                AND vpp.cd_classificacao::integer = 2)
+              OR (vpp.cd_tipoclas = 5
+                AND vpp.cd_classificacao::integer = 1)
+            )
+        )
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
@@ -104,30 +185,82 @@ router.get('/franquias',
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
     
-    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
     let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
     
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
       const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
       const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
-      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
+    } else {
+      // Lista padrão de empresas
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 200)';
     }
 
     const query = `
       SELECT
-        f.cd_empresa,
-        f.nm_grupoempresa,
-        SUM(f.vendas) as vendas,
-        SUM(f.devolucoes) as devolucoes,
-        SUM(f.total) as venda_liquida,
-        SUM(f.frete) as frete,
-        SUM(f.total + f.frete) as total
-      FROM faturamentofranquia f
-      ${whereClause}
-      GROUP BY f.cd_empresa, f.nm_grupoempresa
-      ORDER BY f.cd_empresa
+        fisnf.dt_transacao,
+        fisnf.cd_grupoempresa,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto_entrada,
+        COALESCE(SUM(
+          CASE
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_saida,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto_entrada,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_sem_desconto,
+        COALESCE(SUM(
+          CASE 
+            WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            ELSE 0 
+          END
+        ), 0) AS valor_com_desconto
+      FROM
+        vr_fis_nfitemprod fisnf
+      LEFT JOIN pes_pesjuridica pp ON
+        pp.cd_pessoa = fisnf.cd_pessoatra
+      WHERE
+        fisnf.dt_transacao BETWEEN $1 AND $2
+        ${empresaWhereClause}
+        AND fisnf.tp_situacao NOT IN ('C', 'X')
+        AND fisnf.vl_unitbruto IS NOT NULL
+        AND fisnf.vl_unitliquido IS NOT NULL
+        AND fisnf.qt_faturado IS NOT NULL
+        AND fisnf.qt_faturado != 0
+        AND pp.nm_fantasia LIKE '%F%CROSBY%'
+        AND fisnf.cd_operacao IN (1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204, 2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660, 661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102, 5106, 5107, 5110, 5111, 5113)
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
@@ -146,30 +279,62 @@ router.get('/revenda',
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
     
-    let whereClause = 'WHERE f.dt_transacao BETWEEN $1 AND $2';
     let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
     
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
       const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
       const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
-      whereClause += ` AND f.cd_empresa IN (${placeholders})`;
+      empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
+    } else {
+      // Lista padrão de empresas
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
       SELECT
-        f.cd_empresa,
-        f.nm_grupoempresa,
-        SUM(f.vendas) as vendas,
-        SUM(f.devolucoes) as devolucoes,
-        SUM(f.total) as venda_liquida,
-        SUM(f.frete) as frete,
-        SUM(f.total + f.frete) as total
-      FROM faturamentorevenda f
-      ${whereClause}
-      GROUP BY f.cd_empresa, f.nm_grupoempresa
-      ORDER BY f.cd_empresa
+        fisnf.dt_transacao,
+        fisnf.cd_grupoempresa,
+        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
+          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_saida,
+        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E'
+          THEN fisnf.qt_faturado ELSE 0 END), 0) AS quantidade_total_entrada,
+        COALESCE(SUM(CASE WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S'
+          THEN fisnf.qt_faturado * prdvl.vl_produto ELSE 0 END), 0) AS cmv
+      FROM
+        vr_fis_nfitemprod fisnf
+      LEFT JOIN prd_valor prdvl ON
+        fisnf.cd_produto = prdvl.cd_produto
+      WHERE
+        fisnf.dt_transacao BETWEEN $1 AND $2
+        AND prdvl.cd_valor = 3
+        AND prdvl.cd_empresa = 1
+        AND prdvl.tp_valor = 'C'
+        ${empresaWhereClause}
+        AND fisnf.tp_situacao NOT IN ('C', 'X')
+        AND fisnf.vl_unitbruto IS NOT NULL
+        AND fisnf.vl_unitliquido IS NOT NULL
+        AND fisnf.qt_faturado IS NOT NULL
+        AND fisnf.qt_faturado != 0
+        AND fisnf.cd_operacao IN (1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204, 2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660, 661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102, 5106, 5107, 5110, 5111, 5113)
+        AND EXISTS (
+          SELECT
+            1
+          FROM
+            vr_pes_pessoaclas vpp
+          WHERE
+            vpp.cd_pessoa = fisnf.cd_pessoatra
+            AND (
+              (vpp.cd_tipoclas = 20
+                AND vpp.cd_classificacao::integer = 3)
+              OR (vpp.cd_tipoclas = 7
+                AND vpp.cd_classificacao::integer = 1)
+            )
+        )
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
