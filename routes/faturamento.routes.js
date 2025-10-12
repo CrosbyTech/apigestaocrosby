@@ -122,7 +122,7 @@ router.get('/mtm',
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1,100,75,750,85,850,99,990,2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 500, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
@@ -227,7 +227,7 @@ router.get('/franquias',
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 200)';
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
@@ -321,7 +321,7 @@ router.get('/revenda',
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1,100,75,750,85,850,99,990,2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 500, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
+      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
