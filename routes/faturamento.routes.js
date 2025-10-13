@@ -524,8 +524,8 @@ router.get('/analise-cashback',
           ) AS rn_dia
         FROM tra_transacao t
         WHERE t.tp_situacao = 4
-        and t.cd_operacao <> 599
-        and t.tp_operacao = 'S'
+          and t.cd_operacao <> 599
+          and t.tp_operacao = 'S'
       )
       SELECT
         v.cd_pessoa,
@@ -535,15 +535,15 @@ router.get('/analise-cashback',
         v.dt_cadastro              AS dt_voucher,
         t.nr_transacao,
         t.dt_transacao,
-        t.vl_total,                -- bruto
+        t.vl_total,                -- líquido
         t.vl_desconto,
-        -- líquido (bruto - desconto)
-        (t.vl_total - COALESCE(t.vl_desconto,0)) AS vl_liquido,
-        -- % de desconto sobre o bruto
+        -- BRUTO = total (líquido) + desconto
+        (COALESCE(t.vl_total,0) + COALESCE(t.vl_desconto,0)) AS vl_bruto,
+        -- % de desconto sobre o BRUTO
         ROUND(
-          100.0 * COALESCE(t.vl_desconto,0) / NULLIF(t.vl_total,0)
-        , 2) AS pct_desconto
-      ,
+          100.0 * COALESCE(t.vl_desconto,0)
+          / NULLIF(COALESCE(t.vl_total,0) + COALESCE(t.vl_desconto,0), 0)
+        , 2) AS pct_desconto_bruto,
         t.cd_empresa,
         t.tp_operacao,
         t.tp_situacao              AS tp_situacao_transacao
