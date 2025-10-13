@@ -510,4 +510,58 @@ router.get('/consolidado',
   })
 );
 
+// Endpoint para análise de cashback
+router.get('/analise-cashback', 
+  asyncHandler(async (req, res) => {
+    const query = `
+      WITH trx_do_dia AS (
+        SELECT
+          t.*,
+          DATE(t.dt_transacao) AS d_trans,
+          ROW_NUMBER() OVER (
+            PARTITION BY t.cd_pessoa, DATE(t.dt_transacao)
+            ORDER BY t.dt_transacao DESC, t.nr_transacao DESC
+          ) AS rn_dia
+        FROM tra_transacao t
+        WHERE t.tp_situacao = 4
+        and t.cd_operacao <> 599
+        and t.tp_operacao = 'S'
+      )
+      SELECT
+        v.cd_pessoa,
+        v.nr_voucher,
+        v.vl_voucher,
+        v.tp_situacao              AS tp_situacao_voucher,
+        v.dt_cadastro              AS dt_voucher,
+        t.nr_transacao,
+        t.dt_transacao,
+        t.vl_total,                -- bruto
+        t.vl_desconto,
+        -- líquido (bruto - desconto)
+        (t.vl_total - COALESCE(t.vl_desconto,0)) AS vl_liquido,
+        -- % de desconto sobre o bruto
+        ROUND(
+          100.0 * COALESCE(t.vl_desconto,0) / NULLIF(t.vl_total,0)
+        , 2) AS pct_desconto
+      ,
+        t.cd_empresa,
+        t.tp_operacao,
+        t.tp_situacao              AS tp_situacao_transacao
+      FROM pdv_voucher v
+      JOIN trx_do_dia t
+        ON t.cd_pessoa = v.cd_pessoa
+       AND t.d_trans = DATE(v.dt_cadastro)
+       AND t.rn_dia = 1
+      WHERE v.tp_situacao = 4
+    `;
+
+    const result = await pool.query(query);
+    
+    return successResponse(res, {
+      data: result.rows,
+      total: result.rows.length
+    }, 'Análise de cashback recuperada com sucesso');
+  })
+);
+
 export default router;
