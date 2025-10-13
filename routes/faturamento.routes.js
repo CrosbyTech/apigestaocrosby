@@ -37,6 +37,7 @@ router.get('/varejo',
     const query = `
       SELECT
         fisnf.cd_grupoempresa,
+        fisnf.nm_grupoempresa,
         fisnf.dt_transacao,
         COALESCE(SUM(
           CASE 
@@ -91,8 +92,8 @@ router.get('/varejo',
         AND fisnf.qt_faturado IS NOT NULL
         AND fisnf.qt_faturado != 0
         AND fisnf.cd_operacao IN (1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 8750, 9017, 9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205, 1101)
-      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
-      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
@@ -129,6 +130,7 @@ router.get('/mtm',
       SELECT
         fisnf.dt_transacao,
         fisnf.cd_grupoempresa,
+        fisnf.nm_grupoempresa,
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
@@ -196,8 +198,8 @@ router.get('/mtm',
                 AND vpp.cd_classificacao::integer = 1)
             )
         )
-      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
-      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
@@ -234,6 +236,7 @@ router.get('/franquias',
       SELECT
         fisnf.dt_transacao,
         fisnf.cd_grupoempresa,
+        fisnf.nm_grupoempresa,
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
@@ -290,8 +293,8 @@ router.get('/franquias',
         AND fisnf.qt_faturado != 0
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
         AND fisnf.cd_operacao IN (1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204, 2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660, 661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102, 5106, 5107, 5110, 5111, 5113)
-      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa
-      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa
+      GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
+      ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
     `;
 
     const result = await pool.query(query, queryParams);
@@ -327,6 +330,7 @@ router.get('/revenda',
     const query = `
       SELECT
         fisnf.cd_grupoempresa,
+        fisnf.nm_grupoempresa,
         fisnf.dt_transacao,
         COALESCE(SUM(
           CASE 
@@ -395,8 +399,8 @@ router.get('/revenda',
                 AND vpp.cd_classificacao::integer = 1)
             )
         )
-      GROUP BY fisnf.cd_grupoempresa, fisnf.dt_transacao
-      ORDER BY fisnf.cd_grupoempresa, fisnf.dt_transacao
+      GROUP BY fisnf.cd_grupoempresa, fisnf.nm_grupoempresa, fisnf.dt_transacao
+      ORDER BY fisnf.cd_grupoempresa, fisnf.nm_grupoempresa, fisnf.dt_transacao
     `;
 
     const result = await pool.query(query, queryParams);
