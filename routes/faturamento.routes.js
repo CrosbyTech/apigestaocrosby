@@ -42,42 +42,42 @@ router.get('/varejo',
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
-            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado 
             ELSE 0 
           END
         ), 0) AS valor_sem_desconto_saida,
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
-            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado 
             ELSE 0 
           END
         ), 0) AS valor_sem_desconto_entrada,
         COALESCE(SUM(
           CASE
             WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'S' 
-            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado 
             ELSE 0 
           END
         ), 0) AS valor_com_desconto_saida,
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 AND fisnf.tp_operacao = 'E' 
-            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado 
             ELSE 0 
           END
         ), 0) AS valor_com_desconto_entrada,
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitbruto IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0 
-            THEN fisnf.vl_unitbruto * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            THEN fisnf.vl_unitbruto * fisnf.qt_faturado 
             ELSE 0 
           END
         ), 0) AS valor_sem_desconto,
         COALESCE(SUM(
           CASE 
             WHEN fisnf.vl_unitliquido IS NOT NULL AND fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado != 0
-            THEN fisnf.vl_unitliquido * fisnf.qt_faturado + COALESCE(fisnf.vl_freterat, 0)
+            THEN fisnf.vl_unitliquido * fisnf.qt_faturado 
             ELSE 0 
           END
         ), 0) AS valor_com_desconto
