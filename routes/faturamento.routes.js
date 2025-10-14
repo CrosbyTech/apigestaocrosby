@@ -633,6 +633,7 @@ router.get(
         WHERE t.tp_situacao = 4
           AND t.cd_operacao <> 599
           AND t.tp_operacao = 'S'
+          AND t.cd_empresa < 5999
           ${!useVoucherDate && dataInicio && dataFim ? 
             `AND t.dt_transacao >= $1 AND t.dt_transacao <= $2::date + INTERVAL '1 day'` : ''}
         ORDER BY t.cd_pessoa, DATE(t.dt_transacao), t.dt_transacao DESC, t.nr_transacao DESC
