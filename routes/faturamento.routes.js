@@ -682,4 +682,47 @@ router.get(
   }),
 );
 
+// Endpoint para buscar vendedores
+router.get(
+  '/pes_vendedor',
+  asyncHandler(async (req, res) => {
+    const { cd_vendedor } = req.query;
+    
+    let whereClause = '';
+    let queryParams = [];
+    
+    if (cd_vendedor) {
+      // Se cd_vendedor é uma string com vírgulas, trata como array
+      const vendedores = cd_vendedor.includes(',')
+        ? cd_vendedor.split(',').map(s => s.trim())
+        : [cd_vendedor];
+      const placeholders = vendedores
+        .map((_, index) => `$${index + 1}`)
+        .join(',');
+      whereClause = `WHERE pv.cd_vendedor IN (${placeholders})`;
+      queryParams.push(...vendedores);
+    }
+
+    const query = `
+      SELECT
+        pv.cd_vendedor,
+        pv.nm_vendedor
+      FROM pes_vendedor pv
+      ${whereClause}
+      ORDER BY pv.nm_vendedor
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Vendedores recuperados com sucesso',
+    );
+  }),
+);
+
 export default router;
