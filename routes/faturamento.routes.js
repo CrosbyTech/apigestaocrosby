@@ -14,24 +14,30 @@ import {
 const router = express.Router();
 
 // Endpoint para buscar faturamento do varejo
-router.get('/varejo', 
+router.get(
+  '/varejo',
   validateRequired(['dataInicio', 'dataFim']),
   validateDateFormat(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
-    
+
     let queryParams = [dataInicio, dataFim];
     let empresaWhereClause = '';
-    
+
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
-      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
-      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',')
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
       empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 500, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
+      empresaWhereClause =
+        'AND fisnf.cd_empresa IN (2, 5, 55, 65, 90, 91, 92, 93, 94, 95, 96, 97, 98, 200, 500, 550, 650, 890, 910, 920, 930, 940, 950, 960, 970, 980)';
     }
 
     const query = `
@@ -97,33 +103,43 @@ router.get('/varejo',
     `;
 
     const result = await pool.query(query, queryParams);
-    
-    return successResponse(res, {
-      data: result.rows,
-      total: result.rows.length
-    }, 'Faturamento varejo recuperado com sucesso');
-  })
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento varejo recuperado com sucesso',
+    );
+  }),
 );
 
 // Endpoint para buscar faturamento MTM (multimarcas)
-router.get('/mtm', 
+router.get(
+  '/mtm',
   validateRequired(['dataInicio', 'dataFim']),
   validateDateFormat(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
-    
+
     let queryParams = [dataInicio, dataFim];
     let empresaWhereClause = '';
-    
+
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
-      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
-      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',')
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
       empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+      empresaWhereClause =
+        'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
@@ -203,33 +219,43 @@ router.get('/mtm',
     `;
 
     const result = await pool.query(query, queryParams);
-    
-    return successResponse(res, {
-      data: result.rows,
-      total: result.rows.length
-    }, 'Faturamento MTM recuperado com sucesso');
-  })
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento MTM recuperado com sucesso',
+    );
+  }),
 );
 
 // Endpoint para buscar faturamento de franquias
-router.get('/franquias', 
+router.get(
+  '/franquias',
   validateRequired(['dataInicio', 'dataFim']),
   validateDateFormat(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
-    
+
     let queryParams = [dataInicio, dataFim];
     let empresaWhereClause = '';
-    
+
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
-      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
-      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',')
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
       empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+      empresaWhereClause =
+        'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
@@ -298,33 +324,43 @@ router.get('/franquias',
     `;
 
     const result = await pool.query(query, queryParams);
-    
-    return successResponse(res, {
-      data: result.rows,
-      total: result.rows.length
-    }, 'Faturamento franquias recuperado com sucesso');
-  })
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento franquias recuperado com sucesso',
+    );
+  }),
 );
 
 // Endpoint para buscar faturamento de revenda
-router.get('/revenda', 
+router.get(
+  '/revenda',
   validateRequired(['dataInicio', 'dataFim']),
   validateDateFormat(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
-    
+
     let queryParams = [dataInicio, dataFim];
     let empresaWhereClause = '';
-    
+
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
-      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
-      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',')
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
       empresaWhereClause = `AND fisnf.cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
     } else {
       // Lista padrão de empresas
-      empresaWhereClause = 'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+      empresaWhereClause =
+        'AND fisnf.cd_empresa IN (1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     }
 
     const query = `
@@ -404,28 +440,37 @@ router.get('/revenda',
     `;
 
     const result = await pool.query(query, queryParams);
-    
-    return successResponse(res, {
-      data: result.rows,
-      total: result.rows.length
-    }, 'Faturamento revenda recuperado com sucesso');
-  })
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento revenda recuperado com sucesso',
+    );
+  }),
 );
 
 // Endpoint consolidado para buscar todos os tipos de faturamento
-router.get('/consolidado', 
+router.get(
+  '/consolidado',
   validateRequired(['dataInicio', 'dataFim']),
   validateDateFormat(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
-    
+
     let whereClause = 'WHERE dt_transacao BETWEEN $1 AND $2';
     let queryParams = [dataInicio, dataFim];
-    
+
     if (cd_empresa) {
       // Se cd_empresa é uma string com vírgulas, trata como array
-      const empresas = cd_empresa.includes(',') ? cd_empresa.split(',') : [cd_empresa];
-      const placeholders = empresas.map((_, index) => `$${index + 3}`).join(',');
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',')
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
       whereClause += ` AND cd_empresa IN (${placeholders})`;
       queryParams.push(...empresas);
     }
@@ -492,27 +537,69 @@ router.get('/consolidado',
     `;
 
     // Executar todas as queries em paralelo
-    const [varejoResult, mtmResult, franquiasResult, revendaResult] = await Promise.all([
-      pool.query(varejoQuery, queryParams),
-      pool.query(mtmQuery, queryParams),
-      pool.query(franquiasQuery, queryParams),
-      pool.query(revendaQuery, queryParams)
-    ]);
+    const [varejoResult, mtmResult, franquiasResult, revendaResult] =
+      await Promise.all([
+        pool.query(varejoQuery, queryParams),
+        pool.query(mtmQuery, queryParams),
+        pool.query(franquiasQuery, queryParams),
+        pool.query(revendaQuery, queryParams),
+      ]);
 
     const data = {
       varejo: varejoResult.rows,
       mtm: mtmResult.rows,
       franquias: franquiasResult.rows,
-      revenda: revendaResult.rows
+      revenda: revendaResult.rows,
     };
 
-    return successResponse(res, data, 'Faturamento consolidado recuperado com sucesso');
-  })
+    return successResponse(
+      res,
+      data,
+      'Faturamento consolidado recuperado com sucesso',
+    );
+  }),
 );
 
 // Endpoint para análise de cashback
-router.get('/analise-cashback', 
+router.get(
+  '/analise-cashback',
   asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa, dateField } = req.query;
+
+    // dateField: 'dt_transacao' or 'dt_voucher' (v.dt_cadastro)
+    const useVoucherDate = dateField === 'dt_voucher';
+
+    // Construir cláusula WHERE dinamicamente
+    const whereClauses = ['v.tp_situacao = 4'];
+    const params = [];
+
+    // Filtrar por empresa se informado
+    if (cd_empresa) {
+      // cd_empresa pode vir como '1,2,3'
+      const empresas = cd_empresa.split(',').map((s) => s.trim());
+      const placeholders = empresas
+        .map((_, i) => `$${params.length + i + 1}`)
+        .join(',');
+      whereClauses.push(`t.cd_empresa IN (${placeholders})`);
+      params.push(...empresas);
+    }
+
+    // Filtrar por período (usando o campo de data escolhido)
+    if (dataInicio && dataFim) {
+      const startIdx = params.length + 1;
+      const endIdx = params.length + 2;
+      if (useVoucherDate) {
+        whereClauses.push(
+          `DATE(v.dt_cadastro) BETWEEN $${startIdx} AND $${endIdx}`,
+        );
+      } else {
+        whereClauses.push(
+          `DATE(t.dt_transacao) BETWEEN $${startIdx} AND $${endIdx}`,
+        );
+      }
+      params.push(dataInicio, dataFim);
+    }
+
     const query = `
       WITH trx_do_dia AS (
         SELECT
@@ -537,9 +624,7 @@ router.get('/analise-cashback',
         t.dt_transacao,
         t.vl_total,                -- líquido
         t.vl_desconto,
-        -- BRUTO = total (líquido) + desconto
         (COALESCE(t.vl_total,0) + COALESCE(t.vl_desconto,0)) AS vl_bruto,
-        -- % de desconto sobre o BRUTO
         ROUND(
           100.0 * COALESCE(t.vl_desconto,0)
           / NULLIF(COALESCE(t.vl_total,0) + COALESCE(t.vl_desconto,0), 0)
@@ -552,16 +637,21 @@ router.get('/analise-cashback',
         ON t.cd_pessoa = v.cd_pessoa
        AND t.d_trans = DATE(v.dt_cadastro)
        AND t.rn_dia = 1
-      WHERE v.tp_situacao = 4
+      WHERE ${whereClauses.join(' AND ')}
+      ORDER BY t.dt_transacao DESC
     `;
 
-    const result = await pool.query(query);
-    
-    return successResponse(res, {
-      data: result.rows,
-      total: result.rows.length
-    }, 'Análise de cashback recuperada com sucesso');
-  })
+    const result = await pool.query(query, params);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Análise de cashback recuperada com sucesso',
+    );
+  }),
 );
 
 export default router;
