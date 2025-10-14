@@ -589,11 +589,11 @@ router.get(
       const endIdx = params.length + 2;
       if (useVoucherDate) {
         whereClauses.push(
-          `v.dt_cadastro >= $${startIdx} AND v.dt_cadastro <= $${endIdx} + INTERVAL '1 day'`,
+          `v.dt_cadastro >= $${startIdx} AND v.dt_cadastro <= $${endIdx}::date + INTERVAL '1 day'`,
         );
       } else {
         whereClauses.push(
-          `t.dt_transacao >= $${startIdx} AND t.dt_transacao <= $${endIdx} + INTERVAL '1 day'`,
+          `t.dt_transacao >= $${startIdx} AND t.dt_transacao <= $${endIdx}::date + INTERVAL '1 day'`,
         );
       }
       params.push(dataInicio, dataFim);
@@ -616,7 +616,7 @@ router.get(
         FROM pdv_voucher v
         WHERE v.tp_situacao = 4
           ${useVoucherDate && dataInicio && dataFim ? 
-            `AND v.dt_cadastro >= $1 AND v.dt_cadastro <= $2 + INTERVAL '1 day'` : ''}
+            `AND v.dt_cadastro >= $1 AND v.dt_cadastro <= $2::date + INTERVAL '1 day'` : ''}
       ),
       trx_otimizada AS (
         SELECT DISTINCT ON (t.cd_pessoa, DATE(t.dt_transacao))
@@ -634,7 +634,7 @@ router.get(
           AND t.cd_operacao <> 599
           AND t.tp_operacao = 'S'
           ${!useVoucherDate && dataInicio && dataFim ? 
-            `AND t.dt_transacao >= $1 AND t.dt_transacao <= $2 + INTERVAL '1 day'` : ''}
+            `AND t.dt_transacao >= $1 AND t.dt_transacao <= $2::date + INTERVAL '1 day'` : ''}
         ORDER BY t.cd_pessoa, DATE(t.dt_transacao), t.dt_transacao DESC, t.nr_transacao DESC
       )
       SELECT
