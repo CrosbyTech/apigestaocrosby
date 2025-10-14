@@ -628,6 +628,7 @@ router.get(
           t.cd_empresa,
           t.tp_operacao,
           t.tp_situacao,
+	        t.cd_compvend,
           DATE(t.dt_transacao) AS d_trans
         FROM tra_transacao t
         WHERE t.tp_situacao = 4
