@@ -564,7 +564,14 @@ router.get(
 router.get(
   '/analise-cashback',
   asyncHandler(async (req, res) => {
-    const { dataInicio, dataFim, cd_empresa, dateField, limit = 1000, offset = 0 } = req.query;
+    const {
+      dataInicio,
+      dataFim,
+      cd_empresa,
+      dateField,
+      limit = 1000,
+      offset = 0,
+    } = req.query;
 
     // dateField: 'dt_transacao' or 'dt_voucher' (v.dt_cadastro)
     const useVoucherDate = dateField === 'dt_voucher';
@@ -615,8 +622,11 @@ router.get(
           DATE(v.dt_cadastro) AS d_voucher
         FROM pdv_voucher v
         WHERE v.tp_situacao = 4
-          ${useVoucherDate && dataInicio && dataFim ? 
-            `AND v.dt_cadastro >= $1 AND v.dt_cadastro <= $2::date + INTERVAL '1 day'` : ''}
+          ${
+            useVoucherDate && dataInicio && dataFim
+              ? `AND v.dt_cadastro >= $1 AND v.dt_cadastro <= $2::date + INTERVAL '1 day'`
+              : ''
+          }
       ),
       trx_otimizada AS (
         SELECT DISTINCT ON (t.cd_pessoa, DATE(t.dt_transacao))
@@ -635,8 +645,11 @@ router.get(
           AND t.cd_operacao <> 599
           AND t.tp_operacao = 'S'
           AND t.cd_empresa < 5999
-          ${!useVoucherDate && dataInicio && dataFim ? 
-            `AND t.dt_transacao >= $1 AND t.dt_transacao <= $2::date + INTERVAL '1 day'` : ''}
+          ${
+            !useVoucherDate && dataInicio && dataFim
+              ? `AND t.dt_transacao >= $1 AND t.dt_transacao <= $2::date + INTERVAL '1 day'`
+              : ''
+          }
         ORDER BY t.cd_pessoa, DATE(t.dt_transacao), t.dt_transacao DESC, t.nr_transacao DESC
       )
       SELECT
@@ -656,13 +669,19 @@ router.get(
         , 2) AS pct_desconto_bruto,
         t.cd_empresa,
         t.tp_operacao,
-        t.tp_situacao AS tp_situacao_transacao,
-        t.cd_compvend
+        t.tp_situacao AS tp_situacao_transacao
       FROM voucher_filtrado v
       INNER JOIN trx_otimizada t
         ON t.cd_pessoa = v.cd_pessoa
        AND t.d_trans = v.d_voucher
-      ${cd_empresa ? `WHERE t.cd_empresa IN (${cd_empresa.split(',').map((_, i) => `$${i + 3}`).join(',')})` : ''}
+      ${
+        cd_empresa
+          ? `WHERE t.cd_empresa IN (${cd_empresa
+              .split(',')
+              .map((_, i) => `$${i + 3}`)
+              .join(',')})`
+          : ''
+      }
       ORDER BY t.dt_transacao DESC
       LIMIT ${limitParam} OFFSET ${offsetParam}
     `;
@@ -676,7 +695,7 @@ router.get(
         total: result.rows.length,
         limit: parseInt(limit),
         offset: parseInt(offset),
-        hasMore: result.rows.length === parseInt(limit)
+        hasMore: result.rows.length === parseInt(limit),
       },
       'Análise de cashback recuperada com sucesso',
     );
@@ -688,14 +707,14 @@ router.get(
   '/pes_vendedor',
   asyncHandler(async (req, res) => {
     const { cd_vendedor } = req.query;
-    
+
     let whereClause = '';
     let queryParams = [];
-    
+
     if (cd_vendedor) {
       // Se cd_vendedor é uma string com vírgulas, trata como array
       const vendedores = cd_vendedor.includes(',')
-        ? cd_vendedor.split(',').map(s => s.trim())
+        ? cd_vendedor.split(',').map((s) => s.trim())
         : [cd_vendedor];
       const placeholders = vendedores
         .map((_, index) => `$${index + 1}`)
@@ -722,6 +741,214 @@ router.get(
         total: result.rows.length,
       },
       'Vendedores recuperados com sucesso',
+    );
+  }),
+);
+
+// Endpoint para buscar faturamento do varejo (view materializada)
+router.get(
+  '/fat-varejo',
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+
+    let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
+
+    if (cd_empresa) {
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',').map((s) => s.trim())
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
+      empresaWhereClause = `AND fv.cd_grupoempresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        fv.cd_grupoempresa,
+        fv.dt_transacao,
+        fv.nm_grupoempresa,
+        fv.valor_com_desconto,
+        fv.valor_com_desconto_entrada,
+        fv.valor_com_desconto_saida,
+        fv.valor_sem_desconto,
+        fv.valor_sem_desconto_entrada,
+        fv.valor_sem_desconto_saida
+      FROM fatvarejo fv
+      WHERE fv.dt_transacao BETWEEN $1 AND $2
+      ${empresaWhereClause}
+      ORDER BY fv.dt_transacao, fv.cd_grupoempresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento varejo recuperado com sucesso',
+    );
+  }),
+);
+
+// Endpoint para buscar faturamento multimarcas (view materializada)
+router.get(
+  '/fat-multimarcas',
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+
+    let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
+
+    if (cd_empresa) {
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',').map((s) => s.trim())
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
+      empresaWhereClause = `AND fm.cd_grupoempresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        fm.cd_grupoempresa,
+        fm.dt_transacao,
+        fm.nm_grupoempresa,
+        fm.valor_com_desconto,
+        fm.valor_com_desconto_entrada,
+        fm.valor_com_desconto_saida,
+        fm.valor_sem_desconto,
+        fm.valor_sem_desconto_entrada,
+        fm.valor_sem_desconto_saida
+      FROM fatmtm fm
+      WHERE fm.dt_transacao BETWEEN $1 AND $2
+      ${empresaWhereClause}
+      ORDER BY fm.dt_transacao, fm.cd_grupoempresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento multimarcas recuperado com sucesso',
+    );
+  }),
+);
+
+// Endpoint para buscar faturamento revenda (view materializada)
+router.get(
+  '/fat-revenda',
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+
+    let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
+
+    if (cd_empresa) {
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',').map((s) => s.trim())
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
+      empresaWhereClause = `AND fr.cd_grupoempresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        fr.cd_grupoempresa,
+        fr.dt_transacao,
+        fr.nm_grupoempresa,
+        fr.valor_com_desconto,
+        fr.valor_com_desconto_entrada,
+        fr.valor_com_desconto_saida,
+        fr.valor_sem_desconto,
+        fr.valor_sem_desconto_entrada,
+        fr.valor_sem_desconto_saida
+      FROM fatrevenda fr
+      WHERE fr.dt_transacao BETWEEN $1 AND $2
+      ${empresaWhereClause}
+      ORDER BY fr.dt_transacao, fr.cd_grupoempresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento revenda recuperado com sucesso',
+    );
+  }),
+);
+
+// Endpoint para buscar faturamento franquias (view materializada)
+router.get(
+  '/fat-franquias',
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+
+    let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
+
+    if (cd_empresa) {
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',').map((s) => s.trim())
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
+      empresaWhereClause = `AND ff.cd_grupoempresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        ff.cd_grupoempresa,
+        ff.dt_transacao,
+        ff.nm_grupoempresa,
+        ff.valor_com_desconto,
+        ff.valor_com_desconto_entrada,
+        ff.valor_com_desconto_saida,
+        ff.valor_sem_desconto,
+        ff.valor_sem_desconto_entrada,
+        ff.valor_sem_desconto_saida
+      FROM fatfranquias ff
+      WHERE ff.dt_transacao BETWEEN $1 AND $2
+      ${empresaWhereClause}
+      ORDER BY ff.dt_transacao, ff.cd_grupoempresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento franquias recuperado com sucesso',
     );
   }),
 );
