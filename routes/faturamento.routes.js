@@ -656,7 +656,8 @@ router.get(
         , 2) AS pct_desconto_bruto,
         t.cd_empresa,
         t.tp_operacao,
-        t.tp_situacao AS tp_situacao_transacao
+        t.tp_situacao AS tp_situacao_transacao,
+        t.cd_compvend
       FROM voucher_filtrado v
       INNER JOIN trx_otimizada t
         ON t.cd_pessoa = v.cd_pessoa
