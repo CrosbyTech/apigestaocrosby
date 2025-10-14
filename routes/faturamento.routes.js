@@ -564,7 +564,7 @@ router.get(
 router.get(
   '/analise-cashback',
   asyncHandler(async (req, res) => {
-    const { dataInicio, dataFim, cd_empresa, dateField } = req.query;
+    const { dataInicio, dataFim, cd_empresa, dateField, limit = 1000, offset = 0 } = req.query;
 
     // dateField: 'dt_transacao' or 'dt_voucher' (v.dt_cadastro)
     const useVoucherDate = dateField === 'dt_voucher';
@@ -575,7 +575,6 @@ router.get(
 
     // Filtrar por empresa se informado
     if (cd_empresa) {
-      // cd_empresa pode vir como '1,2,3'
       const empresas = cd_empresa.split(',').map((s) => s.trim());
       const placeholders = empresas
         .map((_, i) => `$${params.length + i + 1}`)
@@ -590,39 +589,63 @@ router.get(
       const endIdx = params.length + 2;
       if (useVoucherDate) {
         whereClauses.push(
-          `DATE(v.dt_cadastro) BETWEEN $${startIdx} AND $${endIdx}`,
+          `v.dt_cadastro >= $${startIdx} AND v.dt_cadastro <= $${endIdx} + INTERVAL '1 day'`,
         );
       } else {
         whereClauses.push(
-          `DATE(t.dt_transacao) BETWEEN $${startIdx} AND $${endIdx}`,
+          `t.dt_transacao >= $${startIdx} AND t.dt_transacao <= $${endIdx} + INTERVAL '1 day'`,
         );
       }
       params.push(dataInicio, dataFim);
     }
 
+    // Adicionar LIMIT e OFFSET para paginação
+    const limitParam = `$${params.length + 1}`;
+    const offsetParam = `$${params.length + 2}`;
+    params.push(parseInt(limit), parseInt(offset));
+
     const query = `
-      WITH trx_do_dia AS (
-        SELECT
-          t.*,
-          DATE(t.dt_transacao) AS d_trans,
-          ROW_NUMBER() OVER (
-            PARTITION BY t.cd_pessoa, DATE(t.dt_transacao)
-            ORDER BY t.dt_transacao DESC, t.nr_transacao DESC
-          ) AS rn_dia
+      WITH voucher_filtrado AS (
+        SELECT 
+          v.cd_pessoa,
+          v.nr_voucher,
+          v.vl_voucher,
+          v.tp_situacao,
+          v.dt_cadastro,
+          DATE(v.dt_cadastro) AS d_voucher
+        FROM pdv_voucher v
+        WHERE v.tp_situacao = 4
+          ${useVoucherDate && dataInicio && dataFim ? 
+            `AND v.dt_cadastro >= $1 AND v.dt_cadastro <= $2 + INTERVAL '1 day'` : ''}
+      ),
+      trx_otimizada AS (
+        SELECT DISTINCT ON (t.cd_pessoa, DATE(t.dt_transacao))
+          t.cd_pessoa,
+          t.nr_transacao,
+          t.dt_transacao,
+          t.vl_total,
+          t.vl_desconto,
+          t.cd_empresa,
+          t.tp_operacao,
+          t.tp_situacao,
+          DATE(t.dt_transacao) AS d_trans
         FROM tra_transacao t
         WHERE t.tp_situacao = 4
-          and t.cd_operacao <> 599
-          and t.tp_operacao = 'S'
+          AND t.cd_operacao <> 599
+          AND t.tp_operacao = 'S'
+          ${!useVoucherDate && dataInicio && dataFim ? 
+            `AND t.dt_transacao >= $1 AND t.dt_transacao <= $2 + INTERVAL '1 day'` : ''}
+        ORDER BY t.cd_pessoa, DATE(t.dt_transacao), t.dt_transacao DESC, t.nr_transacao DESC
       )
       SELECT
         v.cd_pessoa,
         v.nr_voucher,
         v.vl_voucher,
-        v.tp_situacao              AS tp_situacao_voucher,
-        v.dt_cadastro              AS dt_voucher,
+        v.tp_situacao AS tp_situacao_voucher,
+        v.dt_cadastro AS dt_voucher,
         t.nr_transacao,
         t.dt_transacao,
-        t.vl_total,                -- líquido
+        t.vl_total,
         t.vl_desconto,
         (COALESCE(t.vl_total,0) + COALESCE(t.vl_desconto,0)) AS vl_bruto,
         ROUND(
@@ -631,14 +654,14 @@ router.get(
         , 2) AS pct_desconto_bruto,
         t.cd_empresa,
         t.tp_operacao,
-        t.tp_situacao              AS tp_situacao_transacao
-      FROM pdv_voucher v
-      JOIN trx_do_dia t
+        t.tp_situacao AS tp_situacao_transacao
+      FROM voucher_filtrado v
+      INNER JOIN trx_otimizada t
         ON t.cd_pessoa = v.cd_pessoa
-       AND t.d_trans = DATE(v.dt_cadastro)
-       AND t.rn_dia = 1
-      WHERE ${whereClauses.join(' AND ')}
+       AND t.d_trans = v.d_voucher
+      ${cd_empresa ? `WHERE t.cd_empresa IN (${cd_empresa.split(',').map((_, i) => `$${i + 3}`).join(',')})` : ''}
       ORDER BY t.dt_transacao DESC
+      LIMIT ${limitParam} OFFSET ${offsetParam}
     `;
 
     const result = await pool.query(query, params);
@@ -648,6 +671,9 @@ router.get(
       {
         data: result.rows,
         total: result.rows.length,
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        hasMore: result.rows.length === parseInt(limit)
       },
       'Análise de cashback recuperada com sucesso',
     );
