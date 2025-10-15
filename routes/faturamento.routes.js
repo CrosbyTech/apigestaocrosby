@@ -13,6 +13,92 @@ import {
 
 const router = express.Router();
 
+// ========== SISTEMA DE CACHE PARA IMPOSTOS ==========
+// Cache em memória com TTL (Time To Live)
+const impostosCache = new Map();
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutos em milissegundos
+const MAX_CACHE_SIZE = 100; // Máximo de entradas no cache
+
+// Função para gerar chave única do cache
+const gerarChaveCache = (dataInicio, dataFim, canal = 'todos') => {
+  return `impostos_${dataInicio}_${dataFim}_${canal}`;
+};
+
+// Função para obter do cache
+const obterDoCache = (chave) => {
+  const item = impostosCache.get(chave);
+  if (!item) return null;
+
+  const agora = Date.now();
+  if (agora - item.timestamp > CACHE_TTL) {
+    // Cache expirado
+    impostosCache.delete(chave);
+    console.log(`🗑️ Cache expirado: ${chave}`);
+    return null;
+  }
+
+  console.log(
+    `✅ Cache HIT: ${chave} (idade: ${Math.round(
+      (agora - item.timestamp) / 1000,
+    )}s)`,
+  );
+  return item.data;
+};
+
+// Função para salvar no cache
+const salvarNoCache = (chave, data) => {
+  // Limpar cache antigo se atingir o limite
+  if (impostosCache.size >= MAX_CACHE_SIZE) {
+    const primeiraChave = impostosCache.keys().next().value;
+    impostosCache.delete(primeiraChave);
+    console.log(
+      `🧹 Cache cheio, removida entrada mais antiga: ${primeiraChave}`,
+    );
+  }
+
+  impostosCache.set(chave, {
+    data,
+    timestamp: Date.now(),
+  });
+  console.log(`💾 Salvo no cache: ${chave}`);
+};
+
+// Função para limpar cache de impostos
+const limparCacheImpostos = () => {
+  const tamanho = impostosCache.size;
+  impostosCache.clear();
+  console.log(`🧹 Cache de impostos limpo (${tamanho} entradas removidas)`);
+  return tamanho;
+};
+
+// Endpoint para limpar cache manualmente
+router.delete('/impostos-cache', (req, res) => {
+  const entradas = limparCacheImpostos();
+  return successResponse(
+    res,
+    { entradas_removidas: entradas },
+    'Cache de impostos limpo com sucesso',
+  );
+});
+
+// Endpoint para ver estatísticas do cache
+router.get('/impostos-cache/stats', (req, res) => {
+  const agora = Date.now();
+  const stats = {
+    total_entradas: impostosCache.size,
+    max_size: MAX_CACHE_SIZE,
+    ttl_minutos: CACHE_TTL / 60000,
+    entradas: Array.from(impostosCache.entries()).map(([chave, valor]) => ({
+      chave,
+      idade_segundos: Math.round((agora - valor.timestamp) / 1000),
+      expira_em_segundos: Math.round(
+        (CACHE_TTL - (agora - valor.timestamp)) / 1000,
+      ),
+    })),
+  };
+  return successResponse(res, stats, 'Estatísticas do cache de impostos');
+});
+
 // Endpoint para buscar faturamento do varejo
 router.get(
   '/varejo',
@@ -1209,6 +1295,25 @@ router.get(
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, canal } = req.query;
 
+    // ========== VERIFICAR CACHE ==========
+    const chaveCache = gerarChaveCache(dataInicio, dataFim, canal || 'todos');
+    const dadosCache = obterDoCache(chaveCache);
+
+    if (dadosCache) {
+      console.log('⚡ Retornando dados do cache (muito mais rápido!)');
+      return successResponse(
+        res,
+        {
+          ...dadosCache,
+          from_cache: true,
+        },
+        'Impostos por canal recuperados do cache',
+      );
+    }
+
+    console.log('🔍 Cache MISS, buscando dados do banco...');
+    const tempoInicio = Date.now();
+
     // Definir quais canais buscar
     const canais = canal
       ? [canal]
@@ -1227,7 +1332,8 @@ router.get(
 
     // Função auxiliar para buscar impostos via /sales/vlimposto
     const buscarImpostos = async (transacoes) => {
-      const lotes = dividirEmLotes(transacoes, 500);
+      // Usar lotes maiores para reduzir número de queries
+      const lotes = dividirEmLotes(transacoes, 1000);
       let totalGeral = 0;
       let totalTransacoes = 0;
       const impostosDetalhados = [];
@@ -1236,49 +1342,96 @@ router.get(
         `📦 Processando ${lotes.length} lotes de transações (total: ${transacoes.length})`,
       );
 
-      for (let i = 0; i < lotes.length; i++) {
-        const lote = lotes[i];
+      // Processar até 3 lotes em paralelo para melhor performance
+      const LOTES_PARALELOS = 3;
+
+      for (let i = 0; i < lotes.length; i += LOTES_PARALELOS) {
+        const lotesParaProcessar = lotes.slice(i, i + LOTES_PARALELOS);
+
         console.log(
-          `🔄 Lote ${i + 1}/${lotes.length}: ${lote.length} transações`,
+          `🔄 Processando lotes ${i + 1}-${Math.min(
+            i + LOTES_PARALELOS,
+            lotes.length,
+          )} de ${lotes.length} em paralelo`,
         );
 
-        // Criar query string com múltiplos nr_transacao
-        const queryString = lote.map((t) => `nr_transacao=${t}`).join('&');
+        // Processar múltiplos lotes em paralelo
+        const promises = lotesParaProcessar.map(async (lote) => {
+          const impostosQuery = `
+            SELECT
+              ti.cd_imposto,
+              SUM(ti.vl_imposto) as valorimposto
+            FROM
+              tra_itemimposto ti
+            WHERE
+              ti.nr_transacao = ANY($1)
+            GROUP BY
+              ti.cd_imposto
+          `;
 
-        // Fazer requisição interna para /sales/vlimposto
-        const impostosQuery = `
-          SELECT
-            ti.nr_transacao,
-            ti.dt_transacao,
-            ti.cd_imposto,
-            SUM(ti.vl_imposto) as valorimposto
-          FROM
-            tra_itemimposto ti
-          WHERE
-            ti.nr_transacao = ANY($1)
-          GROUP BY
-            ti.nr_transacao,
-            ti.cd_imposto,
-            ti.dt_transacao
-          ORDER BY
-            ti.nr_transacao,
-            ti.cd_imposto
-        `;
-
-        const result = await pool.query(impostosQuery, [lote]);
-
-        // Processar resultado do lote
-        result.rows.forEach((row) => {
-          totalGeral += parseFloat(row.valorimposto || 0);
-          impostosDetalhados.push(row);
+          const result = await pool.query(impostosQuery, [lote]);
+          return {
+            rows: result.rows,
+            tamanho: lote.length,
+          };
         });
 
-        totalTransacoes += lote.length;
+        const resultados = await Promise.all(promises);
+
+        // Agregar resultados
+        resultados.forEach((resultado) => {
+          resultado.rows.forEach((row) => {
+            const valor = parseFloat(row.valorimposto || 0);
+            totalGeral += valor;
+            impostosDetalhados.push(row);
+          });
+          totalTransacoes += resultado.tamanho;
+        });
       }
+
+      // Agregar por tipo de imposto
+      const impostosPorTipo = {
+        icms: 0, // cd_imposto = 1
+        pis: 0, // cd_imposto = 6
+        cofins: 0, // cd_imposto = 5
+        outros: 0, // outros códigos
+      };
+
+      impostosDetalhados.forEach((row) => {
+        const valor = parseFloat(row.valorimposto || 0);
+        const cdImposto = parseInt(row.cd_imposto);
+
+        switch (cdImposto) {
+          case 1:
+            impostosPorTipo.icms += valor;
+            break;
+          case 6:
+            impostosPorTipo.pis += valor;
+            break;
+          case 5:
+            impostosPorTipo.cofins += valor;
+            break;
+          default:
+            impostosPorTipo.outros += valor;
+            break;
+        }
+      });
+
+      console.log(`💰 Impostos por tipo:`, {
+        icms: impostosPorTipo.icms.toFixed(2),
+        pis: impostosPorTipo.pis.toFixed(2),
+        cofins: impostosPorTipo.cofins.toFixed(2),
+        outros: impostosPorTipo.outros.toFixed(2),
+        total: totalGeral.toFixed(2),
+      });
 
       return {
         total_impostos: totalGeral,
         total_transacoes: totalTransacoes,
+        icms: impostosPorTipo.icms,
+        pis: impostosPorTipo.pis,
+        cofins: impostosPorTipo.cofins,
+        outros: impostosPorTipo.outros,
         detalhes: impostosDetalhados,
       };
     };
@@ -1340,6 +1493,10 @@ router.get(
 
       resultados[canalKey] = {
         total_impostos: resultadoImpostos.total_impostos,
+        icms: resultadoImpostos.icms,
+        pis: resultadoImpostos.pis,
+        cofins: resultadoImpostos.cofins,
+        outros: resultadoImpostos.outros,
         transacoes_processadas: resultadoImpostos.total_transacoes,
         impostos_detalhados: resultadoImpostos.detalhes,
       };
@@ -1347,19 +1504,37 @@ router.get(
       console.log(
         `✅ ${canalKey}: Total de impostos = R$ ${resultadoImpostos.total_impostos.toFixed(
           2,
-        )}`,
+        )} (ICMS: ${resultadoImpostos.icms.toFixed(
+          2,
+        )}, PIS: ${resultadoImpostos.pis.toFixed(
+          2,
+        )}, COFINS: ${resultadoImpostos.cofins.toFixed(2)})`,
       );
     }
 
+    const tempoFim = Date.now();
+    const tempoDecorrido = tempoFim - tempoInicio;
+
+    console.log(`⏱️ Tempo total de processamento: ${tempoDecorrido}ms`);
+
+    const resposta = {
+      data: resultados,
+      periodo: {
+        dataInicio,
+        dataFim,
+      },
+      performance: {
+        tempo_ms: tempoDecorrido,
+        from_cache: false,
+      },
+    };
+
+    // ========== SALVAR NO CACHE ==========
+    salvarNoCache(chaveCache, resposta);
+
     return successResponse(
       res,
-      {
-        data: resultados,
-        periodo: {
-          dataInicio,
-          dataFim,
-        },
-      },
+      resposta,
       'Impostos por canal recuperados com sucesso',
     );
   }),
@@ -1485,13 +1660,38 @@ router.get(
           nr_transacao: nrTransacao,
           dt_transacao: row.dt_transacao,
           total_impostos: 0,
+          icms: 0,
+          pis: 0,
+          cofins: 0,
+          outros: 0,
           impostos: [],
         };
       }
-      acc[nrTransacao].total_impostos += parseFloat(row.valorimposto || 0);
+
+      const valor = parseFloat(row.valorimposto || 0);
+      const cdImposto = parseInt(row.cd_imposto);
+
+      acc[nrTransacao].total_impostos += valor;
+
+      // Separar por tipo de imposto
+      switch (cdImposto) {
+        case 1:
+          acc[nrTransacao].icms += valor;
+          break;
+        case 6:
+          acc[nrTransacao].pis += valor;
+          break;
+        case 5:
+          acc[nrTransacao].cofins += valor;
+          break;
+        default:
+          acc[nrTransacao].outros += valor;
+          break;
+      }
+
       acc[nrTransacao].impostos.push({
         cd_imposto: row.cd_imposto,
-        valorimposto: parseFloat(row.valorimposto || 0),
+        valorimposto: valor,
       });
       return acc;
     }, {});
@@ -1504,6 +1704,10 @@ router.get(
         dt_transacao: cmvRow.dt_transacao,
         nm_grupoempresa: cmvRow.nm_grupoempresa,
         total_impostos: impostoInfo?.total_impostos || 0,
+        icms: impostoInfo?.icms || 0,
+        pis: impostoInfo?.pis || 0,
+        cofins: impostoInfo?.cofins || 0,
+        outros: impostoInfo?.outros || 0,
         impostos_detalhados: impostoInfo?.impostos || [],
       };
     });
@@ -1518,6 +1722,10 @@ router.get(
             (sum, item) => sum + item.total_impostos,
             0,
           ),
+          icms: dadosDetalhados.reduce((sum, item) => sum + item.icms, 0),
+          pis: dadosDetalhados.reduce((sum, item) => sum + item.pis, 0),
+          cofins: dadosDetalhados.reduce((sum, item) => sum + item.cofins, 0),
+          outros: dadosDetalhados.reduce((sum, item) => sum + item.outros, 0),
           total_transacoes: dadosDetalhados.length,
           canal: canal,
         },
