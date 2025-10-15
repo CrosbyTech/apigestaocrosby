@@ -869,7 +869,8 @@ router.get(
         fv.valor_com_desconto_saida,
         fv.valor_sem_desconto,
         fv.valor_sem_desconto_entrada,
-        fv.valor_sem_desconto_saida
+        fv.valor_sem_desconto_saida,
+        fv.nr_transacao
       FROM fatvarejo fv
       WHERE fv.dt_transacao BETWEEN $1 AND $2
       ${empresaWhereClause}
@@ -921,7 +922,8 @@ router.get(
         fm.valor_com_desconto_saida,
         fm.valor_sem_desconto,
         fm.valor_sem_desconto_entrada,
-        fm.valor_sem_desconto_saida
+        fm.valor_sem_desconto_saida,
+        fm.nr_transacao
       FROM fatmtm fm
       WHERE fm.dt_transacao BETWEEN $1 AND $2
       ${empresaWhereClause}
@@ -973,7 +975,8 @@ router.get(
         fr.valor_com_desconto_saida,
         fr.valor_sem_desconto,
         fr.valor_sem_desconto_entrada,
-        fr.valor_sem_desconto_saida
+        fr.valor_sem_desconto_saida,
+        fr.nr_transacao
       FROM fatrevenda fr
       WHERE fr.dt_transacao BETWEEN $1 AND $2
       ${empresaWhereClause}
@@ -1025,7 +1028,8 @@ router.get(
         ff.valor_com_desconto_saida,
         ff.valor_sem_desconto,
         ff.valor_sem_desconto_entrada,
-        ff.valor_sem_desconto_saida
+        ff.valor_sem_desconto_saida,
+        ff.nr_transacao
       FROM fatfranquias ff
       WHERE ff.dt_transacao BETWEEN $1 AND $2
       ${empresaWhereClause}
