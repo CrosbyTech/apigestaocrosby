@@ -1291,8 +1291,8 @@ router.get(
 
 /**
  * GET /api/faturamento/impostos-por-canal
- * Retorna impostos agrupados por canal usando os nr_transacao das views de CMV
- * Envia requisições em lotes de 500 para a rota /sales/vlimposto
+ * Retorna impostos agrupados por canal usando os nr_transacao das views de faturamento
+ * Busca apenas transações de SAÍDA (tp_operacao = 'S') para cálculo preciso
  * Query params:
  *  - dataInicio (obrigatório): data inicial YYYY-MM-DD
  *  - dataFim (obrigatório): data final YYYY-MM-DD
@@ -1448,26 +1448,26 @@ router.get(
       };
     };
 
-    // Para cada canal, buscar CMV e depois os impostos
+    // Para cada canal, buscar faturamento e depois os impostos
     for (const canalAtual of canais) {
       let viewName = '';
       let canalKey = '';
 
       switch (canalAtual) {
         case 'varejo':
-          viewName = 'cmv_varejo';
+          viewName = 'fatvarejo';
           canalKey = 'varejo';
           break;
         case 'multimarcas':
-          viewName = 'cmv_mtm';
+          viewName = 'fatmtm';
           canalKey = 'multimarcas';
           break;
         case 'revenda':
-          viewName = 'cmv_revenda';
+          viewName = 'fatrevenda';
           canalKey = 'revenda';
           break;
         case 'franquias':
-          viewName = 'cmv_franquias';
+          viewName = 'fatfranquias';
           canalKey = 'franquias';
           break;
         default:
@@ -1476,16 +1476,16 @@ router.get(
 
       console.log(`\n🔍 Processando canal: ${canalKey.toUpperCase()}`);
 
-      // 1. Buscar nr_transacao do CMV do canal
-      const cmvQuery = `
+      // 1. Buscar nr_transacao do faturamento do canal
+      const fatQuery = `
         SELECT DISTINCT nr_transacao
         FROM ${viewName}
         WHERE dt_transacao BETWEEN $1 AND $2
         AND nr_transacao IS NOT NULL
       `;
 
-      const cmvResult = await pool.query(cmvQuery, [dataInicio, dataFim]);
-      const transacoes = cmvResult.rows.map((row) => row.nr_transacao);
+      const fatResult = await pool.query(fatQuery, [dataInicio, dataFim]);
+      const transacoes = fatResult.rows.map((row) => row.nr_transacao);
 
       console.log(
         `📊 ${canalKey}: ${transacoes.length} transações encontradas`,
@@ -1570,16 +1570,16 @@ router.get(
     let viewName = '';
     switch (canal) {
       case 'varejo':
-        viewName = 'cmv_varejo';
+        viewName = 'fatvarejo';
         break;
       case 'multimarcas':
-        viewName = 'cmv_mtm';
+        viewName = 'fatmtm';
         break;
       case 'revenda':
-        viewName = 'cmv_revenda';
+        viewName = 'fatrevenda';
         break;
       case 'franquias':
-        viewName = 'cmv_franquias';
+        viewName = 'fatfranquias';
         break;
       default:
         return errorResponse(
@@ -1589,8 +1589,8 @@ router.get(
         );
     }
 
-    // 1. Buscar nr_transacao do CMV do canal
-    const cmvQuery = `
+    // 1. Buscar nr_transacao do faturamento do canal
+    const fatQuery = `
       SELECT DISTINCT nr_transacao, dt_transacao, nm_grupoempresa
       FROM ${viewName}
       WHERE dt_transacao BETWEEN $1 AND $2
@@ -1598,9 +1598,9 @@ router.get(
       ORDER BY dt_transacao, nr_transacao
     `;
 
-    const cmvResult = await pool.query(cmvQuery, [dataInicio, dataFim]);
+    const fatResult = await pool.query(fatQuery, [dataInicio, dataFim]);
 
-    if (cmvResult.rows.length === 0) {
+    if (fatResult.rows.length === 0) {
       return successResponse(
         res,
         {
@@ -1611,7 +1611,7 @@ router.get(
       );
     }
 
-    const transacoes = cmvResult.rows.map((row) => row.nr_transacao);
+    const transacoes = fatResult.rows.map((row) => row.nr_transacao);
 
     console.log(
       `📊 Buscando impostos detalhados para ${transacoes.length} transações do canal ${canal}`,
@@ -1710,13 +1710,13 @@ router.get(
       return acc;
     }, {});
 
-    // Combinar informações de CMV com impostos
-    const dadosDetalhados = cmvResult.rows.map((cmvRow) => {
-      const impostoInfo = impostosPorTransacao[cmvRow.nr_transacao];
+    // Combinar informações de faturamento com impostos
+    const dadosDetalhados = fatResult.rows.map((fatRow) => {
+      const impostoInfo = impostosPorTransacao[fatRow.nr_transacao];
       return {
-        nr_transacao: cmvRow.nr_transacao,
-        dt_transacao: cmvRow.dt_transacao,
-        nm_grupoempresa: cmvRow.nm_grupoempresa,
+        nr_transacao: fatRow.nr_transacao,
+        dt_transacao: fatRow.dt_transacao,
+        nm_grupoempresa: fatRow.nm_grupoempresa,
         total_impostos: impostoInfo?.total_impostos || 0,
         icms: impostoInfo?.icms || 0,
         pis: impostoInfo?.pis || 0,
