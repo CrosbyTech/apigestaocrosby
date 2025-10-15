@@ -1193,4 +1193,338 @@ router.get(
   }),
 );
 
+/**
+ * GET /api/faturamento/impostos-por-canal
+ * Retorna impostos agrupados por canal usando os nr_transacao das views de CMV
+ * Envia requisições em lotes de 500 para a rota /sales/vlimposto
+ * Query params:
+ *  - dataInicio (obrigatório): data inicial YYYY-MM-DD
+ *  - dataFim (obrigatório): data final YYYY-MM-DD
+ *  - canal (opcional): 'varejo', 'multimarcas', 'revenda', 'franquias' (padrão: todos)
+ */
+router.get(
+  '/impostos-por-canal',
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, canal } = req.query;
+
+    // Definir quais canais buscar
+    const canais = canal
+      ? [canal]
+      : ['varejo', 'multimarcas', 'revenda', 'franquias'];
+
+    const resultados = {};
+
+    // Função auxiliar para dividir array em lotes
+    const dividirEmLotes = (array, tamanhoLote) => {
+      const lotes = [];
+      for (let i = 0; i < array.length; i += tamanhoLote) {
+        lotes.push(array.slice(i, i + tamanhoLote));
+      }
+      return lotes;
+    };
+
+    // Função auxiliar para buscar impostos via /sales/vlimposto
+    const buscarImpostos = async (transacoes) => {
+      const lotes = dividirEmLotes(transacoes, 500);
+      let totalGeral = 0;
+      let totalTransacoes = 0;
+      const impostosDetalhados = [];
+
+      console.log(
+        `📦 Processando ${lotes.length} lotes de transações (total: ${transacoes.length})`,
+      );
+
+      for (let i = 0; i < lotes.length; i++) {
+        const lote = lotes[i];
+        console.log(
+          `🔄 Lote ${i + 1}/${lotes.length}: ${lote.length} transações`,
+        );
+
+        // Criar query string com múltiplos nr_transacao
+        const queryString = lote.map((t) => `nr_transacao=${t}`).join('&');
+
+        // Fazer requisição interna para /sales/vlimposto
+        const impostosQuery = `
+          SELECT
+            ti.nr_transacao,
+            ti.dt_transacao,
+            ti.cd_imposto,
+            SUM(ti.vl_imposto) as valorimposto
+          FROM
+            tra_itemimposto ti
+          WHERE
+            ti.nr_transacao = ANY($1)
+          GROUP BY
+            ti.nr_transacao,
+            ti.cd_imposto,
+            ti.dt_transacao
+          ORDER BY
+            ti.nr_transacao,
+            ti.cd_imposto
+        `;
+
+        const result = await pool.query(impostosQuery, [lote]);
+
+        // Processar resultado do lote
+        result.rows.forEach((row) => {
+          totalGeral += parseFloat(row.valorimposto || 0);
+          impostosDetalhados.push(row);
+        });
+
+        totalTransacoes += lote.length;
+      }
+
+      return {
+        total_impostos: totalGeral,
+        total_transacoes: totalTransacoes,
+        detalhes: impostosDetalhados,
+      };
+    };
+
+    // Para cada canal, buscar CMV e depois os impostos
+    for (const canalAtual of canais) {
+      let viewName = '';
+      let canalKey = '';
+
+      switch (canalAtual) {
+        case 'varejo':
+          viewName = 'cmv_varejo';
+          canalKey = 'varejo';
+          break;
+        case 'multimarcas':
+          viewName = 'cmv_mtm';
+          canalKey = 'multimarcas';
+          break;
+        case 'revenda':
+          viewName = 'cmv_revenda';
+          canalKey = 'revenda';
+          break;
+        case 'franquias':
+          viewName = 'cmv_franquias';
+          canalKey = 'franquias';
+          break;
+        default:
+          continue;
+      }
+
+      console.log(`\n🔍 Processando canal: ${canalKey.toUpperCase()}`);
+
+      // 1. Buscar nr_transacao do CMV do canal
+      const cmvQuery = `
+        SELECT DISTINCT nr_transacao
+        FROM ${viewName}
+        WHERE dt_transacao BETWEEN $1 AND $2
+        AND nr_transacao IS NOT NULL
+      `;
+
+      const cmvResult = await pool.query(cmvQuery, [dataInicio, dataFim]);
+      const transacoes = cmvResult.rows.map((row) => row.nr_transacao);
+
+      console.log(
+        `📊 ${canalKey}: ${transacoes.length} transações encontradas`,
+      );
+
+      if (transacoes.length === 0) {
+        resultados[canalKey] = {
+          total_impostos: 0,
+          transacoes_processadas: 0,
+          impostos_detalhados: [],
+        };
+        continue;
+      }
+
+      // 2. Buscar impostos em lotes de 500
+      const resultadoImpostos = await buscarImpostos(transacoes);
+
+      resultados[canalKey] = {
+        total_impostos: resultadoImpostos.total_impostos,
+        transacoes_processadas: resultadoImpostos.total_transacoes,
+        impostos_detalhados: resultadoImpostos.detalhes,
+      };
+
+      console.log(
+        `✅ ${canalKey}: Total de impostos = R$ ${resultadoImpostos.total_impostos.toFixed(
+          2,
+        )}`,
+      );
+    }
+
+    return successResponse(
+      res,
+      {
+        data: resultados,
+        periodo: {
+          dataInicio,
+          dataFim,
+        },
+      },
+      'Impostos por canal recuperados com sucesso',
+    );
+  }),
+);
+
+/**
+ * GET /api/faturamento/impostos-detalhados
+ * Retorna impostos detalhados por transação para análise
+ * Query params:
+ *  - dataInicio (obrigatório): data inicial YYYY-MM-DD
+ *  - dataFim (obrigatório): data final YYYY-MM-DD
+ *  - canal (obrigatório): 'varejo', 'multimarcas', 'revenda', 'franquias'
+ */
+router.get(
+  '/impostos-detalhados',
+  validateRequired(['dataInicio', 'dataFim', 'canal']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, canal } = req.query;
+
+    let viewName = '';
+    switch (canal) {
+      case 'varejo':
+        viewName = 'cmv_varejo';
+        break;
+      case 'multimarcas':
+        viewName = 'cmv_mtm';
+        break;
+      case 'revenda':
+        viewName = 'cmv_revenda';
+        break;
+      case 'franquias':
+        viewName = 'cmv_franquias';
+        break;
+      default:
+        return errorResponse(
+          res,
+          'Canal inválido. Use: varejo, multimarcas, revenda ou franquias',
+          400,
+        );
+    }
+
+    // 1. Buscar nr_transacao do CMV do canal
+    const cmvQuery = `
+      SELECT DISTINCT nr_transacao, dt_transacao, nm_grupoempresa
+      FROM ${viewName}
+      WHERE dt_transacao BETWEEN $1 AND $2
+      AND nr_transacao IS NOT NULL
+      ORDER BY dt_transacao, nr_transacao
+    `;
+
+    const cmvResult = await pool.query(cmvQuery, [dataInicio, dataFim]);
+
+    if (cmvResult.rows.length === 0) {
+      return successResponse(
+        res,
+        {
+          data: [],
+          total: 0,
+        },
+        'Nenhuma transação encontrada para o período',
+      );
+    }
+
+    const transacoes = cmvResult.rows.map((row) => row.nr_transacao);
+
+    console.log(
+      `📊 Buscando impostos detalhados para ${transacoes.length} transações do canal ${canal}`,
+    );
+
+    // 2. Buscar impostos detalhados em lotes de 500
+    const dividirEmLotes = (array, tamanhoLote) => {
+      const lotes = [];
+      for (let i = 0; i < array.length; i += tamanhoLote) {
+        lotes.push(array.slice(i, i + tamanhoLote));
+      }
+      return lotes;
+    };
+
+    const lotes = dividirEmLotes(transacoes, 500);
+    let todosImpostos = [];
+
+    console.log(`📦 Processando ${lotes.length} lotes`);
+
+    for (let i = 0; i < lotes.length; i++) {
+      const lote = lotes[i];
+      console.log(
+        `🔄 Lote ${i + 1}/${lotes.length}: ${lote.length} transações`,
+      );
+
+      const impostosQuery = `
+        SELECT
+          ti.nr_transacao,
+          ti.dt_transacao,
+          ti.cd_imposto,
+          SUM(ti.vl_imposto) as valorimposto
+        FROM
+          tra_itemimposto ti
+        WHERE
+          ti.nr_transacao = ANY($1)
+        GROUP BY
+          ti.nr_transacao,
+          ti.cd_imposto,
+          ti.dt_transacao
+        ORDER BY
+          ti.nr_transacao,
+          ti.cd_imposto
+      `;
+
+      const resultado = await pool.query(impostosQuery, [lote]);
+      todosImpostos = todosImpostos.concat(resultado.rows);
+    }
+
+    console.log(
+      `✅ Total de registros de impostos encontrados: ${todosImpostos.length}`,
+    );
+
+    // Agregar impostos por transação
+    const impostosPorTransacao = todosImpostos.reduce((acc, row) => {
+      const nrTransacao = row.nr_transacao;
+      if (!acc[nrTransacao]) {
+        acc[nrTransacao] = {
+          nr_transacao: nrTransacao,
+          dt_transacao: row.dt_transacao,
+          total_impostos: 0,
+          impostos: [],
+        };
+      }
+      acc[nrTransacao].total_impostos += parseFloat(row.valorimposto || 0);
+      acc[nrTransacao].impostos.push({
+        cd_imposto: row.cd_imposto,
+        valorimposto: parseFloat(row.valorimposto || 0),
+      });
+      return acc;
+    }, {});
+
+    // Combinar informações de CMV com impostos
+    const dadosDetalhados = cmvResult.rows.map((cmvRow) => {
+      const impostoInfo = impostosPorTransacao[cmvRow.nr_transacao];
+      return {
+        nr_transacao: cmvRow.nr_transacao,
+        dt_transacao: cmvRow.dt_transacao,
+        nm_grupoempresa: cmvRow.nm_grupoempresa,
+        total_impostos: impostoInfo?.total_impostos || 0,
+        impostos_detalhados: impostoInfo?.impostos || [],
+      };
+    });
+
+    return successResponse(
+      res,
+      {
+        data: dadosDetalhados,
+        total: dadosDetalhados.length,
+        resumo: {
+          total_impostos: dadosDetalhados.reduce(
+            (sum, item) => sum + item.total_impostos,
+            0,
+          ),
+          total_transacoes: dadosDetalhados.length,
+          canal: canal,
+        },
+      },
+      'Impostos detalhados recuperados com sucesso',
+    );
+  }),
+);
+
 export default router;
