@@ -71,6 +71,12 @@ const limparCacheImpostos = () => {
   return tamanho;
 };
 
+// Limpar cache automaticamente ao iniciar (devido à correção do filtro de saída)
+console.log(
+  '🔄 Limpando cache de impostos ao iniciar (filtro de tp_operacao aplicado)',
+);
+limparCacheImpostos();
+
 // Endpoint para limpar cache manualmente
 router.delete('/impostos-cache', (req, res) => {
   const entradas = limparCacheImpostos();
@@ -1363,8 +1369,10 @@ router.get(
               SUM(ti.vl_imposto) as valorimposto
             FROM
               tra_itemimposto ti
+            INNER JOIN tra_transacao t ON t.nr_transacao = ti.nr_transacao
             WHERE
               ti.nr_transacao = ANY($1)
+              AND t.tp_operacao = 'S'
             GROUP BY
               ti.cd_imposto
           `;
@@ -1633,8 +1641,10 @@ router.get(
           SUM(ti.vl_imposto) as valorimposto
         FROM
           tra_itemimposto ti
+        INNER JOIN tra_transacao t ON t.nr_transacao = ti.nr_transacao
         WHERE
           ti.nr_transacao = ANY($1)
+          AND t.tp_operacao = 'S'
         GROUP BY
           ti.nr_transacao,
           ti.cd_imposto,
