@@ -979,7 +979,8 @@ router.get(
         cv.dt_transacao,
         cv.nm_grupoempresa,
         cv.produtos_entrada,
-        cv.produtos_saida
+        cv.produtos_saida,
+        cv.nr_transacao
       FROM cmv_varejo cv
       WHERE cv.dt_transacao BETWEEN $1 AND $2
     `;
@@ -1037,7 +1038,8 @@ router.get(
         cm.dt_transacao,
         cm.nm_grupoempresa,
         cm.produtos_entrada,
-        cm.produtos_saida
+        cm.produtos_saida,
+        cm.nr_transacao
       FROM cmv_mtm cm
       WHERE cm.dt_transacao BETWEEN $1 AND $2
     `;
@@ -1095,7 +1097,8 @@ router.get(
         cr.dt_transacao,
         cr.nm_grupoempresa,
         cr.produtos_entrada,
-        cr.produtos_saida
+        cr.produtos_saida,
+        cr.nr_transacao
       FROM cmv_revenda cr
       WHERE cr.dt_transacao BETWEEN $1 AND $2
     `;
@@ -1153,7 +1156,8 @@ router.get(
         cf.dt_transacao,
         cf.nm_grupoempresa,
         cf.produtos_entrada,
-        cf.produtos_saida
+        cf.produtos_saida,
+        cf.nr_transacao
       FROM cmv_franquias cf
       WHERE cf.dt_transacao BETWEEN $1 AND $2
     `;
