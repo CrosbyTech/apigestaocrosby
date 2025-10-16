@@ -14,6 +14,9 @@ import {
 
 const router = express.Router();
 
+
+const INCLUDED_OPERATIONS = [1,2,17,21,401,555,1017,1201,1202,1204,1210,1950,1999,2203,2204,2207,9005,9991,200,300,400,510,511,512,521,522,545,546,548,660,661,960,961,1400,1402,1403,1405,1406,5102,5106,5107,5110,5111,5113];
+
 // Cache simples para resultados DRE e Auditoria (em produção usar Redis)
 const dreCache = new Map();
 const auditoriaCache = new Map();
@@ -396,7 +399,7 @@ router.get(
         LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
         WHERE vfn.dt_transacao BETWEEN $1 AND $2
           AND vfn.cd_empresa IN (${empresaPlaceholders})
-          AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 15).join(
+          AND vfn.cd_operacao NOT IN (${INCLUDED_OPERATIONS.slice(0, 15).join(
             ',',
           )})
           AND vfn.tp_situacao NOT IN ('C', 'X')
@@ -424,7 +427,7 @@ router.get(
         LEFT JOIN pes_pesjuridica p ON p.cd_pessoa = vfn.cd_pessoa   
         WHERE vfn.dt_transacao BETWEEN $1 AND $2
           AND vfn.cd_empresa IN (${empresaPlaceholders})
-          AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 20).join(
+          AND vfn.cd_operacao NOT IN (${INCLUDED_OPERATIONS.slice(0, 20).join(
             ',',
           )})
           AND vfn.tp_situacao NOT IN ('C', 'X')
@@ -550,7 +553,7 @@ router.get(
         LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
         WHERE vfn.dt_transacao BETWEEN $1 AND $2
           AND vfn.cd_empresa IN (${empresaPlaceholders})
-          AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 20).join(
+          AND vfn.cd_operacao NOT IN (${INCLUDED_OPERATIONS.slice(0, 20).join(
             ',',
           )})
           AND vfn.tp_situacao NOT IN ('C', 'X')
@@ -580,7 +583,7 @@ router.get(
         LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
         WHERE vfn.dt_transacao BETWEEN $1 AND $2
           AND vfn.cd_empresa IN (${empresaPlaceholders})
-          AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.slice(0, 25).join(
+          AND vfn.cd_operacao NOT IN (${INCLUDED_OPERATIONS.slice(0, 25).join(
             ',',
           )})
           AND vfn.tp_situacao NOT IN ('C', 'X')
@@ -1166,7 +1169,7 @@ router.get(
         LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
         WHERE vfn.dt_transacao BETWEEN $1 AND $2
           AND vfn.cd_empresa IN (${empresaPlaceholders})
-          AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
+          AND vfn.cd_operacao NOT IN (${INCLUDED_OPERATIONS.join(',')})
           AND vfn.tp_situacao NOT IN ('C', 'X')
           ${fantasiaWhere}
       `;
@@ -1233,7 +1236,7 @@ router.get(
         LEFT JOIN vr_pes_pessoaclas pc ON vfn.cd_pessoa = pc.cd_pessoa
         WHERE vfn.dt_transacao BETWEEN $1 AND $2
           AND vfn.cd_empresa IN (${empresaPlaceholders})
-          AND vfn.cd_operacao NOT IN (${EXCLUDED_OPERATIONS.join(',')})
+          AND vfn.cd_operacao NOT IN (${INCLUDED_OPERATIONS.join(',')})
           AND vfn.tp_situacao NOT IN ('C', 'X')
           AND pc.cd_tipoclas = 5
       `;
