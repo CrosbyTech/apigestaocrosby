@@ -2164,4 +2164,64 @@ router.get(
   })
 );
 
+/**
+ * @route GET /financial/obsfati
+ * @desc Buscar observações das faturas
+ * @access Public
+ * @query {cd_cliente, nr_fat}
+ */
+router.get(
+  "/obsfati",
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { cd_cliente, nr_fat } = req.query;
+
+    // Validar parâmetros obrigatórios
+    if (!cd_cliente) {
+      return errorResponse(
+        res,
+        "O parâmetro cd_cliente é obrigatório",
+        400,
+        "MISSING_PARAMETER"
+      );
+    }
+
+    if (!nr_fat) {
+      return errorResponse(
+        res,
+        "O parâmetro nr_fat é obrigatório",
+        400,
+        "MISSING_PARAMETER"
+      );
+    }
+
+    const query = `
+      SELECT
+        t.nr_fat,
+        t.ds_observacao
+      FROM
+        obs_fati t
+      WHERE
+        t.cd_cliente = $1
+        AND t.nr_fat = $2
+      GROUP BY
+        t.nr_fat,
+        t.ds_observacao
+    `;
+
+    const { rows } = await pool.query(query, [cd_cliente, nr_fat]);
+
+    successResponse(
+      res,
+      {
+        cd_cliente,
+        nr_fat,
+        count: rows.length,
+        data: rows,
+      },
+      "Observações das faturas obtidas com sucesso"
+    );
+  })
+);
+
 export default router;
