@@ -1224,6 +1224,7 @@ router.get(
         AND vff.dt_vencimento > $3
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
+        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
@@ -1242,6 +1243,7 @@ router.get(
         AND vff.dt_vencimento > $3
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
+        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
@@ -1341,6 +1343,7 @@ router.get(
         AND vff.dt_vencimento > $3
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
+        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
@@ -1445,6 +1448,7 @@ router.get(
         AND vff.dt_vencimento < CURRENT_DATE
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
+        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
       GROUP BY
@@ -1492,6 +1496,7 @@ router.get(
         AND vff.dt_vencimento < CURRENT_DATE
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
+        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
     `;
