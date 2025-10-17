@@ -39,61 +39,6 @@ router.get(
         },
       );
 
-      /**
-       * @route GET /utils/nm-franquia
-       * @desc Retorna nm_fantasia (nome fantasia) do cliente associado a um número de transação
-       * @query {nr_transacao} - número da transação (pode ser único ou lista separada por vírgula)
-       */
-      router.get(
-        '/nm-franquia',
-        sanitizeInput,
-        asyncHandler(async (req, res) => {
-          let { nr_transacao } = req.query;
-
-          if (!nr_transacao) {
-            return successResponse(res, [], 'Nenhuma transação informada');
-          }
-
-          // Aceitar lista separada por vírgula
-          const transacoes = String(nr_transacao)
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean);
-
-          // Construir placeholders dinamicamente
-          const placeholders = transacoes.map((_, i) => `$${i + 1}`).join(',');
-
-          const query = `
-            SELECT
-              pj.cd_pessoa,
-              pj.nm_fantasia,
-              tt.nr_transacao
-            FROM
-              pes_pesjuridica pj
-            LEFT JOIN tra_transacao tt ON
-              tt.cd_pessoa = pj.cd_pessoa
-            WHERE
-              tt.nr_transacao IN (${placeholders})
-            GROUP BY
-              pj.cd_pessoa,
-              pj.nm_fantasia,
-              tt.nr_transacao
-          `;
-
-          const result = await pool.query(query, transacoes);
-
-          // Retornar map por nr_transacao
-          const map = result.rows.reduce((acc, row) => {
-            acc[row.nr_transacao] = {
-              cd_pessoa: row.cd_pessoa,
-              nm_fantasia: row.nm_fantasia,
-            };
-            return acc;
-          }, {});
-
-          successResponse(res, map, 'Nomes fantasia obtidos com sucesso');
-        }),
-      );
 
       successResponse(
         res,
@@ -106,6 +51,62 @@ router.get(
     } catch (error) {
       throw new Error(`Erro ao buscar dados externos: ${error.message}`);
     }
+  }),
+);
+
+/**
+ * @route GET /utils/nm-franquia
+ * @desc Retorna nm_fantasia (nome fantasia) do cliente associado a um número de transação
+ * @query {nr_transacao} - número da transação (pode ser único ou lista separada por vírgula)
+ */
+router.get(
+  '/nm-franquia',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    let { nr_transacao } = req.query;
+
+    if (!nr_transacao) {
+      return successResponse(res, [], 'Nenhuma transação informada');
+    }
+
+    // Aceitar lista separada por vírgula
+    const transacoes = String(nr_transacao)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // Construir placeholders dinamicamente
+    const placeholders = transacoes.map((_, i) => `$${i + 1}`).join(',');
+
+    const query = `
+      SELECT
+        pj.cd_pessoa,
+        pj.nm_fantasia,
+        tt.nr_transacao
+      FROM
+        pes_pesjuridica pj
+      LEFT JOIN tra_transacao tt ON
+        tt.cd_pessoa = pj.cd_pessoa
+      WHERE
+        tt.nr_transacao IN (${placeholders})
+      GROUP BY
+        pj.cd_pessoa,
+        pj.nm_fantasia,
+        tt.nr_transacao
+    `;
+
+    const result = await pool.query(query, transacoes);
+
+    // Retornar map por nr_transacao
+    const map = result.rows.reduce((acc, row) => {
+      acc[row.nr_transacao] = {
+        cd_pessoa: row.cd_pessoa,
+        nm_fantasia: row.nm_fantasia,
+      };
+      return acc;
+    }, {});
+
+    successResponse(res, map, 'Nomes fantasia obtidos com sucesso');
   }),
 );
 
