@@ -56,7 +56,7 @@ router.get(
 
 /**
  * @route GET /utils/nm-franquia
- * @desc Retorna nm_fantasia (nome fantasia) do cliente associado a um número de transação
+ * @desc Retorna nm_fantasia (nome fantasia) e consultor do cliente associado a um número de transação
  * @query {nr_transacao} - número da transação (pode ser único ou lista separada por vírgula)
  */
 router.get(
@@ -82,17 +82,29 @@ router.get(
       SELECT
         pj.cd_pessoa,
         pj.nm_fantasia,
-        tt.nr_transacao
+        tt.nr_transacao,
+        COALESCE(
+          CASE
+            WHEN pc.cd_classificacao::integer = 1 THEN 'IVANNA'
+            WHEN pc.cd_classificacao::integer = 2 THEN 'ARTHUR'
+            WHEN pc.cd_classificacao::integer = 3 THEN 'JHEMYSON'
+            ELSE 'Sem consultor'
+          END
+        ) as consultor
       FROM
         pes_pesjuridica pj
       LEFT JOIN tra_transacao tt ON
         tt.cd_pessoa = pj.cd_pessoa
+      LEFT JOIN vr_pes_pessoaclas pc ON
+        pj.cd_pessoa = pc.cd_pessoa
       WHERE
         tt.nr_transacao IN (${placeholders})
+        AND pc.cd_tipoclas = 57
       GROUP BY
         pj.cd_pessoa,
         pj.nm_fantasia,
-        tt.nr_transacao
+        tt.nr_transacao,
+        pc.cd_classificacao
     `;
 
     const result = await pool.query(query, transacoes);
@@ -102,11 +114,12 @@ router.get(
       acc[row.nr_transacao] = {
         cd_pessoa: row.cd_pessoa,
         nm_fantasia: row.nm_fantasia,
+        consultor: row.consultor,
       };
       return acc;
     }, {});
 
-    successResponse(res, map, 'Nomes fantasia obtidos com sucesso');
+    successResponse(res, map, 'Nomes fantasia e consultores obtidos com sucesso');
   }),
 );
 
