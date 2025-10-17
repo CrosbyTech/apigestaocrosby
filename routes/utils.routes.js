@@ -1,16 +1,16 @@
-import express from "express";
-import axios from "axios";
-import pool from "../config/database.js";
+import express from 'express';
+import axios from 'axios';
+import pool from '../config/database.js';
 import {
   sanitizeInput,
   validateRequired,
   validateDateFormat,
-} from "../middlewares/validation.middleware.js";
+} from '../middlewares/validation.middleware.js';
 import {
   asyncHandler,
   successResponse,
   errorResponse,
-} from "../utils/errorHandler.js";
+} from '../utils/errorHandler.js';
 
 const router = express.Router();
 
@@ -20,37 +20,93 @@ const router = express.Router();
  * @access Public
  */
 router.get(
-  "/external-test",
+  '/external-test',
   asyncHandler(async (req, res) => {
-    if (process.env.NODE_ENV === "production") {
+    if (process.env.NODE_ENV === 'production') {
       return errorResponse(
         res,
-        "Endpoint disponível apenas em desenvolvimento",
+        'Endpoint disponível apenas em desenvolvimento',
         403,
-        "FORBIDDEN"
+        'FORBIDDEN',
       );
     }
 
     try {
       const response = await axios.get(
-        "https://jsonplaceholder.typicode.com/todos/1",
+        'https://jsonplaceholder.typicode.com/todos/1',
         {
           timeout: 5000, // 5 segundos de timeout
-        }
+        },
+      );
+
+      /**
+       * @route GET /utils/nm-franquia
+       * @desc Retorna nm_fantasia (nome fantasia) do cliente associado a um número de transação
+       * @query {nr_transacao} - número da transação (pode ser único ou lista separada por vírgula)
+       */
+      router.get(
+        '/nm-franquia',
+        sanitizeInput,
+        asyncHandler(async (req, res) => {
+          let { nr_transacao } = req.query;
+
+          if (!nr_transacao) {
+            return successResponse(res, [], 'Nenhuma transação informada');
+          }
+
+          // Aceitar lista separada por vírgula
+          const transacoes = String(nr_transacao)
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+
+          // Construir placeholders dinamicamente
+          const placeholders = transacoes.map((_, i) => `$${i + 1}`).join(',');
+
+          const query = `
+            SELECT
+              pj.cd_pessoa,
+              pj.nm_fantasia,
+              tt.nr_transacao
+            FROM
+              pes_pesjuridica pj
+            LEFT JOIN tra_transacao tt ON
+              tt.cd_pessoa = pj.cd_pessoa
+            WHERE
+              tt.nr_transacao IN (${placeholders})
+            GROUP BY
+              pj.cd_pessoa,
+              pj.nm_fantasia,
+              tt.nr_transacao
+          `;
+
+          const result = await pool.query(query, transacoes);
+
+          // Retornar map por nr_transacao
+          const map = result.rows.reduce((acc, row) => {
+            acc[row.nr_transacao] = {
+              cd_pessoa: row.cd_pessoa,
+              nm_fantasia: row.nm_fantasia,
+            };
+            return acc;
+          }, {});
+
+          successResponse(res, map, 'Nomes fantasia obtidos com sucesso');
+        }),
       );
 
       successResponse(
         res,
         {
-          source: "https://jsonplaceholder.typicode.com",
+          source: 'https://jsonplaceholder.typicode.com',
           data: response.data,
         },
-        "API externa consultada com sucesso"
+        'API externa consultada com sucesso',
       );
     } catch (error) {
       throw new Error(`Erro ao buscar dados externos: ${error.message}`);
     }
-  })
+  }),
 );
 
 /**
@@ -60,13 +116,13 @@ router.get(
  * @query {q} - termo de busca (mínimo 1 caractere)
  */
 router.get(
-  "/autocomplete/nm_fantasia",
+  '/autocomplete/nm_fantasia',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const { q } = req.query;
 
     if (!q || q.length < 1) {
-      return successResponse(res, [], "Termo de busca muito curto");
+      return successResponse(res, [], 'Termo de busca muito curto');
     }
 
     const query = `
@@ -84,9 +140,9 @@ router.get(
     successResponse(
       res,
       suggestions,
-      "Sugestões de nomes fantasia obtidas com sucesso"
+      'Sugestões de nomes fantasia obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -96,13 +152,13 @@ router.get(
  * @query {q} - termo de busca (mínimo 1 caractere)
  */
 router.get(
-  "/autocomplete/nm_grupoempresa",
+  '/autocomplete/nm_grupoempresa',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const { q } = req.query;
 
     if (!q || q.length < 1) {
-      return successResponse(res, [], "Termo de busca muito curto");
+      return successResponse(res, [], 'Termo de busca muito curto');
     }
 
     const query = `
@@ -119,9 +175,9 @@ router.get(
     successResponse(
       res,
       rows,
-      "Sugestões de grupos de empresa obtidas com sucesso"
+      'Sugestões de grupos de empresa obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -130,45 +186,45 @@ router.get(
  * @access Public
  */
 router.get(
-  "/health",
+  '/health',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const healthCheck = {
-      status: "OK",
+      status: 'OK',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      environment: process.env.NODE_ENV || "development",
-      version: process.env.npm_package_version || "2.1.0",
+      environment: process.env.NODE_ENV || 'development',
+      version: process.env.npm_package_version || '2.1.0',
       startTime,
     };
 
     // Testar conexão com banco de dados SEM timeout
     try {
-      console.log("🔍 Testando conexão com banco de dados...");
+      console.log('🔍 Testando conexão com banco de dados...');
       const result = await pool.query(
-        "SELECT NOW() as current_time, version() as version, current_database() as database"
+        'SELECT NOW() as current_time, version() as version, current_database() as database',
       );
 
       healthCheck.database = {
-        status: "Connected",
+        status: 'Connected',
         responseTime: `${Date.now() - healthCheck.startTime}ms`,
         serverTime: result.rows[0].current_time,
         database: result.rows[0].database,
         version:
-          result.rows[0].version.split(" ")[0] +
-          " " +
-          result.rows[0].version.split(" ")[1],
-        message: "Conexão sem timeout - ilimitada",
+          result.rows[0].version.split(' ')[0] +
+          ' ' +
+          result.rows[0].version.split(' ')[1],
+        message: 'Conexão sem timeout - ilimitada',
       };
-      console.log("✅ Conexão com banco bem-sucedida");
+      console.log('✅ Conexão com banco bem-sucedida');
     } catch (error) {
-      console.error("❌ Erro na conexão com banco:", error.message);
+      console.error('❌ Erro na conexão com banco:', error.message);
       healthCheck.database = {
-        status: "Disconnected",
+        status: 'Disconnected',
         error: error.message,
-        message: "Falha na conexão mesmo sem timeout",
+        message: 'Falha na conexão mesmo sem timeout',
       };
-      healthCheck.status = "ERROR";
+      healthCheck.status = 'ERROR';
     }
 
     // Testar uso de memória
@@ -179,9 +235,9 @@ router.get(
       heapUsed: `${Math.round(memUsage.heapUsed / 1024 / 1024)} MB`,
     };
 
-    const statusCode = healthCheck.status === "OK" ? 200 : 503;
+    const statusCode = healthCheck.status === 'OK' ? 200 : 503;
     res.status(statusCode).json(healthCheck);
-  })
+  }),
 );
 
 /**
@@ -190,23 +246,23 @@ router.get(
  * @access Public - ADM only
  */
 router.get(
-  "/stats",
+  '/stats',
   asyncHandler(async (req, res) => {
     try {
       // Buscar algumas estatísticas básicas
       const queries = [
         {
-          name: "total_empresas",
+          name: 'total_empresas',
           query:
-            "SELECT COUNT(*) as count FROM vr_ger_empresa WHERE cd_grupoempresa < 5999",
+            'SELECT COUNT(*) as count FROM vr_ger_empresa WHERE cd_grupoempresa < 5999',
         },
         {
-          name: "total_franquias",
+          name: 'total_franquias',
           query:
             "SELECT COUNT(DISTINCT nm_fantasia) as count FROM pes_pesjuridica WHERE nm_fantasia LIKE 'F%CROSBY%'",
         },
         {
-          name: "conexoes_ativas",
+          name: 'conexoes_ativas',
           query:
             "SELECT count(*) as count FROM pg_stat_activity WHERE state = 'active'",
         },
@@ -218,9 +274,9 @@ router.get(
             const result = await pool.query(query);
             return { [name]: parseInt(result.rows[0].count, 10) };
           } catch (error) {
-            return { [name]: "Erro" };
+            return { [name]: 'Erro' };
           }
-        })
+        }),
       );
 
       const stats = results.reduce((acc, curr) => ({ ...acc, ...curr }), {});
@@ -231,12 +287,12 @@ router.get(
           timestamp: new Date().toISOString(),
           ...stats,
         },
-        "Estatísticas do sistema obtidas com sucesso"
+        'Estatísticas do sistema obtidas com sucesso',
       );
     } catch (error) {
       throw new Error(`Erro ao obter estatísticas: ${error.message}`);
     }
-  })
+  }),
 );
 
 // Rota /utils/classcliente removida a pedido
@@ -248,10 +304,10 @@ router.get(
  * @query {dt_inicio, dt_fim, limit, offset}
  */
 router.get(
-  "/cadastropessoa",
+  '/cadastropessoa',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim } = req.query;
 
@@ -264,7 +320,6 @@ router.get(
     const query = `
       SELECT
         tt.cd_empresa,
-        pp.cd_pessoa,
         pp.nr_cpfcnpj,
         pp.nm_pessoa,
         pj.nm_fantasia,
@@ -306,9 +361,9 @@ router.get(
         count: result.rows.length,
         data: result.rows,
       },
-      "Cadastro de pessoas consultado com sucesso"
+      'Cadastro de pessoas consultado com sucesso',
     );
-  })
+  }),
 );
 
 export default router;
