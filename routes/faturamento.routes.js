@@ -1049,6 +1049,57 @@ router.get(
   }),
 );
 
+// Endpoint para buscar faturamento bazar (view materializada)
+router.get(
+  '/fatbazar',
+  validateRequired(['dataInicio', 'dataFim']),
+  validateDateFormat(['dataInicio', 'dataFim']),
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim, cd_empresa } = req.query;
+
+    let queryParams = [dataInicio, dataFim];
+    let empresaWhereClause = '';
+
+    if (cd_empresa) {
+      const empresas = cd_empresa.includes(',')
+        ? cd_empresa.split(',').map((s) => s.trim())
+        : [cd_empresa];
+      const placeholders = empresas
+        .map((_, index) => `$${index + 3}`)
+        .join(',');
+      empresaWhereClause = `AND fb.cd_grupoempresa IN (${placeholders})`;
+      queryParams.push(...empresas);
+    }
+
+    const query = `
+      SELECT
+        fb.cd_grupoempresa,
+        fb.nm_grupoempresa,
+        fb.valor_com_desconto,
+        fb.valor_com_desconto_entrada,
+        fb.valor_com_desconto_saida,
+        fb.valor_sem_desconto,
+        fb.valor_sem_desconto_entrada,
+        fb.valor_sem_desconto_saida
+      FROM fatbazar fb
+      WHERE fb.dt_transacao BETWEEN $1 AND $2
+      ${empresaWhereClause}
+      ORDER BY fb.cd_grupoempresa
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    return successResponse(
+      res,
+      {
+        data: result.rows,
+        total: result.rows.length,
+      },
+      'Faturamento bazar recuperado com sucesso',
+    );
+  }),
+);
+
 // ============================================================================
 // ROTAS CMV (Custo de Mercadoria Vendida) - Views Materializadas
 // ============================================================================
