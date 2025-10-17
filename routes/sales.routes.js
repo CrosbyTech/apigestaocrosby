@@ -924,8 +924,13 @@ router.get(
     );
 
     try {
+      // Preparar parâmetros baseado na presença do limit
+      const queryParams = limit !== undefined 
+        ? [dataInicio, dataFim, limit, offset]
+        : [dataInicio, dataFim];
+
       const [resultado, totalResult] = await Promise.all([
-        pool.query(query, [dataInicio, dataFim, limit, offset]),
+        pool.query(query, queryParams),
         pool.query(countQuery, [dataInicio, dataFim]),
       ]);
 
