@@ -1,7 +1,6 @@
 import express from "express";
 import pool, {
   checkConnectionHealth,
-  executeQueryWithRetry,
 } from "../config/database.js";
 import {
   validateRequired,
