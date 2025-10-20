@@ -140,13 +140,28 @@ function buildWhereClause(conditions, startParamIndex = 1) {
       clauses.push(`${column} ${operator} (${placeholders})`);
       values.push(...valueArray);
     } else if (operator === 'BETWEEN' || operator === 'NOT BETWEEN') {
-      // Para BETWEEN, esperamos um array com 2 valores
+      // Para BETWEEN, aceitar array [val1, val2] ou value + value2
+      let val1, val2;
+
       if (Array.isArray(condition.value) && condition.value.length === 2) {
+        val1 = condition.value[0];
+        val2 = condition.value[1];
+      } else if (condition.value && condition.value2) {
+        val1 = condition.value;
+        val2 = condition.value2;
+      }
+
+      if (val1 !== undefined && val2 !== undefined) {
+        console.log(
+          `🔍 [BETWEEN] Coluna: ${column}, Val1: ${val1}, Val2: ${val2}, ParamIndex: ${paramIndex}`,
+        );
         clauses.push(
           `${column} ${operator} $${paramIndex} AND $${paramIndex + 1}`,
         );
-        values.push(condition.value[0], condition.value[1]);
+        values.push(val1, val2);
         paramIndex += 2;
+      } else {
+        console.log(`⚠️ [BETWEEN] IGNORADO - Val1: ${val1}, Val2: ${val2}`);
       }
     } else if (operator.includes('LIKE')) {
       // Para LIKE, adicionar % se necessário
@@ -183,6 +198,11 @@ function buildWhereClause(conditions, startParamIndex = 1) {
 function buildSafeQuery(params) {
   const select = params.select
     .map((col) => {
+      // Se for string simples, converter para objeto
+      if (typeof col === 'string') {
+        return sanitizeIdentifier(col);
+      }
+
       // Se for agregação, construir apropriadamente
       if (col.aggregation) {
         const func = col.aggregation.toUpperCase();
@@ -190,7 +210,8 @@ function buildSafeQuery(params) {
         const alias = col.alias ? ` AS ${sanitizeIdentifier(col.alias)}` : '';
         return `${func}(${column})${alias}`;
       }
-      // Coluna simples
+
+      // Coluna simples (objeto)
       const column = sanitizeIdentifier(col.column || col);
       const alias = col.alias ? ` AS ${sanitizeIdentifier(col.alias)}` : '';
       return `${column}${alias}`;
@@ -213,9 +234,18 @@ function buildSafeQuery(params) {
 
   // Construir ORDER BY
   let orderByClause = '';
-  if (params.orderBy && params.orderBy.length > 0) {
+  if (
+    params.orderBy &&
+    Array.isArray(params.orderBy) &&
+    params.orderBy.length > 0
+  ) {
     const orderColumns = params.orderBy
       .map((col) => {
+        // Se for string simples
+        if (typeof col === 'string') {
+          return `${sanitizeIdentifier(col)} ASC`;
+        }
+        // Se for objeto
         const column = sanitizeIdentifier(col.column || col);
         const direction =
           col.direction?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
@@ -277,6 +307,12 @@ router.post('/execute', async (req, res) => {
 
     logger.info('📝 Query SQL gerada:', query);
     logger.info('📊 Valores:', values);
+    logger.info('🔍 Query com valores substituídos (DEBUG):');
+    let debugQuery = query;
+    values.forEach((val, idx) => {
+      debugQuery = debugQuery.replace(`$${idx + 1}`, `'${val}'`);
+    });
+    logger.info(debugQuery);
 
     // Executar query
     const startTime = Date.now();
@@ -338,17 +374,76 @@ router.post('/execute', async (req, res) => {
  */
 router.post('/preview', async (req, res) => {
   try {
+    // Forçar limit de 10 para preview
     const params = { ...req.body, limit: 10 };
 
-    // Reutilizar lógica do execute
-    req.body = params;
-    return router.handle(req, res);
+    logger.info('🔍 Executando PREVIEW:', JSON.stringify(params, null, 2));
+
+    // Validar parâmetros
+    const validationErrors = validateQueryParams(params);
+    if (validationErrors.length > 0) {
+      logger.error('❌ Validação falhou:', validationErrors);
+      return res.status(400).json({
+        success: false,
+        error: 'VALIDATION_ERROR',
+        message: 'Parâmetros inválidos',
+        errors: validationErrors,
+      });
+    }
+
+    // Construir query segura
+    const { query, values } = buildSafeQuery(params);
+
+    logger.info('📝 Query SQL (preview):', query);
+    logger.info('📊 Valores (preview):', values);
+
+    // Executar query
+    const startTime = Date.now();
+    const result = await pool.query(query, values);
+    const executionTime = Date.now() - startTime;
+
+    logger.info(
+      `✅ Preview executado com sucesso em ${executionTime}ms - ${result.rows.length} registros`,
+    );
+
+    res.json({
+      success: true,
+      data: {
+        rows: result.rows,
+        total: result.rows.length,
+        columns: result.fields.map((field) => ({
+          name: field.name,
+          dataTypeID: field.dataTypeID,
+        })),
+      },
+      executionTime: `${executionTime}ms`,
+      query: process.env.NODE_ENV === 'development' ? query : undefined,
+    });
   } catch (error) {
     logger.error('❌ Erro ao executar preview:', error);
+    logger.error('❌ Error stack:', error.stack);
+
+    // Tratar erros específicos do PostgreSQL
+    let errorMessage = 'Erro ao executar preview';
+    let errorCode = 'PREVIEW_ERROR';
+
+    if (error.code === '42P01') {
+      errorMessage = 'Tabela não encontrada';
+      errorCode = 'TABLE_NOT_FOUND';
+    } else if (error.code === '42703') {
+      errorMessage = 'Coluna não encontrada';
+      errorCode = 'COLUMN_NOT_FOUND';
+    } else if (error.code === '42601') {
+      errorMessage = 'Erro de sintaxe SQL';
+      errorCode = 'SYNTAX_ERROR';
+    }
+
     res.status(500).json({
       success: false,
-      error: 'PREVIEW_ERROR',
-      message: 'Erro ao executar preview',
+      error: errorCode,
+      message: errorMessage,
+      details:
+        process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
 });
