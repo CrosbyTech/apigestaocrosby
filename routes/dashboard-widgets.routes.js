@@ -10,7 +10,7 @@ const router = express.Router();
 const requireAdminOrOwner = (req, res, next) => {
   const userEmail = req.headers['x-user-email'];
   const userRole = req.headers['x-user-role'];
-  
+
   if (!userEmail || !userRole) {
     return res.status(401).json({
       success: false,
@@ -18,7 +18,7 @@ const requireAdminOrOwner = (req, res, next) => {
       message: 'Autenticação necessária',
     });
   }
-  
+
   if (userRole !== 'admin' && userRole !== 'proprietario') {
     return res.status(403).json({
       success: false,
@@ -26,7 +26,7 @@ const requireAdminOrOwner = (req, res, next) => {
       message: 'Apenas administradores e proprietários podem acessar',
     });
   }
-  
+
   req.user = { email: userEmail, role: userRole };
   next();
 };
@@ -37,15 +37,15 @@ const requireAdminOrOwner = (req, res, next) => {
 router.get('/dashboards/:dashboardId/widgets', async (req, res) => {
   try {
     const { dashboardId } = req.params;
-    
+
     const query = `
       SELECT * FROM dashboard_widgets
       WHERE dashboard_id = $1 AND is_active = true
       ORDER BY position_y, position_x;
     `;
-    
+
     const result = await pool.query(query, [dashboardId]);
-    
+
     res.json({
       success: true,
       data: {
@@ -66,42 +66,48 @@ router.get('/dashboards/:dashboardId/widgets', async (req, res) => {
 // =============================================================================
 // CRIAR NOVO WIDGET
 // =============================================================================
-router.post('/dashboards/:dashboardId/widgets', requireAdminOrOwner, async (req, res) => {
-  try {
-    const { dashboardId } = req.params;
-    const {
-      name,
-      description,
-      widgetType,
-      chartType,
-      queryConfig,
-      displayConfig,
-      positionX,
-      positionY,
-      width,
-      height,
-      refreshInterval,
-    } = req.body;
-    
-    // Validações
-    if (!name || !widgetType || !queryConfig) {
-      return res.status(400).json({
-        success: false,
-        error: 'VALIDATION_ERROR',
-        message: 'Nome, tipo de widget e configuração de query são obrigatórios',
-      });
-    }
-    
-    const validWidgetTypes = ['chart', 'table', 'metric', 'kpi'];
-    if (!validWidgetTypes.includes(widgetType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'VALIDATION_ERROR',
-        message: `Tipo de widget inválido. Use: ${validWidgetTypes.join(', ')}`,
-      });
-    }
-    
-    const query = `
+router.post(
+  '/dashboards/:dashboardId/widgets',
+  requireAdminOrOwner,
+  async (req, res) => {
+    try {
+      const { dashboardId } = req.params;
+      const {
+        name,
+        description,
+        widgetType,
+        chartType,
+        queryConfig,
+        displayConfig,
+        positionX,
+        positionY,
+        width,
+        height,
+        refreshInterval,
+      } = req.body;
+
+      // Validações
+      if (!name || !widgetType || !queryConfig) {
+        return res.status(400).json({
+          success: false,
+          error: 'VALIDATION_ERROR',
+          message:
+            'Nome, tipo de widget e configuração de query são obrigatórios',
+        });
+      }
+
+      const validWidgetTypes = ['chart', 'table', 'metric', 'kpi'];
+      if (!validWidgetTypes.includes(widgetType)) {
+        return res.status(400).json({
+          success: false,
+          error: 'VALIDATION_ERROR',
+          message: `Tipo de widget inválido. Use: ${validWidgetTypes.join(
+            ', ',
+          )}`,
+        });
+      }
+
+      const query = `
       INSERT INTO dashboard_widgets (
         dashboard_id, name, description, widget_type, chart_type,
         query_config, display_config, position_x, position_y,
@@ -110,39 +116,41 @@ router.post('/dashboards/:dashboardId/widgets', requireAdminOrOwner, async (req,
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *;
     `;
-    
-    const result = await pool.query(query, [
-      dashboardId,
-      name,
-      description || null,
-      widgetType,
-      chartType || null,
-      JSON.stringify(queryConfig),
-      displayConfig ? JSON.stringify(displayConfig) : null,
-      positionX || 0,
-      positionY || 0,
-      width || 6,
-      height || 4,
-      refreshInterval || null,
-    ]);
-    
-    logger.info(`✅ Widget criado: ${name} no dashboard ${dashboardId}`);
-    
-    res.status(201).json({
-      success: true,
-      data: result.rows[0],
-      message: 'Widget criado com sucesso',
-    });
-  } catch (error) {
-    logger.error('❌ Erro ao criar widget:', error);
-    res.status(500).json({
-      success: false,
-      error: 'WIDGET_CREATE_ERROR',
-      message: 'Erro ao criar widget',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined,
-    });
-  }
-});
+
+      const result = await pool.query(query, [
+        dashboardId,
+        name,
+        description || null,
+        widgetType,
+        chartType || null,
+        JSON.stringify(queryConfig),
+        displayConfig ? JSON.stringify(displayConfig) : null,
+        positionX || 0,
+        positionY || 0,
+        width || 6,
+        height || 4,
+        refreshInterval || null,
+      ]);
+
+      logger.info(`✅ Widget criado: ${name} no dashboard ${dashboardId}`);
+
+      res.status(201).json({
+        success: true,
+        data: result.rows[0],
+        message: 'Widget criado com sucesso',
+      });
+    } catch (error) {
+      logger.error('❌ Erro ao criar widget:', error);
+      res.status(500).json({
+        success: false,
+        error: 'WIDGET_CREATE_ERROR',
+        message: 'Erro ao criar widget',
+        details:
+          process.env.NODE_ENV === 'development' ? error.message : undefined,
+      });
+    }
+  },
+);
 
 // =============================================================================
 // ATUALIZAR WIDGET
@@ -164,7 +172,7 @@ router.put('/widgets/:id', requireAdminOrOwner, async (req, res) => {
       refreshInterval,
       isActive,
     } = req.body;
-    
+
     const query = `
       UPDATE dashboard_widgets 
       SET 
@@ -184,7 +192,7 @@ router.put('/widgets/:id', requireAdminOrOwner, async (req, res) => {
       WHERE id = $13
       RETURNING *;
     `;
-    
+
     const result = await pool.query(query, [
       name || null,
       description || null,
@@ -200,7 +208,7 @@ router.put('/widgets/:id', requireAdminOrOwner, async (req, res) => {
       isActive !== undefined ? isActive : null,
       id,
     ]);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -208,9 +216,9 @@ router.put('/widgets/:id', requireAdminOrOwner, async (req, res) => {
         message: 'Widget não encontrado',
       });
     }
-    
+
     logger.info(`✅ Widget atualizado: ${id}`);
-    
+
     res.json({
       success: true,
       data: result.rows[0],
@@ -232,7 +240,7 @@ router.put('/widgets/:id', requireAdminOrOwner, async (req, res) => {
 router.delete('/widgets/:id', requireAdminOrOwner, async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     // Soft delete
     const query = `
       UPDATE dashboard_widgets 
@@ -240,9 +248,9 @@ router.delete('/widgets/:id', requireAdminOrOwner, async (req, res) => {
       WHERE id = $1
       RETURNING *;
     `;
-    
+
     const result = await pool.query(query, [id]);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -250,9 +258,9 @@ router.delete('/widgets/:id', requireAdminOrOwner, async (req, res) => {
         message: 'Widget não encontrado',
       });
     }
-    
+
     logger.info(`✅ Widget deletado: ${id}`);
-    
+
     res.json({
       success: true,
       message: 'Widget deletado com sucesso',
@@ -274,7 +282,7 @@ router.get('/widgets/:id/execute', async (req, res) => {
   try {
     const { id } = req.params;
     const userEmail = req.headers['x-user-email'];
-    
+
     if (!userEmail) {
       return res.status(401).json({
         success: false,
@@ -282,7 +290,7 @@ router.get('/widgets/:id/execute', async (req, res) => {
         message: 'Autenticação necessária',
       });
     }
-    
+
     // Buscar widget e verificar permissão
     const widgetQuery = `
       SELECT 
@@ -298,9 +306,9 @@ router.get('/widgets/:id/execute', async (req, res) => {
         AND dw.is_active = true
         AND d.is_active = true;
     `;
-    
+
     const widgetResult = await pool.query(widgetQuery, [id, userEmail]);
-    
+
     if (widgetResult.rows.length === 0) {
       return res.status(403).json({
         success: false,
@@ -308,17 +316,17 @@ router.get('/widgets/:id/execute', async (req, res) => {
         message: 'Você não tem permissão para visualizar este widget',
       });
     }
-    
+
     const widget = widgetResult.rows[0];
     const queryConfig = widget.query_config;
-    
+
     // Executar query (reutilizar lógica do querybuilder)
     const { buildSafeQuery } = await import('./querybuilder-execute.routes.js');
-    
+
     // Aqui você deve executar a query do widget
     // Por simplicidade, vou fazer uma query básica
     // TODO: Integrar com a lógica completa do query builder
-    
+
     res.json({
       success: true,
       data: {
@@ -341,46 +349,59 @@ router.get('/widgets/:id/execute', async (req, res) => {
 // =============================================================================
 // ATUALIZAR POSIÇÕES DOS WIDGETS (drag and drop)
 // =============================================================================
-router.patch('/dashboards/:dashboardId/widgets/positions', requireAdminOrOwner, async (req, res) => {
-  try {
-    const { dashboardId } = req.params;
-    const { widgets } = req.body; // Array de { id, positionX, positionY, width, height }
-    
-    if (!Array.isArray(widgets)) {
-      return res.status(400).json({
-        success: false,
-        error: 'VALIDATION_ERROR',
-        message: 'Widgets deve ser um array',
-      });
-    }
-    
-    // Atualizar cada widget
-    const updates = widgets.map(async (widget) => {
-      return pool.query(
-        `UPDATE dashboard_widgets 
+router.patch(
+  '/dashboards/:dashboardId/widgets/positions',
+  requireAdminOrOwner,
+  async (req, res) => {
+    try {
+      const { dashboardId } = req.params;
+      const { widgets } = req.body; // Array de { id, positionX, positionY, width, height }
+
+      if (!Array.isArray(widgets)) {
+        return res.status(400).json({
+          success: false,
+          error: 'VALIDATION_ERROR',
+          message: 'Widgets deve ser um array',
+        });
+      }
+
+      // Atualizar cada widget
+      const updates = widgets.map(async (widget) => {
+        return pool.query(
+          `UPDATE dashboard_widgets 
          SET position_x = $1, position_y = $2, width = $3, height = $4, updated_at = CURRENT_TIMESTAMP
          WHERE id = $5 AND dashboard_id = $6
          RETURNING *;`,
-        [widget.positionX, widget.positionY, widget.width, widget.height, widget.id, dashboardId]
+          [
+            widget.positionX,
+            widget.positionY,
+            widget.width,
+            widget.height,
+            widget.id,
+            dashboardId,
+          ],
+        );
+      });
+
+      await Promise.all(updates);
+
+      logger.info(
+        `✅ Posições atualizadas para ${widgets.length} widgets do dashboard ${dashboardId}`,
       );
-    });
-    
-    await Promise.all(updates);
-    
-    logger.info(`✅ Posições atualizadas para ${widgets.length} widgets do dashboard ${dashboardId}`);
-    
-    res.json({
-      success: true,
-      message: 'Posições atualizadas com sucesso',
-    });
-  } catch (error) {
-    logger.error('❌ Erro ao atualizar posições:', error);
-    res.status(500).json({
-      success: false,
-      error: 'POSITIONS_UPDATE_ERROR',
-      message: 'Erro ao atualizar posições',
-    });
-  }
-});
+
+      res.json({
+        success: true,
+        message: 'Posições atualizadas com sucesso',
+      });
+    } catch (error) {
+      logger.error('❌ Erro ao atualizar posições:', error);
+      res.status(500).json({
+        success: false,
+        error: 'POSITIONS_UPDATE_ERROR',
+        message: 'Erro ao atualizar posições',
+      });
+    }
+  },
+);
 
 export default router;
