@@ -113,6 +113,11 @@ const VALID_SQL_OPERATORS = [
  * @param {string} key - Nome do campo (para detectar operadores SQL)
  */
 function sanitizeInput(input, key = null) {
+  // Se for número, booleano, null ou undefined, retorna como está
+  if (typeof input === 'number' || typeof input === 'boolean' || input === null || input === undefined) {
+    return input;
+  }
+  
   if (typeof input === 'string') {
     // Se for um operador SQL válido, NÃO sanitizar
     if (
@@ -165,6 +170,8 @@ function sanitizeInputMiddleware(req, res, next) {
     return obj;
   };
 
+  console.log('🧹 [sanitizeInput] Query antes:', JSON.stringify(req.query));
+  
   if (req.body) {
     req.body = sanitizeObject(req.body);
   }
@@ -174,6 +181,8 @@ function sanitizeInputMiddleware(req, res, next) {
   if (req.params) {
     req.params = sanitizeObject(req.params);
   }
+  
+  console.log('🧹 [sanitizeInput] Query depois:', JSON.stringify(req.query));
 
   next();
 }
@@ -189,11 +198,24 @@ function validateRequired(fields, data) {
   }
 
   fields.forEach((field) => {
-    if (
-      !data[field] ||
-      (typeof data[field] === 'string' && data[field].trim() === '')
-    ) {
+    const value = data[field];
+    
+    // Campo não existe ou é undefined/null
+    if (value === undefined || value === null) {
       errors.push(`Campo '${field}' é obrigatório`);
+      return;
+    }
+    
+    // Se for string, verifica se está vazia
+    if (typeof value === 'string' && value.trim() === '') {
+      errors.push(`Campo '${field}' é obrigatório`);
+      return;
+    }
+    
+    // Se for array, verifica se está vazio
+    if (Array.isArray(value) && value.length === 0) {
+      errors.push(`Campo '${field}' é obrigatório`);
+      return;
     }
   });
   return errors;
@@ -205,9 +227,15 @@ function validateRequired(fields, data) {
 function validateRequiredMiddleware(fields) {
   return (req, res, next) => {
     const data = req.body || req.query || req.params;
+    
+    // Log de debug para diagnóstico
+    console.log('🔍 [validateRequired] Campos obrigatórios:', fields);
+    console.log('🔍 [validateRequired] Dados recebidos:', JSON.stringify(data));
+    
     const errors = validateRequired(fields, data);
 
     if (errors.length > 0) {
+      console.log('❌ [validateRequired] Erros de validação:', errors);
       return res.status(400).json({
         success: false,
         error: 'VALIDATION_ERROR',
@@ -256,9 +284,12 @@ function validateDateFormatMiddleware(dateFields) {
     }
 
     dateFields.forEach((field) => {
-      const error = validateDateFormat(data[field], field);
-      if (error) {
-        errors.push(error);
+      // Só valida se o campo existir (campos opcionais são aceitos)
+      if (data[field]) {
+        const error = validateDateFormat(data[field], field);
+        if (error) {
+          errors.push(error);
+        }
       }
     });
 
