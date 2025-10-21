@@ -21,6 +21,7 @@ import companyRoutes from './routes/company.routes.js';
 import franchiseRoutes from './routes/franchise.routes.js';
 import utilsRoutes from './routes/utils.routes.js';
 import faturamentoRoutes from './routes/faturamento.routes.js';
+import widgetsRoutes from './routes/widgets.routes.js';
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -115,6 +116,7 @@ app.use('/api/company', companyRoutes); // Empresas e lojas
 app.use('/api/franchise', franchiseRoutes); // Franquias
 app.use('/api/utils', utilsRoutes); // Utilitários e autocomplete
 app.use('/api/faturamento', faturamentoRoutes); // Faturamento das lojas
+app.use('/api/widgets', widgetsRoutes); // Widgets e dashboards (views e queries)
 
 // =============================================================================
 // ROTAS DE COMPATIBILIDADE (MANTER TEMPORARIAMENTE)
