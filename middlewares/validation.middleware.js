@@ -85,13 +85,46 @@ function sanitizeIdentifier(identifier) {
 }
 
 /**
- * Sanitiza entrada de dados para prevenir injeção de código
+ * Lista de operadores SQL válidos que contêm < ou >
  */
-function sanitizeInput(input) {
+const VALID_SQL_OPERATORS = [
+  '>',
+  '<',
+  '>=',
+  '<=',
+  '<>',
+  '!=',
+  '=',
+  'LIKE',
+  'ILIKE',
+  'NOT LIKE',
+  'NOT ILIKE',
+  'IN',
+  'NOT IN',
+  'BETWEEN',
+  'NOT BETWEEN',
+  'IS NULL',
+  'IS NOT NULL',
+];
+
+/**
+ * Sanitiza entrada de dados para prevenir injeção de código
+ * @param {*} input - Valor a ser sanitizado
+ * @param {string} key - Nome do campo (para detectar operadores SQL)
+ */
+function sanitizeInput(input, key = null) {
   if (typeof input === 'string') {
-    // Remove caracteres potencialmente perigosos
+    // Se for um operador SQL válido, NÃO sanitizar
+    if (
+      key === 'operator' &&
+      VALID_SQL_OPERATORS.includes(input.trim().toUpperCase())
+    ) {
+      return input.trim();
+    }
+
+    // Para outros campos, remove caracteres potencialmente perigosos
     return input
-      .replace(/[<>]/g, '') // Remove < e >
+      .replace(/[<>]/g, '') // Remove < e > (exceto em operadores)
       .replace(/javascript:/gi, '') // Remove javascript:
       .replace(/on\w+=/gi, '') // Remove event handlers
       .trim();
@@ -101,19 +134,31 @@ function sanitizeInput(input) {
 
 /**
  * Middleware para sanitizar dados de entrada
+ * Preserva operadores SQL válidos no campo 'operator'
  */
 function sanitizeInputMiddleware(req, res, next) {
-  const sanitizeObject = (obj) => {
+  const sanitizeObject = (obj, parentKey = null) => {
     if (typeof obj === 'string') {
-      return sanitizeInput(obj);
+      const original = obj;
+      const sanitized = sanitizeInput(obj, parentKey);
+      // Log quando operador é preservado
+      if (parentKey === 'operator' && original !== sanitized) {
+        console.log(
+          `🔧 [sanitizeInput] Operador "${original}" → "${sanitized}"`,
+        );
+      } else if (parentKey === 'operator') {
+        console.log(`✅ [sanitizeInput] Operador "${original}" PRESERVADO`);
+      }
+      return sanitized;
     }
     if (Array.isArray(obj)) {
-      return obj.map(sanitizeObject);
+      return obj.map((item) => sanitizeObject(item, parentKey));
     }
     if (obj && typeof obj === 'object') {
       const sanitized = {};
       for (const [key, value] of Object.entries(obj)) {
-        sanitized[key] = sanitizeObject(value);
+        // Passa o nome da chave para preservar operadores SQL
+        sanitized[key] = sanitizeObject(value, key);
       }
       return sanitized;
     }
@@ -142,9 +187,12 @@ function validateRequired(fields, data) {
     errors.push('Dados não fornecidos');
     return errors;
   }
-  
-  fields.forEach(field => {
-    if (!data[field] || (typeof data[field] === 'string' && data[field].trim() === '')) {
+
+  fields.forEach((field) => {
+    if (
+      !data[field] ||
+      (typeof data[field] === 'string' && data[field].trim() === '')
+    ) {
       errors.push(`Campo '${field}' é obrigatório`);
     }
   });
@@ -158,16 +206,16 @@ function validateRequiredMiddleware(fields) {
   return (req, res, next) => {
     const data = req.body || req.query || req.params;
     const errors = validateRequired(fields, data);
-    
+
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
         error: 'VALIDATION_ERROR',
         message: 'Campos obrigatórios não fornecidos',
-        errors: errors
+        errors: errors,
       });
     }
-    
+
     next();
   };
 }
@@ -177,17 +225,17 @@ function validateRequiredMiddleware(fields) {
  */
 function validateDateFormat(dateString, fieldName = 'data') {
   if (!dateString) return null;
-  
+
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!dateRegex.test(dateString)) {
     return `Campo '${fieldName}' deve estar no formato YYYY-MM-DD`;
   }
-  
+
   const date = new Date(dateString);
   if (isNaN(date.getTime())) {
     return `Campo '${fieldName}' contém uma data inválida`;
   }
-  
+
   return null;
 }
 
@@ -198,31 +246,31 @@ function validateDateFormatMiddleware(dateFields) {
   return (req, res, next) => {
     const data = req.body || req.query || req.params;
     const errors = [];
-    
+
     if (!data) {
       return res.status(400).json({
         success: false,
         error: 'VALIDATION_ERROR',
-        message: 'Dados não fornecidos'
+        message: 'Dados não fornecidos',
       });
     }
-    
-    dateFields.forEach(field => {
+
+    dateFields.forEach((field) => {
       const error = validateDateFormat(data[field], field);
       if (error) {
         errors.push(error);
       }
     });
-    
+
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
         error: 'VALIDATION_ERROR',
         message: 'Formato de data inválido',
-        errors: errors
+        errors: errors,
       });
     }
-    
+
     next();
   };
 }
@@ -232,21 +280,21 @@ function validateDateFormatMiddleware(dateFields) {
  */
 function validatePagination(page, limit) {
   const errors = [];
-  
+
   if (page !== undefined) {
     const pageNum = parseInt(page);
     if (isNaN(pageNum) || pageNum < 1) {
       errors.push('Parâmetro "page" deve ser um número maior que 0');
     }
   }
-  
+
   if (limit !== undefined) {
     const limitNum = parseInt(limit);
     if (isNaN(limitNum) || limitNum < 1 || limitNum > 1000) {
       errors.push('Parâmetro "limit" deve ser um número entre 1 e 1000');
     }
   }
-  
+
   return errors;
 }
 
@@ -627,7 +675,7 @@ export {
   validatePagination,
   getSafeOperator,
   buildWhereClause,
-  buildSafeQuery
+  buildSafeQuery,
 };
 
 export default router;
