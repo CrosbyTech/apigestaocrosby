@@ -8,7 +8,7 @@ export const validateRequired = (requiredFields) => {
     const data = { ...req.body, ...req.query, ...req.params };
     const missingFields = [];
 
-    requiredFields.forEach(field => {
+    requiredFields.forEach((field) => {
       if (!data[field] || data[field] === '') {
         missingFields.push(field);
       }
@@ -18,7 +18,7 @@ export const validateRequired = (requiredFields) => {
       return res.status(400).json({
         message: 'Parâmetros obrigatórios não fornecidos',
         missingFields,
-        error: 'VALIDATION_ERROR'
+        error: 'VALIDATION_ERROR',
       });
     }
 
@@ -33,7 +33,7 @@ export const validateDateFormat = (dateFields) => {
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     const invalidDates = [];
 
-    dateFields.forEach(field => {
+    dateFields.forEach((field) => {
       if (data[field] && !dateRegex.test(data[field])) {
         invalidDates.push(field);
       }
@@ -43,7 +43,7 @@ export const validateDateFormat = (dateFields) => {
       return res.status(400).json({
         message: 'Formato de data inválido. Use YYYY-MM-DD',
         invalidFields: invalidDates,
-        error: 'VALIDATION_ERROR'
+        error: 'VALIDATION_ERROR',
       });
     }
 
@@ -72,9 +72,12 @@ export const validateTypes = (fieldTypes) => {
             }
             break;
           case 'array':
-            if (!Array.isArray(data[field]) && typeof data[field] === 'string') {
+            if (
+              !Array.isArray(data[field]) &&
+              typeof data[field] === 'string'
+            ) {
               // Tentar converter string separada por vírgula em array
-              data[field] = data[field].split(',').map(item => item.trim());
+              data[field] = data[field].split(',').map((item) => item.trim());
             }
             break;
         }
@@ -85,7 +88,7 @@ export const validateTypes = (fieldTypes) => {
       return res.status(400).json({
         message: 'Erro de validação de tipos',
         errors,
-        error: 'VALIDATION_ERROR'
+        error: 'VALIDATION_ERROR',
       });
     }
 
@@ -97,15 +100,17 @@ export const validateTypes = (fieldTypes) => {
 export const sanitizeInput = (req, res, next) => {
   const sanitize = (obj) => {
     if (typeof obj === 'string') {
-      // Remove caracteres perigosos para SQL
-      return obj.replace(/[<>'"]/g, '');
+      // Remove apenas aspas simples e duplas
+      // Mantém < e > pois são usados como operadores SQL válidos
+      // E usamos prepared statements que protegem contra SQL injection
+      return obj.replace(/['"]/g, '');
     }
     if (Array.isArray(obj)) {
       return obj.map(sanitize);
     }
     if (typeof obj === 'object' && obj !== null) {
       const sanitized = {};
-      Object.keys(obj).forEach(key => {
+      Object.keys(obj).forEach((key) => {
         sanitized[key] = sanitize(obj[key]);
       });
       return sanitized;
@@ -129,7 +134,7 @@ export const validatePagination = (req, res, next) => {
     if (isNaN(limitNum) || limitNum < 1 || limitNum > 100000000) {
       return res.status(400).json({
         message: 'Parâmetro limit deve ser um número entre 1 e 100000000',
-        error: 'VALIDATION_ERROR'
+        error: 'VALIDATION_ERROR',
       });
     }
   }
@@ -139,7 +144,7 @@ export const validatePagination = (req, res, next) => {
     if (isNaN(offsetNum) || offsetNum < 0) {
       return res.status(400).json({
         message: 'Parâmetro offset deve ser um número maior ou igual a 0',
-        error: 'VALIDATION_ERROR'
+        error: 'VALIDATION_ERROR',
       });
     }
   }
