@@ -18,7 +18,7 @@ router.get('/views', async (req, res) => {
       FROM information_schema.tables 
       WHERE table_schema = 'public' 
       AND table_type IN ('VIEW', 'BASE TABLE')
-      AND table_name LIKE 'vw_%' OR table_name LIKE 'view_%'
+      AND (table_name LIKE 'vw_%' OR table_name LIKE 'view_%')
       ORDER BY table_name;
     `;
 
