@@ -152,16 +152,11 @@ function buildWhereClause(conditions, startParamIndex = 1) {
       }
 
       if (val1 !== undefined && val2 !== undefined) {
-        console.log(
-          `🔍 [BETWEEN] Coluna: ${column}, Val1: ${val1}, Val2: ${val2}, ParamIndex: ${paramIndex}`,
-        );
         clauses.push(
           `${column} ${operator} $${paramIndex} AND $${paramIndex + 1}`,
         );
         values.push(val1, val2);
         paramIndex += 2;
-      } else {
-        console.log(`⚠️ [BETWEEN] IGNORADO - Val1: ${val1}, Val2: ${val2}`);
       }
     } else if (operator.includes('LIKE')) {
       // Para LIKE, adicionar % se necessário
@@ -307,12 +302,6 @@ router.post('/execute', async (req, res) => {
 
     logger.info('📝 Query SQL gerada:', query);
     logger.info('📊 Valores:', values);
-    logger.info('🔍 Query com valores substituídos (DEBUG):');
-    let debugQuery = query;
-    values.forEach((val, idx) => {
-      debugQuery = debugQuery.replace(`$${idx + 1}`, `'${val}'`);
-    });
-    logger.info(debugQuery);
 
     // Executar query
     const startTime = Date.now();
@@ -434,7 +423,7 @@ router.post('/preview', async (req, res) => {
       errorMessage = 'Coluna não encontrada';
       errorCode = 'COLUMN_NOT_FOUND';
     } else if (error.code === '42601') {
-      errorMessage = 'Erro de sintaxes SQL';
+      errorMessage = 'Erro de sintaxe SQL';
       errorCode = 'SYNTAX_ERROR';
     }
 

@@ -49,6 +49,7 @@ router.get('/tables', async (req, res) => {
       success: true,
       data: {
         tables: result.rows.map((t) => ({
+          table_name: t.name, // Frontend espera 'table_name'
           name: t.name,
           fullName: `${t.schema}.${t.name}`,
           schema: t.schema,

@@ -1,22 +1,23 @@
-import express from "express";
+import express from 'express';
 import pool, {
   checkConnectionHealth,
-} from "../config/database.js";
+  executeQueryWithRetry,
+} from '../config/database.js';
 import {
   validateRequired,
   validateDateFormat,
   validatePagination,
   sanitizeInput,
-} from "../middlewares/validation.middleware.js";
+} from '../middlewares/validation.middleware.js';
 import {
   asyncHandler,
   successResponse,
   errorResponse,
-} from "../utils/errorHandler.js";
-import multer from "multer";
-import { BankReturnParser } from "../utils/bankReturnParser.js";
-import fs from "fs";
-import path from "path";
+} from '../utils/errorHandler.js';
+import multer from 'multer';
+import { BankReturnParser } from '../utils/bankReturnParser.js';
+import fs from 'fs';
+import path from 'path';
 
 const router = express.Router();
 
@@ -26,36 +27,36 @@ const router = express.Router();
  * @access Public
  */
 router.get(
-  "/health",
+  '/health',
   asyncHandler(async (req, res) => {
     const health = await checkConnectionHealth();
 
     if (health.healthy) {
-      successResponse(res, health, "Conexão com banco de dados saudável");
+      successResponse(res, health, 'Conexão com banco de dados saudável');
     } else {
       errorResponse(
         res,
-        "Problemas na conexão com banco de dados",
+        'Problemas na conexão com banco de dados',
         503,
-        "DB_CONNECTION_ERROR",
-        health
+        'DB_CONNECTION_ERROR',
+        health,
       );
     }
-  })
+  }),
 );
 
 // Configuração do multer para upload de arquivos
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = "./uploads";
+    const uploadDir = './uploads';
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, file.fieldname + "-" + uniqueSuffix + ".RET");
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + '.RET');
   },
 });
 
@@ -64,10 +65,10 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     // Aceitar arquivos .RET (maiúsculo e minúsculo) e arquivos de texto
     const fileName = file.originalname.toLowerCase();
-    if (fileName.endsWith(".ret") || file.mimetype === "text/plain") {
+    if (fileName.endsWith('.ret') || file.mimetype === 'text/plain') {
       cb(null, true);
     } else {
-      cb(new Error("Apenas arquivos .RET são permitidos"), false);
+      cb(new Error('Apenas arquivos .RET são permitidos'), false);
     }
   },
   // Removidos os limites de tamanho de arquivo
@@ -79,14 +80,14 @@ const uploadMultiple = multer({
   fileFilter: (req, file, cb) => {
     // Aceitar arquivos .RET (maiúsculo e minúsculo) e arquivos de texto
     const fileName = file.originalname.toLowerCase();
-    if (fileName.endsWith(".ret") || file.mimetype === "text/plain") {
+    if (fileName.endsWith('.ret') || file.mimetype === 'text/plain') {
       cb(null, true);
     } else {
-      cb(new Error("Apenas arquivos .RET são permitidos"), false);
+      cb(new Error('Apenas arquivos .RET são permitidos'), false);
     }
   },
   // Removidos os limites de tamanho e quantidade de arquivos
-}).array("files"); // Campo 'files' sem limite de quantidade
+}).array('files'); // Campo 'files' sem limite de quantidade
 
 /**
  * @route GET /financial/extrato
@@ -95,7 +96,7 @@ const uploadMultiple = multer({
  * @query {cd_empresa, nr_ctapes, dt_movim_ini, dt_movim_fim, limit, offset}
  */
 router.get(
-  "/extrato",
+  '/extrato',
   sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
@@ -103,7 +104,7 @@ router.get(
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    let baseQuery = " FROM fcc_extratbco fe WHERE 1=1";
+    let baseQuery = ' FROM fcc_extratbco fe WHERE 1=1';
     const params = [];
     let idx = 1;
 
@@ -118,7 +119,7 @@ router.get(
         const nr_ctapes_num = nr_ctapes.map(Number);
         baseQuery += ` AND fe.nr_ctapes IN (${nr_ctapes_num
           .map(() => `$${idx++}`)
-          .join(",")})`;
+          .join(',')})`;
         params.push(...nr_ctapes_num);
       } else {
         baseQuery += ` AND fe.nr_ctapes = $${idx++}`;
@@ -162,9 +163,9 @@ router.get(
         hasMore: offset + limit < total,
         data: rows,
       },
-      "Extrato bancário obtido com sucesso"
+      'Extrato bancário obtido com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -174,7 +175,7 @@ router.get(
  * @query {nr_ctapes, dt_movim_ini, dt_movim_fim, limit, offset}
  */
 router.get(
-  "/extrato-totvs",
+  '/extrato-totvs',
   sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
@@ -182,8 +183,8 @@ router.get(
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    let baseQuery = " FROM fcc_mov fm WHERE fm.in_estorno = $1";
-    const params = ["F"]; // Filtro fixo para não estornados
+    let baseQuery = ' FROM fcc_mov fm WHERE fm.in_estorno = $1';
+    const params = ['F']; // Filtro fixo para não estornados
     let idx = 2;
 
     if (nr_ctapes) {
@@ -191,7 +192,7 @@ router.get(
       if (contas.length > 1) {
         baseQuery += ` AND fm.nr_ctapes IN (${contas
           .map(() => `$${idx++}`)
-          .join(",")})`;
+          .join(',')})`;
         params.push(...contas);
       } else {
         baseQuery += ` AND fm.nr_ctapes = $${idx++}`;
@@ -231,9 +232,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Extrato TOTVS obtido com sucesso"
+      'Extrato TOTVS obtido com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -243,17 +244,17 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/contas-pagar",
+  '/contas-pagar',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
     // Otimização baseada no número de empresas e período
     const isHeavyQuery =
@@ -329,12 +330,12 @@ router.get(
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -348,7 +349,7 @@ router.get(
         acc.totalDesconto += parseFloat(row.vl_desconto || 0);
         return acc;
       },
-      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 }
+      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 },
     );
 
     successResponse(
@@ -364,15 +365,15 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
-          limiteAplicado: "sem limite",
+          limiteAplicado: 'sem limite',
         },
         data: rows,
       },
-      `Contas a pagar obtidas com sucesso (${queryType})`
+      `Contas a pagar obtidas com sucesso (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -382,17 +383,17 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/contas-pagar-emissao",
+  '/contas-pagar-emissao',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
     // Otimização baseada no número de empresas e período
     const isHeavyQuery =
@@ -524,12 +525,12 @@ router.get(
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Contas-pagar-emissao: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Contas-pagar-emissao: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -543,7 +544,7 @@ router.get(
         acc.totalDesconto += parseFloat(row.vl_desconto || 0);
         return acc;
       },
-      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 }
+      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 },
     );
 
     successResponse(
@@ -559,15 +560,15 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
-          limiteAplicado: "sem limite",
+          limiteAplicado: 'sem limite',
         },
         data: rows,
       },
-      `Contas a pagar por data de emissão obtidas com sucesso (${queryType})`
+      `Contas a pagar por data de emissão obtidas com sucesso (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -577,17 +578,17 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/fluxocaixa-saida",
+  '/fluxocaixa-saida',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
     let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(",");
+    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
     // Otimização baseada no número de empresas e período
     const isHeavyQuery =
@@ -660,16 +661,16 @@ router.get(
       WHERE fd.dt_liq BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
       ORDER BY fd.dt_liq DESC
-      ${isHeavyQuery ? "LIMIT 100000" : ""}
+      ${isHeavyQuery ? 'LIMIT 100000' : ''}
     `;
 
     const queryType = isVeryHeavyQuery
-      ? "muito-pesada"
+      ? 'muito-pesada'
       : isHeavyQuery
-      ? "pesada"
-      : "completa";
+      ? 'pesada'
+      : 'completa';
     console.log(
-      `🔍 Fluxocaixa-saida: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`
+      `🔍 Fluxocaixa-saida: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
     );
 
     const { rows } = await pool.query(query, params);
@@ -683,7 +684,7 @@ router.get(
         acc.totalDesconto += parseFloat(row.vl_desconto || 0);
         return acc;
       },
-      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 }
+      { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 },
     );
 
     successResponse(
@@ -699,19 +700,19 @@ router.get(
           isHeavyQuery,
           isVeryHeavyQuery,
           diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24)
+            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
           ),
           limiteAplicado: isVeryHeavyQuery
             ? 50000
             : isHeavyQuery
             ? 100000
-            : "sem limite",
+            : 'sem limite',
         },
         data: rows,
       },
-      `Fluxo de caixa de saída obtido com sucesso (${queryType})`
+      `Fluxo de caixa de saída obtido com sucesso (${queryType})`,
     );
-  })
+  }),
 );
 
 /**
@@ -721,9 +722,9 @@ router.get(
  * @query {cd_ccusto[]} - Array de códigos de centros de custo
  */
 router.get(
-  "/centrocusto",
+  '/centrocusto',
   sanitizeInput,
-  validateRequired(["cd_ccusto"]),
+  validateRequired(['cd_ccusto']),
   asyncHandler(async (req, res) => {
     const { cd_ccusto } = req.query;
 
@@ -732,15 +733,15 @@ router.get(
 
     // Remover valores vazios ou nulos
     centrosCusto = centrosCusto.filter(
-      (c) => c && c !== "" && c !== "null" && c !== "undefined"
+      (c) => c && c !== '' && c !== 'null' && c !== 'undefined',
     );
 
     if (centrosCusto.length === 0) {
       return errorResponse(
         res,
-        "Pelo menos um código de centro de custo deve ser fornecido",
+        'Pelo menos um código de centro de custo deve ser fornecido',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
@@ -748,7 +749,7 @@ router.get(
     let params = [...centrosCusto];
     let ccustoPlaceholders = centrosCusto
       .map((_, idx) => `$${idx + 1}`)
-      .join(",");
+      .join(',');
 
     // Query simples para buscar descrições dos centros de custo
     const query = `
@@ -761,7 +762,7 @@ router.get(
     `;
 
     console.log(
-      `🔍 Centro-custo: buscando ${centrosCusto.length} centros de custo`
+      `🔍 Centro-custo: buscando ${centrosCusto.length} centros de custo`,
     );
 
     try {
@@ -774,13 +775,13 @@ router.get(
           centros_custo_encontrados: rows.length,
           data: rows,
         },
-        "Descrições de centros de custo obtidas com sucesso"
+        'Descrições de centros de custo obtidas com sucesso',
       );
     } catch (error) {
-      console.error("❌ Erro na query de centros de custo:", error);
+      console.error('❌ Erro na query de centros de custo:', error);
       throw error;
     }
-  })
+  }),
 );
 
 /**
@@ -790,9 +791,9 @@ router.get(
  * @query {cd_despesaitem[]} - Array de códigos de itens de despesa
  */
 router.get(
-  "/despesa",
+  '/despesa',
   sanitizeInput,
-  validateRequired(["cd_despesaitem"]),
+  validateRequired(['cd_despesaitem']),
   asyncHandler(async (req, res) => {
     const { cd_despesaitem } = req.query;
 
@@ -803,21 +804,21 @@ router.get(
 
     // Remover valores vazios ou nulos
     despesas = despesas.filter(
-      (d) => d && d !== "" && d !== "null" && d !== "undefined"
+      (d) => d && d !== '' && d !== 'null' && d !== 'undefined',
     );
 
     if (despesas.length === 0) {
       return errorResponse(
         res,
-        "Pelo menos um código de item de despesa deve ser fornecido",
+        'Pelo menos um código de item de despesa deve ser fornecido',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     // Criar placeholders para a query
     let params = [...despesas];
-    let despesaPlaceholders = despesas.map((_, idx) => `$${idx + 1}`).join(",");
+    let despesaPlaceholders = despesas.map((_, idx) => `$${idx + 1}`).join(',');
 
     // Query simples para buscar descrições dos itens de despesa
     const query = `
@@ -841,13 +842,13 @@ router.get(
           despesas_encontradas: rows.length,
           data: rows,
         },
-        "Descrições de itens de despesa obtidas com sucesso"
+        'Descrições de itens de despesa obtidas com sucesso',
       );
     } catch (error) {
-      console.error("❌ Erro na query de itens de despesa:", error);
+      console.error('❌ Erro na query de itens de despesa:', error);
       throw error;
     }
-  })
+  }),
 );
 
 /**
@@ -857,9 +858,9 @@ router.get(
  * @query {cd_fornecedor[]} - Array de códigos de fornecedores
  */
 router.get(
-  "/fornecedor",
+  '/fornecedor',
   sanitizeInput,
-  validateRequired(["cd_fornecedor"]),
+  validateRequired(['cd_fornecedor']),
   asyncHandler(async (req, res) => {
     const { cd_fornecedor } = req.query;
 
@@ -870,15 +871,15 @@ router.get(
 
     // Remover valores vazios ou nulos
     fornecedores = fornecedores.filter(
-      (f) => f && f !== "" && f !== "null" && f !== "undefined"
+      (f) => f && f !== '' && f !== 'null' && f !== 'undefined',
     );
 
     if (fornecedores.length === 0) {
       return errorResponse(
         res,
-        "Pelo menos um código de fornecedor deve ser fornecido",
+        'Pelo menos um código de fornecedor deve ser fornecido',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
@@ -886,7 +887,7 @@ router.get(
     let params = [...fornecedores];
     let fornecedorPlaceholders = fornecedores
       .map((_, idx) => `$${idx + 1}`)
-      .join(",");
+      .join(',');
 
     // Query simples para buscar nomes dos fornecedores
     const query = `
@@ -910,13 +911,13 @@ router.get(
           fornecedores_encontrados: rows.length,
           data: rows,
         },
-        "Nomes de fornecedores obtidos com sucesso"
+        'Nomes de fornecedores obtidos com sucesso',
       );
     } catch (error) {
-      console.error("❌ Erro na query de fornecedores:", error);
+      console.error('❌ Erro na query de fornecedores:', error);
       throw error;
     }
-  })
+  }),
 );
 
 /**
@@ -926,10 +927,10 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/contas-receber",
+  '/contas-receber',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -997,9 +998,9 @@ router.get(
         filtros: { dt_inicio, dt_fim, cd_empresa },
         data: resultado.rows,
       },
-      "Contas a receber obtidas com sucesso"
+      'Contas a receber obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1009,10 +1010,10 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/contas-receberemiss",
+  '/contas-receberemiss',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1080,9 +1081,9 @@ router.get(
         filtros: { dt_inicio, dt_fim, cd_empresa },
         data: resultado.rows,
       },
-      "Contas a receber por emissão obtidas com sucesso"
+      'Contas a receber por emissão obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1092,10 +1093,10 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/fluxocaixa-entradas",
+  '/fluxocaixa-entradas',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1163,9 +1164,9 @@ router.get(
         filtros: { dt_inicio, dt_fim, cd_empresa },
         data: resultado.rows,
       },
-      "Fluxo de caixa de entradas obtido com sucesso"
+      'Fluxo de caixa de entradas obtido com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1175,10 +1176,10 @@ router.get(
  * @query {dt_inicio, dt_fim, dt_vencimento_ini, limit, offset}
  */
 router.get(
-  "/inadimplentes-multimarcas",
+  '/inadimplentes-multimarcas',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
-  validateDateFormat(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'dt_vencimento_ini']),
+  validateDateFormat(['dt_inicio', 'dt_fim', 'dt_vencimento_ini']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, dt_vencimento_ini } = req.query;
@@ -1223,7 +1224,6 @@ router.get(
         AND vff.dt_vencimento > $3
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
-        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
@@ -1242,7 +1242,6 @@ router.get(
         AND vff.dt_vencimento > $3
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
-        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
@@ -1267,11 +1266,10 @@ router.get(
         filtros: { dt_inicio, dt_fim, dt_vencimento_ini },
         data: resultado.rows,
       },
-      "Inadimplentes multimarcas obtidos com sucesso"
+      'Inadimplentes multimarcas obtidos com sucesso',
     );
-  })
+  }),
 );
-
 
 /**
  * @route GET /financial/inadimplentes-multimarcas
@@ -1280,29 +1278,15 @@ router.get(
  * @query {dt_inicio, dt_fim, dt_vencimento_ini, limit, offset}
  */
 router.get(
-  "/inadimplentes-revenda",
+  '/inadimplentes-revenda',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
-  validateDateFormat(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'dt_vencimento_ini']),
+  validateDateFormat(['dt_inicio', 'dt_fim', 'dt_vencimento_ini']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, dt_vencimento_ini } = req.query;
-    const limit = parseInt(req.query.limit, 10) || 10000; // Reduzido de 50M para 10K
+    const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
-
-    // Validação adicional para evitar períodos muito longos
-    const inicioDate = new Date(dt_inicio);
-    const fimDate = new Date(dt_fim);
-    const diffDays = (fimDate - inicioDate) / (1000 * 60 * 60 * 24);
-    
-    if (diffDays > 365) {
-      return errorResponse(
-        res,
-        "Período muito longo. Máximo permitido: 365 dias",
-        400,
-        "PERIOD_TOO_LONG"
-      );
-    }
 
     const query = `
       SELECT
@@ -1342,7 +1326,6 @@ router.get(
         AND vff.dt_vencimento > $3
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
-        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
@@ -1363,8 +1346,8 @@ router.get(
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
         AND (
-          (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
-          OR (vpp.cd_tipoclas = 7 AND vpp.cd_classificacao::integer = 1)
+          (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
+          OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
         )
     `;
 
@@ -1385,9 +1368,9 @@ router.get(
         filtros: { dt_inicio, dt_fim, dt_vencimento_ini },
         data: resultado.rows,
       },
-      "Inadimplentes revenda obtidos com sucesso"
+      'Inadimplentes revenda obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1397,10 +1380,10 @@ router.get(
  * @query {dt_inicio, dt_fim, limit, offset}
  */
 router.get(
-  "/inadimplentes-franquias",
+  '/inadimplentes-franquias',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim } = req.query;
@@ -1447,7 +1430,6 @@ router.get(
         AND vff.dt_vencimento < CURRENT_DATE
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
-        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
       GROUP BY
@@ -1495,7 +1477,6 @@ router.get(
         AND vff.dt_vencimento < CURRENT_DATE
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
-        AND vff.cd_empresa < 5999
         AND vff.vl_pago = 0
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
     `;
@@ -1517,9 +1498,9 @@ router.get(
         filtros: { dt_inicio, dt_fim },
         data: resultado.rows,
       },
-      "Inadimplentes de franquias obtidos com sucesso"
+      'Inadimplentes de franquias obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1528,7 +1509,7 @@ router.get(
  * @access Public
  */
 router.get(
-  "/credev-adiantamento",
+  '/credev-adiantamento',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
@@ -1585,9 +1566,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Adiantamentos e crediários obtidos com sucesso"
+      'Adiantamentos e crediários obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1596,7 +1577,7 @@ router.get(
  * @access Public
  */
 router.get(
-  "/credev-revenda",
+  '/credev-revenda',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
@@ -1655,9 +1636,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Crediários de revenda obtidos com sucesso"
+      'Crediários de revenda obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1666,7 +1647,7 @@ router.get(
  * @access Public
  */
 router.get(
-  "/credev-varejo",
+  '/credev-varejo',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
@@ -1728,9 +1709,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Crediários de varejo obtidos com sucesso"
+      'Crediários de varejo obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1739,7 +1720,7 @@ router.get(
  * @access Public
  */
 router.get(
-  "/credev-mtm",
+  '/credev-mtm',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
@@ -1798,9 +1779,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Crediários de MTM obtidos com sucesso"
+      'Crediários de MTM obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1810,10 +1791,10 @@ router.get(
  * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
  */
 router.get(
-  "/nfmanifestacao",
+  '/nfmanifestacao',
   sanitizeInput,
-  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1822,7 +1803,7 @@ router.get(
 
     // Construir query dinamicamente para suportar múltiplas empresas
     let baseQuery =
-      " FROM fis_nfmanifestacao fn WHERE fn.dt_emissao BETWEEN $1 AND $2";
+      ' FROM fis_nfmanifestacao fn WHERE fn.dt_emissao BETWEEN $1 AND $2';
     const params = [dt_inicio, dt_fim];
     let idx = 3;
 
@@ -1831,7 +1812,7 @@ router.get(
         const cd_empresa_num = cd_empresa.map(Number);
         baseQuery += ` AND fn.cd_empresa IN (${cd_empresa_num
           .map(() => `$${idx++}`)
-          .join(",")})`;
+          .join(',')})`;
         params.push(...cd_empresa_num);
       } else {
         baseQuery += ` AND fn.cd_empresa = $${idx++}`;
@@ -1883,9 +1864,9 @@ router.get(
         filtros: { dt_inicio, dt_fim, cd_empresa },
         data: resultado.rows,
       },
-      "Notas fiscais de manifestação obtidas com sucesso"
+      'Notas fiscais de manifestação obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1895,13 +1876,13 @@ router.get(
  * @query {cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela}
  */
 router.get(
-  "/observacao",
+  '/observacao',
   sanitizeInput,
   validateRequired([
-    "cd_fornecedor",
-    "nr_duplicata",
-    "cd_empresa",
-    "nr_parcela",
+    'cd_fornecedor',
+    'nr_duplicata',
+    'cd_empresa',
+    'nr_parcela',
   ]),
   asyncHandler(async (req, res) => {
     const { cd_fornecedor, nr_duplicata, cd_empresa, nr_parcela } = req.query;
@@ -1935,9 +1916,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Observações obtidas com sucesso"
+      'Observações obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -1947,21 +1928,21 @@ router.get(
  * @body {file} - Arquivo .RET do banco
  */
 router.post(
-  "/upload-retorno",
-  upload.single("file"),
+  '/upload-retorno',
+  upload.single('file'),
   asyncHandler(async (req, res) => {
     if (!req.file) {
       return errorResponse(
         res,
-        "Nenhum arquivo foi enviado",
+        'Nenhum arquivo foi enviado',
         400,
-        "NO_FILE_UPLOADED"
+        'NO_FILE_UPLOADED',
       );
     }
 
     try {
       // Ler o arquivo
-      const fileContent = fs.readFileSync(req.file.path, "utf8");
+      const fileContent = fs.readFileSync(req.file.path, 'utf8');
 
       // Processar o arquivo
       const parser = new BankReturnParser();
@@ -1975,7 +1956,7 @@ router.post(
       // Limpar arquivo temporário
       fs.unlinkSync(req.file.path);
 
-      successResponse(res, result, "Arquivo de retorno processado com sucesso");
+      successResponse(res, result, 'Arquivo de retorno processado com sucesso');
     } catch (error) {
       // Limpar arquivo em caso de erro
       if (req.file && fs.existsSync(req.file.path)) {
@@ -1986,10 +1967,10 @@ router.post(
         res,
         `Erro ao processar arquivo: ${error.message}`,
         400,
-        "FILE_PROCESSING_ERROR"
+        'FILE_PROCESSING_ERROR',
       );
     }
-  })
+  }),
 );
 
 /**
@@ -1999,7 +1980,7 @@ router.post(
  * @body {files[]} - Array de arquivos .RET do banco (quantidade ilimitada)
  */
 router.post(
-  "/upload-retorno-multiplo",
+  '/upload-retorno-multiplo',
   (req, res, next) => {
     uploadMultiple(req, res, (err) => {
       if (err instanceof multer.MulterError) {
@@ -2007,14 +1988,14 @@ router.post(
           res,
           `Erro no upload: ${err.message}`,
           400,
-          "UPLOAD_ERROR"
+          'UPLOAD_ERROR',
         );
       } else if (err) {
         return errorResponse(
           res,
           `Erro no upload: ${err.message}`,
           400,
-          "UPLOAD_ERROR"
+          'UPLOAD_ERROR',
         );
       }
       next();
@@ -2024,9 +2005,9 @@ router.post(
     if (!req.files || req.files.length === 0) {
       return errorResponse(
         res,
-        "Nenhum arquivo foi enviado",
+        'Nenhum arquivo foi enviado',
         400,
-        "NO_FILES_UPLOADED"
+        'NO_FILES_UPLOADED',
       );
     }
 
@@ -2041,7 +2022,7 @@ router.post(
         console.log(`📄 Processando arquivo: ${file.originalname}`);
 
         // Ler o arquivo
-        const fileContent = fs.readFileSync(file.path, "utf8");
+        const fileContent = fs.readFileSync(file.path, 'utf8');
 
         // Processar o arquivo
         const parser = new BankReturnParser();
@@ -2061,7 +2042,7 @@ router.post(
         console.log(`✅ Arquivo processado com sucesso: ${file.originalname}`);
       } catch (error) {
         console.log(
-          `❌ Erro ao processar arquivo ${file.originalname}: ${error.message}`
+          `❌ Erro ao processar arquivo ${file.originalname}: ${error.message}`,
         );
 
         arquivosComErro.push({
@@ -2094,9 +2075,9 @@ router.post(
           sucessos,
           erros,
           saldoTotal: saldoTotal,
-          saldoTotalFormatado: saldoTotal.toLocaleString("pt-BR", {
-            style: "currency",
-            currency: "BRL",
+          saldoTotalFormatado: saldoTotal.toLocaleString('pt-BR', {
+            style: 'currency',
+            currency: 'BRL',
           }),
         },
         arquivosProcessados,
@@ -2112,9 +2093,9 @@ router.post(
           arquivo: result.arquivo,
         })),
       },
-      `Processamento concluído: ${sucessos} sucessos, ${erros} erros`
+      `Processamento concluído: ${sucessos} sucessos, ${erros} erros`,
     );
-  })
+  }),
 );
 
 /**
@@ -2124,10 +2105,10 @@ router.post(
  * @query {nr_ctapes, dt_inicio, dt_fim}
  */
 router.get(
-  "/saldo-conta",
+  '/saldo-conta',
   sanitizeInput,
-  validateRequired(["nr_ctapes", "dt_inicio", "dt_fim"]),
-  validateDateFormat(["dt_inicio", "dt_fim"]),
+  validateRequired(['nr_ctapes', 'dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_inicio, dt_fim } = req.query;
 
@@ -2156,9 +2137,9 @@ router.get(
         saldo: parseFloat(saldo),
         data: rows[0],
       },
-      "Saldo de conta obtido com sucesso"
+      'Saldo de conta obtido com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -2168,9 +2149,9 @@ router.get(
  * @query {cd_pessoa} - Array de códigos de pessoa
  */
 router.get(
-  "/infopessoa",
+  '/infopessoa',
   sanitizeInput,
-  validateRequired(["cd_pessoa"]),
+  validateRequired(['cd_pessoa']),
   asyncHandler(async (req, res) => {
     const { cd_pessoa } = req.query;
 
@@ -2181,16 +2162,16 @@ router.get(
     if (codigosPessoa.length === 0) {
       return errorResponse(
         res,
-        "Pelo menos um código de pessoa deve ser fornecido",
+        'Pelo menos um código de pessoa deve ser fornecido',
         400,
-        "MISSING_PERSON_CODE"
+        'MISSING_PERSON_CODE',
       );
     }
 
     // Construir placeholders para a query IN
     const placeholders = codigosPessoa
       .map((_, index) => `$${index + 1}`)
-      .join(",");
+      .join(',');
 
     const query = `
       SELECT
@@ -2225,9 +2206,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Informações de pessoas obtidas com sucesso"
+      'Informações de pessoas obtidas com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -2237,10 +2218,10 @@ router.get(
  * @query {nr_ctapes, dt_movim_ini, dt_movim_fim}
  */
 router.get(
-  "/auditor-credev",
+  '/auditor-credev',
   sanitizeInput,
-  validateRequired(["nr_ctapes", "dt_movim_ini", "dt_movim_fim"]),
-  validateDateFormat(["dt_movim_ini", "dt_movim_fim"]),
+  validateRequired(['nr_ctapes', 'dt_movim_ini', 'dt_movim_fim']),
+  validateDateFormat(['dt_movim_ini', 'dt_movim_fim']),
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
 
@@ -2280,9 +2261,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Dados de auditoria de crédito e débito obtidos com sucesso"
+      'Dados de auditoria de crédito e débito obtidos com sucesso',
     );
-  })
+  }),
 );
 
 /**
@@ -2292,7 +2273,7 @@ router.get(
  * @query {cd_cliente, nr_fat}
  */
 router.get(
-  "/obsfati",
+  '/obsfati',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const { cd_cliente, nr_fat } = req.query;
@@ -2301,18 +2282,18 @@ router.get(
     if (!cd_cliente) {
       return errorResponse(
         res,
-        "O parâmetro cd_cliente é obrigatório",
+        'O parâmetro cd_cliente é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
     if (!nr_fat) {
       return errorResponse(
         res,
-        "O parâmetro nr_fat é obrigatório",
+        'O parâmetro nr_fat é obrigatório',
         400,
-        "MISSING_PARAMETER"
+        'MISSING_PARAMETER',
       );
     }
 
@@ -2340,9 +2321,9 @@ router.get(
         count: rows.length,
         data: rows,
       },
-      "Observações das faturas obtidas com sucesso"
+      'Observações das faturas obtidas com sucesso',
     );
-  })
+  }),
 );
 
 export default router;
