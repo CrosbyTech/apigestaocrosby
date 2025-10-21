@@ -21,10 +21,6 @@ import companyRoutes from './routes/company.routes.js';
 import franchiseRoutes from './routes/franchise.routes.js';
 import utilsRoutes from './routes/utils.routes.js';
 import faturamentoRoutes from './routes/faturamento.routes.js';
-import queryBuilderRoutes from './routes/querybuilder.routes.js';
-import queryBuilderExecuteRoutes from './routes/querybuilder-execute.routes.js';
-import dashboardRoutes from './routes/dashboard.routes.js';
-import dashboardWidgetsRoutes from './routes/dashboard-widgets.routes.js';
 
 // Carregar variáveis de ambiente
 dotenv.config();
@@ -119,10 +115,6 @@ app.use('/api/company', companyRoutes); // Empresas e lojas
 app.use('/api/franchise', franchiseRoutes); // Franquias
 app.use('/api/utils', utilsRoutes); // Utilitários e autocomplete
 app.use('/api/faturamento', faturamentoRoutes); // Faturamento das lojas
-app.use('/api/querybuilder', queryBuilderRoutes); // Query Builder - Metadados
-app.use('/api/querybuilder', queryBuilderExecuteRoutes); // Query Builder - Execução
-app.use('/api', dashboardRoutes); // Dashboards Personalizados
-app.use('/api', dashboardWidgetsRoutes); // Widgets dos Dashboards
 
 // =============================================================================
 // ROTAS DE COMPATIBILIDADE (MANTER TEMPORARIAMENTE)
@@ -187,32 +179,9 @@ app.get('/api/docs', (req, res) => {
       'GET /api/utils/autocomplete/nm_grupoempresa':
         'Autocomplete de grupos empresa',
     },
-    'Query Builder': {
-      'GET /api/querybuilder/tables':
-        'Lista todas as tabelas disponíveis no banco',
-      'GET /api/querybuilder/tables/:tableName/columns':
-        'Lista colunas de uma tabela específica',
-      'POST /api/querybuilder/execute':
-        'Executa query customizada (JSON: select, from, where, groupBy, orderBy, limit)',
-      'POST /api/querybuilder/preview':
-        'Preview da query (limite 10 registros)',
-    },
-    'Dashboards Personalizados': {
-      'GET /api/my-dashboards': 'Lista dashboards do usuário logado',
-      'GET /api/dashboards/:id': 'Detalhes de um dashboard específico',
-      'GET /api/admin/dashboards': 'Lista todos dashboards (Admin)',
-      'POST /api/admin/dashboards': 'Criar dashboard (Admin)',
-      'PUT /api/admin/dashboards/:id': 'Atualizar dashboard (Admin)',
-      'DELETE /api/admin/dashboards/:id': 'Deletar dashboard (Admin)',
-      'POST /api/admin/dashboards/:id/permissions': 'Adicionar usuário',
-      'GET /api/dashboards/:dashboardId/widgets': 'Lista widgets',
-      'POST /api/dashboards/:dashboardId/widgets': 'Criar widget (Admin)',
-    },
     Nota: {
       Autenticação: 'Sistema de login gerenciado externamente via Supabase',
       Acesso: 'Todas as rotas são públicas - controle de acesso no frontend',
-      'Query Builder': 'Construa queries SQL dinamicamente sem escrever código',
-      'Dashboards': 'Admin/Proprietário criam e atribuem dashboards aos usuários',
     },
   };
 
