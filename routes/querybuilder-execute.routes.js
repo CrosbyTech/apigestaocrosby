@@ -434,7 +434,7 @@ router.post('/preview', async (req, res) => {
       errorMessage = 'Coluna não encontrada';
       errorCode = 'COLUMN_NOT_FOUND';
     } else if (error.code === '42601') {
-      errorMessage = 'Erro de sintaxe SQL';
+      errorMessage = 'Erro de sintaxes SQL';
       errorCode = 'SYNTAX_ERROR';
     }
 
