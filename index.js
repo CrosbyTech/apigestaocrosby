@@ -12,7 +12,7 @@ import { logger } from './utils/errorHandler.js';
 
 // Importar middlewares
 import { errorHandler } from './utils/errorHandler.js';
-import { sanitizeInputMiddleware } from './middlewares/validation.middleware.js';
+import { sanitizeInput } from './middlewares/validation.middleware.js';
 
 // Importar rotas
 import financialRoutes from './routes/financial.routes.js';
@@ -94,7 +94,7 @@ app.use(
 );
 
 // Sanitização global de entrada
-app.use(sanitizeInputMiddleware);
+app.use(sanitizeInput);
 
 // =============================================================================
 // ROTAS DA API

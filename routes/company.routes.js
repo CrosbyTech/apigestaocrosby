@@ -1,6 +1,6 @@
 import express from 'express';
 import pool from '../config/database.js';
-import { validateRequiredMiddleware, validateDateFormatMiddleware, validatePagination, sanitizeInputMiddleware } from '../middlewares/validation.middleware.js';
+import { validateRequired, validateDateFormat, validatePagination, sanitizeInput } from '../middlewares/validation.middleware.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 
 const router = express.Router();
@@ -11,7 +11,7 @@ const router = express.Router();
  * @access Public
  */
 router.get('/empresas',
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
       SELECT cd_empresa, nm_grupoempresa 
@@ -35,7 +35,7 @@ router.get('/empresas',
  * @access Public
  */
 router.get('/grupo-empresas',
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
       SELECT cd_grupoempresa, nm_grupoempresa 
@@ -61,9 +61,9 @@ router.get('/grupo-empresas',
  * @query {cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim}
  */
 router.get('/faturamento-lojas',
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(['cd_grupoempresa_ini', 'cd_grupoempresa_fim', 'dt_inicio', 'dt_fim']),
-  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
+  sanitizeInput,
+  validateRequired(['cd_grupoempresa_ini', 'cd_grupoempresa_fim', 'dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim } = req.query;
 
@@ -196,7 +196,7 @@ router.get('/expedicao',
  * @query {limit, offset}
  */
 router.get('/pcp',
-  sanitizeInputMiddleware,
+  sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 50000000;

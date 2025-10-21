@@ -3,10 +3,10 @@ import pool, {
   checkConnectionHealth,
 } from "../config/database.js";
 import {
-  validateRequiredMiddleware,
-  validateDateFormatMiddleware,
+  validateRequired,
+  validateDateFormat,
   validatePagination,
-  sanitizeInputMiddleware,
+  sanitizeInput,
 } from "../middlewares/validation.middleware.js";
 import {
   asyncHandler,
@@ -96,7 +96,7 @@ const uploadMultiple = multer({
  */
 router.get(
   "/extrato",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
     const { cd_empresa, nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
@@ -175,7 +175,7 @@ router.get(
  */
 router.get(
   "/extrato-totvs",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   validatePagination,
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
@@ -244,9 +244,9 @@ router.get(
  */
 router.get(
   "/contas-pagar",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
@@ -383,9 +383,9 @@ router.get(
  */
 router.get(
   "/contas-pagar-emissao",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
@@ -578,9 +578,9 @@ router.get(
  */
 router.get(
   "/fluxocaixa-saida",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
 
@@ -722,8 +722,8 @@ router.get(
  */
 router.get(
   "/centrocusto",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["cd_ccusto"]),
+  sanitizeInput,
+  validateRequired(["cd_ccusto"]),
   asyncHandler(async (req, res) => {
     const { cd_ccusto } = req.query;
 
@@ -791,8 +791,8 @@ router.get(
  */
 router.get(
   "/despesa",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["cd_despesaitem"]),
+  sanitizeInput,
+  validateRequired(["cd_despesaitem"]),
   asyncHandler(async (req, res) => {
     const { cd_despesaitem } = req.query;
 
@@ -858,8 +858,8 @@ router.get(
  */
 router.get(
   "/fornecedor",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["cd_fornecedor"]),
+  sanitizeInput,
+  validateRequired(["cd_fornecedor"]),
   asyncHandler(async (req, res) => {
     const { cd_fornecedor } = req.query;
 
@@ -927,9 +927,9 @@ router.get(
  */
 router.get(
   "/contas-receber",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1010,9 +1010,9 @@ router.get(
  */
 router.get(
   "/contas-receberemiss",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1093,9 +1093,9 @@ router.get(
  */
 router.get(
   "/fluxocaixa-entradas",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1176,9 +1176,9 @@ router.get(
  */
 router.get(
   "/inadimplentes-multimarcas",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
+  validateDateFormat(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, dt_vencimento_ini } = req.query;
@@ -1281,9 +1281,9 @@ router.get(
  */
 router.get(
   "/inadimplentes-revenda",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
+  validateDateFormat(["dt_inicio", "dt_fim", "dt_vencimento_ini"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, dt_vencimento_ini } = req.query;
@@ -1398,9 +1398,9 @@ router.get(
  */
 router.get(
   "/inadimplentes-franquias",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim } = req.query;
@@ -1529,7 +1529,7 @@ router.get(
  */
 router.get(
   "/credev-adiantamento",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
       select
@@ -1597,7 +1597,7 @@ router.get(
  */
 router.get(
   "/credev-revenda",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
       select
@@ -1667,7 +1667,7 @@ router.get(
  */
 router.get(
   "/credev-varejo",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
       select
@@ -1740,7 +1740,7 @@ router.get(
  */
 router.get(
   "/credev-mtm",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
       select
@@ -1811,9 +1811,9 @@ router.get(
  */
 router.get(
   "/nfmanifestacao",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["dt_inicio", "dt_fim", "cd_empresa"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["dt_inicio", "dt_fim", "cd_empresa"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_empresa } = req.query;
@@ -1896,8 +1896,8 @@ router.get(
  */
 router.get(
   "/observacao",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware([
+  sanitizeInput,
+  validateRequired([
     "cd_fornecedor",
     "nr_duplicata",
     "cd_empresa",
@@ -2125,9 +2125,9 @@ router.post(
  */
 router.get(
   "/saldo-conta",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["nr_ctapes", "dt_inicio", "dt_fim"]),
-  validateDateFormatMiddleware(["dt_inicio", "dt_fim"]),
+  sanitizeInput,
+  validateRequired(["nr_ctapes", "dt_inicio", "dt_fim"]),
+  validateDateFormat(["dt_inicio", "dt_fim"]),
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_inicio, dt_fim } = req.query;
 
@@ -2169,8 +2169,8 @@ router.get(
  */
 router.get(
   "/infopessoa",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["cd_pessoa"]),
+  sanitizeInput,
+  validateRequired(["cd_pessoa"]),
   asyncHandler(async (req, res) => {
     const { cd_pessoa } = req.query;
 
@@ -2238,9 +2238,9 @@ router.get(
  */
 router.get(
   "/auditor-credev",
-  sanitizeInputMiddleware,
-  validateRequiredMiddleware(["nr_ctapes", "dt_movim_ini", "dt_movim_fim"]),
-  validateDateFormatMiddleware(["dt_movim_ini", "dt_movim_fim"]),
+  sanitizeInput,
+  validateRequired(["nr_ctapes", "dt_movim_ini", "dt_movim_fim"]),
+  validateDateFormat(["dt_movim_ini", "dt_movim_fim"]),
   asyncHandler(async (req, res) => {
     const { nr_ctapes, dt_movim_ini, dt_movim_fim } = req.query;
 
@@ -2293,7 +2293,7 @@ router.get(
  */
 router.get(
   "/obsfati",
-  sanitizeInputMiddleware,
+  sanitizeInput,
   asyncHandler(async (req, res) => {
     const { cd_cliente, nr_fat } = req.query;
 

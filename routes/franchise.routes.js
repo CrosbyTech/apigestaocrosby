@@ -1,6 +1,6 @@
 import express from 'express';
 import pool from '../config/database.js';
-import { validateDateFormatMiddleware, sanitizeInputMiddleware } from '../middlewares/validation.middleware.js';
+import { validateDateFormat, sanitizeInput } from '../middlewares/validation.middleware.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 
 const router = express.Router();
@@ -12,8 +12,8 @@ const router = express.Router();
  * @query {cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia[]}
  */
 router.get('/consulta-fatura',
-  sanitizeInputMiddleware,
-  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     let { cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia } = req.query;
     
@@ -112,8 +112,8 @@ router.get('/consulta-fatura',
  * @query {cd_empresa, dt_inicio, dt_fim, nm_fantasia[]}
  */
 router.get('/fundo-propaganda',
-  sanitizeInputMiddleware,
-  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     let { cd_empresa, dt_inicio, dt_fim, nm_fantasia } = req.query;
     let whereConditions = [];
@@ -221,8 +221,8 @@ router.get('/fundo-propaganda',
  * @query {dt_inicio, dt_fim}
  */
 router.get('/franquias-credev',
-  sanitizeInputMiddleware,
-  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_cliente } = req.query;
     let where = [];
