@@ -85,6 +85,76 @@ function sanitizeIdentifier(identifier) {
 }
 
 /**
+ * Sanitiza entrada de dados para prevenir injeção de código
+ */
+function sanitizeInput(input) {
+  if (typeof input === 'string') {
+    // Remove caracteres potencialmente perigosos
+    return input
+      .replace(/[<>]/g, '') // Remove < e >
+      .replace(/javascript:/gi, '') // Remove javascript:
+      .replace(/on\w+=/gi, '') // Remove event handlers
+      .trim();
+  }
+  return input;
+}
+
+/**
+ * Valida se campos obrigatórios estão presentes
+ */
+function validateRequired(fields, data) {
+  const errors = [];
+  fields.forEach(field => {
+    if (!data[field] || (typeof data[field] === 'string' && data[field].trim() === '')) {
+      errors.push(`Campo '${field}' é obrigatório`);
+    }
+  });
+  return errors;
+}
+
+/**
+ * Valida formato de data (YYYY-MM-DD)
+ */
+function validateDateFormat(dateString, fieldName = 'data') {
+  if (!dateString) return null;
+  
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(dateString)) {
+    return `Campo '${fieldName}' deve estar no formato YYYY-MM-DD`;
+  }
+  
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) {
+    return `Campo '${fieldName}' contém uma data inválida`;
+  }
+  
+  return null;
+}
+
+/**
+ * Valida parâmetros de paginação
+ */
+function validatePagination(page, limit) {
+  const errors = [];
+  
+  if (page !== undefined) {
+    const pageNum = parseInt(page);
+    if (isNaN(pageNum) || pageNum < 1) {
+      errors.push('Parâmetro "page" deve ser um número maior que 0');
+    }
+  }
+  
+  if (limit !== undefined) {
+    const limitNum = parseInt(limit);
+    if (isNaN(limitNum) || limitNum < 1 || limitNum > 1000) {
+      errors.push('Parâmetro "limit" deve ser um número entre 1 e 1000');
+    }
+  }
+  
+  return errors;
+}
+
+/**
  * Retorna o operador SQL válido
  */
 function getSafeOperator(operator) {
@@ -447,5 +517,18 @@ router.post('/preview', async (req, res) => {
     });
   }
 });
+
+// Exportar funções de validação e sanitização
+export {
+  validateQueryParams,
+  sanitizeIdentifier,
+  sanitizeInput,
+  validateRequired,
+  validateDateFormat,
+  validatePagination,
+  getSafeOperator,
+  buildWhereClause,
+  buildSafeQuery
+};
 
 export default router;
