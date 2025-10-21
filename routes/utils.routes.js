@@ -2,9 +2,9 @@ import express from 'express';
 import axios from 'axios';
 import pool from '../config/database.js';
 import {
-  sanitizeInput,
-  validateRequired,
-  validateDateFormat,
+  sanitizeInputMiddleware,
+  validateRequiredMiddleware,
+  validateDateFormatMiddleware,
 } from '../middlewares/validation.middleware.js';
 import {
   asyncHandler,
@@ -61,7 +61,7 @@ router.get(
  */
 router.get(
   '/nm-franquia',
-  sanitizeInput,
+  sanitizeInputMiddleware,
   asyncHandler(async (req, res) => {
     let { nr_transacao } = req.query;
 
@@ -131,7 +131,7 @@ router.get(
  */
 router.get(
   '/autocomplete/nm_fantasia',
-  sanitizeInput,
+  sanitizeInputMiddleware,
   asyncHandler(async (req, res) => {
     const { q } = req.query;
 
@@ -167,7 +167,7 @@ router.get(
  */
 router.get(
   '/autocomplete/nm_grupoempresa',
-  sanitizeInput,
+  sanitizeInputMiddleware,
   asyncHandler(async (req, res) => {
     const { q } = req.query;
 
@@ -319,9 +319,9 @@ router.get(
  */
 router.get(
   '/cadastropessoa',
-  sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateRequiredMiddleware(['dt_inicio', 'dt_fim']),
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim } = req.query;
 

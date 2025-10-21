@@ -1,10 +1,10 @@
 import express from 'express';
 import pool from '../config/database.js';
 import {
-  validateRequired,
-  validateDateFormat,
+  validateRequiredMiddleware,
+  validateDateFormatMiddleware,
   validatePagination,
-  sanitizeInput,
+  sanitizeInputMiddleware,
 } from '../middlewares/validation.middleware.js';
 import {
   asyncHandler,
@@ -48,7 +48,7 @@ setInterval(cleanExpiredCache, 10 * 60 * 1000);
  */
 router.get(
   '/transacoes-por-operacao',
-  sanitizeInput,
+  sanitizeInputMiddleware,
   asyncHandler(async (req, res) => {
     const { cd_operacao, dt_inicio, dt_fim, cd_empresa } = req.query;
     if (!cd_operacao) {
@@ -127,7 +127,7 @@ router.get(
  */
 router.get(
   '/transacoes-por-nr',
-  sanitizeInput,
+  sanitizeInputMiddleware,
   asyncHandler(async (req, res) => {
     const { nr_transacao, dt_inicio, dt_fim, cd_empresa } = req.query;
     if (!nr_transacao) {
@@ -193,8 +193,8 @@ router.get(
  */
 router.get(
   '/faturamento',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-07-01',
@@ -338,8 +338,8 @@ router.get(
  */
 router.get(
   '/faturamento-franquia',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-07-01',
@@ -499,8 +499,8 @@ router.get(
  */
 router.get(
   '/faturamento-mtm',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-07-01',
@@ -651,8 +651,8 @@ router.get(
  */
 router.get(
   '/faturamento-revenda',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-06-01',
@@ -817,9 +817,9 @@ router.get(
  */
 router.get(
   '/ranking-vendedores',
-  sanitizeInput,
-  validateRequired(['inicio', 'fim']),
-  validateDateFormat(['inicio', 'fim']),
+  sanitizeInputMiddleware,
+  validateRequiredMiddleware(['inicio', 'fim']),
+  validateDateFormatMiddleware(['inicio', 'fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
@@ -963,9 +963,9 @@ router.get(
  */
 router.get(
   '/ranking-vendedores-simples',
-  sanitizeInput,
-  validateRequired(['inicio', 'fim']),
-  validateDateFormat(['inicio', 'fim']),
+  sanitizeInputMiddleware,
+  validateRequiredMiddleware(['inicio', 'fim']),
+  validateDateFormatMiddleware(['inicio', 'fim']),
   asyncHandler(async (req, res) => {
     const { inicio, fim } = req.query;
 
@@ -1060,8 +1060,8 @@ router.get(
  */
 router.get(
   '/receitaliquida-faturamento',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-07-01',
@@ -1125,8 +1125,8 @@ router.get(
  */
 router.get(
   '/receitaliquida-franquias',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-07-01',
@@ -1202,8 +1202,8 @@ router.get(
  */
 router.get(
   '/receitaliquida-mtm',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-07-01',
@@ -1269,8 +1269,8 @@ router.get(
  */
 router.get(
   '/receitaliquida-revenda',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-06-01',
@@ -1347,8 +1347,8 @@ router.get(
  */
 router.get(
   '/vlimposto',
-  sanitizeInput,
-  validateRequired(['nr_transacao']),
+  sanitizeInputMiddleware,
+  validateRequiredMiddleware(['nr_transacao']),
   asyncHandler(async (req, res) => {
     const { nr_transacao } = req.query;
 
@@ -1458,9 +1458,9 @@ router.get(
  */
 router.get(
   '/cmvtest',
-  sanitizeInput,
-  validateRequired(['dt_inicio', 'dt_fim', 'cd_classificacao']),
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateRequiredMiddleware(['dt_inicio', 'dt_fim', 'cd_classificacao']),
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const { dt_inicio, dt_fim, cd_classificacao } = req.query;
 
@@ -1565,8 +1565,8 @@ router.get(
  */
 router.get(
   '/cmv',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-01-01',
@@ -1745,8 +1745,8 @@ router.get(
  */
 router.get(
   '/cmvvarejo',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-01-01',
@@ -1915,8 +1915,8 @@ router.get(
  */
 router.get(
   '/cmvfranquia',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-01-01',
@@ -2092,8 +2092,8 @@ router.get(
  */
 router.get(
   '/cmvmultimarcas',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-01-01',
@@ -2269,8 +2269,8 @@ router.get(
  */
 router.get(
   '/cmvrevenda',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-01-01',
@@ -2446,8 +2446,8 @@ router.get(
  */
 router.get(
   '/dre-data',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-01-01',
@@ -2698,8 +2698,8 @@ router.get(
  */
 router.get(
   '/auditoria-transacoes',
-  sanitizeInput,
-  validateDateFormat(['dt_inicio', 'dt_fim']),
+  sanitizeInputMiddleware,
+  validateDateFormatMiddleware(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     const {
       dt_inicio = '2025-06-01',

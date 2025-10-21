@@ -1,9 +1,9 @@
 import express from 'express';
 import pool from '../config/database.js';
 import {
-  validateRequired,
-  validateDateFormat,
-  sanitizeInput,
+  validateRequiredMiddleware,
+  validateDateFormatMiddleware,
+  sanitizeInputMiddleware,
 } from '../middlewares/validation.middleware.js';
 import {
   asyncHandler,
@@ -108,8 +108,8 @@ router.get('/impostos-cache/stats', (req, res) => {
 // Endpoint para buscar faturamento do varejo
 router.get(
   '/varejo',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -210,8 +210,8 @@ router.get(
 // Endpoint para buscar faturamento MTM (multimarcas)
 router.get(
   '/mtm',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -326,8 +326,8 @@ router.get(
 // Endpoint para buscar faturamento de franquias
 router.get(
   '/franquias',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -431,8 +431,8 @@ router.get(
 // Endpoint para buscar faturamento de revenda
 router.get(
   '/revenda',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -547,8 +547,8 @@ router.get(
 // Endpoint consolidado para buscar todos os tipos de faturamento
 router.get(
   '/consolidado',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -840,8 +840,8 @@ router.get(
 // Endpoint para buscar faturamento do varejo (view materializada)
 router.get(
   '/fat-varejo',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -893,8 +893,8 @@ router.get(
 // Endpoint para buscar faturamento multimarcas (view materializada)
 router.get(
   '/fat-multimarcas',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -946,8 +946,8 @@ router.get(
 // Endpoint para buscar faturamento revenda (view materializada)
 router.get(
   '/fat-revenda',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -999,8 +999,8 @@ router.get(
 // Endpoint para buscar faturamento franquias (view materializada)
 router.get(
   '/fat-franquias',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -1052,8 +1052,8 @@ router.get(
 // Endpoint para buscar faturamento bazar (view materializada)
 router.get(
   '/fatbazar',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -1103,8 +1103,8 @@ router.get(
 // Endpoint para buscar faturamento sellect (view materializada)
 router.get(
   '/fatsellect',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_empresa } = req.query;
 
@@ -1165,8 +1165,8 @@ router.get(
  */
 router.get(
   '/cmv-varejo',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_grupoempresa } = req.query;
 
@@ -1224,8 +1224,8 @@ router.get(
  */
 router.get(
   '/cmv-multimarcas',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_grupoempresa } = req.query;
 
@@ -1283,8 +1283,8 @@ router.get(
  */
 router.get(
   '/cmv-revenda',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_grupoempresa } = req.query;
 
@@ -1342,8 +1342,8 @@ router.get(
  */
 router.get(
   '/cmv-franquias',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, cd_grupoempresa } = req.query;
 
@@ -1402,8 +1402,8 @@ router.get(
  */
 router.get(
   '/impostos-por-canal',
-  validateRequired(['dataInicio', 'dataFim']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, canal } = req.query;
 
@@ -1664,8 +1664,8 @@ router.get(
  */
 router.get(
   '/impostos-detalhados',
-  validateRequired(['dataInicio', 'dataFim', 'canal']),
-  validateDateFormat(['dataInicio', 'dataFim']),
+  validateRequiredMiddleware(['dataInicio', 'dataFim', 'canal']),
+  validateDateFormatMiddleware(['dataInicio', 'dataFim']),
   asyncHandler(async (req, res) => {
     const { dataInicio, dataFim, canal } = req.query;
 

@@ -100,16 +100,76 @@ function sanitizeInput(input) {
 }
 
 /**
+ * Middleware para sanitizar dados de entrada
+ */
+function sanitizeInputMiddleware(req, res, next) {
+  const sanitizeObject = (obj) => {
+    if (typeof obj === 'string') {
+      return sanitizeInput(obj);
+    }
+    if (Array.isArray(obj)) {
+      return obj.map(sanitizeObject);
+    }
+    if (obj && typeof obj === 'object') {
+      const sanitized = {};
+      for (const [key, value] of Object.entries(obj)) {
+        sanitized[key] = sanitizeObject(value);
+      }
+      return sanitized;
+    }
+    return obj;
+  };
+
+  if (req.body) {
+    req.body = sanitizeObject(req.body);
+  }
+  if (req.query) {
+    req.query = sanitizeObject(req.query);
+  }
+  if (req.params) {
+    req.params = sanitizeObject(req.params);
+  }
+
+  next();
+}
+
+/**
  * Valida se campos obrigatórios estão presentes
  */
 function validateRequired(fields, data) {
   const errors = [];
+  if (!data) {
+    errors.push('Dados não fornecidos');
+    return errors;
+  }
+  
   fields.forEach(field => {
     if (!data[field] || (typeof data[field] === 'string' && data[field].trim() === '')) {
       errors.push(`Campo '${field}' é obrigatório`);
     }
   });
   return errors;
+}
+
+/**
+ * Middleware para validar campos obrigatórios
+ */
+function validateRequiredMiddleware(fields) {
+  return (req, res, next) => {
+    const data = req.body || req.query || req.params;
+    const errors = validateRequired(fields, data);
+    
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'VALIDATION_ERROR',
+        message: 'Campos obrigatórios não fornecidos',
+        errors: errors
+      });
+    }
+    
+    next();
+  };
 }
 
 /**
@@ -129,6 +189,42 @@ function validateDateFormat(dateString, fieldName = 'data') {
   }
   
   return null;
+}
+
+/**
+ * Middleware para validar formato de datas
+ */
+function validateDateFormatMiddleware(dateFields) {
+  return (req, res, next) => {
+    const data = req.body || req.query || req.params;
+    const errors = [];
+    
+    if (!data) {
+      return res.status(400).json({
+        success: false,
+        error: 'VALIDATION_ERROR',
+        message: 'Dados não fornecidos'
+      });
+    }
+    
+    dateFields.forEach(field => {
+      const error = validateDateFormat(data[field], field);
+      if (error) {
+        errors.push(error);
+      }
+    });
+    
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'VALIDATION_ERROR',
+        message: 'Formato de data inválido',
+        errors: errors
+      });
+    }
+    
+    next();
+  };
 }
 
 /**
@@ -523,8 +619,11 @@ export {
   validateQueryParams,
   sanitizeIdentifier,
   sanitizeInput,
+  sanitizeInputMiddleware,
   validateRequired,
+  validateRequiredMiddleware,
   validateDateFormat,
+  validateDateFormatMiddleware,
   validatePagination,
   getSafeOperator,
   buildWhereClause,
