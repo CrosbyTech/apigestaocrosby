@@ -276,9 +276,9 @@ function validateDateFormatMiddleware(dateFields) {
 }
 
 /**
- * Valida parâmetros de paginação
+ * Valida parâmetros de paginação (função utilitária)
  */
-function validatePagination(page, limit) {
+function validatePaginationFunction(page, limit) {
   const errors = [];
 
   if (page !== undefined) {
@@ -296,6 +296,25 @@ function validatePagination(page, limit) {
   }
 
   return errors;
+}
+
+/**
+ * Middleware para validar parâmetros de paginação
+ */
+function validatePagination(req, res, next) {
+  const { page, limit, offset } = req.query;
+  const errors = validatePaginationFunction(page, limit);
+
+  if (errors.length > 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'VALIDATION_ERROR',
+      message: 'Parâmetros de paginação inválidos',
+      errors: errors,
+    });
+  }
+
+  next();
 }
 
 /**
@@ -666,13 +685,17 @@ router.post('/preview', async (req, res) => {
 export {
   validateQueryParams,
   sanitizeIdentifier,
-  sanitizeInput,
+  sanitizeInput as sanitizeInputFunction,
   sanitizeInputMiddleware,
-  validateRequired,
+  sanitizeInputMiddleware as sanitizeInput, // Alias para uso nas rotas
+  validateRequired as validateRequiredFunction,
   validateRequiredMiddleware,
-  validateDateFormat,
+  validateRequiredMiddleware as validateRequired, // Alias para uso nas rotas
+  validateDateFormat as validateDateFormatFunction,
   validateDateFormatMiddleware,
-  validatePagination,
+  validateDateFormatMiddleware as validateDateFormat, // Alias para uso nas rotas
+  validatePagination, // Middleware de paginação
+  validatePaginationFunction, // Função utilitária de paginação
   getSafeOperator,
   buildWhereClause,
   buildSafeQuery,
