@@ -40,4 +40,44 @@
 
 ---
 
+## ⏰ Sistema de Atualização Automática de Views Materializadas
+
+Este projeto inclui um sistema automático que atualiza views materializadas do PostgreSQL a cada hora, sempre aos **5 minutos** (00:05, 01:05, 02:05, etc.).
+
+### Views Gerenciadas
+
+- `public.fatbazar`
+- `public.fatvarejo`
+- `public.fatrevenda`
+- `public.fatfranquias`
+- `public.fatmtm`
+- `public.fatsellect`
+- `public.cmv_varejo`
+- `public.cmv_revenda`
+- `public.cmv_mtm`
+- `public.cmv_franquias`
+
+### Recursos
+
+✅ **Atualização automática** a cada hora  
+✅ **Logs detalhados** de cada atualização  
+✅ **API para atualização manual**: `POST /api/utils/refresh-materialized-views`  
+✅ **Graceful shutdown** ao encerrar o servidor  
+✅ **Timezone configurável** (padrão: America/Sao_Paulo)
+
+### Documentação Completa
+
+Consulte [MATERIALIZED_VIEWS_REFRESH.md](./MATERIALIZED_VIEWS_REFRESH.md) para detalhes completos sobre:
+- Como funciona o sistema
+- Horários de execução
+- API de atualização manual
+- Configuração e personalização
+- Monitoramento e solução de problemas
+
+### Teste Rápido
+
+Abra o arquivo `test-refresh-views.html` no navegador para testar a atualização manual das views.
+
+---
+
 Se precisar de deploy automatizado, integração com banco de dados ou outras configurações, personalize conforme sua necessidade. # apigestaocrosby

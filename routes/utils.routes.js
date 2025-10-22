@@ -11,6 +11,7 @@ import {
   successResponse,
   errorResponse,
 } from '../utils/errorHandler.js';
+import { refreshAllMaterializedViews } from '../utils/refreshMaterializedViews.js';
 
 const router = express.Router();
 
@@ -376,6 +377,33 @@ router.get(
         data: result.rows,
       },
       'Cadastro de pessoas consultado com sucesso',
+    );
+  }),
+);
+
+/**
+ * @route POST /utils/refresh-materialized-views
+ * @desc Atualiza manualmente todas as views materializadas
+ * @access Public (pode adicionar autenticação se necessário)
+ */
+router.post(
+  '/refresh-materialized-views',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    
+    // Executar atualização de todas as views materializadas
+    const results = await refreshAllMaterializedViews();
+    
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    
+    successResponse(
+      res,
+      {
+        ...results,
+        duration: `${duration}s`,
+        timestamp: new Date().toISOString(),
+      },
+      `Views materializadas atualizadas com sucesso em ${duration}s`,
     );
   }),
 );

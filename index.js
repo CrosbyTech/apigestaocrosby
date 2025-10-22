@@ -9,6 +9,11 @@ import dotenv from 'dotenv';
 // Importar configurações
 import pool, { testConnection, closePool } from './config/database.js';
 import { logger } from './utils/errorHandler.js';
+import { 
+  startMaterializedViewsScheduler, 
+  stopMaterializedViewsScheduler,
+  refreshAllMaterializedViews 
+} from './utils/refreshMaterializedViews.js';
 
 // Importar middlewares
 import { errorHandler } from './utils/errorHandler.js';
@@ -180,6 +185,8 @@ app.get('/api/docs', (req, res) => {
         'Autocomplete de nomes fantasia',
       'GET /api/utils/autocomplete/nm_grupoempresa':
         'Autocomplete de grupos empresa',
+      'POST /api/utils/refresh-materialized-views':
+        'Atualiza manualmente todas as views materializadas',
     },
     Nota: {
       Autenticação: 'Sistema de login gerenciado externamente via Supabase',
@@ -214,9 +221,17 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 4000;
 
+// Variável para armazenar o scheduler das views materializadas
+let materializedViewsTask = null;
+
 // Graceful shutdown
 const gracefulShutdown = (signal) => {
   logger.info(`Recebido sinal ${signal}. Encerrando servidor graciosamente...`);
+
+  // Parar o scheduler de views materializadas
+  if (materializedViewsTask) {
+    stopMaterializedViewsScheduler(materializedViewsTask);
+  }
 
   server.close(async () => {
     logger.info('Servidor HTTP fechado.');
@@ -250,6 +265,16 @@ const server = app.listen(PORT, async () => {
   const dbConnected = await testConnection();
   if (dbConnected) {
     logger.info('🗄️  Banco de dados conectado com sucesso - SEM TIMEOUTS');
+    
+    // Iniciar o scheduler de atualização das views materializadas
+    materializedViewsTask = startMaterializedViewsScheduler();
+    
+    // Executar a primeira atualização imediatamente (opcional)
+    // Comentado por padrão - descomente se quiser atualizar na inicialização
+    // setTimeout(async () => {
+    //   logger.info('🔄 Executando primeira atualização das views materializadas...');
+    //   await refreshAllMaterializedViews();
+    // }, 5000);
   } else {
     logger.error('❌ Falha na conexão com banco de dados');
   }
