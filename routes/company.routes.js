@@ -15,8 +15,7 @@ router.get('/empresas',
   asyncHandler(async (req, res) => {
     const query = `
       SELECT cd_empresa, nm_grupoempresa 
-      FROM vr_ger_empresa 
-      WHERE cd_grupoempresa < 5999 
+      FROM vr_ger_empresa
       ORDER BY cd_grupoempresa ASC
     `;
     
