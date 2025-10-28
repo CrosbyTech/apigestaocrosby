@@ -1136,6 +1136,9 @@ router.get(
         break;
     }
 
+    // Adicionar filtro de situação
+    whereClause += ` AND vff.tp_situacao = 1`;
+
     // Adicionar LIMIT e OFFSET aos parâmetros (já temos cd_cliente em $1)
     queryParams.push(limit, offset);
 
@@ -1144,6 +1147,7 @@ router.get(
         vff.cd_empresa,
         vff.cd_cliente,
         vff.nm_cliente,
+        vff.nr_fat,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
