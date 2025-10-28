@@ -67,7 +67,7 @@ router.get('/faturamento-lojas',
     const { cd_grupoempresa_ini, cd_grupoempresa_fim, dt_inicio, dt_fim } = req.query;
 
     const allowedOperations = [
-      1,2,510,511,1511,521,1521,522,960,9001,9009,9027,8750,9017,9400,
+      1,2,510,511,1511,521,1521,522,960,9001,9009,9027,9017,9400,
       9401,9402,9403,9404,9005,545,546,555,548,1210,9405,1205,1101
     ];
 

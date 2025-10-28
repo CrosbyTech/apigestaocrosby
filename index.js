@@ -14,6 +14,10 @@ import {
   stopMaterializedViewsScheduler,
   refreshAllMaterializedViews 
 } from './utils/refreshMaterializedViews.js';
+import {
+  startTokenScheduler,
+  stopTokenScheduler,
+} from './utils/totvsTokenManager.js';
 
 // Importar middlewares
 import { errorHandler } from './utils/errorHandler.js';
@@ -27,7 +31,7 @@ import franchiseRoutes from './routes/franchise.routes.js';
 import utilsRoutes from './routes/utils.routes.js';
 import faturamentoRoutes from './routes/faturamento.routes.js';
 import widgetsRoutes from './routes/widgets.routes.js';
-
+import totvsRoutes from './routes/totvs.routes.js';
 // Carregar variáveis de ambiente
 dotenv.config();
 
@@ -57,6 +61,9 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api/', limiter);
+
+
+
 
 // CORS configurado para permitir qualquer origem
 app.use(
@@ -122,7 +129,7 @@ app.use('/api/franchise', franchiseRoutes); // Franquias
 app.use('/api/utils', utilsRoutes); // Utilitários e autocomplete
 app.use('/api/faturamento', faturamentoRoutes); // Faturamento das lojas
 app.use('/api/widgets', widgetsRoutes); // Widgets e dashboards (views e queries)
-
+app.use('/api/totvs', totvsRoutes); // Integração com API TOTVS Moda
 // =============================================================================
 // ROTAS DE COMPATIBILIDADE (MANTER TEMPORARIAMENTE)
 // =============================================================================
@@ -221,16 +228,21 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 4000;
 
-// Variável para armazenar o scheduler das views materializadas
+// Variáveis para armazenar os schedulers
 let materializedViewsTask = null;
+let totvsTokenTask = null;
 
 // Graceful shutdown
 const gracefulShutdown = (signal) => {
   logger.info(`Recebido sinal ${signal}. Encerrando servidor graciosamente...`);
 
-  // Parar o scheduler de views materializadas
+  // Parar os schedulers
   if (materializedViewsTask) {
     stopMaterializedViewsScheduler(materializedViewsTask);
+  }
+  
+  if (totvsTokenTask) {
+    stopTokenScheduler(totvsTokenTask);
   }
 
   server.close(async () => {
@@ -248,12 +260,22 @@ const gracefulShutdown = (signal) => {
 };
 
 const server = app.listen(PORT, async () => {
+  // URL base da API (Render ou localhost)
+  const API_BASE_URL = process.env.API_BASE_URL || 
+                       process.env.RENDER_EXTERNAL_URL || 
+                       `http://localhost:${PORT}`;
+
   logger.info(`🚀 Servidor rodando na porta ${PORT}`);
-  logger.info(
-    `📚 Documentação disponível em http://localhost:${PORT}/api/docs`,
-  );
-  logger.info(`🏥 Health check em http://localhost:${PORT}/api/utils/health`);
+  logger.info(`🌐 URL da API: ${API_BASE_URL}`);
+  logger.info(`📚 Documentação disponível em ${API_BASE_URL}/api/docs`);
+  logger.info(`🏥 Health check em ${API_BASE_URL}/api/utils/health`);
   logger.info(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  
+  // Logs das rotas TOTVS
+  logger.info(`🔐 Rotas TOTVS disponíveis:`);
+  logger.info(`   GET  ${API_BASE_URL}/api/totvs/token`);
+  logger.info(`   POST ${API_BASE_URL}/api/totvs/auth`);
+  logger.info(`   POST ${API_BASE_URL}/api/totvs/bank-slip`);
 
   // Remover timeout do servidor HTTP (ilimitado)
   server.timeout = 0; // Sem timeout para requisições
@@ -278,6 +300,9 @@ const server = app.listen(PORT, async () => {
   } else {
     logger.error('❌ Falha na conexão com banco de dados');
   }
+
+  // Iniciar o scheduler de geração automática de token TOTVS
+  totvsTokenTask = startTokenScheduler();
 });
 
 // Handlers para encerramento gracioso
