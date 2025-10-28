@@ -1086,6 +1086,124 @@ router.get(
 );
 
 /**
+ * @route GET /financial/contas-receber-cliente
+ * @desc Buscar contas a receber por cliente com filtro de status
+ * @access Public
+ * @query {cd_cliente, status, limit, offset}
+ * @query status: 'em_aberto' | 'pagos' | 'vencidos' | 'todos' (opcional, padrão: 'todos')
+ */
+router.get(
+  '/contas-receber-cliente',
+  sanitizeInput,
+  validateRequired(['cd_cliente']),
+  validatePagination,
+  asyncHandler(async (req, res) => {
+    const { cd_cliente, status = 'todos' } = req.query;
+    const limit = parseInt(req.query.limit, 10) || 50000000;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Validar status
+    const statusValidos = ['em_aberto', 'pagos', 'vencidos', 'todos'];
+    if (!statusValidos.includes(status)) {
+      return errorResponse(
+        res,
+        `Status inválido. Valores válidos: ${statusValidos.join(', ')}`,
+        400,
+        'INVALID_STATUS',
+      );
+    }
+
+    // Construir WHERE baseado no status
+    let whereClause = 'WHERE vff.cd_cliente = $1';
+    const queryParams = [cd_cliente];
+    const countParams = [cd_cliente];
+
+    switch (status) {
+      case 'em_aberto':
+        // vl_pago = 0 ou NULL indica em aberto
+        whereClause += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL)`;
+        break;
+      case 'pagos':
+        // vl_pago > 0 indica pagos
+        whereClause += ` AND vff.vl_pago > 0`;
+        break;
+      case 'vencidos':
+        // dt_vencimento não nulo e menor que hoje, e ainda não pago
+        whereClause += ` AND vff.dt_vencimento IS NOT NULL AND vff.dt_vencimento < CURRENT_DATE AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL)`;
+        break;
+      case 'todos':
+        // Sem WHERE adicional
+        break;
+    }
+
+    // Adicionar LIMIT e OFFSET aos parâmetros (já temos cd_cliente em $1)
+    queryParams.push(limit, offset);
+
+    const query = `
+      SELECT
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nm_cliente,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.dt_cancelamento,
+        vff.dt_liq,
+        vff.tp_cobranca,
+        vff.tp_documento,
+        vff.tp_faturamento,
+        vff.tp_inclusao,
+        vff.tp_baixa,
+        vff.tp_situacao,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_abatimento,
+        vff.vl_pago,
+        vff.vl_desconto,
+        vff.vl_liquido,
+        vff.vl_acrescimo,
+        vff.vl_multa,
+        vff.nr_portador,
+        vff.vl_renegociacao,
+        vff.vl_corrigido,
+        vff.vl_juros,
+        vff.pr_juromes,
+        vff.pr_multa
+      FROM vr_fcr_faturai vff
+      ${whereClause}
+      ORDER BY vff.dt_emissao DESC
+      LIMIT $2 OFFSET $3
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM vr_fcr_faturai vff
+      ${whereClause}
+    `;
+
+    const [resultado, totalResult] = await Promise.all([
+      pool.query(query, queryParams),
+      pool.query(countQuery, countParams),
+    ]);
+
+    const total = parseInt(totalResult.rows[0].total, 10);
+
+    successResponse(
+      res,
+      {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+        filtros: { cd_cliente, status },
+        data: resultado.rows,
+      },
+      'Contas a receber do cliente obtidas com sucesso',
+    );
+  }),
+);
+
+/**
  * @route GET /financial/fluxocaixa-entradas
  * @desc Buscar fluxo de caixa de entradas (baseado na data de liquidação)
  * @access Public

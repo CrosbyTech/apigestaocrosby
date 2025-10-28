@@ -14,7 +14,7 @@ router.get('/empresas',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const query = `
-      SELECT cd_empresa, nm_grupoempresa 
+      SELECT cd_empresa, nm_grupoempresa, cd_pessoa 
       FROM vr_ger_empresa
       ORDER BY cd_grupoempresa ASC
     `;
