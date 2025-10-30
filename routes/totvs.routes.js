@@ -604,4 +604,547 @@ router.post(
   })
 );
 
+router.post(
+  '/invoices-search',
+  asyncHandler(async (req, res) => {
+    try {
+      // Obter token atual (ou gerar novo se necessário)
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      // Montar payload com padrões e sobrepor com corpo recebido
+      const defaultPayload = {
+        filter: {
+          change: {},
+        },
+        page: 1,
+        pageSize: 100,
+        expand: 'person',
+      };
+
+      const payload = {
+        ...defaultPayload,
+        ...req.body,
+        filter: {
+          ...defaultPayload.filter,
+          ...(req.body?.filter || {}),
+        },
+      };
+
+      const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+
+      console.log('🧾 Buscando notas fiscais na API TOTVS:', {
+        endpoint,
+        page: payload.page,
+        pageSize: payload.pageSize,
+        hasPerson: payload.expand,
+      });
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido ao buscar notas fiscais. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      successResponse(
+        res,
+        {
+          ...response.data,
+        },
+        'Notas fiscais obtidas com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar notas fiscais na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        const errorMessage = error.response.data?.message ||
+          error.response.data?.error ||
+          error.response.data?.error_description ||
+          (typeof error.response.data === 'string' ? error.response.data : 'Erro ao buscar notas fiscais na API TOTVS');
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data,
+          payload: req.body,
+        });
+      } else if (error.request) {
+        const errorMessage = error.code === 'ENOTFOUND'
+          ? 'URL da API TOTVS não encontrada. Verifique se a URL está correta.'
+          : error.code === 'ECONNREFUSED'
+          ? 'Conexão recusada pela API TOTVS. O servidor pode estar offline.'
+          : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(
+          res,
+          errorMessage,
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+router.post(
+  '/danfe-search',
+  asyncHandler(async (req, res) => {
+    const { mainInvoiceXml, nfeDocumentType } = req.body || {};
+
+    if (!mainInvoiceXml || typeof mainInvoiceXml !== 'string' || mainInvoiceXml.trim() === '') {
+      return errorResponse(
+        res,
+        'O campo mainInvoiceXml é obrigatório e deve ser uma string com conteúdo',
+        400,
+        'MISSING_MAIN_INVOICE_XML',
+      );
+    }
+
+    // Valor padrão conforme especificado
+    const documentType = nfeDocumentType || 'NFeNormal';
+
+    try {
+      // Obter token atual (ou gerar novo se necessário)
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`;
+      const payload = {
+        mainInvoiceXml,
+        nfeDocumentType: documentType,
+      };
+
+      console.log('🧾 Gerando DANFE na API TOTVS:', {
+        endpoint,
+        nfeDocumentType: payload.nfeDocumentType,
+        xmlLength: mainInvoiceXml.length,
+      });
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido ao gerar DANFE. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      successResponse(
+        res,
+        response.data,
+        'DANFE gerada com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao gerar DANFE na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+        headers: error.response?.headers,
+        url: error.config?.url,
+      });
+
+      if (error.response) {
+        let errorMessage = 'Erro ao gerar DANFE na API TOTVS';
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage = error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+          payload: { nfeDocumentType: documentType, mainInvoiceXmlLength: mainInvoiceXml?.length },
+        });
+      } else if (error.request) {
+        const errorMessage = error.code === 'ENOTFOUND'
+          ? 'URL da API TOTVS não encontrada. Verifique se a URL está correta.'
+          : error.code === 'ECONNREFUSED'
+          ? 'Conexão recusada pela API TOTVS. O servidor pode estar offline.'
+          : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(
+          res,
+          errorMessage,
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+router.post(
+  '/danfe-from-invoice',
+  asyncHandler(async (req, res) => {
+    // Payload esperado é o mesmo da invoices-search
+    const searchPayload = req.body || {};
+
+    try {
+      // Obter token
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const token = tokenData.access_token;
+
+      // 1) invoices/search -> obter accessKey
+      const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      const invoicesDefaults = {
+        filter: { change: {} },
+        page: 1,
+        pageSize: 100,
+        expand: 'person',
+      };
+      const invoicesBody = {
+        ...invoicesDefaults,
+        ...searchPayload,
+        filter: { ...invoicesDefaults.filter, ...(searchPayload.filter || {}) },
+      };
+
+      const doInvoicesRequest = async (accessToken) =>
+        axios.post(invoicesEndpoint, invoicesBody, {
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let invoicesResp;
+      try {
+        invoicesResp = await doInvoicesRequest(token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newToken = (await getToken(true))?.access_token;
+          invoicesResp = await doInvoicesRequest(newToken);
+        } else {
+          throw error;
+        }
+      }
+
+      const items = invoicesResp?.data?.items || [];
+      if (!Array.isArray(items) || items.length === 0) {
+        return errorResponse(
+          res,
+          'Nenhuma nota fiscal encontrada para os filtros informados',
+          404,
+          'INVOICE_NOT_FOUND',
+        );
+      }
+
+      // Usar o primeiro item encontrado (ou permitir index via req.body.index futuramente)
+      const first = items[0];
+      const accessKey = first?.eletronic?.accessKey;
+      if (!accessKey) {
+        return errorResponse(
+          res,
+          'Chave de acesso não encontrada na resposta de invoices-search',
+          404,
+          'ACCESS_KEY_NOT_FOUND',
+        );
+      }
+
+      // 2) xml-contents -> obter XML principal
+      const xmlEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${encodeURIComponent(accessKey)}`;
+
+      const doXmlRequest = async (accessToken) =>
+        axios.get(xmlEndpoint, {
+          headers: {
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let xmlResp;
+      try {
+        xmlResp = await doXmlRequest(token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newToken = (await getToken(true))?.access_token;
+          xmlResp = await doXmlRequest(newToken);
+        } else {
+          throw error;
+        }
+      }
+
+      const mainInvoiceXml = xmlResp?.data?.mainInvoiceXml || xmlResp?.data?.data?.mainInvoiceXml;
+      if (!mainInvoiceXml) {
+        return errorResponse(
+          res,
+          'XML principal da NFe não retornado pela API TOTVS',
+          404,
+          'XML_NOT_FOUND',
+        );
+      }
+
+      // 3) danfe-search -> obter base64 do PDF
+      const danfeEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`;
+      const danfeBody = {
+        mainInvoiceXml,
+        nfeDocumentType: 'NFeNormal',
+      };
+
+      const doDanfeRequest = async (accessToken) =>
+        axios.post(danfeEndpoint, danfeBody, {
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let danfeResp;
+      try {
+        danfeResp = await doDanfeRequest(token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newToken = (await getToken(true))?.access_token;
+          danfeResp = await doDanfeRequest(newToken);
+        } else {
+          throw error;
+        }
+      }
+
+      const danfePdfBase64 = danfeResp?.data?.danfePdfBase64;
+      if (!danfePdfBase64) {
+        return errorResponse(
+          res,
+          'DANFE não retornada pela API TOTVS',
+          502,
+          'DANFE_NOT_RETURNED',
+        );
+      }
+
+      // Sucesso
+      return successResponse(
+        res,
+        {
+          danfePdfBase64,
+          accessKey,
+          invoice: {
+            branchCode: first?.branchCode,
+            invoiceCode: first?.invoiceCode,
+            serialCode: first?.serialCode,
+            personCode: first?.personCode,
+            personName: first?.personName,
+            invoiceDate: first?.invoiceDate,
+          },
+        },
+        'DANFE gerada com sucesso a partir da pesquisa de notas',
+      );
+    } catch (error) {
+      // Tratamento de erro geral
+      const status = error.response?.status || 500;
+      const details = error.response?.data || null;
+      const message = details?.message || details?.error || details?.error_description || error.message || 'Erro ao gerar DANFE';
+      return res.status(status).json({
+        success: false,
+        message,
+        error: 'DANFE_FLOW_ERROR',
+        timestamp: new Date().toISOString(),
+        details,
+        step: details ? undefined : 'unknown',
+      });
+    }
+  }),
+);
+
+router.get(
+  '/xml-contents/:accessKey?',
+  asyncHandler(async (req, res) => {
+    const accessKey = req.params.accessKey || req.query.accessKey;
+
+    if (!accessKey) {
+      return errorResponse(
+        res,
+        'O parâmetro accessKey é obrigatório',
+        400,
+        'MISSING_ACCESS_KEY',
+      );
+    }
+
+    try {
+      // Obter token atual (ou gerar novo se necessário)
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${encodeURIComponent(accessKey)}`;
+
+      console.log('📄 Buscando XML da NF-e na API TOTVS:', {
+        endpoint,
+        accessKey,
+        hasAccessKey: Boolean(accessKey),
+      });
+
+      const doRequest = async (accessToken) =>
+        axios.get(endpoint, {
+          headers: {
+            'Accept': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido ao buscar XML. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      successResponse(
+        res,
+        response.data,
+        'XML da nota fiscal obtido com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar XML da NF-e na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+        headers: error.response?.headers,
+        url: error.config?.url,
+      });
+
+      if (error.response) {
+        // Tratamento melhorado para diferentes formatos de erro
+        let errorMessage = 'Erro ao buscar XML da NF-e na API TOTVS';
+        
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage = error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              (error.response.status === 404 ? 'Nota fiscal não encontrada na API TOTVS' : errorMessage);
+          }
+        } else if (error.response.status === 404) {
+          errorMessage = 'Nota fiscal não encontrada na API TOTVS';
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+          payload: { accessKey },
+        });
+      } else if (error.request) {
+        const errorMessage = error.code === 'ENOTFOUND'
+          ? 'URL da API TOTVS não encontrada. Verifique se a URL está correta.'
+          : error.code === 'ECONNREFUSED'
+          ? 'Conexão recusada pela API TOTVS. O servidor pode estar offline.'
+          : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(
+          res,
+          errorMessage,
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
 export default router;

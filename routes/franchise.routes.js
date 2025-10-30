@@ -293,4 +293,75 @@ router.get('/franquias-credev',
   })
 );
 
+/**
+ * @route GET /franchise/meuspedidos
+ * @desc Listar pedidos/transações por cliente (pessoa) com período
+ * @access Public
+ * @query {dt_inicio, dt_fim, cd_pessoa}
+ */
+router.get(
+  '/meuspedidos',
+  sanitizeInput,
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim, cd_pessoa } = req.query;
+
+    if (!dt_inicio || !dt_fim || !cd_pessoa) {
+      return errorResponse(
+        res,
+        'Parâmetros obrigatórios: dt_inicio, dt_fim, cd_pessoa',
+        400,
+        'MISSING_PARAMETERS',
+      );
+    }
+
+    // Lista estática (mantida) de empresas e operações
+    const empresasPermitidas = '(1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+    const operacoesPermitidas = `(
+      1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204,
+      2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660, 661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102,
+      5106, 5107, 5110, 5111, 5113, 3200, 3201, 3202, 3203, 7801, 7802, 7807, 5107, 7109
+    )`;
+
+    // Otimizações aplicadas:
+    // - INNER JOIN (equivalente à combinação LEFT JOIN + filtro em pp.cd_pessoa)
+    // - Filtro em tt.cd_pessoa (coluna da tabela principal)
+    // - Remoção do GROUP BY desnecessário (join 1:1)
+    // - Seleção de colunas apenas necessárias
+    const query = `
+      SELECT
+        tt.cd_grupoempresa,
+        tt.dt_transacao,
+        tt.nr_transacao,
+        tt.cd_pessoa,
+        pp.nm_fantasia,
+        tt.vl_total
+      FROM tra_transacao tt
+      INNER JOIN pes_pesjuridica pp ON pp.cd_pessoa = tt.cd_pessoa
+      WHERE
+        tt.dt_transacao BETWEEN $1 AND $2
+        AND tt.cd_empresa IN ${empresasPermitidas}
+        AND tt.cd_operacao IN ${operacoesPermitidas}
+        AND tt.cd_pessoa = $3
+        AND tt.tp_situacao = 4
+        AND tt.tp_operacao = 'S'
+      ORDER BY tt.dt_transacao DESC, tt.nr_transacao DESC
+    `;
+
+    const params = [dt_inicio, dt_fim, cd_pessoa];
+
+    const { rows } = await pool.query(query, params);
+
+    successResponse(
+      res,
+      {
+        filtros: { dt_inicio, dt_fim, cd_pessoa },
+        count: rows.length,
+        data: rows,
+      },
+      'Pedidos obtidos com sucesso',
+    );
+  }),
+);
+
 export default router;
