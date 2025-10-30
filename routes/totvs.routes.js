@@ -480,7 +480,7 @@ router.post(
       );
     } catch (error) {
       // Tratamento de erros da API TOTVS
-      console.error('❌ Erro ao gerar boleto bancário na API TOTVS:', {
+      console.error('❌ Falha ao gerar boleto. Confira se já foi pago; se persistir, contate o suporte.', {
         message: error.message,
         code: error.code,
         response: error.response?.data,
