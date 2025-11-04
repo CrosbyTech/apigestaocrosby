@@ -17,15 +17,15 @@ const pool = new Pool({
       ? { rejectUnauthorized: false }
       : false,
 
-  // Configurações sem limites de tempo
-  max: 1000, // Máximo de conexões no pool
-  min: 200, // Mínimo de conexões mantidas
-  idleTimeoutMillis: 0, // Sem timeout para conexões ociosas (ilimitado)
+  // Configurações de pool
+  max: 50, // Máximo de conexões no pool
+  min: 0, // Mínimo de conexões mantidas (agressivo para reduzir conexões)
+  idleTimeoutMillis: 600000, // 10 minutos para encerrar conexões ociosas
   connectionTimeoutMillis: 0, // Sem timeout para novas conexões (ilimitado)
   acquireTimeoutMillis: 0, // Sem timeout para adquirir conexão (ilimitado)
   createTimeoutMillis: 0, // Sem timeout para criar conexão (ilimitado)
   destroyTimeoutMillis: 0, // Sem timeout para destruir conexão (ilimitado)
-  reapIntervalMillis: 0, // Sem limpeza automática de conexões
+  reapIntervalMillis: 1000, // Verificar e limpar conexões ociosas a cada 1s
   createRetryIntervalMillis: 0, // Sem intervalo entre tentativas
 
   // Configurações específicas do PostgreSQL - SEM TIMEOUTS

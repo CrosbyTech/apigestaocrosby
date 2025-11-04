@@ -2,9 +2,9 @@ module.exports = {
   apps: [
     {
       name: 'api-gestao-crosby',
-      script: 'index.refatorado.js',
-      instances: process.env.NODE_ENV === 'production' ? 'max' : 1,
-      exec_mode: process.env.NODE_ENV === 'production' ? 'cluster' : 'fork',
+      script: 'index.js',
+      instances: 1, // Garantir 1 instância para controlar conexões
+      exec_mode: 'fork',
       autorestart: true,
       watch: false,
       max_memory_restart: '1G',
