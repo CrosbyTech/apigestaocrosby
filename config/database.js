@@ -5,6 +5,23 @@ dotenv.config();
 
 const { Pool } = pkg;
 
+// Validar e exibir configuração do banco de dados
+const dbConfig = {
+  user: process.env.PGUSER || 'crosby_ro_geo',
+  host: process.env.PGHOST || 'dbexp.vcenter.com.br',
+  database: process.env.PGDATABASE || 'crosby',
+  password: process.env.PGPASSWORD ? '***' : 'usando_senha_padrao',
+  port: process.env.PGPORT ? parseInt(process.env.PGPORT) : 20187,
+};
+
+console.log('📊 Configuração do Banco de Dados:');
+console.log(`   Host: ${dbConfig.host}`);
+console.log(`   Port: ${dbConfig.port}`);
+console.log(`   Database: ${dbConfig.database}`);
+console.log(`   User: ${dbConfig.user}`);
+console.log(`   Password: ${dbConfig.password}`);
+console.log(`   SSL: ${process.env.NODE_ENV === 'production' ? 'Habilitado' : 'Desabilitado'}`);
+
 // Configuração do pool de conexões do banco de dados (otimizada para Render)
 const pool = new Pool({
   user: process.env.PGUSER || 'crosby_ro_geo',
@@ -77,8 +94,8 @@ pool.on('error', (err, client) => {
   }
 });
 
-// Helper para executar queries com retry infinito para timeouts
-const queryWithRetry = async (text, params, maxRetries = 10) => {
+// Helper para executar queries com retry limitado
+const queryWithRetry = async (text, params, maxRetries = 3) => {
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -91,28 +108,33 @@ const queryWithRetry = async (text, params, maxRetries = 10) => {
     } catch (error) {
       lastError = error;
 
-      // Se é timeout ou conexão perdida, tenta novamente indefinidamente
-      if (
+      // ECONNREFUSED significa que o banco não está acessível - não adianta tentar novamente
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+        console.error(`❌ Erro de conexão com banco de dados: ${error.message}`);
+        console.error(`� Verifique: IP do banco, porta, firewall, e variáveis de ambiente`);
+        throw error; // Falha imediatamente em erros de conexão
+      }
+
+      // Para timeouts temporários ou conexões resetadas, tenta novamente (máximo 3 vezes)
+      const isRetryable = 
         error.message.includes('timeout') ||
         error.code === 'ECONNRESET' ||
-        error.code === 'ENOTFOUND' ||
-        error.code === 'ECONNREFUSED'
-      ) {
-        console.log(`⚠️  Tentativa ${attempt} falhou: ${error.message}`);
-        console.log(`🔄 Tentando novamente em ${attempt * 2000}ms...`);
+        error.code === 'ETIMEDOUT';
 
-        // Se chegou no máximo de tentativas para timeout, continua tentando
-        if (attempt === maxRetries) {
-          console.log(`♾️  Continuando tentativas infinitas para timeout...`);
-          maxRetries += 10; // Aumenta o limite para continuar tentando
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+      if (isRetryable && attempt < maxRetries) {
+        const delay = Math.min(attempt * 1000, 5000); // Máximo 5 segundos
+        console.warn(`⚠️  Tentativa ${attempt}/${maxRetries} falhou: ${error.message}`);
+        console.warn(`🔄 Tentando novamente em ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
 
-      // Se não é erro de conexão/timeout, falha imediatamente
-      console.error(`❌ Erro definitivo na query:`, error.message);
+      // Se não é retryable ou esgotou tentativas, falha
+      if (attempt === maxRetries) {
+        console.error(`❌ Falha após ${maxRetries} tentativas:`, error.message);
+      } else {
+        console.error(`❌ Erro não recuperável na query:`, error.message);
+      }
       throw error;
     }
   }
@@ -124,14 +146,47 @@ const queryWithRetry = async (text, params, maxRetries = 10) => {
 const originalQuery = pool.query.bind(pool);
 pool.query = queryWithRetry;
 
-// Função para testar conexão
+// Função para testar conexão com diagnóstico detalhado
 export const testConnection = async () => {
+  console.log('\n🔌 Testando conexão com banco de dados...');
+  
   try {
-    const result = await pool.query('SELECT 1 as test');
-    console.log('✅ Teste de conexão bem-sucedido');
+    const startTime = Date.now();
+    const result = await originalQuery.call(pool, 'SELECT NOW() as current_time, version() as pg_version');
+    const duration = Date.now() - startTime;
+    
+    console.log('✅ Teste de conexão bem-sucedido!');
+    console.log(`   Tempo de resposta: ${duration}ms`);
+    console.log(`   Hora do servidor: ${result.rows[0].current_time}`);
+    console.log(`   Versão PostgreSQL: ${result.rows[0].pg_version.split(' ')[0]}\n`);
+    
     return true;
   } catch (error) {
-    console.error('❌ Falha no teste de conexão:', error.message);
+    console.error('\n❌ FALHA NO TESTE DE CONEXÃO\n');
+    console.error(`Erro: ${error.message}`);
+    console.error(`Código: ${error.code || 'N/A'}`);
+    
+    // Diagnóstico específico
+    if (error.code === 'ECONNREFUSED') {
+      console.error('\n🔧 DIAGNÓSTICO:');
+      console.error('   • O banco de dados não está respondendo na porta especificada');
+      console.error('   • Verifique se o IP e porta estão corretos');
+      console.error('   • Verifique se o firewall permite conexões');
+      console.error('   • Verifique as variáveis de ambiente no Render\n');
+    } else if (error.code === 'ENOTFOUND') {
+      console.error('\n🔧 DIAGNÓSTICO:');
+      console.error('   • O hostname do banco de dados não foi encontrado');
+      console.error('   • Verifique a variável PGHOST\n');
+    } else if (error.message.includes('password')) {
+      console.error('\n🔧 DIAGNÓSTICO:');
+      console.error('   • Erro de autenticação');
+      console.error('   • Verifique usuário e senha (PGUSER, PGPASSWORD)\n');
+    } else if (error.message.includes('timeout')) {
+      console.error('\n🔧 DIAGNÓSTICO:');
+      console.error('   • Timeout ao conectar');
+      console.error('   • A rede pode estar lenta ou o banco sobrecarregado\n');
+    }
+    
     return false;
   }
 };
