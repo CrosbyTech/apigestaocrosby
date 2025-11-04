@@ -17,41 +17,63 @@ const pool = new Pool({
       ? { rejectUnauthorized: false }
       : false,
 
-  // Configurações de pool
-  max: 50, // Máximo de conexões no pool
-  min: 0, // Mínimo de conexões mantidas (agressivo para reduzir conexões)
-  idleTimeoutMillis: 600000, // 10 minutos para encerrar conexões ociosas
-  connectionTimeoutMillis: 0, // Sem timeout para novas conexões (ilimitado)
-  acquireTimeoutMillis: 0, // Sem timeout para adquirir conexão (ilimitado)
-  createTimeoutMillis: 0, // Sem timeout para criar conexão (ilimitado)
-  destroyTimeoutMillis: 0, // Sem timeout para destruir conexão (ilimitado)
-  reapIntervalMillis: 1000, // Verificar e limpar conexões ociosas a cada 1s
-  createRetryIntervalMillis: 0, // Sem intervalo entre tentativas
-
-  // Configurações específicas do PostgreSQL - SEM TIMEOUTS
-  statement_timeout: 0, // Sem timeout para statements (ilimitado)
-  query_timeout: 0, // Sem timeout para queries (ilimitado)
-  idle_in_transaction_session_timeout: 0, // Sem timeout para transações ociosas
+  // Configurações de pool - OTIMIZADO PARA REDUZIR CONSUMO
+  max: 10, // Máximo de 10 conexões simultâneas (reduzido de 50)
+  min: 2, // Mínimo de 2 conexões mantidas sempre ativas
+  idleTimeoutMillis: 30000, // 30 segundos para encerrar conexões ociosas (reduzido de 10 min)
+  connectionTimeoutMillis: 10000, // 10 segundos timeout para novas conexões
+  
+  // Configurações específicas do PostgreSQL - COM TIMEOUTS ADEQUADOS
+  statement_timeout: 60000, // 60 segundos timeout para statements (previne queries travadas)
+  query_timeout: 60000, // 60 segundos timeout para queries
+  idle_in_transaction_session_timeout: 10000, // 10 segundos para transações ociosas (CRÍTICO!)
   application_name: 'apigestaocrosby',
 
-  // Keep alive para conexões permanentes
+  // Keep alive para conexões
   keepAlive: true,
-  keepAliveInitialDelayMillis: 0, // Sem delay inicial
+  keepAliveInitialDelayMillis: 10000, // 10 segundos de delay inicial
 });
+
+// Monitoramento de conexões
+let totalConnections = 0;
+let activeConnections = 0;
+let idleConnections = 0;
 
 // Teste de conexão na inicialização
-pool.on('connect', () => {
-  console.log('Conectado ao banco de dados PostgreSQL');
+pool.on('connect', (client) => {
+  totalConnections++;
+  activeConnections++;
+  console.log(`✅ Nova conexão ao banco PostgreSQL (Total: ${pool.totalCount}, Ociosas: ${pool.idleCount}, Aguardando: ${pool.waitingCount})`);
 });
 
-pool.on('error', (err) => {
-  console.error('Erro na conexão com o banco de dados:', err);
+pool.on('acquire', (client) => {
+  activeConnections++;
+  idleConnections--;
+  console.log(`🔵 Conexão adquirida (Ativas: ${activeConnections}, Ociosas: ${idleConnections}, Total: ${totalConnections})`);
+});
+
+pool.on('release', (client) => {
+  activeConnections--;
+  idleConnections++;
+  console.log(`🟢 Conexão liberada (Ativas: ${activeConnections}, Ociosas: ${idleConnections})`);
+});
+
+pool.on('remove', (client) => {
+  totalConnections--;
+  console.log(`🗑️  Conexão removida do pool (Total restante: ${totalConnections})`);
+});
+
+pool.on('error', (err, client) => {
+  console.error('❌ Erro na conexão com o banco de dados:', err);
 
   // Log específico para timeouts
   if (err.message.includes('timeout') || err.code === 'ECONNRESET') {
-    console.error(
-      '⚠️  Timeout de conexão detectado. Verifique a latência de rede.',
-    );
+    console.error('⚠️  Timeout de conexão detectado. Verifique a latência de rede.');
+  }
+  
+  // Log para conexões presas em transações
+  if (err.message.includes('idle_in_transaction')) {
+    console.error('⚠️  Transação ociosa detectada! Conexão será encerrada.');
   }
 });
 
@@ -124,23 +146,71 @@ export const closePool = async () => {
   }
 };
 
-// Health check da conexão
+// Health check da conexão com informações do pool
 export const checkConnectionHealth = async () => {
   try {
     const result = await pool.query(
       'SELECT NOW() as time, version() as version',
     );
+    
+    // Consultar conexões ativas no banco
+    const connectionsQuery = await pool.query(`
+      SELECT 
+        COUNT(*) as total_connections,
+        COUNT(*) FILTER (WHERE state = 'active') as active_queries,
+        COUNT(*) FILTER (WHERE state = 'idle') as idle_connections,
+        COUNT(*) FILTER (WHERE state = 'idle in transaction') as idle_in_transaction
+      FROM pg_stat_activity 
+      WHERE datname = current_database()
+        AND application_name = 'apigestaocrosby'
+    `);
+    
+    const dbStats = connectionsQuery.rows[0];
+    
     return {
       healthy: true,
       time: result.rows[0].time,
       version: result.rows[0].version,
+      pool: {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+        max: pool.options.max,
+      },
+      database: {
+        total_connections: parseInt(dbStats.total_connections),
+        active_queries: parseInt(dbStats.active_queries),
+        idle_connections: parseInt(dbStats.idle_connections),
+        idle_in_transaction: parseInt(dbStats.idle_in_transaction),
+      },
+      warning: dbStats.idle_in_transaction > 0 ? 'Conexões presas em transações detectadas!' : null,
     };
   } catch (error) {
     return {
       healthy: false,
       error: error.message,
+      pool: {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+        max: pool.options.max,
+      },
     };
   }
+};
+
+// Função para monitorar e reportar status do pool periodicamente
+export const startPoolMonitoring = (intervalMinutes = 5) => {
+  setInterval(async () => {
+    const health = await checkConnectionHealth();
+    console.log('\n📊 ===== STATUS DO POOL DE CONEXÕES =====');
+    console.log(`Pool: ${health.pool.total} total, ${health.pool.idle} ociosas, ${health.pool.waiting} aguardando`);
+    console.log(`Banco: ${health.database?.total_connections} conexões, ${health.database?.active_queries} queries ativas`);
+    if (health.database?.idle_in_transaction > 0) {
+      console.log(`⚠️  ALERTA: ${health.database.idle_in_transaction} conexões presas em transações!`);
+    }
+    console.log('=========================================\n');
+  }, intervalMinutes * 60 * 1000);
 };
 
 export default pool;

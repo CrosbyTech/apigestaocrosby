@@ -7,7 +7,7 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 
 // Importar configurações
-import pool, { testConnection, closePool } from './config/database.js';
+import pool, { testConnection, closePool, startPoolMonitoring } from './config/database.js';
 import { logger } from './utils/errorHandler.js';
 import { 
   startMaterializedViewsScheduler, 
@@ -286,7 +286,13 @@ const server = app.listen(PORT, async () => {
   // Testar conexão com banco de dados na inicialização
   const dbConnected = await testConnection();
   if (dbConnected) {
-    logger.info('🗄️  Banco de dados conectado com sucesso - SEM TIMEOUTS');
+    logger.info('🗄️  Banco de dados conectado com sucesso');
+    logger.info('⚙️  Configurações de pool: max=10, min=2, idleTimeout=30s');
+    logger.info('⏱️  Timeouts: queries=60s, transações ociosas=10s');
+    
+    // Iniciar monitoramento do pool (a cada 5 minutos)
+    startPoolMonitoring(5);
+    logger.info('📊 Monitoramento de conexões iniciado (relatórios a cada 5 minutos)');
     
     // Iniciar o scheduler de atualização das views materializadas
     materializedViewsTask = startMaterializedViewsScheduler();

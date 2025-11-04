@@ -9,7 +9,10 @@ const router = express.Router();
  * @access Private (Admin/Owner apenas)
  */
 router.get('/views', async (req, res) => {
+  let queryStartTime;
   try {
+    queryStartTime = Date.now();
+    
     // Query para listar todas as views do banco
     const query = `
       SELECT 
@@ -30,12 +33,17 @@ router.get('/views', async (req, res) => {
       count: result.rows.length,
     });
   } catch (error) {
-    console.error('Erro ao buscar views:', error);
+    console.error('❌ Erro ao buscar views:', error);
     res.status(500).json({
       success: false,
       message: 'Erro ao buscar views disponíveis',
       error: error.message,
     });
+  } finally {
+    if (queryStartTime) {
+      const duration = Date.now() - queryStartTime;
+      console.log(`⏱️  Query '/views' executada em ${duration}ms`);
+    }
   }
 });
 
@@ -45,7 +53,9 @@ router.get('/views', async (req, res) => {
  * @access Private (Admin/Owner apenas)
  */
 router.get('/views/:viewName/columns', async (req, res) => {
+  let queryStartTime;
   try {
+    queryStartTime = Date.now();
     const { viewName } = req.params;
 
     // Validação básica do nome da view
@@ -85,12 +95,17 @@ router.get('/views/:viewName/columns', async (req, res) => {
       count: result.rows.length,
     });
   } catch (error) {
-    console.error('Erro ao buscar colunas da view:', error);
+    console.error('❌ Erro ao buscar colunas da view:', error);
     res.status(500).json({
       success: false,
       message: 'Erro ao buscar colunas da view',
       error: error.message,
     });
+  } finally {
+    if (queryStartTime) {
+      const duration = Date.now() - queryStartTime;
+      console.log(`⏱️  Query '/views/:viewName/columns' executada em ${duration}ms`);
+    }
   }
 });
 
@@ -108,7 +123,13 @@ router.get('/views/:viewName/columns', async (req, res) => {
  * }
  */
 router.post('/query', async (req, res) => {
+  let queryStartTime;
+  let finalQuery;
+  let queryParams;
+  
   try {
+    queryStartTime = Date.now();
+    
     const {
       viewName,
       columns = [],
@@ -163,7 +184,7 @@ router.post('/query', async (req, res) => {
 
     // Construir WHERE
     let whereClause = '';
-    let queryParams = [];
+    queryParams = [];
     let paramIndex = 1;
 
     if (filters && filters.length > 0) {
@@ -233,7 +254,7 @@ router.post('/query', async (req, res) => {
     }
 
     // Montar query final
-    const finalQuery = `
+    finalQuery = `
       SELECT ${selectClause.join(', ')}
       FROM ${viewName}
       ${whereClause}
@@ -242,8 +263,8 @@ router.post('/query', async (req, res) => {
       LIMIT ${parseInt(limit) || 1000}
     `.trim();
 
-    console.log('Executando query:', finalQuery);
-    console.log('Parâmetros:', queryParams);
+    console.log('🔍 Executando query personalizada:', finalQuery);
+    console.log('📊 Parâmetros:', queryParams);
 
     // Executar query
     const result = await pool.query(finalQuery, queryParams);
@@ -256,12 +277,20 @@ router.post('/query', async (req, res) => {
       params: queryParams, // Para debug (remover em produção)
     });
   } catch (error) {
-    console.error('Erro ao executar query:', error);
+    console.error('❌ Erro ao executar query:', error);
+    console.error('Query que falhou:', finalQuery);
+    console.error('Parâmetros:', queryParams);
+    
     res.status(500).json({
       success: false,
       message: 'Erro ao executar query',
       error: error.message,
     });
+  } finally {
+    if (queryStartTime) {
+      const duration = Date.now() - queryStartTime;
+      console.log(`⏱️  Query personalizada executada em ${duration}ms`);
+    }
   }
 });
 
@@ -271,7 +300,9 @@ router.post('/query', async (req, res) => {
  * @access Private
  */
 router.post('/validate-query', async (req, res) => {
+  let queryStartTime;
   try {
+    queryStartTime = Date.now();
     const { viewName, columns } = req.body;
 
     // Validações básicas
@@ -331,12 +362,17 @@ router.post('/validate-query', async (req, res) => {
       columns: existingColumns,
     });
   } catch (error) {
-    console.error('Erro ao validar query:', error);
+    console.error('❌ Erro ao validar query:', error);
     res.status(500).json({
       success: false,
       message: 'Erro ao validar query',
       error: error.message,
     });
+  } finally {
+    if (queryStartTime) {
+      const duration = Date.now() - queryStartTime;
+      console.log(`⏱️  Validação de query executada em ${duration}ms`);
+    }
   }
 });
 
