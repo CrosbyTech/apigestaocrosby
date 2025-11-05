@@ -1,7 +1,5 @@
 import express from 'express';
-import pool, {
-  checkConnectionHealth,
-} from '../config/database.js';
+import pool, { checkConnectionHealth } from '../config/database.js';
 import {
   validateRequired,
   validateDateFormat,
@@ -778,6 +776,70 @@ router.get(
       );
     } catch (error) {
       console.error('❌ Erro na query de centros de custo:', error);
+      throw error;
+    }
+  }),
+);
+
+/**
+ * @route GET /financial/despesas-todas
+ * @desc Buscar TODAS as descrições de itens de despesa (sem parâmetros obrigatórios)
+ * @access Public
+ * @query {tipo} - Opcional: 'OPERACIONAL' ou 'FINANCEIRA' para filtrar por faixa de código
+ */
+router.get(
+  '/despesas-todas',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { tipo } = req.query;
+
+    let query = `
+      SELECT
+        fd.cd_despesaitem,
+        fd.ds_despesaitem
+      FROM fcp_despesaitem fd
+    `;
+
+    let params = [];
+
+    // Aplicar filtro por tipo se fornecido
+    if (tipo === 'OPERACIONAL') {
+      // Operacionais: 1000-6999 e 8000-9999 (excluindo financeiras 7000-7999)
+      query += `
+        WHERE (fd.cd_despesaitem >= 1000 AND fd.cd_despesaitem <= 6999)
+           OR (fd.cd_despesaitem >= 8000 AND fd.cd_despesaitem <= 9999)
+      `;
+    } else if (tipo === 'FINANCEIRA') {
+      // Financeiras: 7000-7999
+      query += `
+        WHERE fd.cd_despesaitem >= 7000 AND fd.cd_despesaitem <= 7999
+      `;
+    }
+
+    query += `
+      ORDER BY fd.cd_despesaitem
+    `;
+
+    console.log(
+      `🔍 Despesas-Todas: buscando todas as despesas${
+        tipo ? ` do tipo ${tipo}` : ''
+      }`,
+    );
+
+    try {
+      const { rows } = await pool.query(query, params);
+
+      successResponse(
+        res,
+        {
+          total: rows.length,
+          tipo: tipo || 'TODAS',
+          data: rows,
+        },
+        'Todas as despesas obtidas com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro na query de todas as despesas:', error);
       throw error;
     }
   }),
