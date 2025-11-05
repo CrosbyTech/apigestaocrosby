@@ -189,7 +189,7 @@ router.get(
         AND fisnf.vl_unitliquido IS NOT NULL
         AND fisnf.qt_faturado IS NOT NULL
         AND fisnf.qt_faturado != 0
-        AND fisnf.cd_operacao IN (1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 8750, 9017, 9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205, 1101)
+        AND fisnf.cd_operacao IN (1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017, 9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205, 1101)
       GROUP BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
       ORDER BY fisnf.dt_transacao, fisnf.cd_grupoempresa, fisnf.nm_grupoempresa
     `;
