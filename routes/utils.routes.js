@@ -413,12 +413,13 @@ router.post(
  * @desc Retorna informações de vouchers e transações do dia relacionadas
  * @access Public
  * @query {cd_empcad} - código(s) de empresa cadastro (pode ser único ou lista separada por vírgula)
+ * @query {cd_sufixo} - código(s) sufixo (opcional, pode ser único ou lista separada por vírgula)
  */
 router.get(
   '/acao-cartoes',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    let { cd_empcad } = req.query;
+    let { cd_empcad, cd_sufixo } = req.query;
 
     if (!cd_empcad) {
       return errorResponse(
@@ -435,8 +436,23 @@ router.get(
       .map((s) => s.trim())
       .filter(Boolean);
 
-    // Construir placeholders dinamicamente
-    const placeholders = empresas.map((_, i) => `$${i + 1}`).join(',');
+    // Construir placeholders dinamicamente para empresas
+    const placeholdersEmpresas = empresas.map((_, i) => `$${i + 1}`).join(',');
+
+    // Processar cd_sufixo se fornecido
+    let sufixos = [];
+    let placeholdersSufixos = '';
+    let paramIndex = empresas.length + 1;
+
+    if (cd_sufixo) {
+      sufixos = String(cd_sufixo)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      placeholdersSufixos = sufixos
+        .map((_, i) => `$${paramIndex + i}`)
+        .join(',');
+    }
 
     const query = `
       with trx_do_dia as (
@@ -498,13 +514,15 @@ router.get(
         and v.cd_sufixo not like '%crosby%'
         and v.cd_sufixo not like '%CROSBY%'
         and v.tp_situacao <> 6
-        and v.cd_empcad in (${placeholders})
+        and v.cd_empcad in (${placeholdersEmpresas})
+        ${placeholdersSufixos ? `and v.cd_sufixo in (${placeholdersSufixos})` : ''}
       order by
         v.cd_empcad,
         v.dt_cadastro desc
     `;
 
-    const result = await pool.query(query, empresas);
+    const params = [...empresas, ...sufixos];
+    const result = await pool.query(query, params);
 
     successResponse(
       res,
