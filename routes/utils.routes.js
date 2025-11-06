@@ -408,4 +408,113 @@ router.post(
   }),
 );
 
+/**
+ * @route GET /utils/acao-cartoes
+ * @desc Retorna informações de vouchers e transações do dia relacionadas
+ * @access Public
+ * @query {cd_empcad} - código(s) de empresa cadastro (pode ser único ou lista separada por vírgula)
+ */
+router.get(
+  '/acao-cartoes',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    let { cd_empcad } = req.query;
+
+    if (!cd_empcad) {
+      return errorResponse(
+        res,
+        'Parâmetro cd_empcad é obrigatório',
+        400,
+        'BAD_REQUEST',
+      );
+    }
+
+    // Aceitar lista separada por vírgula
+    const empresas = String(cd_empcad)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // Construir placeholders dinamicamente
+    const placeholders = empresas.map((_, i) => `$${i + 1}`).join(',');
+
+    const query = `
+      with trx_do_dia as (
+        select
+          t.cd_pessoa,
+          DATE(t.dt_transacao) as d_trans,
+          t.nr_transacao,
+          t.dt_transacao,
+          t.vl_total,
+          t.vl_desconto,
+          t.cd_empresa,
+          t.tp_operacao,
+          t.tp_situacao,
+          row_number() over (
+            partition by t.cd_pessoa,
+              DATE(t.dt_transacao)
+            order by
+              t.dt_transacao desc,
+              t.nr_transacao desc
+          ) as rn_dia
+        from
+          tra_transacao t
+        where
+          t.tp_situacao = 4
+          and t.cd_operacao <> 599
+          and t.tp_operacao = 'S'
+      )
+      select
+        v.cd_empcad,
+        v.cd_pessoa,
+        v.nr_voucher,
+        v.cd_sufixo,
+        v.vl_voucher,
+        v.dt_cadastro,
+        v.tp_situacao,
+        case
+          when v.tp_situacao = 4 then 'USADO'
+          else 'NÃO USADO'
+        end as situacao_uso,
+        t.nr_transacao,
+        t.dt_transacao,
+        t.cd_empresa as cd_empresa_transacao,
+        t.vl_total,
+        t.vl_desconto,
+        (coalesce(t.vl_total, 0) + coalesce(t.vl_desconto, 0)) as vl_bruto,
+        ROUND(
+          100.0 * coalesce(t.vl_desconto, 0)
+          / nullif(coalesce(t.vl_total, 0) + coalesce(t.vl_desconto, 0), 0)
+        , 2) as pct_desconto_bruto
+      from
+        pdv_voucher v
+      left join trx_do_dia t
+        on
+          t.cd_pessoa = v.cd_pessoa
+          and t.d_trans = v.dt_cadastro::date
+          and t.rn_dia = 1
+      where
+        v.cd_pessoa is not null
+        and v.cd_sufixo not like '%crosby%'
+        and v.cd_sufixo not like '%CROSBY%'
+        and v.tp_situacao <> 6
+        and v.cd_empcad in (${placeholders})
+      order by
+        v.cd_empcad,
+        v.dt_cadastro desc
+    `;
+
+    const result = await pool.query(query, empresas);
+
+    successResponse(
+      res,
+      {
+        count: result.rows.length,
+        data: result.rows,
+      },
+      'Dados de ação cartões obtidos com sucesso',
+    );
+  }),
+);
+
 export default router;
