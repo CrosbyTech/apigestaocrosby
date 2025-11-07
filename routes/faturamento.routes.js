@@ -1472,13 +1472,11 @@ router.get(
           const impostosQuery = `
             SELECT
               ti.cd_imposto,
-              SUM(ti.vl_imposto) as valorimposto
+              SUM(ti.valorimposto) as valorimposto
             FROM
-              tra_itemimposto ti
-            INNER JOIN tra_transacao t ON t.nr_transacao = ti.nr_transacao
+              impostosdre ti
             WHERE
               ti.nr_transacao = ANY($1)
-              AND t.tp_operacao = 'S'
             GROUP BY
               ti.cd_imposto
           `;

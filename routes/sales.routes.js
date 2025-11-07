@@ -1391,7 +1391,7 @@ router.get(
           ti.nr_transacao,
           ti.dt_transacao,
           ti.cd_imposto,
-          SUM(ti.vl_imposto) as valorimposto
+          SUM(ti.valorimposto) as valorimposto
         FROM
           impostosdre ti
         WHERE
