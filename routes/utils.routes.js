@@ -413,7 +413,7 @@ router.post(
  * @desc Retorna informações de vouchers e transações do dia relacionadas
  * @access Public
  * @query {cd_empcad} - código(s) de empresa cadastro (pode ser único ou lista separada por vírgula)
- * @query {cd_sufixo} - código(s) sufixo (opcional, pode ser único ou lista separada por vírgula)
+ * @query {cd_sufixo} - código sufixo (opcional) - filtra por cd_sufixo exato
  */
 router.get(
   '/acao-cartoes',
@@ -436,22 +436,24 @@ router.get(
       .map((s) => s.trim())
       .filter(Boolean);
 
-    // Construir placeholders dinamicamente para empresas
-    const placeholdersEmpresas = empresas.map((_, i) => `$${i + 1}`).join(',');
-
-    // Processar cd_sufixo se fornecido
-    let sufixos = [];
-    let placeholdersSufixos = '';
+    // Construir placeholders dinamicamente
+    const placeholders = empresas.map((_, i) => `$${i + 1}`).join(',');
+    
+    // Construir parâmetros e condições dinamicamente
+    let params = [...empresas];
     let paramIndex = empresas.length + 1;
-
+    let whereConditions = [
+      'v.cd_pessoa is not null',
+      `v.cd_sufixo not like '%crosby%'`,
+      `v.cd_sufixo not like '%CROSBY%'`,
+      `v.tp_situacao <> 6`,
+      `v.cd_empcad in (${placeholders})`
+    ];
+    
+    // Adicionar filtro de cd_sufixo se fornecido
     if (cd_sufixo) {
-      sufixos = String(cd_sufixo)
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      placeholdersSufixos = sufixos
-        .map((_, i) => `$${paramIndex + i}`)
-        .join(',');
+      whereConditions.push(`v.cd_sufixo = $${paramIndex}`);
+      params.push(cd_sufixo);
     }
 
     const query = `
@@ -510,18 +512,12 @@ router.get(
           and t.d_trans = v.dt_cadastro::date
           and t.rn_dia = 1
       where
-        v.cd_pessoa is not null
-        and v.cd_sufixo not like '%crosby%'
-        and v.cd_sufixo not like '%CROSBY%'
-        and v.tp_situacao <> 6
-        and v.cd_empcad in (${placeholdersEmpresas})
-        ${placeholdersSufixos ? `and v.cd_sufixo in (${placeholdersSufixos})` : ''}
+        ${whereConditions.join(' AND ')}
       order by
         v.cd_empcad,
         v.dt_cadastro desc
     `;
 
-    const params = [...empresas, ...sufixos];
     const result = await pool.query(query, params);
 
     successResponse(
@@ -534,5 +530,6 @@ router.get(
     );
   }),
 );
+
 
 export default router;
