@@ -413,7 +413,7 @@ router.post(
  * @desc Retorna informações de vouchers e transações do dia relacionadas
  * @access Public
  * @query {cd_empcad} - código(s) de empresa cadastro (pode ser único ou lista separada por vírgula)
- * @query {cd_sufixo} - código sufixo (opcional) - filtra por cd_sufixo exato
+ * @query {cd_sufixo} - código sufixo (obrigatório) - filtra por cd_sufixo exato (usa TRIM para remover espaços)
  */
 router.get(
   '/acao-cartoes',
@@ -430,31 +430,38 @@ router.get(
       );
     }
 
+    if (!cd_sufixo) {
+      return errorResponse(
+        res,
+        'Parâmetro cd_sufixo é obrigatório',
+        400,
+        'BAD_REQUEST',
+      );
+    }
+
     // Aceitar lista separada por vírgula
     const empresas = String(cd_empcad)
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
 
+    // Limpar espaços do cd_sufixo
+    const cdSufixoLimpo = String(cd_sufixo).trim();
+
     // Construir placeholders dinamicamente
     const placeholders = empresas.map((_, i) => `$${i + 1}`).join(',');
     
     // Construir parâmetros e condições dinamicamente
-    let params = [...empresas];
+    let params = [...empresas, cdSufixoLimpo];
     let paramIndex = empresas.length + 1;
     let whereConditions = [
       'v.cd_pessoa is not null',
       `v.cd_sufixo not like '%crosby%'`,
       `v.cd_sufixo not like '%CROSBY%'`,
       `v.tp_situacao <> 6`,
-      `v.cd_empcad in (${placeholders})`
+      `v.cd_empcad in (${placeholders})`,
+      `TRIM(v.cd_sufixo) = $${paramIndex}`
     ];
-    
-    // Adicionar filtro de cd_sufixo se fornecido
-    if (cd_sufixo) {
-      whereConditions.push(`v.cd_sufixo = $${paramIndex}`);
-      params.push(cd_sufixo);
-    }
 
     const query = `
       with trx_do_dia as (
