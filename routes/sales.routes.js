@@ -1388,8 +1388,6 @@ router.get(
 
     const query = `
         SELECT
-          ti.nr_transacao,
-          ti.dt_transacao,
           ti.cd_imposto,
           SUM(ti.valorimposto) as valorimposto
         FROM
@@ -1397,11 +1395,6 @@ router.get(
         WHERE
           ti.nr_transacao IN (${placeholders})
         GROUP BY
-          ti.nr_transacao,
-          ti.cd_imposto,
-          ti.dt_transacao
-        ORDER BY
-          ti.nr_transacao,
           ti.cd_imposto
       `;
 
