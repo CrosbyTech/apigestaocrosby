@@ -1393,7 +1393,7 @@ router.get(
           ti.cd_imposto,
           SUM(ti.vl_imposto) as valorimposto
         FROM
-          tra_itemimposto ti
+          impostosdre ti
         WHERE
           ti.nr_transacao IN (${placeholders})
         GROUP BY
