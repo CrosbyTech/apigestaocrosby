@@ -492,6 +492,7 @@ router.get(
       select
         v.cd_empcad,
         v.cd_pessoa,
+        pp.nm_pessoa,
         v.nr_voucher,
         v.cd_sufixo,
         v.vl_voucher,
@@ -518,6 +519,8 @@ router.get(
           t.cd_pessoa = v.cd_pessoa
           and t.d_trans = v.dt_cadastro::date
           and t.rn_dia = 1
+      left join pes_pessoa pp on
+        v.cd_pessoa = pp.cd_pessoa
       where
         ${whereConditions.join(' AND ')}
       order by
