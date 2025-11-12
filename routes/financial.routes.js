@@ -1408,6 +1408,7 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
+        AND vff.tp_situacao = 1
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
           OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
@@ -1426,6 +1427,7 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
+        AND vff.tp_situacao = 1
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
           OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
@@ -1510,6 +1512,7 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
+        AND vff.tp_situacao = 1
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
           OR (vpp.cd_tipoclas = 7 AND vpp.cd_classificacao::integer = 1)
@@ -1528,9 +1531,10 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
+        AND vff.tp_situacao = 1
         AND (
-          (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
-          OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
+          (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
+          OR (vpp.cd_tipoclas = 7 AND vpp.cd_classificacao::integer = 1)
         )
     `;
 
@@ -1614,6 +1618,7 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
+        AND vff.tp_situacao = 1
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
       GROUP BY
         vff.cd_cliente,
@@ -1661,6 +1666,7 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
+        AND vff.tp_situacao = 1
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
     `;
 
