@@ -1,7 +1,14 @@
 import express from 'express';
 import pool from '../config/database.js';
-import { validateDateFormat, sanitizeInput } from '../middlewares/validation.middleware.js';
-import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import {
+  validateDateFormat,
+  sanitizeInput,
+} from '../middlewares/validation.middleware.js';
+import {
+  asyncHandler,
+  successResponse,
+  errorResponse,
+} from '../utils/errorHandler.js';
 
 const router = express.Router();
 
@@ -11,47 +18,54 @@ const router = express.Router();
  * @access Public
  * @query {cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia[]}
  */
-router.get('/consulta-fatura',
+router.get(
+  '/consulta-fatura',
   sanitizeInput,
   validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
     let { cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia } = req.query;
-    
+
     let whereConditions = [];
     let params = [];
     let paramIndex = 1;
-    
+
     // Filtro para nome fantasia (múltiplo ou padrão)
     if (nm_fantasia) {
       let nomes = Array.isArray(nm_fantasia) ? nm_fantasia : [nm_fantasia];
-      whereConditions.push(`pp.nm_fantasia IN (${nomes.map(() => `$${paramIndex++}`).join(',')})`);
+      whereConditions.push(
+        `pp.nm_fantasia IN (${nomes.map(() => `$${paramIndex++}`).join(',')})`,
+      );
       params.push(...nomes);
     } else {
       whereConditions.push("pp.nm_fantasia LIKE 'F%CROSBY%'");
     }
-    
+
     // Filtros opcionais
     if (cd_empresa) {
       whereConditions.push(`vff.cd_empresa = $${paramIndex++}`);
       params.push(cd_empresa);
     }
-    
+
     if (cd_cliente) {
       whereConditions.push(`vff.cd_cliente = $${paramIndex++}`);
       params.push(cd_cliente);
     }
-    
+
     // Filtro de data (com padrão se não fornecido)
     if (dt_inicio && dt_fim) {
-      whereConditions.push(`vff.dt_emissao BETWEEN $${paramIndex++} AND $${paramIndex++}`);
+      whereConditions.push(
+        `vff.dt_emissao BETWEEN $${paramIndex++} AND $${paramIndex++}`,
+      );
       params.push(dt_inicio, dt_fim);
     } else {
-      whereConditions.push(`vff.dt_emissao BETWEEN $${paramIndex++} AND $${paramIndex++}`);
+      whereConditions.push(
+        `vff.dt_emissao BETWEEN $${paramIndex++} AND $${paramIndex++}`,
+      );
       params.push('2025-05-01', '2025-05-12');
     }
-    
+
     const whereClause = whereConditions.join(' AND ');
-    
+
     const query = `
       SELECT
         vff.cd_empresa,
@@ -85,24 +99,31 @@ router.get('/consulta-fatura',
         vff.vl_pago
       ORDER BY vff.dt_emissao DESC
     `;
-    
+
     const { rows } = await pool.query(query, params);
 
     // Calcular totais
-    const totals = rows.reduce((acc, row) => {
-      acc.totalFatura += parseFloat(row.vl_fatura || 0);
-      acc.totalPago += parseFloat(row.vl_pago || 0);
-      acc.totalSaldo += parseFloat(row.vl_saldo || 0);
-      return acc;
-    }, { totalFatura: 0, totalPago: 0, totalSaldo: 0 });
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.totalFatura += parseFloat(row.vl_fatura || 0);
+        acc.totalPago += parseFloat(row.vl_pago || 0);
+        acc.totalSaldo += parseFloat(row.vl_saldo || 0);
+        return acc;
+      },
+      { totalFatura: 0, totalPago: 0, totalSaldo: 0 },
+    );
 
-    successResponse(res, {
-      filtros: { cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia },
-      totais: totals,
-      count: rows.length,
-      data: rows
-    }, 'Consulta de faturas realizada com sucesso');
-  })
+    successResponse(
+      res,
+      {
+        filtros: { cd_empresa, cd_cliente, dt_inicio, dt_fim, nm_fantasia },
+        totais: totals,
+        count: rows.length,
+        data: rows,
+      },
+      'Consulta de faturas realizada com sucesso',
+    );
+  }),
 );
 
 /**
@@ -111,7 +132,8 @@ router.get('/consulta-fatura',
  * @access Public
  * @query {cd_empresa, dt_inicio, dt_fim, nm_fantasia[]}
  */
-router.get('/fundo-propaganda',
+router.get(
+  '/fundo-propaganda',
   sanitizeInput,
   validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
@@ -123,7 +145,9 @@ router.get('/fundo-propaganda',
     // Filtro para nome fantasia
     if (nm_fantasia) {
       let nomes = Array.isArray(nm_fantasia) ? nm_fantasia : [nm_fantasia];
-      whereConditions.push(`p.nm_fantasia IN (${nomes.map(() => `$${paramIndex++}`).join(',')})`);
+      whereConditions.push(
+        `p.nm_fantasia IN (${nomes.map(() => `$${paramIndex++}`).join(',')})`,
+      );
       params.push(...nomes);
     } else {
       whereConditions.push("p.nm_fantasia LIKE 'F%CROSBY%'");
@@ -136,21 +160,28 @@ router.get('/fundo-propaganda',
 
     // Filtro de data com padrão
     if (dt_inicio && dt_fim) {
-      whereConditions.push(`vfn.dt_transacao BETWEEN $${paramIndex++} AND $${paramIndex++}`);
+      whereConditions.push(
+        `vfn.dt_transacao BETWEEN $${paramIndex++} AND $${paramIndex++}`,
+      );
       params.push(dt_inicio, dt_fim);
     } else {
-      whereConditions.push(`vfn.dt_transacao BETWEEN '2025-07-01' AND '2025-07-15'`);
+      whereConditions.push(
+        `vfn.dt_transacao BETWEEN '2025-07-01' AND '2025-07-15'`,
+      );
     }
 
     // Filtros fixos do fundo de propaganda
     const excludedOperations = [
-      1152,590,5153,660,9200,2008,536,1153,599,5920,5930,1711,7111,2009,5152,6029,530,
-      5152,5930,650,5010,600,620,40,1557,8600,5910,3336,9003,9052,662,5909,5153,5910,
-      3336,9003,530,36,536,1552,51,1556,2500,1126,1127,8160,1122,1102,9986,1128,1553,
-      1556,9200,8002,2551,1557,8160,2004,5912,1410
+      1152, 590, 5153, 660, 9200, 2008, 536, 1153, 599, 5920, 5930, 1711, 7111,
+      2009, 5152, 6029, 530, 5152, 5930, 650, 5010, 600, 620, 40, 1557, 8600,
+      5910, 3336, 9003, 9052, 662, 5909, 5153, 5910, 3336, 9003, 530, 36, 536,
+      1552, 51, 1556, 2500, 1126, 1127, 8160, 1122, 1102, 9986, 1128, 1553,
+      1556, 9200, 8002, 2551, 1557, 8160, 2004, 5912, 1410,
     ];
 
-    whereConditions.push(`vfn.cd_operacao NOT IN (${excludedOperations.join(',')})`);
+    whereConditions.push(
+      `vfn.cd_operacao NOT IN (${excludedOperations.join(',')})`,
+    );
     whereConditions.push(`vfn.tp_situacao = 4`);
     whereConditions.push(`vfn.cd_grupoempresa < 5999`);
     whereConditions.push(`(f.tp_documento IS NULL OR f.tp_documento <> 20)`);
@@ -196,7 +227,7 @@ router.get('/fundo-propaganda',
           nm_fantasia: fantasia,
           total_valor: 0,
           total_transacoes: 0,
-          transacoes: []
+          transacoes: [],
         };
       }
       acc[fantasia].total_valor += parseFloat(row.vl_total || 0);
@@ -205,13 +236,20 @@ router.get('/fundo-propaganda',
       return acc;
     }, {});
 
-    successResponse(res, {
-      periodo: dt_inicio && dt_fim ? { dt_inicio, dt_fim } : { dt_inicio: '2025-07-01', dt_fim: '2025-07-15' },
-      filtros: { cd_empresa, nm_fantasia },
-      total_franquias: Object.keys(groupedData).length,
-      data: Object.values(groupedData)
-    }, 'Dados do fundo de propaganda obtidos com sucesso');
-  })
+    successResponse(
+      res,
+      {
+        periodo:
+          dt_inicio && dt_fim
+            ? { dt_inicio, dt_fim }
+            : { dt_inicio: '2025-07-01', dt_fim: '2025-07-15' },
+        filtros: { cd_empresa, nm_fantasia },
+        total_franquias: Object.keys(groupedData).length,
+        data: Object.values(groupedData),
+      },
+      'Dados do fundo de propaganda obtidos com sucesso',
+    );
+  }),
 );
 
 /**
@@ -220,7 +258,8 @@ router.get('/fundo-propaganda',
  * @access Public
  * @query {dt_inicio, dt_fim}
  */
-router.get('/franquias-credev',
+router.get(
+  '/franquias-credev',
   sanitizeInput,
   validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
@@ -271,26 +310,42 @@ router.get('/franquias-credev',
     const { rows } = await pool.query(query, params);
 
     // Calcular estatísticas
-    const stats = rows.reduce((acc, row) => {
-      const valor = parseFloat(row.vl_pago || 0);
-      if (valor > 0) {
-        acc.totalCredito += valor;
-        acc.qtdCredito += 1;
-      } else if (valor < 0) {
-        acc.totalDebito += Math.abs(valor);
-        acc.qtdDebito += 1;
-      }
-      acc.saldoTotal = acc.totalCredito - acc.totalDebito;
-      return acc;
-    }, { totalCredito: 0, totalDebito: 0, qtdCredito: 0, qtdDebito: 0, saldoTotal: 0 });
+    const stats = rows.reduce(
+      (acc, row) => {
+        const valor = parseFloat(row.vl_pago || 0);
+        if (valor > 0) {
+          acc.totalCredito += valor;
+          acc.qtdCredito += 1;
+        } else if (valor < 0) {
+          acc.totalDebito += Math.abs(valor);
+          acc.qtdDebito += 1;
+        }
+        acc.saldoTotal = acc.totalCredito - acc.totalDebito;
+        return acc;
+      },
+      {
+        totalCredito: 0,
+        totalDebito: 0,
+        qtdCredito: 0,
+        qtdDebito: 0,
+        saldoTotal: 0,
+      },
+    );
 
-    successResponse(res, {
-      periodo: dt_inicio && dt_fim ? { dt_inicio, dt_fim } : { dt_inicio: '2025-06-10', dt_fim: '2025-06-10' },
-      estatisticas: stats,
-      count: rows.length,
-      data: rows
-    }, 'Franquias crédito/débito obtidas com sucesso');
-  })
+    successResponse(
+      res,
+      {
+        periodo:
+          dt_inicio && dt_fim
+            ? { dt_inicio, dt_fim }
+            : { dt_inicio: '2025-06-10', dt_fim: '2025-06-10' },
+        estatisticas: stats,
+        count: rows.length,
+        data: rows,
+      },
+      'Franquias crédito/débito obtidas com sucesso',
+    );
+  }),
 );
 
 /**
@@ -316,7 +371,8 @@ router.get(
     }
 
     // Lista estática (mantida) de empresas e operações
-    const empresasPermitidas = '(1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
+    const empresasPermitidas =
+      '(1, 2, 5, 6, 7, 11, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99)';
     const operacoesPermitidas = `(
       1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204,
       2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660, 661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102,
@@ -333,6 +389,7 @@ router.get(
         tt.cd_grupoempresa,
         tt.dt_transacao,
         tt.nr_transacao,
+        tt.nr_transacaoori,
         tt.cd_pessoa,
         pp.nm_fantasia,
         tt.vl_total
