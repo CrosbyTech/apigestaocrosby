@@ -447,8 +447,10 @@ router.get(
       SELECT
         tt.cd_empresa,
         ff.nr_fat as nr_fatura,
+        ff.dt_emissao,
         tt.nr_transacaoori,
         tt.nr_transacao,
+        tt.dt_transacao,
         tt.vl_transacao,
         ff.tp_documento
       FROM
@@ -461,8 +463,10 @@ router.get(
       GROUP BY
         tt.cd_empresa,
         ff.nr_fat,
+        ff.dt_emissao,
         tt.nr_transacaoori,
         tt.nr_transacao,
+        tt.dt_transacao,
         tt.vl_transacao,
         ff.tp_documento
       ORDER BY
