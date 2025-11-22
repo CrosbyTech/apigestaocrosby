@@ -421,4 +421,68 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /franchise/trans_fatura
+ * @desc Buscar transações relacionadas a uma fatura específica
+ * @access Public
+ * @query {nr_fat, cd_cliente}
+ */
+router.get(
+  '/trans_fatura',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { nr_fat, cd_cliente } = req.query;
+
+    // Validação de parâmetros obrigatórios
+    if (!nr_fat || !cd_cliente) {
+      return errorResponse(
+        res,
+        'Parâmetros obrigatórios: nr_fat, cd_cliente',
+        400,
+        'MISSING_PARAMETERS',
+      );
+    }
+
+    const query = `
+      SELECT
+        tt.cd_empresa,
+        ff.nr_fat as nr_fatura,
+        tt.nr_transacaoori,
+        tt.nr_transacao,
+        tt.vl_transacao,
+        ff.tp_documento
+      FROM
+        fcr_faturai ff
+      RIGHT JOIN tra_transacao tt ON
+        ff.vl_fatura = tt.vl_transacao
+      WHERE
+        ff.nr_fat = $1
+        AND ff.cd_cliente = $2
+      GROUP BY
+        tt.cd_empresa,
+        ff.nr_fat,
+        tt.nr_transacaoori,
+        tt.nr_transacao,
+        tt.vl_transacao,
+        ff.tp_documento
+      ORDER BY
+        tt.nr_transacao DESC
+    `;
+
+    const params = [nr_fat, cd_cliente];
+
+    const { rows } = await pool.query(query, params);
+
+    successResponse(
+      res,
+      {
+        filtros: { nr_fat, cd_cliente },
+        count: rows.length,
+        data: rows,
+      },
+      'Transações da fatura obtidas com sucesso',
+    );
+  }),
+);
+
 export default router;
