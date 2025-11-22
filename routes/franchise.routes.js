@@ -460,6 +460,7 @@ router.get(
       WHERE
         ff.nr_fat = $1
         AND ff.cd_cliente = $2
+        AND tt.nr_transacaoori IS NOT NULL
       GROUP BY
         tt.cd_empresa,
         ff.nr_fat,
@@ -485,6 +486,71 @@ router.get(
         data: rows,
       },
       'Transações da fatura obtidas com sucesso',
+    );
+  }),
+);
+
+/**
+ * @route GET /franchise/detalhenf
+ * @desc Buscar detalhes dos itens de uma nota fiscal (transação)
+ * @access Public
+ * @query {nr_transacao} - Número da transação (obrigatório)
+ */
+router.get(
+  '/detalhenf',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { nr_transacao } = req.query;
+
+    // Validar parâmetro obrigatório
+    if (!nr_transacao) {
+      return errorResponse(
+        res,
+        'O parâmetro nr_transacao é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    const query = `
+      SELECT
+        tt.nr_transacao,
+        tt.cd_produto,
+        tt.ds_produto,
+        SUM(tt.qt_solicitada) AS qnt,
+        tt.vl_unitliquido,
+        SUM(tt.vl_totalliquido) AS total
+      FROM
+        tra_transitem tt
+      WHERE
+        tt.nr_transacao = $1
+      GROUP BY
+        tt.nr_transacao,
+        tt.cd_produto,
+        tt.ds_produto,
+        tt.vl_unitliquido
+      ORDER BY
+        tt.cd_produto
+    `;
+
+    const { rows } = await pool.query(query, [nr_transacao]);
+
+    // Calcular total geral
+    const totalGeral = rows.reduce((acc, item) => acc + parseFloat(item.total || 0), 0);
+    const quantidadeTotal = rows.reduce((acc, item) => acc + parseFloat(item.qnt || 0), 0);
+
+    successResponse(
+      res,
+      {
+        filtros: { nr_transacao },
+        count: rows.length,
+        totais: {
+          quantidade_total: quantidadeTotal,
+          valor_total: totalGeral,
+        },
+        data: rows,
+      },
+      'Detalhes da nota fiscal obtidos com sucesso',
     );
   }),
 );
