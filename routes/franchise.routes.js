@@ -423,71 +423,54 @@ router.get(
 
 /**
  * @route GET /franchise/trans_fatura
- * @desc Buscar transações relacionadas a uma fatura específica
+ * @desc Buscar transações por pessoa, data e valor
  * @access Public
- * @query {nr_fat, cd_cliente, dt_emissao (opcional)}
+ * @query {cd_pessoa, dt_transacao, vl_transacao}
  */
 router.get(
   '/trans_fatura',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    const { nr_fat, cd_cliente, dt_emissao } = req.query;
+    const { cd_pessoa, dt_transacao, vl_transacao } = req.query;
 
     // Validação de parâmetros obrigatórios
-    if (!nr_fat || !cd_cliente) {
+    if (!cd_pessoa || !dt_transacao || !vl_transacao) {
       return errorResponse(
         res,
-        'Parâmetros obrigatórios: nr_fat, cd_cliente',
+        'Parâmetros obrigatórios: cd_pessoa, dt_transacao, vl_transacao',
         400,
         'MISSING_PARAMETERS',
       );
     }
 
-    // Construir WHERE dinamicamente
-    let whereConditions = ['ff.nr_fat = $1', 'ff.cd_cliente = $2'];
-    let params = [nr_fat, cd_cliente];
-    let paramIndex = 3;
-
-    // Adicionar filtro de dt_emissao se fornecido
-    if (dt_emissao) {
-      whereConditions.push(`ff.dt_emissao = $${paramIndex}`);
-      params.push(dt_emissao);
-      paramIndex++;
-    }
-
-    const whereClause = whereConditions.join(' AND ');
-
     const query = `
       SELECT
         tt.cd_empresa,
-        ff.nr_fat as nr_fatura,
-        ff.dt_emissao,
-        tt.nr_transacaoori,
         tt.nr_transacao,
         tt.dt_transacao,
-        tt.vl_transacao,
-        ff.tp_documento
+        tt.vl_transacao
       FROM
-        fcr_faturai ff
-      LEFT JOIN tra_transacao tt ON
-        ff.vl_fatura = tt.vl_transacao
-        AND tt.cd_pessoa = ff.cd_cliente
+        tra_transacao tt
       WHERE
-        ${whereClause}
+        tt.cd_pessoa = $1
+        AND tt.dt_transacao = $2
+        AND tt.vl_transacao = $3
       ORDER BY
         tt.nr_transacao DESC
     `;
+
+    const params = [cd_pessoa, dt_transacao, vl_transacao];
 
     const { rows } = await pool.query(query, params);
 
     successResponse(
       res,
       {
-        filtros: { nr_fat, cd_cliente, dt_emissao },
+        filtros: { cd_pessoa, dt_transacao, vl_transacao },
         count: rows.length,
         data: rows,
       },
-      'Transações da fatura obtidas com sucesso',
+      'Transações obtidas com sucesso',
     );
   }),
 );
