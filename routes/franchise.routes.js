@@ -444,11 +444,7 @@ router.get(
     }
 
     // Construir WHERE dinamicamente
-    let whereConditions = [
-      'ff.nr_fat = $1',
-      'ff.cd_cliente = $2',
-      'tt.nr_transacaoori IS NOT NULL'
-    ];
+    let whereConditions = ['ff.nr_fat = $1', 'ff.cd_cliente = $2'];
     let params = [nr_fat, cd_cliente];
     let paramIndex = 3;
 
@@ -473,19 +469,11 @@ router.get(
         ff.tp_documento
       FROM
         fcr_faturai ff
-      RIGHT JOIN tra_transacao tt ON
+      LEFT JOIN tra_transacao tt ON
         ff.vl_fatura = tt.vl_transacao
+        AND tt.cd_pessoa = ff.cd_cliente
       WHERE
         ${whereClause}
-      GROUP BY
-        tt.cd_empresa,
-        ff.nr_fat,
-        ff.dt_emissao,
-        tt.nr_transacaoori,
-        tt.nr_transacao,
-        tt.dt_transacao,
-        tt.vl_transacao,
-        ff.tp_documento
       ORDER BY
         tt.nr_transacao DESC
     `;
@@ -614,12 +602,7 @@ router.get(
     const { rows } = await pool.query(query, [nr_transacao]);
 
     if (rows.length === 0) {
-      return errorResponse(
-        res,
-        'Transação não encontrada',
-        404,
-        'NOT_FOUND',
-      );
+      return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
     }
 
     successResponse(
