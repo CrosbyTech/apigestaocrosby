@@ -515,6 +515,7 @@ router.get(
     const query = `
       SELECT
         tt.nr_transacao,
+        tt.cd_empresa,
         tt.cd_produto,
         tt.ds_produto,
         SUM(tt.qt_solicitada) AS qnt,
@@ -526,6 +527,7 @@ router.get(
         tt.nr_transacao = $1
       GROUP BY
         tt.nr_transacao,
+        tt.cd_empresa,
         tt.cd_produto,
         tt.ds_produto,
         tt.vl_unitliquido
@@ -536,8 +538,14 @@ router.get(
     const { rows } = await pool.query(query, [nr_transacao]);
 
     // Calcular total geral
-    const totalGeral = rows.reduce((acc, item) => acc + parseFloat(item.total || 0), 0);
-    const quantidadeTotal = rows.reduce((acc, item) => acc + parseFloat(item.qnt || 0), 0);
+    const totalGeral = rows.reduce(
+      (acc, item) => acc + parseFloat(item.total || 0),
+      0,
+    );
+    const quantidadeTotal = rows.reduce(
+      (acc, item) => acc + parseFloat(item.qnt || 0),
+      0,
+    );
 
     successResponse(
       res,
