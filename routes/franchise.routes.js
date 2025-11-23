@@ -448,12 +448,14 @@ router.get(
         tt.cd_empresa,
         tt.nr_transacao,
         tt.dt_transacao,
-        tt.vl_transacao
+        tt.vl_transacao,
+        tt.nr_transacaoori
       FROM
         tra_transacao tt
       WHERE
         tt.cd_pessoa = $1
         AND tt.dt_transacao = $2
+        AND tt.cd_empresa <= 100
       ORDER BY
         tt.nr_transacao DESC
     `;
