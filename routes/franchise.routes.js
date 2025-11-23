@@ -423,21 +423,21 @@ router.get(
 
 /**
  * @route GET /franchise/trans_fatura
- * @desc Buscar transações por pessoa, data e valor
+ * @desc Buscar transações por pessoa e data
  * @access Public
- * @query {cd_pessoa, dt_transacao, vl_transacao}
+ * @query {cd_pessoa, dt_transacao}
  */
 router.get(
   '/trans_fatura',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    const { cd_pessoa, dt_transacao, vl_transacao } = req.query;
+    const { cd_pessoa, dt_transacao } = req.query;
 
     // Validação de parâmetros obrigatórios
-    if (!cd_pessoa || !dt_transacao || !vl_transacao) {
+    if (!cd_pessoa || !dt_transacao) {
       return errorResponse(
         res,
-        'Parâmetros obrigatórios: cd_pessoa, dt_transacao, vl_transacao',
+        'Parâmetros obrigatórios: cd_pessoa, dt_transacao',
         400,
         'MISSING_PARAMETERS',
       );
@@ -454,19 +454,18 @@ router.get(
       WHERE
         tt.cd_pessoa = $1
         AND tt.dt_transacao = $2
-        AND tt.vl_transacao = $3
       ORDER BY
         tt.nr_transacao DESC
     `;
 
-    const params = [cd_pessoa, dt_transacao, vl_transacao];
+    const params = [cd_pessoa, dt_transacao];
 
     const { rows } = await pool.query(query, params);
 
     successResponse(
       res,
       {
-        filtros: { cd_pessoa, dt_transacao, vl_transacao },
+        filtros: { cd_pessoa, dt_transacao },
         count: rows.length,
         data: rows,
       },
