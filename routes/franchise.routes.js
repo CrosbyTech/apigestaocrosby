@@ -563,4 +563,60 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /franchise/transacao-info
+ * @desc Buscar informações básicas de uma transação (cd_empresa, dt_transacao)
+ * @access Public
+ * @query {nr_transacao} - Número da transação (obrigatório)
+ */
+router.get(
+  '/transacao-info',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { nr_transacao } = req.query;
+
+    if (!nr_transacao) {
+      return errorResponse(
+        res,
+        'O parâmetro nr_transacao é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    const query = `
+      SELECT
+        tt.nr_transacao,
+        tt.cd_empresa,
+        tt.dt_transacao,
+        tt.cd_pessoa
+      FROM
+        tra_transacao tt
+      WHERE
+        tt.nr_transacao = $1
+      LIMIT 1
+    `;
+
+    const { rows } = await pool.query(query, [nr_transacao]);
+
+    if (rows.length === 0) {
+      return errorResponse(
+        res,
+        'Transação não encontrada',
+        404,
+        'NOT_FOUND',
+      );
+    }
+
+    successResponse(
+      res,
+      {
+        filtros: { nr_transacao },
+        data: rows[0],
+      },
+      'Informações da transação obtidas com sucesso',
+    );
+  }),
+);
+
 export default router;
