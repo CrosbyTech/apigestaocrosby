@@ -425,13 +425,13 @@ router.get(
  * @route GET /franchise/trans_fatura
  * @desc Buscar transações relacionadas a uma fatura específica
  * @access Public
- * @query {nr_fat, cd_cliente}
+ * @query {nr_fat, cd_cliente, dt_emissao (opcional)}
  */
 router.get(
   '/trans_fatura',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    const { nr_fat, cd_cliente } = req.query;
+    const { nr_fat, cd_cliente, dt_emissao } = req.query;
 
     // Validação de parâmetros obrigatórios
     if (!nr_fat || !cd_cliente) {
@@ -442,6 +442,24 @@ router.get(
         'MISSING_PARAMETERS',
       );
     }
+
+    // Construir WHERE dinamicamente
+    let whereConditions = [
+      'ff.nr_fat = $1',
+      'ff.cd_cliente = $2',
+      'tt.nr_transacaoori IS NOT NULL'
+    ];
+    let params = [nr_fat, cd_cliente];
+    let paramIndex = 3;
+
+    // Adicionar filtro de dt_emissao se fornecido
+    if (dt_emissao) {
+      whereConditions.push(`ff.dt_emissao = $${paramIndex}`);
+      params.push(dt_emissao);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.join(' AND ');
 
     const query = `
       SELECT
@@ -458,9 +476,7 @@ router.get(
       RIGHT JOIN tra_transacao tt ON
         ff.vl_fatura = tt.vl_transacao
       WHERE
-        ff.nr_fat = $1
-        AND ff.cd_cliente = $2
-        AND tt.nr_transacaoori IS NOT NULL
+        ${whereClause}
       GROUP BY
         tt.cd_empresa,
         ff.nr_fat,
@@ -474,14 +490,12 @@ router.get(
         tt.nr_transacao DESC
     `;
 
-    const params = [nr_fat, cd_cliente];
-
     const { rows } = await pool.query(query, params);
 
     successResponse(
       res,
       {
-        filtros: { nr_fat, cd_cliente },
+        filtros: { nr_fat, cd_cliente, dt_emissao },
         count: rows.length,
         data: rows,
       },
