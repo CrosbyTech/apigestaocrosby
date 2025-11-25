@@ -472,6 +472,7 @@ router.get(
         vff.cd_cliente = $1
         AND vff.nr_fat = $2
         AND vff.nr_parcela = $3
+        AND vtt.tp_situacaodest = 4
     `;
 
     const params = [cd_cliente, nr_fat, nr_parcela];
