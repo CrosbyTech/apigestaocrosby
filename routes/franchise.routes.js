@@ -423,21 +423,21 @@ router.get(
 
 /**
  * @route GET /franchise/trans_fatura
- * @desc Buscar transações por pessoa e data
+ * @desc Buscar transações vinculadas a fatura
  * @access Public
- * @query {cd_pessoa, dt_transacao}
+ * @query {cd_cliente, nr_fat, nr_parcela}
  */
 router.get(
   '/trans_fatura',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    const { cd_pessoa, dt_transacao, vl_transacao } = req.query;
+    const { cd_cliente, nr_fat, nr_parcela } = req.query;
 
     // Validação de parâmetros obrigatórios
-    if (!cd_pessoa || !dt_transacao || !vl_transacao) {
+    if (!cd_cliente || !nr_fat || !nr_parcela) {
       return errorResponse(
         res,
-        'Parâmetros obrigatórios: cd_pessoa, dt_transacao, vl_transacao',
+        'Parâmetros obrigatórios: cd_cliente, nr_fat, nr_parcela',
         400,
         'MISSING_PARAMETERS',
       );
@@ -445,34 +445,47 @@ router.get(
 
     const query = `
       SELECT
-        tt.cd_empresa,
-        tt.nr_transacao,
-        tt.dt_transacao,
-        tt.vl_transacao,
-        tt.nr_transacaoori
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nr_fat,
+        vff.nr_parcela,
+        vff.cd_empliq,
+        vff.dt_liq,
+        vff.nr_seqliq,
+        vff.cd_emptransacao,
+        vff.nr_transacao,
+        vff.dt_transacao,
+        vtt.cd_empresadest,
+        vtt.nr_transacaodest,
+        vtt.dt_transacaodest,
+        vtt.cd_operacaodest,
+        vtt.tp_situacaodest,
+        vtt.cd_empresaori,
+        vtt.nr_transacaoori,
+        vtt.dt_transacaoori,
+        vtt.cd_operacaoori,
+        vtt.tp_situacaoori
       FROM
-        tra_transacao tt
+        vr_fcr_fattrans vff
+      LEFT JOIN vr_tra_transacoridest vtt ON vff.nr_transacao = vtt.nr_transacaoori
       WHERE
-        tt.cd_pessoa = $1
-        AND tt.dt_transacao = $2
-        AND tt.vl_transacao = $3
-        AND tt.cd_empresa <= 100
-      ORDER BY
-        tt.nr_transacao DESC
+        vff.cd_cliente = $1
+        AND vff.nr_fat = $2
+        AND vff.nr_parcela = $3
     `;
 
-    const params = [cd_pessoa, dt_transacao, vl_transacao];
+    const params = [cd_cliente, nr_fat, nr_parcela];
 
     const { rows } = await pool.query(query, params);
 
     successResponse(
       res,
       {
-        filtros: { cd_pessoa, dt_transacao, vl_transacao },
+        filtros: { cd_cliente, nr_fat, nr_parcela },
         count: rows.length,
         data: rows,
       },
-      'Transações obtidas com sucesso',
+      'Transações da fatura obtidas com sucesso',
     );
   }),
 );
