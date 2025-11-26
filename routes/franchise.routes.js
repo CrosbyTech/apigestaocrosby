@@ -468,11 +468,34 @@ router.get(
       FROM
         vr_fcr_fattrans vff
       LEFT JOIN vr_tra_transacoridest vtt ON vff.nr_transacao = vtt.nr_transacaoori
+      LEFT JOIN fcr_faturai ff ON vff.cd_cliente = ff.cd_cliente AND vff.cd_empresa = ff.cd_empresa
       WHERE
         vff.cd_cliente = $1
         AND vff.nr_fat = $2
         AND vff.nr_parcela = $3
         AND vtt.tp_situacaodest = 4
+        AND ff.vl_fatura = '5321.83'
+      GROUP BY
+        vff.cd_empresa,
+        vff.cd_cliente,
+        vff.nr_fat,
+        vff.nr_parcela,
+        vff.cd_empliq,
+        vff.dt_liq,
+        vff.nr_seqliq,
+        vff.cd_emptransacao,
+        vff.nr_transacao,
+        vff.dt_transacao,
+        vtt.cd_empresadest,
+        vtt.nr_transacaodest,
+        vtt.dt_transacaodest,
+        vtt.cd_operacaodest,
+        vtt.tp_situacaodest,
+        vtt.cd_empresaori,
+        vtt.nr_transacaoori,
+        vtt.dt_transacaoori,
+        vtt.cd_operacaoori,
+        vtt.tp_situacaoori
     `;
 
     const params = [cd_cliente, nr_fat, nr_parcela];
