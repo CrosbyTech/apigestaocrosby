@@ -425,13 +425,13 @@ router.get(
  * @route GET /franchise/trans_fatura
  * @desc Buscar transações vinculadas a fatura
  * @access Public
- * @query {cd_cliente, nr_fat, nr_parcela}
+ * @query {cd_cliente, nr_fat, nr_parcela, vl_fatura}
  */
 router.get(
   '/trans_fatura',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    const { cd_cliente, nr_fat, nr_parcela } = req.query;
+    const { cd_cliente, nr_fat, nr_parcela, vl_fatura } = req.query;
 
     // Validação de parâmetros obrigatórios
     if (!cd_cliente || !nr_fat || !nr_parcela) {
@@ -442,6 +442,26 @@ router.get(
         'MISSING_PARAMETERS',
       );
     }
+
+    // Construir condições WHERE dinamicamente
+    let whereConditions = [
+      'vff.cd_cliente = $1',
+      'vff.nr_fat = $2',
+      'vff.nr_parcela = $3',
+      'vtt.tp_situacaodest = 4'
+    ];
+    
+    let params = [cd_cliente, nr_fat, nr_parcela];
+    let paramIndex = 4;
+
+    // Adicionar filtro de valor se fornecido
+    if (vl_fatura) {
+      whereConditions.push(`ff.vl_fatura = $${paramIndex}`);
+      params.push(vl_fatura);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.join(' AND ');
 
     const query = `
       SELECT
@@ -468,44 +488,20 @@ router.get(
       FROM
         vr_fcr_fattrans vff
       LEFT JOIN vr_tra_transacoridest vtt ON vff.nr_transacao = vtt.nr_transacaoori
-      LEFT JOIN fcr_faturai ff ON vff.cd_cliente = ff.cd_cliente AND vff.cd_empresa = ff.cd_empresa
-      WHERE
-        vff.cd_cliente = $1
-        AND vff.nr_fat = $2
-        AND vff.nr_parcela = $3
-        AND vtt.tp_situacaodest = 4
-        AND ff.vl_fatura = '5321.83'
-      GROUP BY
-        vff.cd_empresa,
-        vff.cd_cliente,
-        vff.nr_fat,
-        vff.nr_parcela,
-        vff.cd_empliq,
-        vff.dt_liq,
-        vff.nr_seqliq,
-        vff.cd_emptransacao,
-        vff.nr_transacao,
-        vff.dt_transacao,
-        vtt.cd_empresadest,
-        vtt.nr_transacaodest,
-        vtt.dt_transacaodest,
-        vtt.cd_operacaodest,
-        vtt.tp_situacaodest,
-        vtt.cd_empresaori,
-        vtt.nr_transacaoori,
-        vtt.dt_transacaoori,
-        vtt.cd_operacaoori,
-        vtt.tp_situacaoori
+      LEFT JOIN fcr_faturai ff ON vff.cd_cliente = ff.cd_cliente 
+        AND vff.cd_empresa = ff.cd_empresa 
+        AND vff.nr_fat = ff.nr_fat
+        AND vff.nr_parcela = ff.nr_parcela
+      WHERE ${whereClause}
+      ORDER BY vff.dt_transacao DESC
     `;
-
-    const params = [cd_cliente, nr_fat, nr_parcela];
 
     const { rows } = await pool.query(query, params);
 
     successResponse(
       res,
       {
-        filtros: { cd_cliente, nr_fat, nr_parcela },
+        filtros: { cd_cliente, nr_fat, nr_parcela, vl_fatura: vl_fatura || 'não informado' },
         count: rows.length,
         data: rows,
       },
