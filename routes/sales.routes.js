@@ -14,8 +14,12 @@ import {
 
 const router = express.Router();
 
-
-const INCLUDED_OPERATIONS = [1,2,17,21,401,555,1017,1201,1202,1204,1210,1950,1999,2203,2204,2207,9005,9991,200,300,400,510,511,512,521,522,545,546,548,660,661,960,961,1400,1402,1403,1405,1406,5102,5106,5107,5110,5111,5113];
+const INCLUDED_OPERATIONS = [
+  1, 2, 17, 21, 401, 555, 1017, 1201, 1202, 1204, 1210, 1950, 1999, 2203, 2204,
+  2207, 9005, 9991, 200, 300, 400, 510, 511, 512, 521, 522, 545, 546, 548, 660,
+  661, 960, 961, 1400, 1402, 1403, 1405, 1406, 5102, 5106, 5107, 5110, 5111,
+  5113,
+];
 
 // Cache simples para resultados DRE e Auditoria (em produção usar Redis)
 const dreCache = new Map();
@@ -834,9 +838,9 @@ router.get(
       1, 3, 4, 6, 7, 8, 9, 10, 31, 50, 51, 45, 75, 85, 99,
     ];
     const allowedOperations = [
-      1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
-      9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
-      1101,
+      1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017, 9400,
+      9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205, 1101,
+      9065, 9064, 9063, 9062, 9061,
     ];
 
     // Query otimizada com LIMIT para evitar sobrecarga
@@ -925,9 +929,10 @@ router.get(
 
     try {
       // Preparar parâmetros baseado na presença do limit
-      const queryParams = limit !== undefined 
-        ? [dataInicio, dataFim, limit, offset]
-        : [dataInicio, dataFim];
+      const queryParams =
+        limit !== undefined
+          ? [dataInicio, dataFim, limit, offset]
+          : [dataInicio, dataFim];
 
       const [resultado, totalResult] = await Promise.all([
         pool.query(query, queryParams),
