@@ -448,7 +448,7 @@ router.get(
       'vff.cd_cliente = $1',
       'vff.nr_fat = $2',
       'vff.nr_parcela = $3',
-      'and (vtt.tp_situacaodest = 4 OR vtt.tp_situacaodest IS NULL)'
+      '(vtt.tp_situacaodest = 4 OR vtt.tp_situacaodest IS NULL)'
     ];
     
     let params = [cd_cliente, nr_fat, nr_parcela];
