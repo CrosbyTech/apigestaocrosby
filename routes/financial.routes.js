@@ -1200,6 +1200,9 @@ router.get(
 
     // Adicionar filtro de situação
     whereClause += ` AND vff.tp_situacao = 1`;
+    
+    // Adicionar filtro para tp_baixa diferente de 18
+    whereClause += ` AND (vff.tp_baixa IS NULL OR vff.tp_baixa != 18)`;
 
     // Adicionar LIMIT e OFFSET aos parâmetros (já temos cd_cliente em $1)
     queryParams.push(limit, offset);
