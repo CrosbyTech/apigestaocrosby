@@ -1203,6 +1203,9 @@ router.get(
     
     // Adicionar filtro para tp_baixa diferente de 18
     whereClause += ` AND (vff.tp_baixa IS NULL OR vff.tp_baixa != 18)`;
+    
+    // Adicionar filtro de cd_empresa menor que 1000
+    whereClause += ` AND vff.cd_empresa < 1000`;
 
     // Adicionar LIMIT e OFFSET aos parâmetros (já temos cd_cliente em $1)
     queryParams.push(limit, offset);
