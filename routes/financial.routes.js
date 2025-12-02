@@ -2731,7 +2731,9 @@ router.get(
         ff.nr_fat,
         ff.nr_parcela,
         ff.dt_emissao,
-        ff.dt_vencimento
+        ff.dt_vencimento,
+        ff.dt_liq,
+        ff.vl_pago
       FROM
         fcr_faturai ff
       WHERE
