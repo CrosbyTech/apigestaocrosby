@@ -2677,4 +2677,92 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /financial/lanc-ext-adiant
+ * @desc Obter lançamentos de extrato para adiantamento
+ * @access Private
+ * @query cd_cliente - Código do cliente (obrigatório)
+ * @query dt_emissao - Data de emissão (obrigatório)
+ * @query cd_empresa - Código da empresa (obrigatório)
+ */
+router.get(
+  '/lanc-ext-adiant',
+  asyncHandler(async (req, res) => {
+    const { cd_cliente, dt_emissao, cd_empresa } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!cd_cliente) {
+      return errorResponse(
+        res,
+        'Código do cliente (cd_cliente) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!dt_emissao) {
+      return errorResponse(
+        res,
+        'Data de emissão (dt_emissao) é obrigatória',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!cd_empresa) {
+      return errorResponse(
+        res,
+        'Código da empresa (cd_empresa) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    console.log('🔍 Buscando lançamentos de adiantamento:', {
+      cd_cliente,
+      dt_emissao,
+      cd_empresa,
+    });
+
+    const query = `
+      SELECT
+        ff.cd_cliente,
+        ff.vl_fatura,
+        ff.nr_fat,
+        ff.nr_parcela,
+        ff.dt_emissao,
+        ff.dt_vencimento
+      FROM
+        fcr_faturai ff
+      WHERE
+        ff.cd_cliente = $1
+        AND ff.dt_emissao = $2
+        AND ff.cd_empresa = $3
+    `;
+
+    const values = [cd_cliente, dt_emissao, cd_empresa];
+
+    const result = await pool.query(query, values);
+
+    console.log('✅ Lançamentos de adiantamento obtidos:', {
+      cd_cliente,
+      dt_emissao,
+      cd_empresa,
+      registros: result.rows.length,
+    });
+
+    successResponse(
+      res,
+      {
+        cd_cliente,
+        dt_emissao,
+        cd_empresa,
+        count: result.rows.length,
+        data: result.rows,
+      },
+      'Lançamentos de adiantamento obtidos com sucesso',
+    );
+  }),
+);
+
 export default router;
