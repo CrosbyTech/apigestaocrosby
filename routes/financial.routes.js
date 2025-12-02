@@ -1200,12 +1200,6 @@ router.get(
 
     // Adicionar filtro de situação
     whereClause += ` AND vff.tp_situacao = 1`;
-    
-    // Adicionar filtro para tp_baixa diferente de 18
-    whereClause += ` AND (vff.tp_baixa IS NULL OR vff.tp_baixa != 18)`;
-    
-    // Adicionar filtro de cd_empresa menor que 1000
-    whereClause += ` AND vff.cd_empresa < 1000`;
 
     // Adicionar LIMIT e OFFSET aos parâmetros (já temos cd_cliente em $1)
     queryParams.push(limit, offset);
@@ -1414,7 +1408,6 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
-        AND vff.tp_situacao = 1
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
           OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
@@ -1433,7 +1426,6 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
-        AND vff.tp_situacao = 1
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
           OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
@@ -1518,7 +1510,6 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
-        AND vff.tp_situacao = 1
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
           OR (vpp.cd_tipoclas = 7 AND vpp.cd_classificacao::integer = 1)
@@ -1537,10 +1528,9 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
-        AND vff.tp_situacao = 1
         AND (
-          (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 3)
-          OR (vpp.cd_tipoclas = 7 AND vpp.cd_classificacao::integer = 1)
+          (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
+          OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
         )
     `;
 
@@ -1624,7 +1614,6 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
-        AND vff.tp_situacao = 1
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
       GROUP BY
         vff.cd_cliente,
@@ -1672,7 +1661,6 @@ router.get(
         AND vff.dt_liq IS NULL
         AND vff.dt_cancelamento IS NULL
         AND vff.vl_pago = 0
-        AND vff.tp_situacao = 1
         AND pp.nm_fantasia LIKE '%F%CROSBY%'
     `;
 
@@ -2517,6 +2505,85 @@ router.get(
         data: rows,
       },
       'Observações das faturas obtidas com sucesso',
+    );
+  }),
+);
+
+/**
+ * @route GET /financial/extrato-cliente
+ * @desc Obter extrato financeiro detalhado de um cliente
+ * @access Private
+ * @query cd_pessoa - Código do cliente (obrigatório)
+ * @query dt_inicio - Data inicial (formato: YYYY-MM-DD, obrigatório)
+ * @query dt_fim - Data final (formato: YYYY-MM-DD, obrigatório)
+ */
+router.get(
+  '/extrato-cliente',
+  asyncHandler(async (req, res) => {
+    const { cd_pessoa, dt_inicio, dt_fim } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!cd_pessoa) {
+      return errorResponse(
+        res,
+        'Código do cliente (cd_pessoa) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!dt_inicio || !dt_fim) {
+      return errorResponse(
+        res,
+        'Datas de início e fim são obrigatórias',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    console.log('🔍 Buscando extrato do cliente:', {
+      cd_pessoa,
+      dt_inicio,
+      dt_fim,
+    });
+
+    const query = `
+      SELECT
+        a.*,
+        b.*,
+        pp.nm_fantasia
+      FROM
+        vr_fcc_ctapes b
+      JOIN vr_fcc_mov a ON a.nr_ctapes = b.nr_ctapes
+      JOIN pes_pesjuridica pp ON b.cd_pessoa = pp.cd_pessoa
+      WHERE
+        a.in_estorno = 'F'
+        AND a.dt_movim <= NOW()
+        AND b.tp_manutencao = 2
+        AND b.cd_pessoa = $1
+        AND a.dt_movim BETWEEN $2 AND $3
+      ORDER BY a.dt_movim DESC, a.nr_seq DESC
+    `;
+
+    const values = [cd_pessoa, dt_inicio, dt_fim];
+
+    const result = await pool.query(query, values);
+
+    console.log('✅ Extrato obtido:', {
+      cd_pessoa,
+      registros: result.rows.length,
+    });
+
+    successResponse(
+      res,
+      {
+        cd_pessoa,
+        dt_inicio,
+        dt_fim,
+        count: result.rows.length,
+        data: result.rows,
+      },
+      'Extrato do cliente obtido com sucesso',
     );
   }),
 );
