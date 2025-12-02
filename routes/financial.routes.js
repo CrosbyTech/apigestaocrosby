@@ -2562,6 +2562,7 @@ router.get(
         AND b.tp_manutencao = 2
         AND b.cd_pessoa = $1
         AND a.dt_movim BETWEEN $2 AND $3
+      ORDER BY a.dt_movim DESC, a.nr_seqmov DESC
     `;
 
     const values = [cd_pessoa, dt_inicio, dt_fim];
@@ -2583,6 +2584,95 @@ router.get(
         data: result.rows,
       },
       'Extrato do cliente obtido com sucesso',
+    );
+  }),
+);
+
+/**
+ * @route GET /financial/fatura-ext-cliente
+ * @desc Obter dados de fatura com transações relacionadas
+ * @access Private
+ * @query cd_cliente - Código do cliente (obrigatório)
+ * @query vl_fatura - Valor da fatura (obrigatório)
+ * @query tp_situacaodest - Tipo de situação destino (opcional, padrão: 4)
+ */
+router.get(
+  '/fatura-ext-cliente',
+  asyncHandler(async (req, res) => {
+    const { cd_cliente, vl_fatura, tp_situacaodest = '4' } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!cd_cliente) {
+      return errorResponse(
+        res,
+        'Código do cliente (cd_cliente) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!vl_fatura) {
+      return errorResponse(
+        res,
+        'Valor da fatura (vl_fatura) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    console.log('🔍 Buscando fatura do cliente:', {
+      cd_cliente,
+      vl_fatura,
+      tp_situacaodest,
+    });
+
+    const query = `
+      SELECT
+        ff.cd_cliente,
+        ff.vl_fatura,
+        ff.nr_fat,
+        vff.nr_transacao,
+        vtt.cd_empresadest,
+        vtt.cd_empresaori,
+        vtt.cd_operacaodest,
+        vtt.cd_operacaoori,
+        vtt.dt_transacaodest,
+        vtt.dt_transacaoori,
+        vtt.nr_transacaodest,
+        vtt.nr_transacaoori,
+        vtt.tp_situacaodest,
+        vtt.tp_situacaoori
+      FROM
+        fcr_faturai ff
+      LEFT JOIN vr_fcr_fattrans vff ON ff.nr_fat = vff.nr_fat
+        AND ff.cd_cliente = vff.cd_cliente
+      LEFT JOIN vr_tra_transacoridest vtt ON vff.nr_transacao = vtt.nr_transacaoori
+      WHERE
+        ff.cd_cliente = $1
+        AND ff.vl_fatura = $2
+        AND vtt.tp_situacaodest = $3
+    `;
+
+    const values = [cd_cliente, vl_fatura, tp_situacaodest];
+
+    const result = await pool.query(query, values);
+
+    console.log('✅ Fatura obtida:', {
+      cd_cliente,
+      vl_fatura,
+      registros: result.rows.length,
+    });
+
+    successResponse(
+      res,
+      {
+        cd_cliente,
+        vl_fatura,
+        tp_situacaodest,
+        count: result.rows.length,
+        data: result.rows,
+      },
+      'Fatura do cliente obtida com sucesso',
     );
   }),
 );
