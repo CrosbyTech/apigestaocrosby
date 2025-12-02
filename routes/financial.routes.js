@@ -2562,7 +2562,6 @@ router.get(
         AND b.tp_manutencao = 2
         AND b.cd_pessoa = $1
         AND a.dt_movim BETWEEN $2 AND $3
-      ORDER BY a.dt_movim DESC, a.nr_seq DESC
     `;
 
     const values = [cd_pessoa, dt_inicio, dt_fim];
