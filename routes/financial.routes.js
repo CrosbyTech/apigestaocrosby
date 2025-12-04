@@ -1201,6 +1201,9 @@ router.get(
     // Adicionar filtro de situação
     whereClause += ` AND vff.tp_situacao = 1`;
 
+    // Adicionar filtro de tipo de documento (apenas faturas de mercadoria)
+    whereClause += ` AND vff.tp_documento = 14`;
+
     // Adicionar LIMIT e OFFSET aos parâmetros (já temos cd_cliente em $1)
     queryParams.push(limit, offset);
 
