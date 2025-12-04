@@ -2844,4 +2844,95 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /financial/transacao-fatura-credev
+ * @desc Obter número de transação relacionada a uma fatura de crédito CREDEV
+ * @access Private
+ * @query cd_cliente - Código do cliente (obrigatório)
+ * @query nr_fat - Número da fatura (obrigatório)
+ * @query dt_movimfcc - Data da movimentação FCC (obrigatório, formato: YYYY-MM-DD)
+ */
+router.get(
+  '/transacao-fatura-credev',
+  asyncHandler(async (req, res) => {
+    const { cd_cliente, nr_fat, dt_movimfcc } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!cd_cliente) {
+      return errorResponse(
+        res,
+        'Código do cliente (cd_cliente) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!nr_fat) {
+      return errorResponse(
+        res,
+        'Número da fatura (nr_fat) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!dt_movimfcc) {
+      return errorResponse(
+        res,
+        'Data da movimentação (dt_movimfcc) é obrigatória',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    console.log('🔍 Buscando transação da fatura CREDEV:', {
+      cd_cliente,
+      nr_fat,
+      dt_movimfcc,
+    });
+
+    const query = `
+      SELECT
+        fl.cd_cliente,
+        fl.nr_transacao,
+        fl.nr_fat,
+        fl.dt_movimfcc
+      FROM
+        fgr_liqitemcr fl
+      WHERE 
+        fl.cd_cliente = $1
+        AND fl.nr_fat = $2
+        AND fl.dt_movimfcc = $3
+      ORDER BY fl.nr_transacao DESC
+      LIMIT 1
+    `;
+
+    const values = [cd_cliente, nr_fat, dt_movimfcc];
+
+    const result = await pool.query(query, values);
+
+    console.log('✅ Transação da fatura CREDEV:', {
+      cd_cliente,
+      nr_fat,
+      dt_movimfcc,
+      encontrado: result.rows.length > 0,
+      nr_transacao: result.rows[0]?.nr_transacao,
+    });
+
+    successResponse(
+      res,
+      {
+        cd_cliente,
+        nr_fat,
+        dt_movimfcc,
+        count: result.rows.length,
+        data: result.rows,
+      },
+      result.rows.length > 0
+        ? 'Transação da fatura CREDEV encontrada'
+        : 'Nenhuma transação encontrada para esta fatura',
+    );
+  }),
+);
+
 export default router;
