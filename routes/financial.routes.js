@@ -2770,4 +2770,78 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /financial/obs-mov
+ * @desc Obter observações de uma movimentação do extrato
+ * @access Private
+ * @query nr_ctapes - Número da conta a pagar/receber (obrigatório)
+ * @query nr_seqmov - Número sequencial da movimentação (obrigatório)
+ */
+router.get(
+  '/obs-mov',
+  asyncHandler(async (req, res) => {
+    const { nr_ctapes, nr_seqmov } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!nr_ctapes) {
+      return errorResponse(
+        res,
+        'Número da conta (nr_ctapes) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!nr_seqmov) {
+      return errorResponse(
+        res,
+        'Número da movimentação (nr_seqmov) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    console.log('🔍 Buscando observações da movimentação:', {
+      nr_ctapes,
+      nr_seqmov,
+    });
+
+    const query = `
+      SELECT
+        om.ds_obs,
+        om.dt_cadastro,
+        om.dt_movim,
+        om.nr_ctapes,
+        om.nr_seqmov
+      FROM
+        obs_mov om
+      WHERE
+        om.nr_ctapes = $1
+        AND om.nr_seqmov = $2
+      ORDER BY om.dt_cadastro DESC
+    `;
+
+    const values = [nr_ctapes, nr_seqmov];
+
+    const result = await pool.query(query, values);
+
+    console.log('✅ Observações obtidas:', {
+      nr_ctapes,
+      nr_seqmov,
+      total: result.rows.length,
+    });
+
+    successResponse(
+      res,
+      {
+        nr_ctapes,
+        nr_seqmov,
+        count: result.rows.length,
+        data: result.rows,
+      },
+      'Observações da movimentação obtidas com sucesso',
+    );
+  }),
+);
+
 export default router;
