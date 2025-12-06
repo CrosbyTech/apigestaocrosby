@@ -2982,7 +2982,7 @@ router.post(
       );
     }
 
-    const pdf = await import('pdf-parse');
+    const pdfParse = (await import('pdf-parse')).default;
     const extratosProcessados = [];
 
     console.log(`📄 Processando ${req.files.length} arquivo(s) PDF...`);
@@ -2990,7 +2990,7 @@ router.post(
     for (const file of req.files) {
       try {
         // Processar PDF
-        const data = await pdf.default(file.buffer);
+        const data = await pdfParse(file.buffer);
         const texto = data.text;
 
         console.log(`📖 Lendo: ${file.originalname}`);
