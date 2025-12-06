@@ -2935,4 +2935,313 @@ router.get(
   }),
 );
 
+// Configuração de upload para PDFs de extratos bancários
+const uploadPDF = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas arquivos PDF são permitidos'), false);
+    }
+  },
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+}).array('pdfs', 50); // Máximo 50 PDFs por vez
+
+/**
+ * @route POST /financial/processar-extrato-pdf
+ * @desc Processar arquivos PDF de extratos bancários
+ * @access Private
+ */
+router.post(
+  '/processar-extrato-pdf',
+  (req, res, next) => {
+    uploadPDF(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        return errorResponse(
+          res,
+          `Erro no upload: ${err.message}`,
+          400,
+          'UPLOAD_ERROR',
+        );
+      } else if (err) {
+        return errorResponse(res, err.message, 400, 'FILE_TYPE_ERROR');
+      }
+      next();
+    });
+  },
+  asyncHandler(async (req, res) => {
+    if (!req.files || req.files.length === 0) {
+      return errorResponse(
+        res,
+        'Nenhum arquivo PDF foi enviado',
+        400,
+        'NO_FILES',
+      );
+    }
+
+    const pdf = await import('pdf-parse');
+    const extratosProcessados = [];
+
+    console.log(`📄 Processando ${req.files.length} arquivo(s) PDF...`);
+
+    for (const file of req.files) {
+      try {
+        // Processar PDF
+        const data = await pdf.default(file.buffer);
+        const texto = data.text;
+
+        console.log(`📖 Lendo: ${file.originalname}`);
+
+        // Identificar banco
+        const banco = identificarBancoPDF(texto);
+
+        // Extrair dados gerais
+        const dadosGerais = extrairDadosGeraisPDF(texto, banco.codigo);
+
+        // Extrair movimentações
+        const movimentacoes = extrairMovimentacoesPDF(texto, banco.codigo);
+
+        // Calcular totais
+        const totalCreditos = movimentacoes
+          .filter((m) => m.tipo === 'C')
+          .reduce((acc, m) => acc + m.valor, 0);
+
+        const totalDebitos = movimentacoes
+          .filter((m) => m.tipo === 'D')
+          .reduce((acc, m) => acc + Math.abs(m.valor), 0);
+
+        extratosProcessados.push({
+          arquivo: file.originalname,
+          banco: banco,
+          periodo: dadosGerais.periodo,
+          agencia: dadosGerais.agencia,
+          conta: dadosGerais.conta,
+          saldoAnterior: dadosGerais.saldoAnterior,
+          saldoAtual: dadosGerais.saldoAtual,
+          totalCreditos: totalCreditos,
+          totalDebitos: totalDebitos,
+          movimentacoes: movimentacoes,
+          numPaginas: data.numpages,
+        });
+
+        console.log(
+          `✅ ${file.originalname}: ${movimentacoes.length} movimentações`,
+        );
+      } catch (error) {
+        console.error(
+          `❌ Erro ao processar ${file.originalname}:`,
+          error.message,
+        );
+
+        extratosProcessados.push({
+          arquivo: file.originalname,
+          erro: true,
+          mensagem: `Erro ao processar: ${error.message}`,
+        });
+      }
+    }
+
+    successResponse(
+      res,
+      {
+        totalArquivos: req.files.length,
+        processados: extratosProcessados.filter((e) => !e.erro).length,
+        erros: extratosProcessados.filter((e) => e.erro).length,
+        extratos: extratosProcessados,
+      },
+      'Extratos processados com sucesso',
+    );
+  }),
+);
+
+// Função para identificar banco pelo texto do PDF
+function identificarBancoPDF(texto) {
+  const textoLower = texto.toLowerCase();
+
+  if (
+    textoLower.includes('banco do brasil') ||
+    textoLower.includes('001-9') ||
+    textoLower.includes('001.9')
+  ) {
+    return { nome: 'Banco do Brasil', codigo: '001', cor: 'yellow' };
+  }
+  if (
+    textoLower.includes('bradesco') ||
+    textoLower.includes('237-2') ||
+    textoLower.includes('237.2')
+  ) {
+    return { nome: 'Bradesco', codigo: '237', cor: 'red' };
+  }
+  if (
+    textoLower.includes('caixa econômica') ||
+    textoLower.includes('caixa econômica federal') ||
+    textoLower.includes('104-0') ||
+    textoLower.includes('104.0') ||
+    textoLower.includes('c a i x a')
+  ) {
+    return { nome: 'Caixa Econômica Federal', codigo: '104', cor: 'blue' };
+  }
+  if (
+    textoLower.includes('itaú') ||
+    textoLower.includes('itau') ||
+    textoLower.includes('341-7') ||
+    textoLower.includes('341.7')
+  ) {
+    return { nome: 'Itaú', codigo: '341', cor: 'orange' };
+  }
+  if (
+    textoLower.includes('santander') ||
+    textoLower.includes('033-7') ||
+    textoLower.includes('033.7')
+  ) {
+    return { nome: 'Santander', codigo: '033', cor: 'red' };
+  }
+  if (
+    textoLower.includes('sicredi') ||
+    textoLower.includes('748-x') ||
+    textoLower.includes('748.x')
+  ) {
+    return { nome: 'Sicredi', codigo: '748', cor: 'green' };
+  }
+  if (
+    textoLower.includes('unicred') ||
+    textoLower.includes('136-1') ||
+    textoLower.includes('136.1')
+  ) {
+    return { nome: 'Unicred', codigo: '136', cor: 'purple' };
+  }
+  if (
+    textoLower.includes('bnb') ||
+    textoLower.includes('banco do nordeste') ||
+    textoLower.includes('004-3') ||
+    textoLower.includes('004.3')
+  ) {
+    return { nome: 'Banco do Nordeste', codigo: '004', cor: 'blue' };
+  }
+
+  return { nome: 'Banco Não Identificado', codigo: '000', cor: 'gray' };
+}
+
+// Função para extrair dados gerais do extrato
+function extrairDadosGeraisPDF(texto, codigoBanco) {
+  const dados = {
+    periodo: { inicio: '', fim: '' },
+    agencia: '',
+    conta: '',
+    saldoAnterior: 0,
+    saldoAtual: 0,
+  };
+
+  try {
+    // Extrair período
+    const regexPeriodo =
+      /per[ií]odo[:\s]+(\d{2}[\/\-]\d{2}[\/\-]\d{4})\s+(?:a|at[ée])\s+(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i;
+    const matchPeriodo = texto.match(regexPeriodo);
+    if (matchPeriodo) {
+      dados.periodo.inicio = matchPeriodo[1].replace(/-/g, '/');
+      dados.periodo.fim = matchPeriodo[2].replace(/-/g, '/');
+    }
+
+    // Extrair agência e conta (padrões comuns)
+    const regexAgencia = /ag[êe]ncia[:\s]+(\d{4,5})/i;
+    const matchAgencia = texto.match(regexAgencia);
+    if (matchAgencia) {
+      dados.agencia = matchAgencia[1];
+    }
+
+    const regexConta = /conta[:\s]+(\d{5,12}[\-\.]?\d?)/i;
+    const matchConta = texto.match(regexConta);
+    if (matchConta) {
+      dados.conta = matchConta[1];
+    }
+
+    // Extrair saldos
+    const regexSaldoAnterior = /saldo\s+anterior[:\s]+r?\$?\s*([\d\.,]+)/i;
+    const matchSaldoAnterior = texto.match(regexSaldoAnterior);
+    if (matchSaldoAnterior) {
+      dados.saldoAnterior = parseFloat(
+        matchSaldoAnterior[1].replace(/\./g, '').replace(',', '.'),
+      );
+    }
+
+    const regexSaldoAtual = /saldo\s+(?:atual|final)[:\s]+r?\$?\s*([\d\.,]+)/i;
+    const matchSaldoAtual = texto.match(regexSaldoAtual);
+    if (matchSaldoAtual) {
+      dados.saldoAtual = parseFloat(
+        matchSaldoAtual[1].replace(/\./g, '').replace(',', '.'),
+      );
+    }
+  } catch (error) {
+    console.error('Erro ao extrair dados gerais:', error.message);
+  }
+
+  return dados;
+}
+
+// Função para extrair movimentações do extrato
+function extrairMovimentacoesPDF(texto, codigoBanco) {
+  const movimentacoes = [];
+
+  try {
+    // Padrão genérico para linhas de movimentação
+    // Formato: DD/MM/YYYY ou DD/MM  DESCRIÇÃO  VALOR  SALDO
+    const linhas = texto.split('\n');
+
+    for (let i = 0; i < linhas.length; i++) {
+      const linha = linhas[i].trim();
+
+      // Regex para detectar movimentações (flexível para diferentes formatos)
+      const regexMovimentacao =
+        /(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?)\s+(.+?)\s+([\d\.,]+)(?:\s+[CD])?\s+([\d\.,]+)/;
+      const match = linha.match(regexMovimentacao);
+
+      if (match) {
+        const data = match[1];
+        let historico = match[2].trim();
+        const valor = parseFloat(match[3].replace(/\./g, '').replace(',', '.'));
+        const saldo = parseFloat(match[4].replace(/\./g, '').replace(',', '.'));
+
+        // Detectar se é crédito ou débito pela palavra-chave ou contexto
+        let tipo = 'D';
+        const historicoLower = historico.toLowerCase();
+
+        if (
+          historicoLower.includes('deposito') ||
+          historicoLower.includes('crédito') ||
+          historicoLower.includes('credito') ||
+          historicoLower.includes('pix recebido') ||
+          historicoLower.includes('ted recebida') ||
+          historicoLower.includes('doc creditado') ||
+          historicoLower.includes('entrada') ||
+          historicoLower.includes('recebimento')
+        ) {
+          tipo = 'C';
+        }
+
+        // Extrair documento se houver
+        const regexDoc = /\b(\d{6,})\b/;
+        const matchDoc = historico.match(regexDoc);
+        const documento = matchDoc ? matchDoc[1] : '';
+
+        movimentacoes.push({
+          id: movimentacoes.length,
+          data: data,
+          historico: historico.substring(0, 100), // Limitar tamanho
+          documento: documento,
+          tipo: tipo,
+          valor: tipo === 'C' ? valor : -valor,
+          saldo: saldo,
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Erro ao extrair movimentações:', error.message);
+  }
+
+  return movimentacoes;
+}
+
 export default router;
