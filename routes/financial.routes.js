@@ -3071,7 +3071,7 @@ router.post(
           totalCreditos: totalCreditos,
           totalDebitos: totalDebitos,
           movimentacoes: movimentacoes,
-          numPaginas: data.numpages,
+          numPaginas: 0, // Não disponível com pdf2json
         });
 
         console.log(
