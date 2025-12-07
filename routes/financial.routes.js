@@ -15,7 +15,6 @@ import multer from 'multer';
 import { BankReturnParser } from '../utils/bankReturnParser.js';
 import fs from 'fs';
 import path from 'path';
-import PDFParser from 'pdf2json';
 
 const router = express.Router();
 
@@ -2997,46 +2996,30 @@ router.post(
           `📖 Iniciando processamento: ${file.originalname} (${file.size} bytes)`,
         );
 
-        // Processar PDF com pdf2json
-        console.log('   🔧 Criando parser pdf2json...');
-        const pdfParser = new PDFParser();
+        // Processar PDF com pdfjs-dist
+        console.log('   🔧 Importando pdfjs-dist...');
+        const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
-        const texto = await new Promise((resolve, reject) => {
-          pdfParser.on('pdfParser_dataError', (errData) => {
-            reject(new Error(errData.parserError));
-          });
-
-          pdfParser.on('pdfParser_dataReady', (pdfData) => {
-            try {
-              console.log('   🔧 Extraindo texto das páginas...');
-              let fullText = '';
-
-              if (pdfData.Pages) {
-                pdfData.Pages.forEach((page) => {
-                  if (page.Texts) {
-                    page.Texts.forEach((text) => {
-                      if (text.R) {
-                        text.R.forEach((r) => {
-                          if (r.T) {
-                            fullText += decodeURIComponent(r.T) + ' ';
-                          }
-                        });
-                      }
-                    });
-                    fullText += '\n';
-                  }
-                });
-              }
-
-              resolve(fullText);
-            } catch (error) {
-              reject(error);
-            }
-          });
-
-          console.log('   🔧 Parseando buffer...');
-          pdfParser.parseBuffer(file.buffer);
+        console.log('   🔧 Carregando documento PDF...');
+        const loadingTask = pdfjsLib.getDocument({
+          data: new Uint8Array(file.buffer),
+          useSystemFonts: true,
         });
+
+        const pdfDocument = await loadingTask.promise;
+        console.log(`   📄 PDF carregado: ${pdfDocument.numPages} páginas`);
+
+        let texto = '';
+
+        // Extrair texto de todas as páginas
+        for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
+          const page = await pdfDocument.getPage(pageNum);
+          const textContent = await page.getTextContent();
+
+          const pageText = textContent.items.map((item) => item.str).join(' ');
+
+          texto += pageText + '\n';
+        }
 
         console.log(`   ✅ Texto extraído: ${texto.length} caracteres`);
 

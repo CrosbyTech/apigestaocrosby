@@ -29,6 +29,7 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "pdf2json": "^4.0.0",
+    "pdfjs-dist": "^3.11.174",
     "pg": "^8.11.3"
   },
   "devDependencies": {
