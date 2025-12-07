@@ -15,7 +15,7 @@ import multer from 'multer';
 import { BankReturnParser } from '../utils/bankReturnParser.js';
 import fs from 'fs';
 import path from 'path';
-import * as pdfParse from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 
 const router = express.Router();
 
@@ -2990,7 +2990,8 @@ router.post(
     for (const file of req.files) {
       try {
         // Processar PDF
-        const data = await pdfParse.default(file.buffer);
+        const parser = new PDFParse();
+        const data = await parser.parse(file.buffer);
         const texto = data.text;
 
         console.log(`📖 Lendo: ${file.originalname}`);
