@@ -2990,7 +2990,7 @@ router.post(
     for (const file of req.files) {
       try {
         // Processar PDF
-        const parser = new PDFParse();
+        const parser = new PDFParse({});
         const data = await parser.parse(file.buffer);
         const texto = data.text;
 
