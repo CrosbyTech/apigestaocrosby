@@ -2994,9 +2994,9 @@ router.post(
     for (const file of req.files) {
       try {
         // Processar PDF
-        const parser = new PDFParse();
-        const data = await parser.parse(file.buffer);
-        const texto = data.text;
+        const parser = new PDFParse({ verbosity: 0 });
+        await parser.load({ data: new Uint8Array(file.buffer) });
+        const texto = await parser.getText();
 
         console.log(`📖 Lendo: ${file.originalname}`);
 
@@ -3029,7 +3029,7 @@ router.post(
           totalCreditos: totalCreditos,
           totalDebitos: totalDebitos,
           movimentacoes: movimentacoes,
-          numPaginas: data.numpages,
+          numPaginas: 0, // Não disponível nesta versão da biblioteca
         });
 
         console.log(
