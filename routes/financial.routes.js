@@ -15,6 +15,7 @@ import multer from 'multer';
 import { BankReturnParser } from '../utils/bankReturnParser.js';
 import fs from 'fs';
 import path from 'path';
+import * as pdfParse from 'pdf-parse';
 
 const router = express.Router();
 
@@ -2982,7 +2983,6 @@ router.post(
       );
     }
 
-    const pdfParse = (await import('pdf-parse')).default;
     const extratosProcessados = [];
 
     console.log(`📄 Processando ${req.files.length} arquivo(s) PDF...`);
@@ -2990,7 +2990,7 @@ router.post(
     for (const file of req.files) {
       try {
         // Processar PDF
-        const data = await pdfParse(file.buffer);
+        const data = await pdfParse.default(file.buffer);
         const texto = data.text;
 
         console.log(`📖 Lendo: ${file.originalname}`);
