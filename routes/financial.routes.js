@@ -15,6 +15,7 @@ import multer from 'multer';
 import { BankReturnParser } from '../utils/bankReturnParser.js';
 import fs from 'fs';
 import path from 'path';
+import PDFParser from 'pdf2json';
 
 const router = express.Router();
 
@@ -2990,14 +2991,54 @@ router.post(
 
     console.log(`📄 Processando ${req.files.length} arquivo(s) PDF...`);
 
-    // Importar pdf-parse dinamicamente para evitar problemas de inicialização
-    const pdfParse = (await import('pdf-parse')).default;
-
     for (const file of req.files) {
       try {
-        // Processar PDF
-        const data = await pdfParse(file.buffer);
-        const texto = data.text;
+        console.log(
+          `📖 Iniciando processamento: ${file.originalname} (${file.size} bytes)`,
+        );
+
+        // Processar PDF com pdf2json
+        console.log('   🔧 Criando parser pdf2json...');
+        const pdfParser = new PDFParser();
+
+        const texto = await new Promise((resolve, reject) => {
+          pdfParser.on('pdfParser_dataError', (errData) => {
+            reject(new Error(errData.parserError));
+          });
+
+          pdfParser.on('pdfParser_dataReady', (pdfData) => {
+            try {
+              console.log('   🔧 Extraindo texto das páginas...');
+              let fullText = '';
+
+              if (pdfData.Pages) {
+                pdfData.Pages.forEach((page) => {
+                  if (page.Texts) {
+                    page.Texts.forEach((text) => {
+                      if (text.R) {
+                        text.R.forEach((r) => {
+                          if (r.T) {
+                            fullText += decodeURIComponent(r.T) + ' ';
+                          }
+                        });
+                      }
+                    });
+                    fullText += '\n';
+                  }
+                });
+              }
+
+              resolve(fullText);
+            } catch (error) {
+              reject(error);
+            }
+          });
+
+          console.log('   🔧 Parseando buffer...');
+          pdfParser.parseBuffer(file.buffer);
+        });
+
+        console.log(`   ✅ Texto extraído: ${texto.length} caracteres`);
 
         console.log(`📖 Lendo: ${file.originalname}`);
 
@@ -3030,7 +3071,7 @@ router.post(
           totalCreditos: totalCreditos,
           totalDebitos: totalDebitos,
           movimentacoes: movimentacoes,
-          numPaginas: 0, // Não disponível nesta versão da biblioteca
+          numPaginas: data.numpages,
         });
 
         console.log(
