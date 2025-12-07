@@ -9,10 +9,10 @@ import dotenv from 'dotenv';
 // Importar configurações
 import pool, { testConnection, closePool } from './config/database.js';
 import { logger } from './utils/errorHandler.js';
-import { 
-  startMaterializedViewsScheduler, 
+import {
+  startMaterializedViewsScheduler,
   stopMaterializedViewsScheduler,
-  refreshAllMaterializedViews 
+  refreshAllMaterializedViews,
 } from './utils/refreshMaterializedViews.js';
 import {
   startTokenScheduler,
@@ -61,9 +61,6 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api/', limiter);
-
-
-
 
 // CORS configurado para permitir qualquer origem
 app.use(
@@ -237,10 +234,10 @@ const gracefulShutdown = (signal) => {
   logger.info(`Recebido sinal ${signal}. Encerrando servidor graciosamente...`);
 
   // Parar os schedulers
-  if (materializedViewsTask) {
-    stopMaterializedViewsScheduler(materializedViewsTask);
-  }
-  
+  // if (materializedViewsTask) {
+  //   stopMaterializedViewsScheduler(materializedViewsTask);
+  // }
+
   if (totvsTokenTask) {
     stopTokenScheduler(totvsTokenTask);
   }
@@ -261,16 +258,17 @@ const gracefulShutdown = (signal) => {
 
 const server = app.listen(PORT, async () => {
   // URL base da API (Render ou localhost)
-  const API_BASE_URL = process.env.API_BASE_URL || 
-                       process.env.RENDER_EXTERNAL_URL || 
-                       `http://localhost:${PORT}`;
+  const API_BASE_URL =
+    process.env.API_BASE_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    `http://localhost:${PORT}`;
 
   logger.info(`🚀 Servidor rodando na porta ${PORT}`);
   logger.info(`🌐 URL da API: ${API_BASE_URL}`);
   logger.info(`📚 Documentação disponível em ${API_BASE_URL}/api/docs`);
   logger.info(`🏥 Health check em ${API_BASE_URL}/api/utils/health`);
   logger.info(`🌍 Ambiente: ${process.env.NODE_ENV || 'development'}`);
-  
+
   // Logs das rotas TOTVS
   logger.info(`🔐 Rotas TOTVS disponíveis:`);
   logger.info(`   GET  ${API_BASE_URL}/api/totvs/token`);
@@ -286,12 +284,11 @@ const server = app.listen(PORT, async () => {
   // Testar conexão com banco de dados na inicialização
   const dbConnected = await testConnection();
   if (dbConnected) {
-    logger.info('🗄️  Banco de dados conectado com sucesso');
-    logger.info('⚙️  Configurações de pool ativas (ver config/database.js): max=50, min=0, idleTimeout=600s');
-    
+    logger.info('🗄️  Banco de dados conectado com sucesso - SEM TIMEOUTS');
+
     // Iniciar o scheduler de atualização das views materializadas
-    materializedViewsTask = startMaterializedViewsScheduler();
-    
+    // materializedViewsTask = startMaterializedViewsScheduler();
+
     // Executar a primeira atualização imediatamente (opcional)
     // Comentado por padrão - descomente se quiser atualizar na inicialização
     // setTimeout(async () => {

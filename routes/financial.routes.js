@@ -1,5 +1,5 @@
 import express from 'express';
-import pool, { checkConnectionHealth } from '../config/database.js';
+import pool from '../config/database.js';
 import {
   validateRequired,
   validateDateFormat,
@@ -15,6 +15,7 @@ import multer from 'multer';
 import { BankReturnParser } from '../utils/bankReturnParser.js';
 import fs from 'fs';
 import path from 'path';
+import { PDFParse } from 'pdf-parse';
 
 const router = express.Router();
 
@@ -26,17 +27,21 @@ const router = express.Router();
 router.get(
   '/health',
   asyncHandler(async (req, res) => {
-    const health = await checkConnectionHealth();
-
-    if (health.healthy) {
-      successResponse(res, health, 'Conexão com banco de dados saudável');
-    } else {
+    // Teste básico de conexão
+    try {
+      await pool.query('SELECT 1');
+      successResponse(
+        res,
+        { healthy: true },
+        'Conexão com banco de dados saudável',
+      );
+    } catch (error) {
       errorResponse(
         res,
         'Problemas na conexão com banco de dados',
         503,
         'DB_CONNECTION_ERROR',
-        health,
+        { healthy: false, error: error.message },
       );
     }
   }),
@@ -2982,8 +2987,6 @@ router.post(
       );
     }
 
-    // Importar pdf-parse dinamicamente
-    const pdfParse = (await import('pdf-parse')).default;
     const extratosProcessados = [];
 
     console.log(`📄 Processando ${req.files.length} arquivo(s) PDF...`);
@@ -2991,7 +2994,8 @@ router.post(
     for (const file of req.files) {
       try {
         // Processar PDF
-        const data = await pdfParse(file.buffer);
+        const parser = new PDFParse();
+        const data = await parser.parse(file.buffer);
         const texto = data.text;
 
         console.log(`📖 Lendo: ${file.originalname}`);
