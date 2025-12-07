@@ -1,5 +1,5 @@
 import express from 'express';
-import pool from '../config/database.js';
+import pool, { checkConnectionHealth } from '../config/database.js';
 import {
   validateRequired,
   validateDateFormat,
@@ -26,21 +26,17 @@ const router = express.Router();
 router.get(
   '/health',
   asyncHandler(async (req, res) => {
-    // Teste básico de conexão
-    try {
-      await pool.query('SELECT 1');
-      successResponse(
-        res,
-        { healthy: true },
-        'Conexão com banco de dados saudável',
-      );
-    } catch (error) {
+    const health = await checkConnectionHealth();
+
+    if (health.healthy) {
+      successResponse(res, health, 'Conexão com banco de dados saudável');
+    } else {
       errorResponse(
         res,
         'Problemas na conexão com banco de dados',
         503,
         'DB_CONNECTION_ERROR',
-        { healthy: false, error: error.message },
+        health,
       );
     }
   }),
@@ -2986,42 +2982,16 @@ router.post(
       );
     }
 
+    const pdfParse = (await import('pdf-parse')).default;
     const extratosProcessados = [];
 
     console.log(`📄 Processando ${req.files.length} arquivo(s) PDF...`);
 
     for (const file of req.files) {
       try {
-        console.log(
-          `📖 Iniciando processamento: ${file.originalname} (${file.size} bytes)`,
-        );
-
-        // Processar PDF com pdfjs-dist
-        console.log('   🔧 Importando pdfjs-dist...');
-        const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-
-        console.log('   🔧 Carregando documento PDF...');
-        const loadingTask = pdfjsLib.getDocument({
-          data: new Uint8Array(file.buffer),
-          useSystemFonts: true,
-        });
-
-        const pdfDocument = await loadingTask.promise;
-        console.log(`   📄 PDF carregado: ${pdfDocument.numPages} páginas`);
-
-        let texto = '';
-
-        // Extrair texto de todas as páginas
-        for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
-          const page = await pdfDocument.getPage(pageNum);
-          const textContent = await page.getTextContent();
-
-          const pageText = textContent.items.map((item) => item.str).join(' ');
-
-          texto += pageText + '\n';
-        }
-
-        console.log(`   ✅ Texto extraído: ${texto.length} caracteres`);
+        // Processar PDF
+        const data = await pdfParse(file.buffer);
+        const texto = data.text;
 
         console.log(`📖 Lendo: ${file.originalname}`);
 
@@ -3054,7 +3024,7 @@ router.post(
           totalCreditos: totalCreditos,
           totalDebitos: totalDebitos,
           movimentacoes: movimentacoes,
-          numPaginas: 0, // Não disponível com pdf2json
+          numPaginas: data.numpages,
         });
 
         console.log(
