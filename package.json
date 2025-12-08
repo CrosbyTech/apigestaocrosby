@@ -15,7 +15,20 @@
     "lint": "eslint . --ext .js",
     "lint:fix": "eslint . --ext .js --fix",
     "security:audit": "npm audit --audit-level=moderate",
-    "db:check": "node -e \"import('./config/database.js').then(db => db.default.query('SELECT 1').then(() => console.log('✅ Database connected')).catch(e => console.error('❌ Database error:', e)))\""
+    "db:check": "node -e \"import('./config/database.js').then(db => db.default.query('SELECT 1').then(() => console.log('✅ Database connected')).catch(e => console.error('❌ Database error:', e)))\"",
+    "extratos:caixa": "node scripts/run-caixa.js"
+    ,
+    "extratos:itau": "node scripts/run-itau.js"
+    ,
+    "extratos:bb": "node scripts/run-bb.js"
+    ,
+    "extratos:sicredi": "node scripts/run-sicredi.js"
+    ,
+    "extratos:bnb": "node scripts/run-bnb.js"
+    ,
+    "extratos:santander": "node scripts/run-santander.js",
+    "extratos:unicred": "node scripts/run-unicred.js",
+    "extratos:bradesco": "node scripts/run-bradesco.js"
   },
   "dependencies": {
     "axios": "^1.6.8",
@@ -28,6 +41,7 @@
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
+    "pdf-parse": "^2.4.5",
     "pdf2json": "^4.0.0",
     "pdfjs-dist": "^3.11.174",
     "pg": "^8.11.3"
