@@ -3244,4 +3244,45 @@ function extrairMovimentacoesPDF(texto, codigoBanco) {
   return movimentacoes;
 }
 
+/**
+ * @route GET /financial/extratos/:banco
+ * @desc Processar e retornar extratos bancários de um banco específico
+ * @access Public
+ * @param {string} banco - Nome do banco (bb, caixa, santander, itau, sicredi, bnb, unicred, bradesco)
+ */
+router.get(
+  '/extratos/:banco',
+  asyncHandler(async (req, res) => {
+    const { banco } = req.params;
+
+    // Importação dinâmica do extractorManager
+    const { processExtractsByBank } = await import(
+      '../utils/extratos/extractorManager.js'
+    );
+
+    try {
+      const result = await processExtractsByBank(banco);
+
+      successResponse(
+        res,
+        result,
+        `Extratos do banco ${banco.toUpperCase()} processados com sucesso`,
+      );
+    } catch (error) {
+      if (error.message.includes('Banco não suportado')) {
+        errorResponse(res, error.message, 400, 'INVALID_BANK');
+      } else if (error.message.includes('Diretório não encontrado')) {
+        errorResponse(
+          res,
+          `Nenhum extrato encontrado para o banco ${banco.toUpperCase()}`,
+          404,
+          'EXTRATOS_NOT_FOUND',
+        );
+      } else {
+        throw error;
+      }
+    }
+  }),
+);
+
 export default router;
