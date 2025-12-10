@@ -7,10 +7,10 @@ const { Pool } = pkg;
 
 // Configuração do pool de conexões do banco de dados (otimizada para Render)
 const pool = new Pool({
-  user: process.env.PGUSER || 'crosby_ro_geo',
+  user: process.env.PGUSER || 'crosby_ro_api',
   host: process.env.PGHOST || 'dbexp.vcenter.com.br',
   database: process.env.PGDATABASE || 'crosby',
-  password: process.env.PGPASSWORD || 'fJioqw9I2@wqwc',
+  password: process.env.PGPASSWORD || 'fGH89IOq2uyTnQw9',
   port: process.env.PGPORT ? parseInt(process.env.PGPORT) : 20187,
   ssl:
     process.env.NODE_ENV === 'production'
