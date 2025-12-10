@@ -2957,7 +2957,7 @@ router.get(
  * @route GET /sales/cohort-analysis
  * @desc Análise de cohort - retenção de clientes por mês de primeira compra
  * @access Public
- * @query cd_grupoempresa (opcional) - Filtrar por grupo de empresas
+ * @query cd_grupoempresa (opcional) - Filtrar por grupo de empresas (aceita múltiplos separados por vírgula)
  * @query cohort_year (opcional) - Filtrar por ano do cohort
  * @query cohort_month (opcional) - Filtrar por mês do cohort (1-12)
  */
@@ -2974,10 +2974,21 @@ router.get(
     const queryParams = [];
     let paramIndex = 1;
 
+    // Suportar múltiplas empresas (separadas por vírgula)
     if (cd_grupoempresa) {
-      whereConditions.push(`c.cd_grupoempresa = $${paramIndex}`);
-      queryParams.push(cd_grupoempresa);
-      paramIndex++;
+      const empresas = cd_grupoempresa.split(',').map((e) => e.trim());
+      if (empresas.length === 1) {
+        whereConditions.push(`c.cd_grupoempresa = $${paramIndex}`);
+        queryParams.push(empresas[0]);
+        paramIndex++;
+      } else {
+        const placeholders = empresas
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions.push(`c.cd_grupoempresa IN (${placeholders})`);
+        empresas.forEach((emp) => queryParams.push(emp));
+        paramIndex += empresas.length;
+      }
     }
 
     if (cohort_year) {
