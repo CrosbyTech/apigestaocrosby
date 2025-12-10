@@ -3110,46 +3110,135 @@ router.get(
     console.timeEnd('cohort-query');
     console.log(`✅ COHORT: ${result.rows.length} registros retornados`);
 
+    // Verificar se múltiplas empresas foram selecionadas
+    const empresasSelecionadas = cd_grupoempresa
+      ? cd_grupoempresa.split(',').map((e) => e.trim())
+      : [];
+    const isMultiEmpresa = empresasSelecionadas.length > 1;
+
+    console.log(
+      `📊 COHORT: ${
+        isMultiEmpresa ? 'Modo multi-empresa ativado' : 'Empresa única ou todas'
+      }`,
+    );
+
     // Agrupar dados por cohort para facilitar visualização
     const cohortData = result.rows.reduce((acc, row) => {
-      const cohortKey = `${row.cohort_year}-${String(row.cohort_month).padStart(
-        2,
-        '0',
-      )}`;
+      // Se multi-empresa, agregar por mês/ano ignorando cd_grupoempresa
+      const cohortKey = isMultiEmpresa
+        ? `${row.cohort_year}-${String(row.cohort_month).padStart(2, '0')}`
+        : `${row.cd_grupoempresa}-${row.cohort_year}-${String(
+            row.cohort_month,
+          ).padStart(2, '0')}`;
 
       if (!acc[cohortKey]) {
         acc[cohortKey] = {
-          cd_grupoempresa: row.cd_grupoempresa,
-          nm_grupoempresa: row.nm_grupoempresa,
+          cd_grupoempresa: isMultiEmpresa ? 'multi' : row.cd_grupoempresa,
+          nm_grupoempresa: isMultiEmpresa
+            ? 'Multi Empresas'
+            : row.nm_grupoempresa,
           cohort_year: row.cohort_year,
           cohort_month: row.cohort_month,
           cohort_month_name: row.cohort_month_name,
           cohort_key: cohortKey,
-          total_users: row.total_users,
-          retention_by_month: [],
+          total_users: 0,
+          retention_by_month_map: {},
         };
       }
 
-      acc[cohortKey].retention_by_month.push({
-        months_since_cohort: row.months_since_cohort,
-        active_users: row.active_users,
-        retention_pct: row.retention_pct,
-      });
+      // Se multi-empresa, somar os valores
+      if (isMultiEmpresa) {
+        // Somar total de usuários apenas no mês 0 para evitar duplicação
+        if (row.months_since_cohort === 0) {
+          acc[cohortKey].total_users += parseInt(row.total_users || 0, 10);
+        }
 
+        // Agregar dados por mês
+        if (!acc[cohortKey].retention_by_month_map[row.months_since_cohort]) {
+          acc[cohortKey].retention_by_month_map[row.months_since_cohort] = {
+            months_since_cohort: row.months_since_cohort,
+            active_users: 0,
+            total_users_for_calc: 0,
+          };
+        }
+
+        acc[cohortKey].retention_by_month_map[
+          row.months_since_cohort
+        ].active_users += parseInt(row.active_users || 0, 10);
+        acc[cohortKey].retention_by_month_map[
+          row.months_since_cohort
+        ].total_users_for_calc += parseInt(row.total_users || 0, 10);
+      } else {
+        // Empresa única - manter comportamento original
+        acc[cohortKey].total_users = row.total_users;
+        if (!acc[cohortKey].retention_by_month_map[row.months_since_cohort]) {
+          acc[cohortKey].retention_by_month_map[row.months_since_cohort] = {
+            months_since_cohort: row.months_since_cohort,
+            active_users: parseInt(row.active_users || 0, 10),
+            retention_pct: parseFloat(row.retention_pct || 0),
+          };
+        }
+      }
+
+      return acc;
+    }, {});
+
+    // Converter retention_by_month_map para array e calcular percentuais para multi-empresa
+    const cohortDataArray = Object.values(cohortData).map((cohort) => {
+      const retention_by_month = Object.values(cohort.retention_by_month_map)
+        .map((month) => {
+          if (isMultiEmpresa) {
+            // Recalcular percentual baseado nos totais agregados
+            const retention_pct =
+              month.months_since_cohort === 0
+                ? 100.0
+                : month.total_users_for_calc > 0
+                ? Math.round(
+                    (month.active_users / month.total_users_for_calc) *
+                      100 *
+                      10,
+                  ) / 10
+                : 0;
+
+            return {
+              months_since_cohort: month.months_since_cohort,
+              active_users: month.active_users,
+              retention_pct: retention_pct,
+            };
+          }
+          return month;
+        })
+        .sort((a, b) => a.months_since_cohort - b.months_since_cohort);
+
+      return {
+        cd_grupoempresa: cohort.cd_grupoempresa,
+        nm_grupoempresa: cohort.nm_grupoempresa,
+        cohort_year: cohort.cohort_year,
+        cohort_month: cohort.cohort_month,
+        cohort_month_name: cohort.cohort_month_name,
+        cohort_key: cohort.cohort_key,
+        total_users: cohort.total_users,
+        retention_by_month: retention_by_month,
+      };
+    });
+
+    const cohortDataFinal = cohortDataArray.reduce((acc, cohort) => {
+      acc[cohort.cohort_key] = cohort;
       return acc;
     }, {});
 
     const responseData = {
       summary: {
-        total_cohorts: Object.keys(cohortData).length,
+        total_cohorts: Object.keys(cohortDataFinal).length,
         total_records: result.rows.length,
+        is_multi_empresa: isMultiEmpresa,
         filters: {
           cd_grupoempresa: cd_grupoempresa || 'todos',
           cohort_year: cohort_year || 'todos',
           cohort_month: cohort_month || 'todos',
         },
       },
-      cohorts: Object.values(cohortData),
+      cohorts: Object.values(cohortDataFinal),
       raw_data: result.rows,
     };
 
