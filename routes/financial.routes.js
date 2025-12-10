@@ -2927,6 +2927,12 @@ router.get(
       const dt_inicio = `${dt_emissao} 00:00:00`;
       const dt_fim = `${dt_emissao} 23:59:59`;
 
+      console.log('🔍 Parâmetros da query:', {
+        dt_inicio,
+        dt_fim,
+        nr_ctapes,
+      });
+
       const queryObs = `
         SELECT
           fm.nr_ctapes,
@@ -2936,10 +2942,9 @@ router.get(
         FROM fcc_mov fm
         LEFT JOIN fgr_liqitemcr fl ON fl.nr_ctapes = fm.nr_ctapes
         LEFT JOIN obs_mov om ON om.nr_ctapes = fm.nr_ctapes
-        WHERE om.dt_movim BETWEEN $1 AND $2
+        WHERE om.dt_movim BETWEEN $1::timestamp AND $2::timestamp
           AND fm.nr_ctapes = $3
           AND fm.tp_operacao = 'C'
-          AND om.ds_obs IS NOT NULL
         GROUP BY fm.nr_ctapes, om.ds_obs, om.dt_cadastro, om.dt_movim
         ORDER BY om.dt_cadastro DESC
       `;
@@ -2970,6 +2975,12 @@ router.get(
       );
     } catch (error) {
       console.error('❌ Erro ao buscar observações da movimentação:', error);
+      console.error('❌ Stack trace:', error.stack);
+      console.error('❌ Detalhes do erro:', {
+        message: error.message,
+        code: error.code,
+        detail: error.detail,
+      });
 
       // Retornar array vazio em caso de erro, ao invés de erro 500
       successResponse(
