@@ -2845,6 +2845,84 @@ router.get(
 );
 
 /**
+ * @route GET /financial/obs-mov-fatura
+ * @desc Obter observações de movimentação de uma fatura
+ * @access Private
+ * @query nr_fat - Número da fatura (obrigatório)
+ * @query cd_cliente - Código do cliente (obrigatório)
+ */
+router.get(
+  '/obs-mov-fatura',
+  asyncHandler(async (req, res) => {
+    const { nr_fat, cd_cliente } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!nr_fat) {
+      return errorResponse(
+        res,
+        'Número da fatura (nr_fat) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!cd_cliente) {
+      return errorResponse(
+        res,
+        'Código do cliente (cd_cliente) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    console.log('🔍 Buscando observações da movimentação da fatura:', {
+      nr_fat,
+      cd_cliente,
+    });
+
+    const query = `
+      SELECT DISTINCT
+        om.ds_obs,
+        om.dt_cadastro,
+        om.dt_movim,
+        om.nr_ctapes,
+        om.nr_seqmov
+      FROM
+        fcr_faturai ff
+      INNER JOIN fcr_movim fm ON ff.cd_cliente = fm.cd_pessoa 
+        AND ff.cd_empresa = fm.cd_empresa
+      INNER JOIN obs_mov om ON fm.nr_ctapes = om.nr_ctapes 
+        AND fm.nr_seqmov = om.nr_seqmov
+      WHERE
+        ff.nr_fat = $1
+        AND ff.cd_cliente = $2
+      ORDER BY om.dt_cadastro DESC
+    `;
+
+    const values = [nr_fat, cd_cliente];
+
+    const result = await pool.query(query, values);
+
+    console.log('✅ Observações da movimentação obtidas:', {
+      nr_fat,
+      cd_cliente,
+      total: result.rows.length,
+    });
+
+    successResponse(
+      res,
+      {
+        nr_fat,
+        cd_cliente,
+        count: result.rows.length,
+        data: result.rows,
+      },
+      'Observações da movimentação da fatura obtidas com sucesso',
+    );
+  }),
+);
+
+/**
  * @route GET /financial/transacao-fatura-credev
  * @desc Obter número de transação relacionada a uma fatura de crédito CREDEV
  * @access Private
