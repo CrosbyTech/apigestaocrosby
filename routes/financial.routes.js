@@ -2848,7 +2848,6 @@ router.get(
  * @route GET /financial/obs-mov-fatura
  * @desc Obter observações de movimentação de uma fatura
  * @access Private
- * @query nr_fat - Número da fatura (obrigatório)
  * @query cd_cliente - Código do cliente (obrigatório)
  * @query cd_empresa - Código da empresa (obrigatório)
  * @query dt_emissao - Data de emissão da fatura (obrigatório, formato: YYYY-MM-DD)
@@ -2856,18 +2855,9 @@ router.get(
 router.get(
   '/obs-mov-fatura',
   asyncHandler(async (req, res) => {
-    const { nr_fat, cd_cliente, cd_empresa, dt_emissao } = req.query;
+    const { cd_cliente, cd_empresa, dt_emissao } = req.query;
 
     // Validação dos parâmetros obrigatórios
-    if (!nr_fat) {
-      return errorResponse(
-        res,
-        'Número da fatura (nr_fat) é obrigatório',
-        400,
-        'MISSING_PARAMETER',
-      );
-    }
-
     if (!cd_cliente) {
       return errorResponse(
         res,
@@ -2895,8 +2885,7 @@ router.get(
       );
     }
 
-    console.log('🔍 Buscando observações da movimentação da fatura:', {
-      nr_fat,
+    console.log('🔍 Buscando observações da movimentação:', {
       cd_cliente,
       cd_empresa,
       dt_emissao,
@@ -2921,7 +2910,6 @@ router.get(
         return successResponse(
           res,
           {
-            nr_fat,
             cd_cliente,
             cd_empresa,
             count: 0,
@@ -2963,7 +2951,6 @@ router.get(
       ]);
 
       console.log('✅ Observações da movimentação obtidas:', {
-        nr_fat,
         cd_cliente,
         cd_empresa,
         nr_ctapes,
@@ -2973,7 +2960,6 @@ router.get(
       successResponse(
         res,
         {
-          nr_fat,
           cd_cliente,
           cd_empresa,
           nr_ctapes,
@@ -2989,7 +2975,6 @@ router.get(
       successResponse(
         res,
         {
-          nr_fat,
           cd_cliente,
           cd_empresa,
           count: 0,
