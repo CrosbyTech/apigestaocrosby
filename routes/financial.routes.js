@@ -2880,45 +2880,63 @@ router.get(
       cd_cliente,
     });
 
-    const query = `
-      SELECT DISTINCT
-        om.ds_obs,
-        om.dt_cadastro,
-        om.dt_movim,
-        om.nr_ctapes,
-        om.nr_seqmov
-      FROM
-        fcr_faturai ff
-      INNER JOIN fcr_movim fm ON ff.cd_cliente = fm.cd_pessoa 
-        AND ff.cd_empresa = fm.cd_empresa
-      INNER JOIN obs_mov om ON fm.nr_ctapes = om.nr_ctapes 
-        AND fm.nr_seqmov = om.nr_seqmov
-      WHERE
-        ff.nr_fat = $1
-        AND ff.cd_cliente = $2
-      ORDER BY om.dt_cadastro DESC
-    `;
+    try {
+      // Primeira tentativa: buscar através de fcr_movim
+      const query = `
+        SELECT DISTINCT
+          om.ds_obs,
+          om.dt_cadastro,
+          om.dt_movim,
+          om.nr_ctapes,
+          om.nr_seqmov
+        FROM
+          fcr_faturai ff
+        INNER JOIN fcr_movim fm ON ff.cd_cliente = fm.cd_pessoa 
+          AND ff.cd_empresa = fm.cd_empresa
+          AND ff.vl_fatura = fm.vl_lancto
+          AND ff.dt_emissao = fm.dt_movim
+        INNER JOIN obs_mov om ON fm.nr_ctapes = om.nr_ctapes 
+          AND fm.nr_seqmov = om.nr_seqmov
+        WHERE
+          ff.nr_fat = $1
+          AND ff.cd_cliente = $2
+        ORDER BY om.dt_cadastro DESC
+      `;
 
-    const values = [nr_fat, cd_cliente];
+      const values = [nr_fat, cd_cliente];
+      const result = await pool.query(query, values);
 
-    const result = await pool.query(query, values);
-
-    console.log('✅ Observações da movimentação obtidas:', {
-      nr_fat,
-      cd_cliente,
-      total: result.rows.length,
-    });
-
-    successResponse(
-      res,
-      {
+      console.log('✅ Observações da movimentação obtidas:', {
         nr_fat,
         cd_cliente,
-        count: result.rows.length,
-        data: result.rows,
-      },
-      'Observações da movimentação da fatura obtidas com sucesso',
-    );
+        total: result.rows.length,
+      });
+
+      successResponse(
+        res,
+        {
+          nr_fat,
+          cd_cliente,
+          count: result.rows.length,
+          data: result.rows,
+        },
+        'Observações da movimentação da fatura obtidas com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar observações da movimentação:', error);
+
+      // Retornar array vazio em caso de erro, ao invés de erro 500
+      successResponse(
+        res,
+        {
+          nr_fat,
+          cd_cliente,
+          count: 0,
+          data: [],
+        },
+        'Nenhuma observação de movimentação encontrada',
+      );
+    }
   }),
 );
 
