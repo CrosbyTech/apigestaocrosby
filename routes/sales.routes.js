@@ -2953,4 +2953,197 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /sales/cohort-analysis
+ * @desc Análise de cohort - retenção de clientes por mês de primeira compra
+ * @access Public
+ * @query cd_grupoempresa (opcional) - Filtrar por grupo de empresas
+ * @query cohort_year (opcional) - Filtrar por ano do cohort
+ * @query cohort_month (opcional) - Filtrar por mês do cohort (1-12)
+ */
+router.get(
+  '/cohort-analysis',
+  asyncHandler(async (req, res) => {
+    const { cd_grupoempresa, cohort_year, cohort_month } = req.query;
+
+    console.log('📊 COHORT: Iniciando análise de cohort');
+    console.time('cohort-query');
+
+    // Construir filtros WHERE dinâmicos
+    const whereConditions = [];
+    const queryParams = [];
+    let paramIndex = 1;
+
+    if (cd_grupoempresa) {
+      whereConditions.push(`c.cd_grupoempresa = $${paramIndex}`);
+      queryParams.push(cd_grupoempresa);
+      paramIndex++;
+    }
+
+    if (cohort_year) {
+      whereConditions.push(
+        `EXTRACT(YEAR FROM c.cohort_month) = $${paramIndex}`,
+      );
+      queryParams.push(cohort_year);
+      paramIndex++;
+    }
+
+    if (cohort_month) {
+      whereConditions.push(
+        `EXTRACT(MONTH FROM c.cohort_month) = $${paramIndex}`,
+      );
+      queryParams.push(cohort_month);
+      paramIndex++;
+    }
+
+    const whereClause =
+      whereConditions.length > 0
+        ? `WHERE ${whereConditions.join(' AND ')}`
+        : '';
+
+    const query = `
+      WITH first_purchase AS (
+        SELECT 
+          cd_grupoempresa,
+          cd_pessoa,
+          MIN(DATE_TRUNC('month', dt_transacao)) AS cohort_month
+        FROM tra_transacao
+        WHERE tp_situacao = 4
+          AND tp_operacao = 'S'
+          AND cd_operacao IN (9017,9027,9009,9001,9400,9401,510,511,521,522,545,548)
+        GROUP BY cd_grupoempresa, cd_pessoa
+      ),
+      cohort_activity AS (
+        SELECT 
+          t.cd_grupoempresa,
+          t.cd_pessoa,
+          fp.cohort_month,
+          DATE_TRUNC('month', t.dt_transacao) AS trans_month,
+          (
+            (EXTRACT(YEAR  FROM DATE_TRUNC('month', t.dt_transacao)) * 12 
+             + EXTRACT(MONTH FROM DATE_TRUNC('month', t.dt_transacao)))
+            -
+            (EXTRACT(YEAR  FROM fp.cohort_month) * 12 
+             + EXTRACT(MONTH FROM fp.cohort_month))
+          )::int AS months_since_cohort
+        FROM tra_transacao t
+        JOIN first_purchase fp 
+          ON t.cd_pessoa       = fp.cd_pessoa
+         AND t.cd_grupoempresa = fp.cd_grupoempresa
+        WHERE t.tp_situacao = 4
+          AND t.tp_operacao = 'S'
+          AND t.cd_operacao IN (9017,9027,9009,9001,9400,9401,510,511,521,522,545,548)
+          AND DATE_TRUNC('month', t.dt_transacao) >= fp.cohort_month
+      ),
+      cohort_counts AS (
+        SELECT
+          cd_grupoempresa,
+          cohort_month,
+          months_since_cohort,
+          COUNT(DISTINCT cd_pessoa) AS active_users
+        FROM cohort_activity
+        GROUP BY cd_grupoempresa, cohort_month, months_since_cohort
+      ),
+      cohort_size AS (
+        SELECT
+          cd_grupoempresa,
+          cohort_month,
+          COUNT(DISTINCT cd_pessoa) AS total_users
+        FROM first_purchase
+        GROUP BY cd_grupoempresa, cohort_month
+      )
+      SELECT
+        c.cd_grupoempresa,
+        g.nm_grupoempresa,
+        EXTRACT(YEAR  FROM c.cohort_month)::int  AS cohort_year,
+        EXTRACT(MONTH FROM c.cohort_month)::int  AS cohort_month,
+        CASE EXTRACT(MONTH FROM c.cohort_month)::int
+          WHEN 1  THEN 'Janeiro'
+          WHEN 2  THEN 'Fevereiro'
+          WHEN 3  THEN 'Março'
+          WHEN 4  THEN 'Abril'
+          WHEN 5  THEN 'Maio'
+          WHEN 6  THEN 'Junho'
+          WHEN 7  THEN 'Julho'
+          WHEN 8  THEN 'Agosto'
+          WHEN 9  THEN 'Setembro'
+          WHEN 10 THEN 'Outubro'
+          WHEN 11 THEN 'Novembro'
+          WHEN 12 THEN 'Dezembro'
+        END AS cohort_month_name,
+        c.months_since_cohort,
+        s.total_users,
+        c.active_users,
+        CASE 
+          WHEN c.months_since_cohort = 0 THEN 100.0
+          ELSE ROUND(
+            c.active_users::numeric / NULLIF(s.total_users, 0) * 100
+          , 1)
+        END AS retention_pct
+      FROM cohort_counts c
+      JOIN cohort_size s
+        ON s.cd_grupoempresa = c.cd_grupoempresa
+       AND s.cohort_month    = c.cohort_month
+      JOIN ger_grupoempresa g
+        ON g.cd_grupoempresa = c.cd_grupoempresa
+      ${whereClause}
+      ORDER BY
+        c.cd_grupoempresa,
+        cohort_year,
+        cohort_month,
+        c.months_since_cohort
+    `;
+
+    const result = await pool.query(query, queryParams);
+
+    console.timeEnd('cohort-query');
+    console.log(`✅ COHORT: ${result.rows.length} registros retornados`);
+
+    // Agrupar dados por cohort para facilitar visualização
+    const cohortData = result.rows.reduce((acc, row) => {
+      const cohortKey = `${row.cohort_year}-${String(row.cohort_month).padStart(
+        2,
+        '0',
+      )}`;
+
+      if (!acc[cohortKey]) {
+        acc[cohortKey] = {
+          cd_grupoempresa: row.cd_grupoempresa,
+          nm_grupoempresa: row.nm_grupoempresa,
+          cohort_year: row.cohort_year,
+          cohort_month: row.cohort_month,
+          cohort_month_name: row.cohort_month_name,
+          cohort_key: cohortKey,
+          total_users: row.total_users,
+          retention_by_month: [],
+        };
+      }
+
+      acc[cohortKey].retention_by_month.push({
+        months_since_cohort: row.months_since_cohort,
+        active_users: row.active_users,
+        retention_pct: row.retention_pct,
+      });
+
+      return acc;
+    }, {});
+
+    const responseData = {
+      summary: {
+        total_cohorts: Object.keys(cohortData).length,
+        total_records: result.rows.length,
+        filters: {
+          cd_grupoempresa: cd_grupoempresa || 'todos',
+          cohort_year: cohort_year || 'todos',
+          cohort_month: cohort_month || 'todos',
+        },
+      },
+      cohorts: Object.values(cohortData),
+      raw_data: result.rows,
+    };
+
+    successResponse(res, responseData, 'Análise de cohort obtida com sucesso');
+  }),
+);
+
 export default router;
