@@ -2850,11 +2850,13 @@ router.get(
  * @access Private
  * @query nr_fat - Número da fatura (obrigatório)
  * @query cd_cliente - Código do cliente (obrigatório)
+ * @query cd_empresa - Código da empresa (obrigatório)
+ * @query dt_emissao - Data de emissão da fatura (obrigatório, formato: YYYY-MM-DD)
  */
 router.get(
   '/obs-mov-fatura',
   asyncHandler(async (req, res) => {
-    const { nr_fat, cd_cliente } = req.query;
+    const { nr_fat, cd_cliente, cd_empresa, dt_emissao } = req.query;
 
     // Validação dos parâmetros obrigatórios
     if (!nr_fat) {
@@ -2875,41 +2877,97 @@ router.get(
       );
     }
 
+    if (!cd_empresa) {
+      return errorResponse(
+        res,
+        'Código da empresa (cd_empresa) é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    if (!dt_emissao) {
+      return errorResponse(
+        res,
+        'Data de emissão (dt_emissao) é obrigatória',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
     console.log('🔍 Buscando observações da movimentação da fatura:', {
       nr_fat,
       cd_cliente,
+      cd_empresa,
+      dt_emissao,
     });
 
     try {
-      // Primeira tentativa: buscar através de fcr_movim
-      const query = `
-        SELECT DISTINCT
+      // Passo 1: Buscar nr_ctapes do cliente
+      const queryCtapes = `
+        SELECT fc.nr_ctapes
+        FROM fcc_ctapes fc
+        WHERE fc.cd_pessoa = $1
+          AND fc.cd_empresa = $2
+      `;
+
+      const resultCtapes = await pool.query(queryCtapes, [
+        cd_cliente,
+        cd_empresa,
+      ]);
+
+      if (resultCtapes.rows.length === 0) {
+        console.log('⚠️ Nenhum nr_ctapes encontrado para o cliente');
+        return successResponse(
+          res,
+          {
+            nr_fat,
+            cd_cliente,
+            cd_empresa,
+            count: 0,
+            data: [],
+          },
+          'Nenhuma conta encontrada para o cliente',
+        );
+      }
+
+      const nr_ctapes = resultCtapes.rows[0].nr_ctapes;
+      console.log('✅ nr_ctapes encontrado:', nr_ctapes);
+
+      // Passo 2: Buscar observações de movimentação
+      // Criar range de data: dt_emissao 00:00:00 até 23:59:59
+      const dt_inicio = `${dt_emissao} 00:00:00`;
+      const dt_fim = `${dt_emissao} 23:59:59`;
+
+      const queryObs = `
+        SELECT
+          fm.nr_ctapes,
           om.ds_obs,
           om.dt_cadastro,
-          om.dt_movim,
-          om.nr_ctapes,
-          om.nr_seqmov
-        FROM
-          fcr_faturai ff
-        INNER JOIN fcr_movim fm ON ff.cd_cliente = fm.cd_pessoa 
-          AND ff.cd_empresa = fm.cd_empresa
-          AND ff.vl_fatura = fm.vl_lancto
-          AND ff.dt_emissao = fm.dt_movim
-        INNER JOIN obs_mov om ON fm.nr_ctapes = om.nr_ctapes 
-          AND fm.nr_seqmov = om.nr_seqmov
-        WHERE
-          ff.nr_fat = $1
-          AND ff.cd_cliente = $2
+          om.dt_movim
+        FROM fcc_mov fm
+        LEFT JOIN fgr_liqitemcr fl ON fl.nr_ctapes = fm.nr_ctapes
+        LEFT JOIN obs_mov om ON om.nr_ctapes = fm.nr_ctapes
+        WHERE om.dt_movim BETWEEN $1 AND $2
+          AND fm.nr_ctapes = $3
+          AND fm.tp_operacao = 'C'
+          AND om.ds_obs IS NOT NULL
+        GROUP BY fm.nr_ctapes, om.ds_obs, om.dt_cadastro, om.dt_movim
         ORDER BY om.dt_cadastro DESC
       `;
 
-      const values = [nr_fat, cd_cliente];
-      const result = await pool.query(query, values);
+      const resultObs = await pool.query(queryObs, [
+        dt_inicio,
+        dt_fim,
+        nr_ctapes,
+      ]);
 
       console.log('✅ Observações da movimentação obtidas:', {
         nr_fat,
         cd_cliente,
-        total: result.rows.length,
+        cd_empresa,
+        nr_ctapes,
+        total: resultObs.rows.length,
       });
 
       successResponse(
@@ -2917,8 +2975,10 @@ router.get(
         {
           nr_fat,
           cd_cliente,
-          count: result.rows.length,
-          data: result.rows,
+          cd_empresa,
+          nr_ctapes,
+          count: resultObs.rows.length,
+          data: resultObs.rows,
         },
         'Observações da movimentação da fatura obtidas com sucesso',
       );
@@ -2931,10 +2991,11 @@ router.get(
         {
           nr_fat,
           cd_cliente,
+          cd_empresa,
           count: 0,
           data: [],
         },
-        'Nenhuma observação de movimentação encontrada',
+        'Erro ao buscar observações de movimentação',
       );
     }
   }),
