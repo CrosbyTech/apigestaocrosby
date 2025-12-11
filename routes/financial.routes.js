@@ -3438,4 +3438,70 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /financial/auditoria-conta
+ * @desc Buscar movimentações de contas específicas para auditoria
+ * @access Public
+ */
+router.get(
+  '/auditoria-conta',
+  asyncHandler(async (req, res) => {
+    const query = `
+      SELECT
+        fm.nr_ctapes,
+        fm.dt_movim,
+        fm.nr_seqmov,
+        fm.ds_doc,
+        fm.in_estorno,
+        fm.tp_operacao,
+        fm.cd_clichqpres,
+        fm.cd_empresa,
+        fm.cd_tipoclas,
+        fm.vl_lancto,
+        fm.cd_grupoempresa,
+        fm.cd_componente,
+        fm.dt_liq,
+        fm.cd_empchqpres,
+        fm.cd_operador,
+        fm.dt_reposicao,
+        fm.dt_faturanf,
+        fm.ds_aux,
+        fm.nr_chequepres,
+        fm.tp_documento,
+        fm.nr_seqhistrelsub,
+        fm.cd_operestorno,
+        fm.cd_empdespesa,
+        fm.dt_conci,
+        fm.cd_historico,
+        fm.nr_faturanf,
+        fm.nr_seqliq,
+        fm.cd_clas,
+        fm.cd_empliq,
+        fm.cd_operconci,
+        fm.vl_reposicao,
+        fm.dt_estorno,
+        fm.tp_reposicao,
+        fm.cd_empresanf,
+        fm.in_fechado,
+        fm.u_version,
+        fm.dt_cadastro
+      FROM
+        fcc_mov fm
+      WHERE
+        fm.nr_ctapes IN (3, 4, 7, 12, 14, 15, 49, 109, 258, 271, 334442, 448, 526, 528, 594, 595, 597, 789, 850, 890, 891, 959, 980, 998)
+        AND fm.dt_movim > '2025-01-01'
+      ORDER BY
+        fm.dt_movim DESC
+    `;
+
+    const result = await pool.query(query);
+
+    successResponse(
+      res,
+      result.rows,
+      `${result.rows.length} movimentações encontradas`,
+    );
+  }),
+);
+
 export default router;
