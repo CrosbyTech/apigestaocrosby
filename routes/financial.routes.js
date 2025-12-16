@@ -3504,4 +3504,97 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /financial/auditoria-faturamento
+ * @desc Buscar auditoria de faturamento com relacionamento entre faturas e transações
+ * @access Public
+ * @query {cd_empresa, dt_inicio, dt_fim}
+ */
+router.get(
+  '/auditoria-faturamento',
+  sanitizeInput,
+  validateRequired(['cd_empresa', 'dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { cd_empresa, dt_inicio, dt_fim } = req.query;
+
+    // Converter cd_empresa para array se for string única
+    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+
+    // Remover valores vazios ou nulos
+    empresas = empresas.filter(
+      (e) => e && e !== '' && e !== 'null' && e !== 'undefined',
+    );
+
+    if (empresas.length === 0) {
+      return errorResponse(
+        res,
+        'Pelo menos uma empresa deve ser fornecida',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    // Criar placeholders para a query
+    let params = [dt_inicio, dt_fim, ...empresas];
+    let empresaPlaceholders = empresas.map((_, idx) => `$${idx + 3}`).join(',');
+
+    const query = `
+      SELECT
+        ff.cd_cliente,
+        ff.vl_fatura,
+        ff.nr_fat,
+        ff.dt_vencimento,
+        vff.nr_transacao,
+        ff.tp_documento,
+        tt.tp_operacao,
+        tt.cd_operacao,
+        ff.cd_empresa
+      FROM
+        fcr_faturai ff
+      LEFT JOIN vr_fcr_fattrans vff ON
+        ff.nr_fat = vff.nr_fat
+        AND ff.cd_cliente = vff.cd_cliente
+      LEFT JOIN tra_transacao tt ON
+        tt.nr_transacao = vff.nr_transacao
+      WHERE
+        tt.dt_transacao BETWEEN $1 AND $2
+        AND ff.cd_empresa IN (${empresaPlaceholders})
+        AND ff.nr_fat >= 1
+      GROUP BY
+        ff.cd_cliente,
+        ff.vl_fatura,
+        ff.nr_fat,
+        vff.nr_transacao,
+        ff.dt_vencimento,
+        ff.tp_documento,
+        tt.tp_operacao,
+        tt.cd_operacao,
+        ff.cd_empresa
+      ORDER BY
+        tt.cd_operacao,
+        ff.nr_fat
+    `;
+
+    console.log(
+      `🔍 Auditoria Faturamento: empresas=${empresas.join(
+        ',',
+      )}, período=${dt_inicio} a ${dt_fim}`,
+    );
+
+    try {
+      const { rows } = await pool.query(query, params);
+
+      successResponse(
+        res,
+        rows,
+        `${rows.length} registros de auditoria encontrados`,
+      );
+    } catch (error) {
+      console.error('❌ Erro na query de auditoria de faturamento:', error);
+      throw error;
+    }
+  }),
+);
+
 export default router;
