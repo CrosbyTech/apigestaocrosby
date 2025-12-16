@@ -3544,6 +3544,7 @@ router.get(
         ff.cd_cliente,
         ff.vl_fatura,
         ff.nr_fat,
+        ff.nr_parcela,
         ff.dt_vencimento,
         vff.nr_transacao,
         ff.tp_documento,
@@ -3565,6 +3566,7 @@ router.get(
         ff.cd_cliente,
         ff.vl_fatura,
         ff.nr_fat,
+        ff.nr_parcela,
         vff.nr_transacao,
         ff.dt_vencimento,
         ff.tp_documento,
@@ -3573,7 +3575,8 @@ router.get(
         ff.cd_empresa
       ORDER BY
         tt.cd_operacao,
-        ff.nr_fat
+        ff.nr_fat,
+        ff.nr_parcela
     `;
 
     console.log(
