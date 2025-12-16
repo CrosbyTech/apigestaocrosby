@@ -3505,6 +3505,105 @@ router.get(
 );
 
 /**
+ * @route GET /financial/classificacao-clientes
+ * @desc Buscar classificação de clientes (Multimarcas ou Revenda)
+ * @access Public
+ * @query {cd_clientes} - Lista de códigos de clientes separados por vírgula
+ */
+router.get(
+  '/classificacao-clientes',
+  sanitizeInput,
+  validateRequired(['cd_clientes']),
+  asyncHandler(async (req, res) => {
+    const { cd_clientes } = req.query;
+
+    // Converter cd_clientes para array
+    let clientes = Array.isArray(cd_clientes)
+      ? cd_clientes
+      : cd_clientes.split(',');
+
+    // Remover valores vazios ou nulos
+    clientes = clientes
+      .filter((c) => c && c !== '' && c !== 'null' && c !== 'undefined')
+      .map((c) => c.trim());
+
+    if (clientes.length === 0) {
+      return errorResponse(
+        res,
+        'Pelo menos um cliente deve ser fornecido',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    // Criar placeholders para a query
+    const placeholders = clientes.map((_, idx) => `$${idx + 1}`).join(',');
+
+    const query = `
+      SELECT
+        vpp.cd_pessoa,
+        vpp.cd_tipoclas,
+        vpp.cd_classificacao
+      FROM
+        vr_pes_pessoaclas vpp
+      WHERE
+        vpp.cd_pessoa IN (${placeholders})
+    `;
+
+    console.log(`🔍 Classificação de Clientes: ${clientes.length} clientes`);
+
+    try {
+      const { rows } = await pool.query(query, clientes);
+
+      // Classificar cada cliente
+      const classificacoes = {};
+
+      clientes.forEach((cdPessoa) => {
+        // Buscar classificações desse cliente
+        const classifCliente = rows.filter(
+          (r) => String(r.cd_pessoa) === String(cdPessoa),
+        );
+
+        let tipo = 'OUTROS';
+
+        // Verificar se é MULTIMARCAS
+        const ehMultimarcas = classifCliente.some(
+          (c) =>
+            (Number(c.cd_tipoclas) === 20 &&
+              Number(c.cd_classificacao) === 2) ||
+            (Number(c.cd_tipoclas) === 5 && Number(c.cd_classificacao) === 1),
+        );
+
+        // Verificar se é REVENDA
+        const ehRevenda = classifCliente.some(
+          (c) =>
+            (Number(c.cd_tipoclas) === 20 &&
+              Number(c.cd_classificacao) === 3) ||
+            (Number(c.cd_tipoclas) === 7 && Number(c.cd_classificacao) === 1),
+        );
+
+        if (ehMultimarcas) {
+          tipo = 'MULTIMARCAS';
+        } else if (ehRevenda) {
+          tipo = 'REVENDA';
+        }
+
+        classificacoes[cdPessoa] = tipo;
+      });
+
+      successResponse(
+        res,
+        classificacoes,
+        `Classificação de ${clientes.length} clientes processada`,
+      );
+    } catch (error) {
+      console.error('❌ Erro na query de classificação de clientes:', error);
+      throw error;
+    }
+  }),
+);
+
+/**
  * @route GET /financial/auditoria-faturamento
  * @desc Buscar auditoria de faturamento com relacionamento entre faturas e transações
  * @access Public
