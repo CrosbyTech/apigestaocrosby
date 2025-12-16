@@ -3745,6 +3745,7 @@ router.get(
         tt.dt_transacao BETWEEN $1 AND $2
         AND ff.cd_empresa IN (${empresaPlaceholders})
         AND ff.nr_fat >= 1
+        AND ff.tp_situacao = 1
       GROUP BY
         ff.cd_cliente,
         ff.vl_fatura,
