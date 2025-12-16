@@ -3692,8 +3692,17 @@ router.get(
   asyncHandler(async (req, res) => {
     const { cd_empresa, dt_inicio, dt_fim } = req.query;
 
-    // Converter cd_empresa para array se for string única
-    let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    // Converter cd_empresa para array
+    let empresas;
+    if (Array.isArray(cd_empresa)) {
+      empresas = cd_empresa;
+    } else if (typeof cd_empresa === 'string' && cd_empresa.includes(',')) {
+      // Se for string com vírgulas, fazer split
+      empresas = cd_empresa.split(',').map((e) => e.trim());
+    } else {
+      // String única
+      empresas = [cd_empresa];
+    }
 
     // Remover valores vazios ou nulos
     empresas = empresas.filter(
