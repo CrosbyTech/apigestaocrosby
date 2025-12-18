@@ -3505,6 +3505,127 @@ router.get(
 );
 
 /**
+ * @route POST /financial/classificacao-faturas
+ * @desc Buscar classificação de faturas considerando operação (VAREJO tem prioridade sobre REVENDA)
+ * @access Public
+ * @body {faturas} - Array de objetos com cd_cliente, cd_operacao, cd_empresa
+ */
+router.post(
+  '/classificacao-faturas',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { faturas } = req.body;
+
+    if (!faturas || !Array.isArray(faturas) || faturas.length === 0) {
+      return errorResponse(
+        res,
+        'Array de faturas deve ser fornecido',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    // Códigos de operação para VAREJO
+    const codigosVarejo = [
+      1, 2, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 8750, 9017,
+      9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
+      1101, 9061,
+    ];
+
+    // Extrair clientes únicos
+    const clientesUnicos = [...new Set(faturas.map((f) => String(f.cd_cliente)))];
+
+    if (clientesUnicos.length === 0) {
+      return successResponse(res, {}, 'Nenhum cliente para processar');
+    }
+
+    // Criar placeholders para a query
+    const placeholders = clientesUnicos.map((_, idx) => `$${idx + 1}`).join(',');
+
+    const query = `
+      SELECT
+        vpp.cd_pessoa,
+        vpp.cd_tipoclas,
+        vpp.cd_classificacao
+      FROM
+        vr_pes_pessoaclas vpp
+      WHERE
+        vpp.cd_pessoa IN (${placeholders})
+    `;
+
+    console.log(`🔍 Classificação de Faturas: ${faturas.length} faturas de ${clientesUnicos.length} clientes`);
+
+    try {
+      const { rows } = await pool.query(query, clientesUnicos);
+
+      // Mapear classificações base por cliente
+      const classificacoesBase = {};
+
+      clientesUnicos.forEach((cdPessoa) => {
+        const classifCliente = rows.filter(
+          (r) => String(r.cd_pessoa) === String(cdPessoa),
+        );
+
+        const ehMultimarcas = classifCliente.some(
+          (c) =>
+            (Number(c.cd_tipoclas) === 20 && Number(c.cd_classificacao) === 2) ||
+            (Number(c.cd_tipoclas) === 5 && Number(c.cd_classificacao) === 1),
+        );
+
+        const ehRevenda = classifCliente.some(
+          (c) =>
+            (Number(c.cd_tipoclas) === 20 && Number(c.cd_classificacao) === 3) ||
+            (Number(c.cd_tipoclas) === 7 && Number(c.cd_classificacao) === 1),
+        );
+
+        classificacoesBase[cdPessoa] = {
+          multimarcas: ehMultimarcas,
+          revenda: ehRevenda,
+        };
+      });
+
+      // Processar cada fatura e retornar classificação considerando operação
+      const resultado = {};
+
+      faturas.forEach((fatura) => {
+        const chave = `${fatura.cd_cliente}-${fatura.cd_operacao}-${fatura.cd_empresa}`;
+        const classifBase = classificacoesBase[String(fatura.cd_cliente)] || { multimarcas: false, revenda: false };
+        const ehOperacaoVarejo = codigosVarejo.includes(Number(fatura.cd_operacao));
+
+        let tipo = 'OUTROS';
+
+        if (classifBase.multimarcas) {
+          tipo = 'MULTIMARCAS';
+        } else if (classifBase.revenda) {
+          // Se é REVENDA mas a operação é de VAREJO, não classificar como REVENDA
+          if (ehOperacaoVarejo) {
+            tipo = 'VAREJO'; // Marca como VAREJO em vez de REVENDA
+          } else {
+            tipo = 'REVENDA';
+          }
+        }
+
+        resultado[chave] = {
+          tipo,
+          cd_cliente: fatura.cd_cliente,
+          cd_operacao: fatura.cd_operacao,
+          cd_empresa: fatura.cd_empresa,
+        };
+      });
+
+      successResponse(
+        res,
+        resultado,
+        `Classificação de ${faturas.length} faturas processada`,
+      );
+    } catch (error) {
+      console.error('❌ Erro na query de classificação de faturas:', error);
+      throw error;
+    }
+  }),
+);
+
+/**
  * @route GET /financial/classificacao-clientes
  * @desc Buscar classificação de clientes (Multimarcas ou Revenda)
  * @access Public
