@@ -2893,17 +2893,18 @@ router.get(
 
     try {
       // Passo 1: Buscar nr_ctapes do cliente
+      // Busca o nr_ctapes sem filtrar por empresa, pois o cliente pode ter conta em outra empresa
       const queryCtapes = `
-        SELECT fc.nr_ctapes
+        SELECT fc.nr_ctapes, fc.cd_empresa
         FROM fcc_ctapes fc
         WHERE fc.cd_pessoa = $1
-          AND fc.cd_empresa = $2
+        ORDER BY fc.cd_empresa ASC
+        LIMIT 1
       `;
 
-      const resultCtapes = await pool.query(queryCtapes, [
-        cd_cliente,
-        cd_empresa,
-      ]);
+      const resultCtapes = await pool.query(queryCtapes, [cd_cliente]);
+
+      console.log('🔍 Buscando nr_ctapes para cd_pessoa:', cd_cliente);
 
       if (resultCtapes.rows.length === 0) {
         console.log('⚠️ Nenhum nr_ctapes encontrado para o cliente');
@@ -2920,7 +2921,13 @@ router.get(
       }
 
       const nr_ctapes = resultCtapes.rows[0].nr_ctapes;
-      console.log('✅ nr_ctapes encontrado:', nr_ctapes);
+      const empresaCtapes = resultCtapes.rows[0].cd_empresa;
+      console.log(
+        '✅ nr_ctapes encontrado:',
+        nr_ctapes,
+        '- empresa:',
+        empresaCtapes,
+      );
 
       // Passo 2: Buscar observações de movimentação
       // Criar range de data: dt_emissao 00:00:00 até 23:59:59
@@ -3533,14 +3540,18 @@ router.post(
     ];
 
     // Extrair clientes únicos
-    const clientesUnicos = [...new Set(faturas.map((f) => String(f.cd_cliente)))];
+    const clientesUnicos = [
+      ...new Set(faturas.map((f) => String(f.cd_cliente))),
+    ];
 
     if (clientesUnicos.length === 0) {
       return successResponse(res, {}, 'Nenhum cliente para processar');
     }
 
     // Criar placeholders para a query
-    const placeholders = clientesUnicos.map((_, idx) => `$${idx + 1}`).join(',');
+    const placeholders = clientesUnicos
+      .map((_, idx) => `$${idx + 1}`)
+      .join(',');
 
     const query = `
       SELECT
@@ -3553,7 +3564,9 @@ router.post(
         vpp.cd_pessoa IN (${placeholders})
     `;
 
-    console.log(`🔍 Classificação de Faturas: ${faturas.length} faturas de ${clientesUnicos.length} clientes`);
+    console.log(
+      `🔍 Classificação de Faturas: ${faturas.length} faturas de ${clientesUnicos.length} clientes`,
+    );
 
     try {
       const { rows } = await pool.query(query, clientesUnicos);
@@ -3568,13 +3581,15 @@ router.post(
 
         const ehMultimarcas = classifCliente.some(
           (c) =>
-            (Number(c.cd_tipoclas) === 20 && Number(c.cd_classificacao) === 2) ||
+            (Number(c.cd_tipoclas) === 20 &&
+              Number(c.cd_classificacao) === 2) ||
             (Number(c.cd_tipoclas) === 5 && Number(c.cd_classificacao) === 1),
         );
 
         const ehRevenda = classifCliente.some(
           (c) =>
-            (Number(c.cd_tipoclas) === 20 && Number(c.cd_classificacao) === 3) ||
+            (Number(c.cd_tipoclas) === 20 &&
+              Number(c.cd_classificacao) === 3) ||
             (Number(c.cd_tipoclas) === 7 && Number(c.cd_classificacao) === 1),
         );
 
@@ -3589,8 +3604,13 @@ router.post(
 
       faturas.forEach((fatura) => {
         const chave = `${fatura.cd_cliente}-${fatura.cd_operacao}-${fatura.cd_empresa}`;
-        const classifBase = classificacoesBase[String(fatura.cd_cliente)] || { multimarcas: false, revenda: false };
-        const ehOperacaoVarejo = codigosVarejo.includes(Number(fatura.cd_operacao));
+        const classifBase = classificacoesBase[String(fatura.cd_cliente)] || {
+          multimarcas: false,
+          revenda: false,
+        };
+        const ehOperacaoVarejo = codigosVarejo.includes(
+          Number(fatura.cd_operacao),
+        );
 
         let tipo = 'OUTROS';
 
