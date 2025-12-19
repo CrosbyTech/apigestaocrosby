@@ -2892,81 +2892,46 @@ router.get(
     });
 
     try {
-      // Passo 1: Buscar nr_ctapes do cliente
-      // Busca o nr_ctapes sem filtrar por empresa, pois o cliente pode ter conta em outra empresa
-      const queryCtapes = `
-        SELECT fc.nr_ctapes, fc.cd_empresa
-        FROM fcc_ctapes fc
-        WHERE fc.cd_pessoa = $1
-        ORDER BY fc.cd_empresa ASC
-        LIMIT 1
-      `;
-
-      const resultCtapes = await pool.query(queryCtapes, [cd_cliente]);
-
-      console.log('🔍 Buscando nr_ctapes para cd_pessoa:', cd_cliente);
-
-      if (resultCtapes.rows.length === 0) {
-        console.log('⚠️ Nenhum nr_ctapes encontrado para o cliente');
-        return successResponse(
-          res,
-          {
-            cd_cliente,
-            cd_empresa,
-            count: 0,
-            data: [],
-          },
-          'Nenhuma conta encontrada para o cliente',
-        );
-      }
-
-      const nr_ctapes = resultCtapes.rows[0].nr_ctapes;
-      const empresaCtapes = resultCtapes.rows[0].cd_empresa;
-      console.log(
-        '✅ nr_ctapes encontrado:',
-        nr_ctapes,
-        '- empresa:',
-        empresaCtapes,
-      );
-
-      // Passo 2: Buscar observações de movimentação
       // Criar range de data: dt_emissao 00:00:00 até 23:59:59
       const dt_inicio = `${dt_emissao} 00:00:00`;
       const dt_fim = `${dt_emissao} 23:59:59`;
 
       console.log('🔍 Parâmetros da query:', {
+        cd_cliente,
         dt_inicio,
         dt_fim,
-        nr_ctapes,
       });
 
+      // Query simplificada: busca observações usando cd_pessoa diretamente
+      // para encontrar o nr_ctapes e depois as observações relacionadas
       const queryObs = `
-        SELECT
-          fm.nr_ctapes,
+        SELECT DISTINCT
+          om.nr_ctapes,
           om.ds_obs,
           om.dt_cadastro,
           om.dt_movim
-        FROM fcc_mov fm
-        LEFT JOIN fgr_liqitemcr fl ON fl.nr_ctapes = fm.nr_ctapes
-        LEFT JOIN obs_mov om ON om.nr_ctapes = fm.nr_ctapes
-        WHERE om.dt_movim BETWEEN $1::timestamp AND $2::timestamp
-          AND fm.nr_ctapes = $3
-          AND fm.tp_operacao = 'C'
-        GROUP BY fm.nr_ctapes, om.ds_obs, om.dt_cadastro, om.dt_movim
+        FROM obs_mov om
+        INNER JOIN fcc_ctapes fc ON fc.nr_ctapes = om.nr_ctapes
+        WHERE fc.cd_pessoa = $1
+          AND om.dt_movim BETWEEN $2::timestamp AND $3::timestamp
+          AND om.ds_obs IS NOT NULL
+          AND om.ds_obs != ''
         ORDER BY om.dt_cadastro DESC
       `;
 
+      console.log('🔍 Executando query com parâmetros:', [cd_cliente, dt_inicio, dt_fim]);
+
       const resultObs = await pool.query(queryObs, [
+        cd_cliente,
         dt_inicio,
         dt_fim,
-        nr_ctapes,
       ]);
 
       console.log('✅ Observações da movimentação obtidas:', {
         cd_cliente,
         cd_empresa,
-        nr_ctapes,
         total: resultObs.rows.length,
+        dados: resultObs.rows,
       });
 
       successResponse(
@@ -2974,7 +2939,7 @@ router.get(
         {
           cd_cliente,
           cd_empresa,
-          nr_ctapes,
+          dt_emissao,
           count: resultObs.rows.length,
           data: resultObs.rows,
         },
