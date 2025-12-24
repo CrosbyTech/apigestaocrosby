@@ -2845,23 +2845,22 @@ router.get(
 );
 
 /**
- * @route GET /financial/obs-mov-fatura
- * @desc Obter observações de movimentação de uma fatura
+ * @route GET /financial/conta-cliente
+ * @desc Obter nr_ctapes (conta) do cliente
  * @access Private
- * @query cd_cliente - Código do cliente (obrigatório)
+ * @query cd_pessoa - Código do cliente (obrigatório)
  * @query cd_empresa - Código da empresa (obrigatório)
- * @query dt_emissao - Data de emissão da fatura (obrigatório, formato: YYYY-MM-DD)
  */
 router.get(
-  '/obs-mov-fatura',
+  '/conta-cliente',
   asyncHandler(async (req, res) => {
-    const { cd_cliente, cd_empresa, dt_emissao } = req.query;
+    const { cd_pessoa, cd_empresa } = req.query;
 
     // Validação dos parâmetros obrigatórios
-    if (!cd_cliente) {
+    if (!cd_pessoa) {
       return errorResponse(
         res,
-        'Código do cliente (cd_cliente) é obrigatório',
+        'Código do cliente (cd_pessoa) é obrigatório',
         400,
         'MISSING_PARAMETER',
       );
@@ -2876,94 +2875,135 @@ router.get(
       );
     }
 
-    if (!dt_emissao) {
+    console.log('🔍 Buscando conta do cliente:', {
+      cd_pessoa,
+      cd_empresa,
+    });
+
+    try {
+      const query = `
+        SELECT
+          fc.cd_empresa,
+          fc.cd_pessoa,
+          fc.nr_ctapes
+        FROM fcc_ctapes fc
+        WHERE fc.cd_pessoa = $1
+          AND fc.cd_empresa = $2
+      `;
+
+      const result = await pool.query(query, [cd_pessoa, cd_empresa]);
+
+      console.log('✅ Conta do cliente obtida:', {
+        cd_pessoa,
+        cd_empresa,
+        total: result.rows.length,
+        dados: result.rows,
+      });
+
+      successResponse(
+        res,
+        {
+          cd_pessoa,
+          cd_empresa,
+          count: result.rows.length,
+          data: result.rows,
+        },
+        'Conta do cliente obtida com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar conta do cliente:', error);
+      errorResponse(
+        res,
+        'Erro ao buscar conta do cliente',
+        500,
+        'DATABASE_ERROR',
+      );
+    }
+  }),
+);
+
+/**
+ * @route GET /financial/obs-mov-fatura
+ * @desc Obter observações de movimentação de uma fatura
+ * @access Private
+ * @query nr_ctapes - Número da conta do cliente (obrigatório)
+ * @query dt_movim - Data da movimentação (obrigatório, formato: YYYY-MM-DD)
+ */
+router.get(
+  '/obs-mov-fatura',
+  asyncHandler(async (req, res) => {
+    const { nr_ctapes, dt_movim } = req.query;
+
+    // Validação dos parâmetros obrigatórios
+    if (!nr_ctapes) {
       return errorResponse(
         res,
-        'Data de emissão (dt_emissao) é obrigatória',
+        'Número da conta (nr_ctapes) é obrigatório',
         400,
         'MISSING_PARAMETER',
       );
     }
 
+    if (!dt_movim) {
+      return errorResponse(
+        res,
+        'Data da movimentação (dt_movim) é obrigatória',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    // Criar range de data: dt_movim 00:00:00 até 23:59:59
+    const dt_inicio = `${dt_movim} 00:00:00`;
+    const dt_fim = `${dt_movim} 23:59:59`;
+
     console.log('🔍 Buscando observações da movimentação:', {
-      cd_cliente,
-      cd_empresa,
-      dt_emissao,
+      nr_ctapes,
+      dt_movim,
+      dt_inicio,
+      dt_fim,
     });
 
     try {
-      // Criar range de data: dt_emissao 00:00:00 até 23:59:59
-      const dt_inicio = `${dt_emissao} 00:00:00`;
-      const dt_fim = `${dt_emissao} 23:59:59`;
-
-      console.log('🔍 Parâmetros da query:', {
-        cd_cliente,
-        dt_inicio,
-        dt_fim,
-      });
-
-      // Query simplificada: busca observações usando cd_pessoa diretamente
-      // para encontrar o nr_ctapes e depois as observações relacionadas
-      const queryObs = `
-        SELECT DISTINCT
-          om.nr_ctapes,
-          om.ds_obs,
-          om.dt_cadastro,
-          om.dt_movim
-        FROM obs_mov om
-        INNER JOIN fcc_ctapes fc ON fc.nr_ctapes = om.nr_ctapes
-        WHERE fc.cd_pessoa = $1
-          AND om.dt_movim BETWEEN $2::timestamp AND $3::timestamp
-          AND om.ds_obs IS NOT NULL
-          AND om.ds_obs != ''
-        ORDER BY om.dt_cadastro DESC
+      const query = `
+        SELECT
+          fm.nr_ctapes,
+          om.ds_obs
+        FROM fcc_mov fm
+        LEFT JOIN fgr_liqitemcr fl ON fl.nr_ctapes = fm.nr_ctapes
+        LEFT JOIN obs_mov om ON om.nr_ctapes = fm.nr_ctapes
+        WHERE om.dt_movim BETWEEN $1::timestamp AND $2::timestamp
+          AND fm.nr_ctapes = $3
+          AND fm.tp_operacao = 'C'
+        GROUP BY fm.nr_ctapes, om.ds_obs
       `;
 
-      console.log('🔍 Executando query com parâmetros:', [cd_cliente, dt_inicio, dt_fim]);
-
-      const resultObs = await pool.query(queryObs, [
-        cd_cliente,
-        dt_inicio,
-        dt_fim,
-      ]);
+      const result = await pool.query(query, [dt_inicio, dt_fim, nr_ctapes]);
 
       console.log('✅ Observações da movimentação obtidas:', {
-        cd_cliente,
-        cd_empresa,
-        total: resultObs.rows.length,
-        dados: resultObs.rows,
+        nr_ctapes,
+        dt_movim,
+        total: result.rows.length,
+        dados: result.rows,
       });
 
       successResponse(
         res,
         {
-          cd_cliente,
-          cd_empresa,
-          dt_emissao,
-          count: resultObs.rows.length,
-          data: resultObs.rows,
+          nr_ctapes,
+          dt_movim,
+          count: result.rows.length,
+          data: result.rows,
         },
-        'Observações da movimentação da fatura obtidas com sucesso',
+        'Observações da movimentação obtidas com sucesso',
       );
     } catch (error) {
       console.error('❌ Erro ao buscar observações da movimentação:', error);
-      console.error('❌ Stack trace:', error.stack);
-      console.error('❌ Detalhes do erro:', {
-        message: error.message,
-        code: error.code,
-        detail: error.detail,
-      });
-
-      // Retornar array vazio em caso de erro, ao invés de erro 500
-      successResponse(
+      errorResponse(
         res,
-        {
-          cd_cliente,
-          cd_empresa,
-          count: 0,
-          data: [],
-        },
-        'Erro ao buscar observações de movimentação',
+        'Erro ao buscar observações da movimentação',
+        500,
+        'DATABASE_ERROR',
       );
     }
   }),
