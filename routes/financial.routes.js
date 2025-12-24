@@ -2886,7 +2886,7 @@ router.get(
           fc.cd_empresa,
           fc.cd_pessoa,
           fc.nr_ctapes
-        FROM fcc_ctapes fc
+        FROM vr_fcc_ctapes fc
         WHERE fc.cd_pessoa = $1
           AND fc.cd_empresa = $2
       `;
