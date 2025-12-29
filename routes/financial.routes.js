@@ -1003,6 +1003,7 @@ router.get(
         vff.cd_empresa,
         vff.cd_cliente,
         vff.nm_cliente,
+        pp.nr_cpfcnpj,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
@@ -1029,6 +1030,7 @@ router.get(
         vff.pr_juromes,
         vff.pr_multa
       FROM vr_fcr_faturai vff
+      LEFT JOIN pes_pessoa pp ON vff.cd_cliente = pp.cd_pessoa
       WHERE vff.dt_vencimento BETWEEN $1 AND $2
         AND vff.cd_empresa = $3
       ORDER BY vff.dt_vencimento DESC
@@ -1086,6 +1088,7 @@ router.get(
         vff.cd_empresa,
         vff.cd_cliente,
         vff.nm_cliente,
+        pp.nr_cpfcnpj,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
@@ -1112,6 +1115,7 @@ router.get(
         vff.pr_juromes,
         vff.pr_multa
       FROM vr_fcr_faturai vff
+      LEFT JOIN pes_pessoa pp ON vff.cd_cliente = pp.cd_pessoa
       WHERE vff.dt_emissao BETWEEN $1 AND $2
         AND vff.cd_empresa = $3
       ORDER BY vff.dt_emissao DESC
