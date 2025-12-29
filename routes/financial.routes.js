@@ -985,7 +985,7 @@ router.get(
  * @route GET /financial/contas-receber
  * @desc Buscar contas a receber com filtros avançados
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, status, situacao, tp_cobranca, cd_cliente[], tp_documento[], nr_fatura, nr_portador, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa[], status, situacao, tp_cobranca, cd_cliente[], tp_documento[], nr_fatura, nr_portador, limit, offset}
  */
 router.get(
   '/contas-receber',
@@ -1010,12 +1010,33 @@ router.get(
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
+    // Suporte a múltiplas empresas
+    const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    const empresasFiltradas = empresas.filter(
+      (e) => e && e !== '' && e !== 'null',
+    );
+
+    if (empresasFiltradas.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Pelo menos uma empresa deve ser informada',
+      });
+    }
+
     // Construir query dinâmica com filtros
-    let params = [dt_inicio, dt_fim, cd_empresa];
-    let paramIndex = 4;
+    let params = [dt_inicio, dt_fim];
+    let paramIndex = 3;
+
+    // Criar placeholders para múltiplas empresas
+    const empresaPlaceholders = empresasFiltradas
+      .map((_, idx) => `$${paramIndex + idx}`)
+      .join(',');
+    params.push(...empresasFiltradas);
+    paramIndex += empresasFiltradas.length;
+
     let whereConditions = `
       WHERE vff.dt_vencimento BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
+        AND vff.cd_empresa IN (${empresaPlaceholders})
     `;
 
     // Filtro por situação (Normais, Canceladas, Todas)
@@ -1203,7 +1224,7 @@ router.get(
  * @route GET /financial/contas-receberemiss
  * @desc Buscar contas a receber por data de emissão com filtros avançados
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, status, situacao, tp_cobranca, cd_cliente[], tp_documento[], nr_fatura, nr_portador, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa[], status, situacao, tp_cobranca, cd_cliente[], tp_documento[], nr_fatura, nr_portador, limit, offset}
  */
 router.get(
   '/contas-receberemiss',
@@ -1228,12 +1249,33 @@ router.get(
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
 
+    // Suporte a múltiplas empresas
+    const empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
+    const empresasFiltradas = empresas.filter(
+      (e) => e && e !== '' && e !== 'null',
+    );
+
+    if (empresasFiltradas.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Pelo menos uma empresa deve ser informada',
+      });
+    }
+
     // Construir query dinâmica com filtros
-    let params = [dt_inicio, dt_fim, cd_empresa];
-    let paramIndex = 4;
+    let params = [dt_inicio, dt_fim];
+    let paramIndex = 3;
+
+    // Criar placeholders para múltiplas empresas
+    const empresaPlaceholders = empresasFiltradas
+      .map((_, idx) => `$${paramIndex + idx}`)
+      .join(',');
+    params.push(...empresasFiltradas);
+    paramIndex += empresasFiltradas.length;
+
     let whereConditions = `
       WHERE vff.dt_emissao BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
+        AND vff.cd_empresa IN (${empresaPlaceholders})
     `;
 
     // Filtro por situação (Normais, Canceladas, Todas)
