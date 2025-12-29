@@ -983,9 +983,9 @@ router.get(
 
 /**
  * @route GET /financial/contas-receber
- * @desc Buscar contas a receber
+ * @desc Buscar contas a receber com filtros avançados
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa, status, situacao, tp_cobranca, cd_cliente[], tp_documento[], nr_fatura, nr_portador, limit, offset}
  */
 router.get(
   '/contas-receber',
@@ -994,9 +994,113 @@ router.get(
   validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const {
+      dt_inicio,
+      dt_fim,
+      cd_empresa,
+      status,
+      situacao,
+      tp_cobranca,
+      cd_cliente,
+      tp_documento,
+      nr_fatura,
+      nr_portador,
+    } = req.query;
+
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Construir query dinâmica com filtros
+    let params = [dt_inicio, dt_fim, cd_empresa];
+    let paramIndex = 4;
+    let whereConditions = `
+      WHERE vff.dt_vencimento BETWEEN $1 AND $2
+        AND vff.cd_empresa = $3
+    `;
+
+    // Filtro por situação (Normais, Canceladas, Todas)
+    if (situacao && situacao !== 'TODAS') {
+      if (situacao === 'NORMAIS') {
+        whereConditions += ` AND vff.dt_cancelamento IS NULL`;
+      } else if (situacao === 'CANCELADAS') {
+        whereConditions += ` AND vff.dt_cancelamento IS NOT NULL`;
+      }
+    }
+
+    // Filtro por status (Pago, Vencido, A Vencer)
+    if (status && status !== 'Todos') {
+      if (status === 'Pago') {
+        whereConditions += ` AND vff.vl_pago > 0`;
+      } else if (status === 'Vencido') {
+        whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL) AND vff.dt_vencimento < CURRENT_DATE`;
+      } else if (status === 'A Vencer') {
+        whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL) AND vff.dt_vencimento >= CURRENT_DATE`;
+      }
+    }
+
+    // Filtro por tipo de cobrança
+    if (tp_cobranca && tp_cobranca !== 'TODOS') {
+      let cobrancaValue;
+      if (tp_cobranca === 'DESCONTADA') cobrancaValue = '2';
+      else if (tp_cobranca === 'SIMPLES') cobrancaValue = '1';
+      else if (tp_cobranca === 'NAO_COBRANCA') cobrancaValue = '0';
+
+      if (cobrancaValue) {
+        whereConditions += ` AND vff.tp_cobranca = $${paramIndex}`;
+        params.push(cobrancaValue);
+        paramIndex++;
+      }
+    }
+
+    // Filtro por clientes (múltiplos)
+    if (cd_cliente) {
+      const clientes = Array.isArray(cd_cliente) ? cd_cliente : [cd_cliente];
+      const clientesFiltrados = clientes.filter(
+        (c) => c && c !== '' && c !== 'null',
+      );
+
+      if (clientesFiltrados.length > 0) {
+        const placeholders = clientesFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vff.cd_cliente IN (${placeholders})`;
+        params.push(...clientesFiltrados);
+        paramIndex += clientesFiltrados.length;
+      }
+    }
+
+    // Filtro por formas de pagamento (múltiplas)
+    if (tp_documento) {
+      const documentos = Array.isArray(tp_documento)
+        ? tp_documento
+        : [tp_documento];
+      const documentosFiltrados = documentos.filter(
+        (d) => d && d !== '' && d !== 'null',
+      );
+
+      if (documentosFiltrados.length > 0) {
+        const placeholders = documentosFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vff.tp_documento IN (${placeholders})`;
+        params.push(...documentosFiltrados);
+        paramIndex += documentosFiltrados.length;
+      }
+    }
+
+    // Filtro por número da fatura (busca parcial)
+    if (nr_fatura && nr_fatura.trim() !== '') {
+      whereConditions += ` AND CAST(vff.nr_fatura AS TEXT) ILIKE $${paramIndex}`;
+      params.push(`%${nr_fatura.trim()}%`);
+      paramIndex++;
+    }
+
+    // Filtro por portador (busca parcial)
+    if (nr_portador && nr_portador.trim() !== '') {
+      whereConditions += ` AND CAST(vff.nr_portador AS TEXT) ILIKE $${paramIndex}`;
+      params.push(`%${nr_portador.trim()}%`);
+      paramIndex++;
+    }
 
     const query = `
       SELECT
@@ -1004,6 +1108,7 @@ router.get(
         vff.cd_cliente,
         vff.nm_cliente,
         pp.nr_cpfcnpj,
+        vff.nr_fatura,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
@@ -1031,22 +1136,43 @@ router.get(
         vff.pr_multa
       FROM vr_fcr_faturai vff
       LEFT JOIN pes_pessoa pp ON vff.cd_cliente = pp.cd_pessoa
-      WHERE vff.dt_vencimento BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
+      ${whereConditions}
       ORDER BY vff.dt_vencimento DESC
-      LIMIT $4 OFFSET $5
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
+
+    params.push(limit, offset);
 
     const countQuery = `
       SELECT COUNT(*) as total
       FROM vr_fcr_faturai vff
-      WHERE vff.dt_vencimento BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
+      ${whereConditions}
     `;
 
+    // Remover limit e offset dos params para a query de contagem
+    const countParams = params.slice(0, -2);
+
+    console.log('🔍 Contas a Receber - Query com filtros:', {
+      status,
+      situacao,
+      tp_cobranca,
+      cd_cliente: cd_cliente
+        ? Array.isArray(cd_cliente)
+          ? cd_cliente.length
+          : 1
+        : 0,
+      tp_documento: tp_documento
+        ? Array.isArray(tp_documento)
+          ? tp_documento.length
+          : 1
+        : 0,
+      nr_fatura,
+      nr_portador,
+    });
+
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa]),
+      pool.query(query, params),
+      pool.query(countQuery, countParams),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
@@ -1058,7 +1184,14 @@ router.get(
         limit,
         offset,
         hasMore: offset + limit < total,
-        filtros: { dt_inicio, dt_fim, cd_empresa },
+        filtros: {
+          dt_inicio,
+          dt_fim,
+          cd_empresa,
+          status,
+          situacao,
+          tp_cobranca,
+        },
         data: resultado.rows,
       },
       'Contas a receber obtidas com sucesso',
@@ -1068,9 +1201,9 @@ router.get(
 
 /**
  * @route GET /financial/contas-receberemiss
- * @desc Buscar contas a receber por data de emissão
+ * @desc Buscar contas a receber por data de emissão com filtros avançados
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa, status, situacao, tp_cobranca, cd_cliente[], tp_documento[], nr_fatura, nr_portador, limit, offset}
  */
 router.get(
   '/contas-receberemiss',
@@ -1079,9 +1212,113 @@ router.get(
   validateDateFormat(['dt_inicio', 'dt_fim']),
   validatePagination,
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const {
+      dt_inicio,
+      dt_fim,
+      cd_empresa,
+      status,
+      situacao,
+      tp_cobranca,
+      cd_cliente,
+      tp_documento,
+      nr_fatura,
+      nr_portador,
+    } = req.query;
+
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Construir query dinâmica com filtros
+    let params = [dt_inicio, dt_fim, cd_empresa];
+    let paramIndex = 4;
+    let whereConditions = `
+      WHERE vff.dt_emissao BETWEEN $1 AND $2
+        AND vff.cd_empresa = $3
+    `;
+
+    // Filtro por situação (Normais, Canceladas, Todas)
+    if (situacao && situacao !== 'TODAS') {
+      if (situacao === 'NORMAIS') {
+        whereConditions += ` AND vff.dt_cancelamento IS NULL`;
+      } else if (situacao === 'CANCELADAS') {
+        whereConditions += ` AND vff.dt_cancelamento IS NOT NULL`;
+      }
+    }
+
+    // Filtro por status (Pago, Vencido, A Vencer)
+    if (status && status !== 'Todos') {
+      if (status === 'Pago') {
+        whereConditions += ` AND vff.vl_pago > 0`;
+      } else if (status === 'Vencido') {
+        whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL) AND vff.dt_vencimento < CURRENT_DATE`;
+      } else if (status === 'A Vencer') {
+        whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL) AND vff.dt_vencimento >= CURRENT_DATE`;
+      }
+    }
+
+    // Filtro por tipo de cobrança
+    if (tp_cobranca && tp_cobranca !== 'TODOS') {
+      let cobrancaValue;
+      if (tp_cobranca === 'DESCONTADA') cobrancaValue = '2';
+      else if (tp_cobranca === 'SIMPLES') cobrancaValue = '1';
+      else if (tp_cobranca === 'NAO_COBRANCA') cobrancaValue = '0';
+
+      if (cobrancaValue) {
+        whereConditions += ` AND vff.tp_cobranca = $${paramIndex}`;
+        params.push(cobrancaValue);
+        paramIndex++;
+      }
+    }
+
+    // Filtro por clientes (múltiplos)
+    if (cd_cliente) {
+      const clientes = Array.isArray(cd_cliente) ? cd_cliente : [cd_cliente];
+      const clientesFiltrados = clientes.filter(
+        (c) => c && c !== '' && c !== 'null',
+      );
+
+      if (clientesFiltrados.length > 0) {
+        const placeholders = clientesFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vff.cd_cliente IN (${placeholders})`;
+        params.push(...clientesFiltrados);
+        paramIndex += clientesFiltrados.length;
+      }
+    }
+
+    // Filtro por formas de pagamento (múltiplas)
+    if (tp_documento) {
+      const documentos = Array.isArray(tp_documento)
+        ? tp_documento
+        : [tp_documento];
+      const documentosFiltrados = documentos.filter(
+        (d) => d && d !== '' && d !== 'null',
+      );
+
+      if (documentosFiltrados.length > 0) {
+        const placeholders = documentosFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vff.tp_documento IN (${placeholders})`;
+        params.push(...documentosFiltrados);
+        paramIndex += documentosFiltrados.length;
+      }
+    }
+
+    // Filtro por número da fatura (busca parcial)
+    if (nr_fatura && nr_fatura.trim() !== '') {
+      whereConditions += ` AND CAST(vff.nr_fatura AS TEXT) ILIKE $${paramIndex}`;
+      params.push(`%${nr_fatura.trim()}%`);
+      paramIndex++;
+    }
+
+    // Filtro por portador (busca parcial)
+    if (nr_portador && nr_portador.trim() !== '') {
+      whereConditions += ` AND CAST(vff.nr_portador AS TEXT) ILIKE $${paramIndex}`;
+      params.push(`%${nr_portador.trim()}%`);
+      paramIndex++;
+    }
 
     const query = `
       SELECT
@@ -1089,6 +1326,7 @@ router.get(
         vff.cd_cliente,
         vff.nm_cliente,
         pp.nr_cpfcnpj,
+        vff.nr_fatura,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
@@ -1116,22 +1354,43 @@ router.get(
         vff.pr_multa
       FROM vr_fcr_faturai vff
       LEFT JOIN pes_pessoa pp ON vff.cd_cliente = pp.cd_pessoa
-      WHERE vff.dt_emissao BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
+      ${whereConditions}
       ORDER BY vff.dt_emissao DESC
-      LIMIT $4 OFFSET $5
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
+
+    params.push(limit, offset);
 
     const countQuery = `
       SELECT COUNT(*) as total
       FROM vr_fcr_faturai vff
-      WHERE vff.dt_emissao BETWEEN $1 AND $2
-        AND vff.cd_empresa = $3
+      ${whereConditions}
     `;
 
+    // Remover limit e offset dos params para a query de contagem
+    const countParams = params.slice(0, -2);
+
+    console.log('🔍 Contas a Receber (Emissão) - Query com filtros:', {
+      status,
+      situacao,
+      tp_cobranca,
+      cd_cliente: cd_cliente
+        ? Array.isArray(cd_cliente)
+          ? cd_cliente.length
+          : 1
+        : 0,
+      tp_documento: tp_documento
+        ? Array.isArray(tp_documento)
+          ? tp_documento.length
+          : 1
+        : 0,
+      nr_fatura,
+      nr_portador,
+    });
+
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, cd_empresa, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, cd_empresa]),
+      pool.query(query, params),
+      pool.query(countQuery, countParams),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
@@ -1143,7 +1402,14 @@ router.get(
         limit,
         offset,
         hasMore: offset + limit < total,
-        filtros: { dt_inicio, dt_fim, cd_empresa },
+        filtros: {
+          dt_inicio,
+          dt_fim,
+          cd_empresa,
+          status,
+          situacao,
+          tp_cobranca,
+        },
         data: resultado.rows,
       },
       'Contas a receber por emissão obtidas com sucesso',
