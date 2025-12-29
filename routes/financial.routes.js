@@ -1090,7 +1090,7 @@ router.get(
 
     // Filtro por número da fatura (busca parcial)
     if (nr_fatura && nr_fatura.trim() !== '') {
-      whereConditions += ` AND CAST(vff.nr_fatura AS TEXT) ILIKE $${paramIndex}`;
+      whereConditions += ` AND CAST(vff.nr_fat AS TEXT) ILIKE $${paramIndex}`;
       params.push(`%${nr_fatura.trim()}%`);
       paramIndex++;
     }
@@ -1108,7 +1108,7 @@ router.get(
         vff.cd_cliente,
         vff.nm_cliente,
         pp.nr_cpfcnpj,
-        vff.nr_fatura,
+        vff.nr_fat,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
@@ -1308,7 +1308,7 @@ router.get(
 
     // Filtro por número da fatura (busca parcial)
     if (nr_fatura && nr_fatura.trim() !== '') {
-      whereConditions += ` AND CAST(vff.nr_fatura AS TEXT) ILIKE $${paramIndex}`;
+      whereConditions += ` AND CAST(vff.nr_fat AS TEXT) ILIKE $${paramIndex}`;
       params.push(`%${nr_fatura.trim()}%`);
       paramIndex++;
     }
@@ -1326,7 +1326,7 @@ router.get(
         vff.cd_cliente,
         vff.nm_cliente,
         pp.nr_cpfcnpj,
-        vff.nr_fatura,
+        vff.nr_fat,
         vff.nr_parcela,
         vff.dt_emissao,
         vff.dt_vencimento,
