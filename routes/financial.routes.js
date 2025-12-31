@@ -1129,6 +1129,10 @@ router.get(
         vff.cd_cliente,
         vff.nm_cliente,
         pp.nr_cpfcnpj,
+        COALESCE(
+          (SELECT pt.nr_telefone FROM pes_telefone pt WHERE pt.cd_pessoa = vff.cd_cliente AND pt.cd_tipofone = 3 LIMIT 1),
+          (SELECT pt.nr_telefone FROM pes_telefone pt WHERE pt.cd_pessoa = vff.cd_cliente AND pt.cd_tipofone = 1 LIMIT 1)
+        ) AS nr_telefone,
         vff.nr_fat,
         vff.nr_parcela,
         vff.dt_emissao,
@@ -1368,6 +1372,10 @@ router.get(
         vff.cd_cliente,
         vff.nm_cliente,
         pp.nr_cpfcnpj,
+        COALESCE(
+          (SELECT pt.nr_telefone FROM pes_telefone pt WHERE pt.cd_pessoa = vff.cd_cliente AND pt.cd_tipofone = 3 LIMIT 1),
+          (SELECT pt.nr_telefone FROM pes_telefone pt WHERE pt.cd_pessoa = vff.cd_cliente AND pt.cd_tipofone = 1 LIMIT 1)
+        ) AS nr_telefone,
         vff.nr_fat,
         vff.nr_parcela,
         vff.dt_emissao,
@@ -4239,6 +4247,200 @@ router.get(
       console.error('❌ Erro na query de auditoria de faturamento:', error);
       throw error;
     }
+  }),
+);
+
+// ============================================
+// BATIDA DE CARTEIRA - UPLOAD DE ARQUIVOS BANCÁRIOS
+// ============================================
+
+// Importar parsers de bancos
+import { processConfiancaFile } from '../utils/extratos/CONFIANCA.js';
+
+// Configuração do multer para upload de arquivos bancários
+const uploadBancario = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'text/csv',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/plain',
+    ];
+    const allowedExtensions = ['.csv', '.xls', '.xlsx', '.txt'];
+    const ext = path.extname(file.originalname).toLowerCase();
+
+    if (
+      allowedTypes.includes(file.mimetype) ||
+      allowedExtensions.includes(ext)
+    ) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error('Tipo de arquivo não permitido. Use CSV, XLS, XLSX ou TXT.'),
+      );
+    }
+  },
+});
+
+/**
+ * @route POST /financial/batida-carteira/upload
+ * @desc Processar arquivo de retorno bancário
+ * @access Private
+ */
+router.post(
+  '/batida-carteira/upload',
+  (req, res, next) => {
+    uploadBancario.single('arquivo')(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        return errorResponse(
+          res,
+          `Erro no upload: ${err.message}`,
+          400,
+          'UPLOAD_ERROR',
+        );
+      } else if (err) {
+        return errorResponse(res, err.message, 400, 'UPLOAD_ERROR');
+      }
+      next();
+    });
+  },
+  asyncHandler(async (req, res) => {
+    const { banco } = req.body;
+    const file = req.file;
+
+    if (!file) {
+      return errorResponse(res, 'Nenhum arquivo enviado', 400, 'NO_FILE');
+    }
+
+    if (!banco) {
+      return errorResponse(res, 'Banco não informado', 400, 'NO_BANK');
+    }
+
+    const bancoUpper = banco.toUpperCase();
+    console.log(
+      `📁 Processando arquivo do banco ${bancoUpper}: ${file.originalname}`,
+    );
+
+    let resultado;
+
+    switch (bancoUpper) {
+      case 'CONFIANCA':
+        resultado = processConfiancaFile(file.buffer);
+        break;
+      case 'BRADESCO':
+        // TODO: Implementar parser do Bradesco
+        return errorResponse(
+          res,
+          'Parser do Bradesco ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'SANTANDER':
+        // TODO: Implementar parser do Santander
+        return errorResponse(
+          res,
+          'Parser do Santander ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'BB':
+        // TODO: Implementar parser do BB
+        return errorResponse(
+          res,
+          'Parser do BB ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'CEF':
+        // TODO: Implementar parser da CEF
+        return errorResponse(
+          res,
+          'Parser da CEF ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'ITAU':
+        // TODO: Implementar parser do Itaú
+        return errorResponse(
+          res,
+          'Parser do Itaú ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'SICREDI':
+        // TODO: Implementar parser do Sicredi
+        return errorResponse(
+          res,
+          'Parser do Sicredi ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'UNICRED':
+        // TODO: Implementar parser do Unicred
+        return errorResponse(
+          res,
+          'Parser do Unicred ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      case 'DAYCOVAL':
+        // TODO: Implementar parser do Daycoval
+        return errorResponse(
+          res,
+          'Parser do Daycoval ainda não implementado',
+          501,
+          'NOT_IMPLEMENTED',
+        );
+      default:
+        return errorResponse(
+          res,
+          `Banco não suportado: ${banco}`,
+          400,
+          'UNSUPPORTED_BANK',
+        );
+    }
+
+    if (!resultado.success) {
+      return errorResponse(res, resultado.error, 400, 'PARSE_ERROR');
+    }
+
+    console.log(
+      `✅ Arquivo processado: ${resultado.stats.totalRegistros} registros`,
+    );
+
+    successResponse(
+      res,
+      resultado,
+      `Arquivo processado com sucesso: ${resultado.stats.totalRegistros} registros`,
+    );
+  }),
+);
+
+/**
+ * @route GET /financial/batida-carteira/bancos
+ * @desc Listar bancos disponíveis para importação
+ * @access Public
+ */
+router.get(
+  '/batida-carteira/bancos',
+  asyncHandler(async (req, res) => {
+    const bancos = [
+      { codigo: 'BRADESCO', nome: 'Bradesco', implementado: false },
+      { codigo: 'SANTANDER', nome: 'Santander', implementado: false },
+      { codigo: 'BB', nome: 'Banco do Brasil', implementado: false },
+      { codigo: 'CEF', nome: 'Caixa Econômica Federal', implementado: false },
+      { codigo: 'ITAU', nome: 'Itaú', implementado: false },
+      { codigo: 'SICREDI', nome: 'Sicredi', implementado: false },
+      { codigo: 'UNICRED', nome: 'Unicred', implementado: false },
+      { codigo: 'DAYCOVAL', nome: 'Daycoval', implementado: false },
+      { codigo: 'CONFIANCA', nome: 'Confiança', implementado: true },
+    ];
+
+    successResponse(res, bancos, 'Lista de bancos disponíveis');
   }),
 );
 
