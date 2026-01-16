@@ -1116,11 +1116,21 @@ router.get(
       paramIndex++;
     }
 
-    // Filtro por portador (busca parcial)
-    if (nr_portador && nr_portador.trim() !== '') {
-      whereConditions += ` AND CAST(vff.nr_portador AS TEXT) ILIKE $${paramIndex}`;
-      params.push(`%${nr_portador.trim()}%`);
-      paramIndex++;
+    // Filtro por portador (suporta múltiplos valores)
+    if (nr_portador) {
+      const portadores = Array.isArray(nr_portador) ? nr_portador : [nr_portador];
+      const portadoresFiltrados = portadores.filter(
+        (p) => p && p.trim() !== '' && p !== 'null',
+      );
+
+      if (portadoresFiltrados.length > 0) {
+        const placeholders = portadoresFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vff.nr_portador IN (${placeholders})`;
+        params.push(...portadoresFiltrados);
+        paramIndex += portadoresFiltrados.length;
+      }
     }
 
     const query = `
