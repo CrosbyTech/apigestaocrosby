@@ -1048,7 +1048,7 @@ router.get(
       }
     }
 
-    // Filtro por status (Pago, Vencido, A Vencer)
+    // Filtro por status (Pago, Vencido, A Vencer, Em Aberto)
     if (status && status !== 'Todos') {
       if (status === 'Pago') {
         whereConditions += ` AND vff.vl_pago > 0`;
@@ -1056,6 +1056,8 @@ router.get(
         whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL) AND vff.dt_vencimento < CURRENT_DATE`;
       } else if (status === 'A Vencer') {
         whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL) AND vff.dt_vencimento >= CURRENT_DATE`;
+      } else if (status === 'Em Aberto') {
+        whereConditions += ` AND (vff.vl_pago = 0 OR vff.vl_pago IS NULL)`;
       }
     }
 
