@@ -1693,7 +1693,7 @@ router.get(
  * @route GET /financial/inadimplentes-multimarcas
  * @desc Buscar inadimplentes multimarcas com filtros de classificação
  * @access Public
- * @query {dt_inicio, dt_fim, dt_vencimento_ini, limit, offset}
+ * @query {dt_inicio, dt_fim, dt_vencimento_ini, cd_empresa_min, cd_empresa_max, limit, offset}
  */
 router.get(
   '/inadimplentes-multimarcas',
@@ -1702,9 +1702,26 @@ router.get(
   validateDateFormat(['dt_inicio', 'dt_fim', 'dt_vencimento_ini']),
   validatePagination,
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, dt_vencimento_ini } = req.query;
+    const {
+      dt_inicio,
+      dt_fim,
+      dt_vencimento_ini,
+      cd_empresa_min,
+      cd_empresa_max,
+    } = req.query;
     const limit = parseInt(req.query.limit, 10) || 50000000;
     const offset = parseInt(req.query.offset, 10) || 0;
+
+    // Construir condição adicional para filtro de empresas
+    let empresaCondition = '';
+    let queryParams = [dt_inicio, dt_fim, dt_vencimento_ini];
+    let limitOffsetIndex = 4;
+
+    if (cd_empresa_min && cd_empresa_max) {
+      empresaCondition = ` AND vff.cd_empresa BETWEEN $4 AND $5`;
+      queryParams.push(cd_empresa_min, cd_empresa_max);
+      limitOffsetIndex = 6;
+    }
 
     const query = `
       SELECT
@@ -1748,9 +1765,9 @@ router.get(
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
           OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
-        )
+        )${empresaCondition}
       ORDER BY vff.dt_emissao DESC
-      LIMIT $4 OFFSET $5
+      LIMIT $${limitOffsetIndex} OFFSET $${limitOffsetIndex + 1}
     `;
 
     const countQuery = `
@@ -1766,12 +1783,12 @@ router.get(
         AND (
           (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
           OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
-        )
+        )${empresaCondition}
     `;
 
     const [resultado, totalResult] = await Promise.all([
-      pool.query(query, [dt_inicio, dt_fim, dt_vencimento_ini, limit, offset]),
-      pool.query(countQuery, [dt_inicio, dt_fim, dt_vencimento_ini]),
+      pool.query(query, [...queryParams, limit, offset]),
+      pool.query(countQuery, queryParams),
     ]);
 
     const total = parseInt(totalResult.rows[0].total, 10);
@@ -1783,7 +1800,13 @@ router.get(
         limit,
         offset,
         hasMore: offset + limit < total,
-        filtros: { dt_inicio, dt_fim, dt_vencimento_ini },
+        filtros: {
+          dt_inicio,
+          dt_fim,
+          dt_vencimento_ini,
+          cd_empresa_min,
+          cd_empresa_max,
+        },
         data: resultado.rows,
       },
       'Inadimplentes multimarcas obtidos com sucesso',
