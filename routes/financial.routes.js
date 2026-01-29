@@ -4476,4 +4476,51 @@ router.get(
   }),
 );
 
+/**
+ * @route GET /financial/telefone-clientes/:cd_pessoa
+ * @desc Buscar telefone padrão de um cliente
+ * @access Public
+ * @param {string} cd_pessoa - Código do cliente
+ */
+router.get(
+  '/telefone-clientes/:cd_pessoa',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { cd_pessoa } = req.params;
+
+    if (!cd_pessoa) {
+      return errorResponse(
+        res,
+        'Código do cliente é obrigatório',
+        400,
+        'MISSING_PARAMETER',
+      );
+    }
+
+    const query = `
+      SELECT *
+      FROM pes_telefone
+      WHERE cd_pessoa = $1
+        AND in_padrao = 'T'
+      LIMIT 1
+    `;
+
+    const resultado = await pool.query(query, [cd_pessoa]);
+
+    if (resultado.rows.length === 0) {
+      return successResponse(
+        res,
+        null,
+        'Nenhum telefone padrão encontrado para este cliente',
+      );
+    }
+
+    successResponse(
+      res,
+      resultado.rows[0],
+      'Telefone do cliente obtido com sucesso',
+    );
+  }),
+);
+
 export default router;
