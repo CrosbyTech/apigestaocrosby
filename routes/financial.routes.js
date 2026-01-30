@@ -1607,6 +1607,65 @@ router.get(
 );
 
 /**
+ * @route GET /financial/buscar-clientes
+ * @desc Buscar clientes por nome ou nome fantasia
+ * @access Public
+ * @query {nm_pessoa, nm_fantasia}
+ */
+router.get(
+  '/buscar-clientes',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { nm_pessoa, nm_fantasia } = req.query;
+
+    // Validar que pelo menos um campo foi informado
+    if (!nm_pessoa && !nm_fantasia) {
+      return errorResponse(
+        res,
+        'Informe pelo menos um campo de busca: nm_pessoa ou nm_fantasia',
+        400,
+        'MISSING_SEARCH_PARAMS',
+      );
+    }
+
+    // Construir WHERE dinamicamente
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+    let idx = 1;
+
+    if (nm_pessoa) {
+      whereClause += ` AND UPPER(pp.nm_pessoa) LIKE UPPER($${idx++})`;
+      params.push(`%${nm_pessoa}%`);
+    }
+
+    if (nm_fantasia) {
+      whereClause += ` AND UPPER(ppj.nm_fantasia) LIKE UPPER($${idx++})`;
+      params.push(`%${nm_fantasia}%`);
+    }
+
+    const query = `
+      SELECT
+        pp.cd_pessoa,
+        pp.nm_pessoa,
+        ppj.nm_fantasia
+      FROM
+        pes_pessoa pp
+      JOIN pes_pesjuridica ppj ON pp.cd_pessoa = ppj.cd_pessoa
+      ${whereClause}
+      ORDER BY pp.nm_pessoa
+      LIMIT 100
+    `;
+
+    console.log('🔍 Query buscar-clientes:', query);
+    console.log('📋 Parâmetros:', params);
+
+    const { rows } = await pool.query(query, params);
+
+    successResponse(res, rows, `${rows.length} cliente(s) encontrado(s)`);
+  }),
+);
+
+/**
  * @route GET /financial/fluxocaixa-entradas
  * @desc Buscar fluxo de caixa de entradas (baseado na data de liquidação)
  * @access Public
