@@ -2082,6 +2082,52 @@ router.get(
 );
 
 /**
+ * @route GET /financial/faturas-a-vencer-cliente/:cd_cliente
+ * @desc Buscar faturas a vencer de um cliente específico de franquia
+ * @access Public
+ */
+router.get(
+  '/faturas-a-vencer-cliente/:cd_cliente',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { cd_cliente } = req.params;
+
+    const query = `
+      SELECT
+        vff.cd_cliente,
+        vff.cd_empresa,
+        vff.nr_fat,
+        vff.nm_cliente,
+        pp.nm_fantasia,
+        pp.ds_uf,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_juros
+      FROM vr_fcr_faturai vff
+      LEFT JOIN vr_pes_pessoaclas vpp ON vff.cd_cliente = vpp.cd_pessoa
+      LEFT JOIN pes_pesjuridica pp ON vpp.cd_pessoa = pp.cd_pessoa
+      WHERE vff.cd_cliente = $1
+        AND vff.dt_vencimento >= CURRENT_DATE
+        AND vff.dt_liq IS NULL
+        AND vff.dt_cancelamento IS NULL
+        AND vff.vl_pago = 0
+      ORDER BY vff.dt_vencimento ASC
+    `;
+
+    const resultado = await pool.query(query, [cd_cliente]);
+
+    successResponse(
+      res,
+      resultado.rows,
+      'Faturas a vencer do cliente obtidas com sucesso',
+    );
+  }),
+);
+
+/**
  * @route GET /financial/credev-adiantamento
  * @desc Buscar saldos de adiantamentos e crediários
  * @access Public
