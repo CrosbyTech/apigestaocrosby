@@ -2058,17 +2058,22 @@ router.get(
   asyncHandler(async (req, res) => {
     const query = `
       SELECT
-        vff.cd_cliente,
-        SUM(vff.vl_fatura) as valor_a_vencer
-      FROM vr_fcr_faturai vff
-      LEFT JOIN vr_pes_pessoaclas vpp ON vff.cd_cliente = vpp.cd_pessoa
-      LEFT JOIN pes_pesjuridica pp ON vpp.cd_pessoa = pp.cd_pessoa
-      WHERE vff.dt_vencimento >= CURRENT_DATE
-        AND vff.dt_liq IS NULL
-        AND vff.dt_cancelamento IS NULL
-        AND vff.vl_pago = 0
-        AND pp.nm_fantasia LIKE '%F%CROSBY%'
-      GROUP BY vff.cd_cliente
+        cd_cliente,
+        SUM(vl_fatura) as valor_a_vencer
+      FROM (
+        SELECT DISTINCT ON (vff.cd_empresa, vff.nr_fat, vff.nr_parcela)
+          vff.cd_cliente,
+          vff.vl_fatura
+        FROM vr_fcr_faturai vff
+        LEFT JOIN pes_pesjuridica pp ON vff.cd_cliente = pp.cd_pessoa
+        WHERE vff.dt_vencimento >= CURRENT_DATE
+          AND vff.dt_liq IS NULL
+          AND vff.dt_cancelamento IS NULL
+          AND vff.vl_pago = 0
+          AND pp.nm_fantasia LIKE '%F%CROSBY%'
+        ORDER BY vff.cd_empresa, vff.nr_fat, vff.nr_parcela
+      ) as faturas_unicas
+      GROUP BY cd_cliente
     `;
 
     const resultado = await pool.query(query);
