@@ -1917,6 +1917,103 @@ router.get(
 );
 
 /**
+ * @route GET /financial/a-vencer-multimarcas
+ * @desc Buscar faturas a vencer de multimarcas
+ * @access Public
+ * @query {cd_empresa_min, cd_empresa_max}
+ */
+router.get(
+  '/a-vencer-multimarcas',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { cd_empresa_min, cd_empresa_max } = req.query;
+
+    let empresaCondition = '';
+    let queryParams = [];
+
+    if (cd_empresa_min && cd_empresa_max) {
+      empresaCondition = ` AND vff.cd_empresa BETWEEN $1 AND $2`;
+      queryParams = [cd_empresa_min, cd_empresa_max];
+    }
+
+    const query = `
+      SELECT
+        cd_cliente,
+        SUM(vl_fatura) as valor_a_vencer
+      FROM (
+        SELECT DISTINCT ON (vff.cd_empresa, vff.nr_fat, vff.nr_parcela)
+          vff.cd_cliente,
+          vff.vl_fatura
+        FROM vr_fcr_faturai vff
+        LEFT JOIN vr_pes_pessoaclas vpp ON vff.cd_cliente = vpp.cd_pessoa
+        WHERE vff.dt_vencimento >= CURRENT_DATE
+          AND vff.dt_liq IS NULL
+          AND vff.dt_cancelamento IS NULL
+          AND vff.vl_pago = 0
+          AND (
+            (vpp.cd_tipoclas = 20 AND vpp.cd_classificacao::integer = 2)
+            OR (vpp.cd_tipoclas = 5 AND vpp.cd_classificacao::integer = 1)
+          )${empresaCondition}
+        ORDER BY vff.cd_empresa, vff.nr_fat, vff.nr_parcela
+      ) as faturas_unicas
+      GROUP BY cd_cliente
+    `;
+
+    const resultado = await pool.query(query, queryParams);
+
+    successResponse(
+      res,
+      resultado.rows,
+      'Faturas a vencer de multimarcas obtidas com sucesso',
+    );
+  }),
+);
+
+/**
+ * @route GET /financial/faturas-a-vencer-cliente-multimarcas/:cd_cliente
+ * @desc Buscar faturas a vencer de um cliente específico de multimarcas
+ * @access Public
+ */
+router.get(
+  '/faturas-a-vencer-cliente-multimarcas/:cd_cliente',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { cd_cliente } = req.params;
+
+    const query = `
+      SELECT DISTINCT ON (vff.cd_empresa, vff.nr_fat, vff.nr_parcela)
+        vff.cd_cliente,
+        vff.cd_empresa,
+        vff.nr_fat,
+        vff.nm_cliente,
+        pp.ds_siglaest,
+        vff.nr_parcela,
+        vff.dt_emissao,
+        vff.dt_vencimento,
+        vff.vl_fatura,
+        vff.vl_original,
+        vff.vl_juros
+      FROM vr_fcr_faturai vff
+      LEFT JOIN vr_pes_endereco pp ON vff.cd_cliente = pp.cd_pessoa
+      WHERE vff.cd_cliente = $1
+        AND vff.dt_vencimento >= CURRENT_DATE
+        AND vff.dt_liq IS NULL
+        AND vff.dt_cancelamento IS NULL
+        AND vff.vl_pago = 0
+      ORDER BY vff.cd_empresa, vff.nr_fat, vff.nr_parcela, vff.dt_vencimento ASC
+    `;
+
+    const resultado = await pool.query(query, [cd_cliente]);
+
+    successResponse(
+      res,
+      resultado.rows,
+      'Faturas a vencer do cliente multimarcas obtidas com sucesso',
+    );
+  }),
+);
+
+/**
  * @route GET /financial/inadimplentes-franquias
  * @desc Buscar inadimplentes de franquias CROSBY
  * @access Public
