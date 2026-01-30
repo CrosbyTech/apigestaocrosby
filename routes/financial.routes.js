@@ -2047,6 +2047,41 @@ router.get(
 );
 
 /**
+ * @route GET /financial/a-vencer-franquias
+ * @desc Buscar faturas a vencer de franquias CROSBY
+ * @access Public
+ * @query {dt_inicio, dt_fim}
+ */
+router.get(
+  '/a-vencer-franquias',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const query = `
+      SELECT
+        vff.cd_cliente,
+        SUM(vff.vl_fatura) as valor_a_vencer
+      FROM vr_fcr_faturai vff
+      LEFT JOIN vr_pes_pessoaclas vpp ON vff.cd_cliente = vpp.cd_pessoa
+      LEFT JOIN pes_pesjuridica pp ON vpp.cd_pessoa = pp.cd_pessoa
+      WHERE vff.dt_vencimento >= CURRENT_DATE
+        AND vff.dt_liq IS NULL
+        AND vff.dt_cancelamento IS NULL
+        AND vff.vl_pago = 0
+        AND pp.nm_fantasia LIKE '%F%CROSBY%'
+      GROUP BY vff.cd_cliente
+    `;
+
+    const resultado = await pool.query(query);
+
+    successResponse(
+      res,
+      resultado.rows,
+      'Faturas a vencer de franquias obtidas com sucesso',
+    );
+  }),
+);
+
+/**
  * @route GET /financial/credev-adiantamento
  * @desc Buscar saldos de adiantamentos e crediários
  * @access Public
