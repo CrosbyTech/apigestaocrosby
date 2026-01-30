@@ -1727,6 +1727,7 @@ router.get(
       SELECT
         DISTINCT vff.cd_cliente,
         vff.cd_empresa,
+        vff.nr_fat,
         vff.nm_cliente,
         pp.ds_siglaest,
         vff.nr_parcela,
