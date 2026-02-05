@@ -4535,6 +4535,7 @@ router.get(
 // Importar parsers de bancos
 import { processConfiancaFile } from '../utils/extratos/CONFIANCA.js';
 import { processSantanderFile } from '../utils/extratos/SANTANDER.js';
+import { processSicrediFile } from '../utils/extratos/SICREDI.js';
 
 // Configuração do multer para upload de arquivos bancários
 const uploadBancario = multer({
@@ -4646,13 +4647,8 @@ router.post(
           'NOT_IMPLEMENTED',
         );
       case 'SICREDI':
-        // TODO: Implementar parser do Sicredi
-        return errorResponse(
-          res,
-          'Parser do Sicredi ainda não implementado',
-          501,
-          'NOT_IMPLEMENTED',
-        );
+        resultado = processSicrediFile(file.buffer);
+        break;
       case 'UNICRED':
         // TODO: Implementar parser do Unicred
         return errorResponse(
@@ -4708,7 +4704,7 @@ router.get(
       { codigo: 'BB', nome: 'Banco do Brasil', implementado: false },
       { codigo: 'CEF', nome: 'Caixa Econômica Federal', implementado: false },
       { codigo: 'ITAU', nome: 'Itaú', implementado: false },
-      { codigo: 'SICREDI', nome: 'Sicredi', implementado: false },
+      { codigo: 'SICREDI', nome: 'Sicredi', implementado: true },
       { codigo: 'UNICRED', nome: 'Unicred', implementado: false },
       { codigo: 'DAYCOVAL', nome: 'Daycoval', implementado: false },
       { codigo: 'CONFIANCA', nome: 'Confiança', implementado: true },
