@@ -287,7 +287,7 @@ router.get(
       }
     }
 
-    // Filtro por status (Pago, Vencido, A Vencer)
+    // Filtro por status (Pago, Vencido, A Vencer, Em Aberto)
     if (status && status !== 'Todos') {
       if (status === 'Pago') {
         whereConditions += ` AND fd.vl_pago > 0`;
@@ -295,6 +295,8 @@ router.get(
         whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento < CURRENT_DATE`;
       } else if (status === 'A Vencer') {
         whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento >= CURRENT_DATE`;
+      } else if (status === 'Em Aberto') {
+        whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL)`;
       }
     }
 
@@ -511,7 +513,7 @@ router.get(
       whereConditions += ` AND fd.tp_situacao = 'N'`;
     }
 
-    // Filtro por status (Pago, Vencido, A Vencer)
+    // Filtro por status (Pago, Vencido, A Vencer, Em Aberto)
     if (status && status !== 'Todos') {
       if (status === 'Pago') {
         whereConditions += ` AND fd.vl_pago > 0`;
@@ -519,6 +521,8 @@ router.get(
         whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento < CURRENT_DATE`;
       } else if (status === 'A Vencer') {
         whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento >= CURRENT_DATE`;
+      } else if (status === 'Em Aberto') {
+        whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL)`;
       }
     }
 
