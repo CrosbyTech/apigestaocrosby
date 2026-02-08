@@ -236,9 +236,9 @@ router.get(
 
 /**
  * @route GET /financial/contas-pagar
- * @desc Buscar contas a pagar
+ * @desc Buscar contas a pagar com filtros avançados
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa[], status, situacao, previsao, cd_fornecedor[], cd_ccusto[], cd_despesaitem[], nr_duplicata}
  */
 router.get(
   '/contas-pagar',
@@ -246,93 +246,176 @@ router.get(
   validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const {
+      dt_inicio,
+      dt_fim,
+      cd_empresa,
+      status,
+      situacao,
+      previsao,
+      cd_fornecedor,
+      cd_ccusto,
+      cd_despesaitem,
+      nr_duplicata,
+    } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    // Otimização baseada no número de empresas e período
-    const isHeavyQuery =
-      empresas.length > 10 ||
-      new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery =
-      empresas.length > 20 ||
-      new Date(dt_fim) - new Date(dt_inicio) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+    // Construir query dinâmica com filtros
+    let params = [dt_inicio, dt_fim];
+    let paramIndex = 3;
 
-    const query = isVeryHeavyQuery
-      ? `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        vfd.vl_rateio,
-        fd.in_aceite,
-        vfd.cd_despesaitem,
-        fd.tp_previsaoreal,
-        vfd.cd_ccusto
-      FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-        AND fd.cd_empresa = vfd.cd_empresa 
-        AND fd.cd_fornecedor = vfd.cd_fornecedor
+    // Criar placeholders para múltiplas empresas
+    const empresaPlaceholders = empresas
+      .map((_, idx) => `$${paramIndex + idx}`)
+      .join(',');
+    params.push(...empresas);
+    paramIndex += empresas.length;
+
+    let whereConditions = `
       WHERE fd.dt_vencimento BETWEEN $1 AND $2
         AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_vencimento DESC
-    `
-      : `
-      SELECT
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        vfd.vl_rateio,
-        fd.in_aceite,
-        vfd.cd_despesaitem,
-        fd.tp_previsaoreal,
-        vfd.cd_ccusto
-      FROM vr_fcp_duplicatai fd
-      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
-        AND fd.cd_empresa = vfd.cd_empresa 
-        AND fd.cd_fornecedor = vfd.cd_fornecedor
-      WHERE fd.dt_vencimento BETWEEN $1 AND $2
-        AND fd.cd_empresa IN (${empresaPlaceholders})
-      ORDER BY fd.dt_liq DESC
-      
     `;
 
-    const queryType = isVeryHeavyQuery
-      ? 'muito-pesada'
-      : isHeavyQuery
-        ? 'pesada'
-        : 'completa';
+    // Filtro por situação (Normais, Canceladas, Todas)
+    if (situacao && situacao !== 'TODAS') {
+      if (situacao === 'NORMAIS') {
+        whereConditions += ` AND fd.tp_situacao = 'N'`;
+      } else if (situacao === 'CANCELADAS') {
+        whereConditions += ` AND fd.tp_situacao = 'C'`;
+      }
+    }
+
+    // Filtro por status (Pago, Vencido, A Vencer)
+    if (status && status !== 'Todos') {
+      if (status === 'Pago') {
+        whereConditions += ` AND fd.vl_pago > 0`;
+      } else if (status === 'Vencido') {
+        whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento < CURRENT_DATE`;
+      } else if (status === 'A Vencer') {
+        whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento >= CURRENT_DATE`;
+      }
+    }
+
+    // Filtro por previsão (PREVISÃO, REAL, CONSIGNADO)
+    if (previsao && previsao !== 'TODOS') {
+      let previsaoValue;
+      if (previsao === 'PREVISAO') previsaoValue = '1';
+      else if (previsao === 'REAL') previsaoValue = '2';
+      else if (previsao === 'CONSIGNADO') previsaoValue = '3';
+
+      if (previsaoValue) {
+        whereConditions += ` AND fd.tp_previsaoreal = $${paramIndex}`;
+        params.push(previsaoValue);
+        paramIndex++;
+      }
+    }
+
+    // Filtro por fornecedores (múltiplos)
+    if (cd_fornecedor) {
+      const fornecedores = Array.isArray(cd_fornecedor)
+        ? cd_fornecedor
+        : [cd_fornecedor];
+      const fornecedoresFiltrados = fornecedores.filter(
+        (f) => f && f !== '' && f !== 'null',
+      );
+
+      if (fornecedoresFiltrados.length > 0) {
+        const placeholders = fornecedoresFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND fd.cd_fornecedor IN (${placeholders})`;
+        params.push(...fornecedoresFiltrados);
+        paramIndex += fornecedoresFiltrados.length;
+      }
+    }
+
+    // Filtro por centros de custo (múltiplos)
+    if (cd_ccusto) {
+      const centrosCusto = Array.isArray(cd_ccusto) ? cd_ccusto : [cd_ccusto];
+      const centrosFiltrados = centrosCusto.filter(
+        (c) => c && c !== '' && c !== 'null',
+      );
+
+      if (centrosFiltrados.length > 0) {
+        const placeholders = centrosFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vfd.cd_ccusto IN (${placeholders})`;
+        params.push(...centrosFiltrados);
+        paramIndex += centrosFiltrados.length;
+      }
+    }
+
+    // Filtro por despesas (múltiplas)
+    if (cd_despesaitem) {
+      const despesas = Array.isArray(cd_despesaitem)
+        ? cd_despesaitem
+        : [cd_despesaitem];
+      const despesasFiltradas = despesas.filter(
+        (d) => d && d !== '' && d !== 'null',
+      );
+
+      if (despesasFiltradas.length > 0) {
+        const placeholders = despesasFiltradas
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vfd.cd_despesaitem IN (${placeholders})`;
+        params.push(...despesasFiltradas);
+        paramIndex += despesasFiltradas.length;
+      }
+    }
+
+    // Filtro por número da duplicata (busca parcial)
+    if (nr_duplicata && nr_duplicata.trim() !== '') {
+      whereConditions += ` AND CAST(fd.nr_duplicata AS TEXT) ILIKE $${paramIndex}`;
+      params.push(`%${nr_duplicata.trim()}%`);
+      paramIndex++;
+    }
+
+    const query = `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        vfd.vl_rateio,
+        fd.in_aceite,
+        vfd.cd_despesaitem,
+        fd.tp_previsaoreal,
+        vfd.cd_ccusto
+      FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON fd.nr_duplicata = vfd.nr_duplicata 
+        AND fd.cd_empresa = vfd.cd_empresa 
+        AND fd.cd_fornecedor = vfd.cd_fornecedor
+      ${whereConditions}
+      ORDER BY fd.dt_vencimento DESC
+    `;
+
     console.log(
-      `🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
+      `🔍 Contas-pagar: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`,
+      {
+        status,
+        situacao,
+        previsao,
+        cd_fornecedor: cd_fornecedor ? 'sim' : 'não',
+        cd_ccusto: cd_ccusto ? 'sim' : 'não',
+        cd_despesaitem: cd_despesaitem ? 'sim' : 'não',
+        nr_duplicata,
+      },
     );
 
     const { rows } = await pool.query(query, params);
@@ -356,28 +439,27 @@ router.get(
         empresas,
         totals,
         count: rows.length,
-        optimized: isHeavyQuery || isVeryHeavyQuery,
-        queryType: queryType,
-        performance: {
-          isHeavyQuery,
-          isVeryHeavyQuery,
-          diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
-          ),
-          limiteAplicado: 'sem limite',
+        filtros: {
+          status,
+          situacao,
+          previsao,
+          cd_fornecedor,
+          cd_ccusto,
+          cd_despesaitem,
+          nr_duplicata,
         },
         data: rows,
       },
-      `Contas a pagar obtidas com sucesso (${queryType})`,
+      `Contas a pagar obtidas com sucesso`,
     );
   }),
 );
 
 /**
  * @route GET /financial/contas-pagar-emissao
- * @desc Buscar contas a pagar por data de emissão
+ * @desc Buscar contas a pagar por data de emissão com filtros avançados
  * @access Public
- * @query {dt_inicio, dt_fim, cd_empresa, limit, offset}
+ * @query {dt_inicio, dt_fim, cd_empresa[], status, situacao, previsao, cd_fornecedor[], cd_ccusto[], cd_despesaitem[], nr_duplicata}
  */
 router.get(
   '/contas-pagar-emissao',
@@ -385,149 +467,189 @@ router.get(
   validateRequired(['dt_inicio', 'dt_fim', 'cd_empresa']),
   validateDateFormat(['dt_inicio', 'dt_fim']),
   asyncHandler(async (req, res) => {
-    const { dt_inicio, dt_fim, cd_empresa } = req.query;
+    const {
+      dt_inicio,
+      dt_fim,
+      cd_empresa,
+      status,
+      situacao,
+      previsao,
+      cd_fornecedor,
+      cd_ccusto,
+      cd_despesaitem,
+      nr_duplicata,
+    } = req.query;
 
     // Seguir o padrão de performance do fluxo de caixa: múltiplas empresas, sem paginação/COUNT
     let empresas = Array.isArray(cd_empresa) ? cd_empresa : [cd_empresa];
-    let params = [dt_inicio, dt_fim, ...empresas];
-    let empresaPlaceholders = empresas.map((_, idx) => `$${3 + idx}`).join(',');
 
-    // Otimização baseada no número de empresas e período
-    const isHeavyQuery =
-      empresas.length > 10 ||
-      new Date(dt_fim) - new Date(dt_inicio) > 30 * 24 * 60 * 60 * 1000; // 30 dias
-    const isVeryHeavyQuery =
-      empresas.length > 20 ||
-      new Date(dt_fim) - new Date(dt_inicio) > 90 * 24 * 60 * 60 * 1000; // 90 dias
+    // Construir query dinâmica com filtros
+    let params = [dt_inicio, dt_fim];
+    let paramIndex = 3;
 
-    const query = isVeryHeavyQuery
-      ? `
-      select
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        vfd.vl_rateio,
-        vfd.cd_ccusto,
-        vfd.cd_despesaitem,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.in_aceite,
-        fd.tp_previsaoreal
-      from
-        vr_fcp_duplicatai fd
-      left join vr_fcp_despduplicatai vfd on
-        fd.nr_duplicata = vfd.nr_duplicata
-        and fd.cd_empresa = vfd.cd_empresa
-        and fd.cd_fornecedor = vfd.cd_fornecedor
-        and fd.dt_emissao = vfd.dt_emissao
-        and fd.nr_parcela = vfd.nr_parcela
-      where
-        fd.dt_emissao between $1 and $2
-        and fd.cd_empresa in (${empresaPlaceholders})
-        and fd.tp_situacao = 'N'
-        and fd.tp_previsaoreal = 2
-      group by
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.in_aceite,
-        fd.tp_previsaoreal,
-        vfd.vl_rateio,
-        vfd.cd_ccusto,
-        vfd.cd_despesaitem
-    `
-      : `
-      select
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        vfd.vl_rateio,
-        vfd.cd_ccusto,
-        vfd.cd_despesaitem,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.in_aceite,
-        fd.tp_previsaoreal
-      from
-        vr_fcp_duplicatai fd
-      left join vr_fcp_despduplicatai vfd on
-        fd.nr_duplicata = vfd.nr_duplicata
-        and fd.cd_empresa = vfd.cd_empresa
-        and fd.cd_fornecedor = vfd.cd_fornecedor
-        and fd.dt_emissao = vfd.dt_emissao
-        and fd.nr_parcela = vfd.nr_parcela
-      where
-        fd.dt_emissao between $1 and $2
-        and fd.cd_empresa in (${empresaPlaceholders})
-        and fd.tp_situacao = 'N'
-        and fd.tp_previsaoreal = 2
-      group by
-        fd.cd_empresa,
-        fd.cd_fornecedor,
-        fd.nr_duplicata,
-        fd.nr_portador,
-        fd.nr_parcela,
-        fd.dt_emissao,
-        fd.dt_vencimento,
-        fd.dt_entrada,
-        fd.dt_liq,
-        fd.tp_situacao,
-        fd.tp_estagio,
-        fd.vl_duplicata,
-        fd.vl_juros,
-        fd.vl_acrescimo,
-        fd.vl_desconto,
-        fd.vl_pago,
-        fd.in_aceite,
-        fd.tp_previsaoreal,
-        vfd.vl_rateio,
-        vfd.cd_ccusto,
-        vfd.cd_despesaitem
-      
+    // Criar placeholders para múltiplas empresas
+    const empresaPlaceholders = empresas
+      .map((_, idx) => `$${paramIndex + idx}`)
+      .join(',');
+    params.push(...empresas);
+    paramIndex += empresas.length;
+
+    let whereConditions = `
+      WHERE fd.dt_emissao BETWEEN $1 AND $2
+        AND fd.cd_empresa IN (${empresaPlaceholders})
     `;
 
-    const queryType = isVeryHeavyQuery
-      ? 'muito-pesada'
-      : isHeavyQuery
-        ? 'pesada'
-        : 'completa';
+    // Filtro por situação (Normais, Canceladas, Todas)
+    if (situacao && situacao !== 'TODAS') {
+      if (situacao === 'NORMAIS') {
+        whereConditions += ` AND fd.tp_situacao = 'N'`;
+      } else if (situacao === 'CANCELADAS') {
+        whereConditions += ` AND fd.tp_situacao = 'C'`;
+      }
+    } else if (!situacao) {
+      // Manter comportamento padrão original: apenas normais
+      whereConditions += ` AND fd.tp_situacao = 'N'`;
+    }
+
+    // Filtro por status (Pago, Vencido, A Vencer)
+    if (status && status !== 'Todos') {
+      if (status === 'Pago') {
+        whereConditions += ` AND fd.vl_pago > 0`;
+      } else if (status === 'Vencido') {
+        whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento < CURRENT_DATE`;
+      } else if (status === 'A Vencer') {
+        whereConditions += ` AND (fd.vl_pago = 0 OR fd.vl_pago IS NULL) AND fd.dt_vencimento >= CURRENT_DATE`;
+      }
+    }
+
+    // Filtro por previsão (PREVISÃO, REAL, CONSIGNADO)
+    if (previsao && previsao !== 'TODOS') {
+      let previsaoValue;
+      if (previsao === 'PREVISAO') previsaoValue = '1';
+      else if (previsao === 'REAL') previsaoValue = '2';
+      else if (previsao === 'CONSIGNADO') previsaoValue = '3';
+
+      if (previsaoValue) {
+        whereConditions += ` AND fd.tp_previsaoreal = $${paramIndex}`;
+        params.push(previsaoValue);
+        paramIndex++;
+      }
+    } else if (!previsao) {
+      // Manter comportamento padrão original: apenas real
+      whereConditions += ` AND fd.tp_previsaoreal = 2`;
+    }
+
+    // Filtro por fornecedores (múltiplos)
+    if (cd_fornecedor) {
+      const fornecedores = Array.isArray(cd_fornecedor)
+        ? cd_fornecedor
+        : [cd_fornecedor];
+      const fornecedoresFiltrados = fornecedores.filter(
+        (f) => f && f !== '' && f !== 'null',
+      );
+
+      if (fornecedoresFiltrados.length > 0) {
+        const placeholders = fornecedoresFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND fd.cd_fornecedor IN (${placeholders})`;
+        params.push(...fornecedoresFiltrados);
+        paramIndex += fornecedoresFiltrados.length;
+      }
+    }
+
+    // Filtro por centros de custo (múltiplos)
+    if (cd_ccusto) {
+      const centrosCusto = Array.isArray(cd_ccusto) ? cd_ccusto : [cd_ccusto];
+      const centrosFiltrados = centrosCusto.filter(
+        (c) => c && c !== '' && c !== 'null',
+      );
+
+      if (centrosFiltrados.length > 0) {
+        const placeholders = centrosFiltrados
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vfd.cd_ccusto IN (${placeholders})`;
+        params.push(...centrosFiltrados);
+        paramIndex += centrosFiltrados.length;
+      }
+    }
+
+    // Filtro por despesas (múltiplas)
+    if (cd_despesaitem) {
+      const despesas = Array.isArray(cd_despesaitem)
+        ? cd_despesaitem
+        : [cd_despesaitem];
+      const despesasFiltradas = despesas.filter(
+        (d) => d && d !== '' && d !== 'null',
+      );
+
+      if (despesasFiltradas.length > 0) {
+        const placeholders = despesasFiltradas
+          .map((_, idx) => `$${paramIndex + idx}`)
+          .join(',');
+        whereConditions += ` AND vfd.cd_despesaitem IN (${placeholders})`;
+        params.push(...despesasFiltradas);
+        paramIndex += despesasFiltradas.length;
+      }
+    }
+
+    // Filtro por número da duplicata (busca parcial)
+    if (nr_duplicata && nr_duplicata.trim() !== '') {
+      whereConditions += ` AND CAST(fd.nr_duplicata AS TEXT) ILIKE $${paramIndex}`;
+      params.push(`%${nr_duplicata.trim()}%`);
+      paramIndex++;
+    }
+
+    const query = `
+      SELECT
+        fd.cd_empresa,
+        fd.cd_fornecedor,
+        fd.nr_duplicata,
+        fd.nr_portador,
+        fd.nr_parcela,
+        vfd.vl_rateio,
+        vfd.cd_ccusto,
+        vfd.cd_despesaitem,
+        fd.dt_emissao,
+        fd.dt_vencimento,
+        fd.dt_entrada,
+        fd.dt_liq,
+        fd.tp_situacao,
+        fd.tp_estagio,
+        fd.vl_duplicata,
+        fd.vl_juros,
+        fd.vl_acrescimo,
+        fd.vl_desconto,
+        fd.vl_pago,
+        fd.in_aceite,
+        fd.tp_previsaoreal
+      FROM vr_fcp_duplicatai fd
+      LEFT JOIN vr_fcp_despduplicatai vfd ON
+        fd.nr_duplicata = vfd.nr_duplicata
+        AND fd.cd_empresa = vfd.cd_empresa
+        AND fd.cd_fornecedor = vfd.cd_fornecedor
+        AND fd.dt_emissao = vfd.dt_emissao
+        AND fd.nr_parcela = vfd.nr_parcela
+      ${whereConditions}
+      GROUP BY
+        fd.cd_empresa, fd.cd_fornecedor, fd.nr_duplicata, fd.nr_portador, fd.nr_parcela,
+        fd.dt_emissao, fd.dt_vencimento, fd.dt_entrada, fd.dt_liq, fd.tp_situacao,
+        fd.tp_estagio, fd.vl_duplicata, fd.vl_juros, fd.vl_acrescimo, fd.vl_desconto,
+        fd.vl_pago, fd.in_aceite, fd.tp_previsaoreal, vfd.vl_rateio, vfd.cd_ccusto, vfd.cd_despesaitem
+    `;
+
     console.log(
-      `🔍 Contas-pagar-emissao: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}, query: ${queryType}`,
+      `🔍 Contas-pagar-emissao: ${empresas.length} empresas, período: ${dt_inicio} a ${dt_fim}`,
+      {
+        status,
+        situacao,
+        previsao,
+        cd_fornecedor: cd_fornecedor ? 'sim' : 'não',
+        cd_ccusto: cd_ccusto ? 'sim' : 'não',
+        cd_despesaitem: cd_despesaitem ? 'sim' : 'não',
+        nr_duplicata,
+      },
     );
 
     const { rows } = await pool.query(query, params);
@@ -551,19 +673,18 @@ router.get(
         empresas,
         totals,
         count: rows.length,
-        optimized: isHeavyQuery || isVeryHeavyQuery,
-        queryType: queryType,
-        performance: {
-          isHeavyQuery,
-          isVeryHeavyQuery,
-          diasPeriodo: Math.ceil(
-            (new Date(dt_fim) - new Date(dt_inicio)) / (1000 * 60 * 60 * 24),
-          ),
-          limiteAplicado: 'sem limite',
+        filtros: {
+          status,
+          situacao,
+          previsao,
+          cd_fornecedor,
+          cd_ccusto,
+          cd_despesaitem,
+          nr_duplicata,
         },
         data: rows,
       },
-      `Contas a pagar por data de emissão obtidas com sucesso (${queryType})`,
+      `Contas a pagar por data de emissão obtidas com sucesso`,
     );
   }),
 );
