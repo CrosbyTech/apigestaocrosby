@@ -4364,6 +4364,106 @@ router.get(
 );
 
 /**
+ * @route POST /financial/impostos-por-transacoes
+ * @desc Buscar impostos das transações separadas por canal (simples e direto)
+ * @access Public
+ * @body { varejo: [nr_transacao], multimarcas: [nr_transacao], franquias: [nr_transacao], revenda: [nr_transacao] }
+ */
+router.post(
+  '/impostos-por-transacoes',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { varejo = [], multimarcas = [], franquias = [], revenda = [] } = req.body;
+
+    console.log('📊 Impostos por transações (POST) - Recebido:', {
+      varejo: varejo.length,
+      multimarcas: multimarcas.length,
+      franquias: franquias.length,
+      revenda: revenda.length,
+    });
+
+    // Função para buscar impostos de um array de transações
+    const buscarImpostosCanal = async (transacoes) => {
+      if (!transacoes || transacoes.length === 0) {
+        return { icms: 0, pis: 0, cofins: 0, total: 0 };
+      }
+
+      // Filtrar transações válidas
+      const transacoesValidas = transacoes.filter(
+        (t) => t !== null && t !== undefined && !isNaN(parseInt(t)) && parseInt(t) > 0,
+      );
+
+      if (transacoesValidas.length === 0) {
+        return { icms: 0, pis: 0, cofins: 0, total: 0 };
+      }
+
+      // Query simples: buscar impostos agrupados por tipo
+      const placeholders = transacoesValidas.map((_, idx) => `$${idx + 1}`).join(',');
+      const params = transacoesValidas.map((t) => parseInt(t));
+
+      const query = `
+        SELECT
+          cd_imposto,
+          COALESCE(SUM(valorimposto), 0) as valor
+        FROM
+          impostosdre
+        WHERE
+          nr_transacao IN (${placeholders})
+        GROUP BY
+          cd_imposto
+      `;
+
+      const { rows } = await pool.query(query, params);
+
+      // Agregar por tipo de imposto
+      const resultado = { icms: 0, pis: 0, cofins: 0, total: 0 };
+
+      rows.forEach((row) => {
+        const valor = parseFloat(row.valor || 0);
+        const cdImposto = parseInt(row.cd_imposto);
+
+        // ICMS: cd_imposto 1, 2, 3
+        if ([1, 2, 3].includes(cdImposto)) {
+          resultado.icms += valor;
+        }
+        // COFINS: cd_imposto 5
+        else if (cdImposto === 5) {
+          resultado.cofins += valor;
+        }
+        // PIS: cd_imposto 6
+        else if (cdImposto === 6) {
+          resultado.pis += valor;
+        }
+
+        resultado.total += valor;
+      });
+
+      return resultado;
+    };
+
+    // Buscar impostos para cada canal em paralelo
+    const [impostosVarejo, impostosMultimarcas, impostosFranquias, impostosRevenda] =
+      await Promise.all([
+        buscarImpostosCanal(varejo),
+        buscarImpostosCanal(multimarcas),
+        buscarImpostosCanal(franquias),
+        buscarImpostosCanal(revenda),
+      ]);
+
+    const resultado = {
+      varejo: impostosVarejo,
+      multimarcas: impostosMultimarcas,
+      franquias: impostosFranquias,
+      revenda: impostosRevenda,
+    };
+
+    console.log('✅ Impostos calculados:', resultado);
+
+    successResponse(res, resultado, 'Impostos calculados com sucesso');
+  }),
+);
+
+/**
  * @route GET /financial/auditoria-faturamento
  * @desc Buscar auditoria de faturamento com relacionamento entre faturas e transações
  * @access Public
