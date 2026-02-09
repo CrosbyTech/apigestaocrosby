@@ -4324,7 +4324,7 @@ router.get(
         tt.vl_total as vl_transacao,
         tt.cd_empresa,
         tt.cd_operacao,
-        tt.cd_cliente
+        tt.cd_pessoa as cd_cliente
       FROM
         tra_transacao tt
       WHERE
