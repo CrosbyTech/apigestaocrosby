@@ -4283,6 +4283,87 @@ router.post(
 );
 
 /**
+ * @route GET /financial/devolucoes-transacao
+ * @desc Buscar devoluções por transação (para MTM, REVENDA, FRANQUIAS)
+ * @access Public
+ * @query {dt_inicio, dt_fim, canal}
+ * Usa tp_situacao = 4 e cd_operacao específicos para devoluções
+ */
+router.get(
+  '/devolucoes-transacao',
+  sanitizeInput,
+  validateRequired(['dt_inicio', 'dt_fim']),
+  validateDateFormat(['dt_inicio', 'dt_fim']),
+  asyncHandler(async (req, res) => {
+    const { dt_inicio, dt_fim } = req.query;
+
+    // Empresas para buscar devoluções (conforme especificado)
+    const empresas = [
+      85, 850, 99, 990, 1, 100, 2, 200, 11, 111, 75, 750, 6, 600, 92, 920, 31,
+      311,
+    ];
+
+    // Códigos de operação de devolução
+    const codigosOperacao = [
+      21, 401, 1202, 1204, 1206, 1209, 1408, 1950, 2207, 3202, 3203,
+    ];
+
+    // Criar placeholders
+    const empresaPlaceholders = empresas
+      .map((_, idx) => `$${idx + 3}`)
+      .join(',');
+    const operacaoPlaceholders = codigosOperacao
+      .map((_, idx) => `$${idx + 3 + empresas.length}`)
+      .join(',');
+
+    const params = [dt_inicio, dt_fim, ...empresas, ...codigosOperacao];
+
+    const query = `
+      SELECT
+        tt.nr_transacao,
+        tt.vl_total as vl_transacao,
+        tt.cd_empresa,
+        tt.cd_operacao,
+        tt.cd_cliente
+      FROM
+        tra_transacao tt
+      WHERE
+        tt.cd_empresa IN (${empresaPlaceholders})
+        AND tt.dt_transacao BETWEEN $1 AND $2
+        AND tt.tp_situacao = 4
+        AND tt.cd_operacao IN (${operacaoPlaceholders})
+    `;
+
+    console.log(
+      `🔍 Devoluções por Transação: período=${dt_inicio} a ${dt_fim}`,
+    );
+
+    try {
+      const { rows } = await pool.query(query, params);
+
+      // Calcular total de devoluções
+      const totalDevolucoes = rows.reduce(
+        (acc, row) => acc + (parseFloat(row.vl_transacao) || 0),
+        0,
+      );
+
+      successResponse(
+        res,
+        {
+          devolucoes: rows,
+          total: totalDevolucoes,
+          count: rows.length,
+        },
+        `${rows.length} devoluções encontradas`,
+      );
+    } catch (error) {
+      console.error('❌ Erro na query de devoluções por transação:', error);
+      throw error;
+    }
+  }),
+);
+
+/**
  * @route GET /financial/auditoria-faturamento
  * @desc Buscar auditoria de faturamento com relacionamento entre faturas e transações
  * @access Public
