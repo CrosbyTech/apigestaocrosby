@@ -4364,31 +4364,39 @@ router.get(
 );
 
 /**
- * @route GET /financial/test-impostosdre
- * @desc Testar se a view impostosdre tem dados
+ * @route GET /financial/test-impostos
+ * @desc Testar se a tabela tra_itemimposto tem dados
  * @access Public
  * @query {nr_transacao} - Transação para testar (opcional)
  */
 router.get(
-  '/test-impostosdre',
+  '/test-impostos',
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const { nr_transacao } = req.query;
     
     // Verificar quantidade total de registros
-    const countResult = await pool.query('SELECT COUNT(*) as total FROM impostosdre');
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total 
+      FROM tra_itemimposto 
+      WHERE cd_empresa < 5999 AND cd_imposto IN (1, 5, 6)
+    `);
     
     // Pegar 10 registros de exemplo
     const sampleResult = await pool.query(`
-      SELECT nr_transacao, cd_imposto, valorimposto, dt_transacao 
-      FROM impostosdre 
+      SELECT nr_transacao, cd_imposto, vl_imposto, dt_transacao 
+      FROM tra_itemimposto 
+      WHERE cd_empresa < 5999 AND cd_imposto IN (1, 5, 6)
       LIMIT 10
     `);
     
     let testTransacao = null;
     if (nr_transacao) {
       const testResult = await pool.query(`
-        SELECT * FROM impostosdre WHERE nr_transacao = $1
+        SELECT cd_imposto, SUM(vl_imposto) as valor 
+        FROM tra_itemimposto 
+        WHERE nr_transacao = $1 AND cd_empresa < 5999 AND cd_imposto IN (1, 5, 6)
+        GROUP BY cd_imposto
       `, [parseInt(nr_transacao)]);
       testTransacao = testResult.rows;
     }
@@ -4397,7 +4405,7 @@ router.get(
       total: countResult.rows[0]?.total,
       sample: sampleResult.rows,
       testTransacao
-    }, 'Teste da view impostosdre');
+    }, 'Teste da tabela tra_itemimposto');
   }),
 );
 
@@ -4440,20 +4448,22 @@ router.post(
         return { icms: 0, pis: 0, cofins: 0, total: 0 };
       }
 
-      // Query simples: buscar impostos agrupados por tipo
+      // Query usando tra_itemimposto: buscar impostos agrupados por tipo
       const placeholders = transacoesValidas.map((_, idx) => `$${idx + 1}`).join(',');
       const params = transacoesValidas.map((t) => parseInt(t));
 
       const query = `
         SELECT
-          cd_imposto,
-          COALESCE(SUM(valorimposto), 0) as valor
+          ti.cd_imposto,
+          COALESCE(SUM(ti.vl_imposto), 0) as valor
         FROM
-          impostosdre
+          tra_itemimposto ti
         WHERE
-          nr_transacao IN (${placeholders})
+          ti.cd_empresa < 5999
+          AND ti.cd_imposto IN (1, 5, 6)
+          AND ti.nr_transacao IN (${placeholders})
         GROUP BY
-          cd_imposto
+          ti.cd_imposto
       `;
 
       const { rows } = await pool.query(query, params);
