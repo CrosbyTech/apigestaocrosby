@@ -4337,7 +4337,10 @@ router.get(
         ff.tp_documento,
         tt.tp_operacao,
         tt.cd_operacao,
-        ff.cd_empresa
+        ff.cd_empresa,
+        tt.vl_total as vl_transacao,
+        tt.vl_desconto as vl_desconto_transacao,
+        (COALESCE(tt.vl_total, 0) + COALESCE(tt.vl_desconto, 0)) as vl_bruto_transacao
       FROM
         fcr_faturai ff
       LEFT JOIN vr_fcr_fattrans vff ON
@@ -4360,7 +4363,9 @@ router.get(
         ff.tp_documento,
         tt.tp_operacao,
         tt.cd_operacao,
-        ff.cd_empresa
+        ff.cd_empresa,
+        tt.vl_total,
+        tt.vl_desconto
       ORDER BY
         tt.cd_operacao,
         ff.nr_fat,
