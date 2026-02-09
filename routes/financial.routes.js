@@ -4364,6 +4364,44 @@ router.get(
 );
 
 /**
+ * @route GET /financial/test-impostosdre
+ * @desc Testar se a view impostosdre tem dados
+ * @access Public
+ * @query {nr_transacao} - Transação para testar (opcional)
+ */
+router.get(
+  '/test-impostosdre',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const { nr_transacao } = req.query;
+    
+    // Verificar quantidade total de registros
+    const countResult = await pool.query('SELECT COUNT(*) as total FROM impostosdre');
+    
+    // Pegar 10 registros de exemplo
+    const sampleResult = await pool.query(`
+      SELECT nr_transacao, cd_imposto, valorimposto, dt_transacao 
+      FROM impostosdre 
+      LIMIT 10
+    `);
+    
+    let testTransacao = null;
+    if (nr_transacao) {
+      const testResult = await pool.query(`
+        SELECT * FROM impostosdre WHERE nr_transacao = $1
+      `, [parseInt(nr_transacao)]);
+      testTransacao = testResult.rows;
+    }
+    
+    successResponse(res, {
+      total: countResult.rows[0]?.total,
+      sample: sampleResult.rows,
+      testTransacao
+    }, 'Teste da view impostosdre');
+  }),
+);
+
+/**
  * @route POST /financial/impostos-por-transacoes
  * @desc Buscar impostos das transações separadas por canal (simples e direto)
  * @access Public
@@ -4380,11 +4418,14 @@ router.post(
       multimarcas: multimarcas.length,
       franquias: franquias.length,
       revenda: revenda.length,
+      exemplosVarejo: varejo.slice(0, 5),
+      tipoVarejo: typeof varejo[0],
     });
 
     // Função para buscar impostos de um array de transações
-    const buscarImpostosCanal = async (transacoes) => {
+    const buscarImpostosCanal = async (nomeCanal, transacoes) => {
       if (!transacoes || transacoes.length === 0) {
+        console.log(`📊 ${nomeCanal}: Nenhuma transação recebida`);
         return { icms: 0, pis: 0, cofins: 0, total: 0 };
       }
 
@@ -4392,6 +4433,8 @@ router.post(
       const transacoesValidas = transacoes.filter(
         (t) => t !== null && t !== undefined && !isNaN(parseInt(t)) && parseInt(t) > 0,
       );
+
+      console.log(`📊 ${nomeCanal}: ${transacoes.length} transações recebidas, ${transacoesValidas.length} válidas`);
 
       if (transacoesValidas.length === 0) {
         return { icms: 0, pis: 0, cofins: 0, total: 0 };
@@ -4414,6 +4457,11 @@ router.post(
       `;
 
       const { rows } = await pool.query(query, params);
+      console.log(`📊 ${nomeCanal}: Query retornou ${rows.length} registros de impostos`);
+      
+      if (rows.length > 0) {
+        console.log(`📊 ${nomeCanal}: Primeiros resultados:`, rows.slice(0, 5));
+      }
 
       // Agregar por tipo de imposto
       const resultado = { icms: 0, pis: 0, cofins: 0, total: 0 };
@@ -4444,10 +4492,10 @@ router.post(
     // Buscar impostos para cada canal em paralelo
     const [impostosVarejo, impostosMultimarcas, impostosFranquias, impostosRevenda] =
       await Promise.all([
-        buscarImpostosCanal(varejo),
-        buscarImpostosCanal(multimarcas),
-        buscarImpostosCanal(franquias),
-        buscarImpostosCanal(revenda),
+        buscarImpostosCanal('VAREJO', varejo),
+        buscarImpostosCanal('MULTIMARCAS', multimarcas),
+        buscarImpostosCanal('FRANQUIAS', franquias),
+        buscarImpostosCanal('REVENDA', revenda),
       ]);
 
     const resultado = {
