@@ -4374,14 +4374,14 @@ router.get(
   sanitizeInput,
   asyncHandler(async (req, res) => {
     const { nr_transacao } = req.query;
-    
+
     // Verificar quantidade total de registros
     const countResult = await pool.query(`
       SELECT COUNT(*) as total 
       FROM tra_itemimposto 
       WHERE cd_empresa < 5999 AND cd_imposto IN (1, 5, 6)
     `);
-    
+
     // Pegar 10 registros de exemplo
     const sampleResult = await pool.query(`
       SELECT nr_transacao, cd_imposto, vl_imposto, dt_transacao 
@@ -4389,23 +4389,30 @@ router.get(
       WHERE cd_empresa < 5999 AND cd_imposto IN (1, 5, 6)
       LIMIT 10
     `);
-    
+
     let testTransacao = null;
     if (nr_transacao) {
-      const testResult = await pool.query(`
+      const testResult = await pool.query(
+        `
         SELECT cd_imposto, SUM(vl_imposto) as valor 
         FROM tra_itemimposto 
         WHERE nr_transacao = $1 AND cd_empresa < 5999 AND cd_imposto IN (1, 5, 6)
         GROUP BY cd_imposto
-      `, [parseInt(nr_transacao)]);
+      `,
+        [parseInt(nr_transacao)],
+      );
       testTransacao = testResult.rows;
     }
-    
-    successResponse(res, {
-      total: countResult.rows[0]?.total,
-      sample: sampleResult.rows,
-      testTransacao
-    }, 'Teste da tabela tra_itemimposto');
+
+    successResponse(
+      res,
+      {
+        total: countResult.rows[0]?.total,
+        sample: sampleResult.rows,
+        testTransacao,
+      },
+      'Teste da tabela tra_itemimposto',
+    );
   }),
 );
 
@@ -4419,7 +4426,12 @@ router.post(
   '/impostos-por-transacoes',
   sanitizeInput,
   asyncHandler(async (req, res) => {
-    const { varejo = [], multimarcas = [], franquias = [], revenda = [] } = req.body;
+    const {
+      varejo = [],
+      multimarcas = [],
+      franquias = [],
+      revenda = [],
+    } = req.body;
 
     console.log('📊 Impostos por transações (POST) - Recebido:', {
       varejo: varejo.length,
@@ -4439,17 +4451,25 @@ router.post(
 
       // Filtrar transações válidas
       const transacoesValidas = transacoes.filter(
-        (t) => t !== null && t !== undefined && !isNaN(parseInt(t)) && parseInt(t) > 0,
+        (t) =>
+          t !== null &&
+          t !== undefined &&
+          !isNaN(parseInt(t)) &&
+          parseInt(t) > 0,
       );
 
-      console.log(`📊 ${nomeCanal}: ${transacoes.length} transações recebidas, ${transacoesValidas.length} válidas`);
+      console.log(
+        `📊 ${nomeCanal}: ${transacoes.length} transações recebidas, ${transacoesValidas.length} válidas`,
+      );
 
       if (transacoesValidas.length === 0) {
         return { icms: 0, pis: 0, cofins: 0, total: 0 };
       }
 
       // Query usando tra_itemimposto: buscar impostos agrupados por tipo
-      const placeholders = transacoesValidas.map((_, idx) => `$${idx + 1}`).join(',');
+      const placeholders = transacoesValidas
+        .map((_, idx) => `$${idx + 1}`)
+        .join(',');
       const params = transacoesValidas.map((t) => parseInt(t));
 
       const query = `
@@ -4467,8 +4487,10 @@ router.post(
       `;
 
       const { rows } = await pool.query(query, params);
-      console.log(`📊 ${nomeCanal}: Query retornou ${rows.length} registros de impostos`);
-      
+      console.log(
+        `📊 ${nomeCanal}: Query retornou ${rows.length} registros de impostos`,
+      );
+
       if (rows.length > 0) {
         console.log(`📊 ${nomeCanal}: Primeiros resultados:`, rows.slice(0, 5));
       }
@@ -4500,13 +4522,17 @@ router.post(
     };
 
     // Buscar impostos para cada canal em paralelo
-    const [impostosVarejo, impostosMultimarcas, impostosFranquias, impostosRevenda] =
-      await Promise.all([
-        buscarImpostosCanal('VAREJO', varejo),
-        buscarImpostosCanal('MULTIMARCAS', multimarcas),
-        buscarImpostosCanal('FRANQUIAS', franquias),
-        buscarImpostosCanal('REVENDA', revenda),
-      ]);
+    const [
+      impostosVarejo,
+      impostosMultimarcas,
+      impostosFranquias,
+      impostosRevenda,
+    ] = await Promise.all([
+      buscarImpostosCanal('VAREJO', varejo),
+      buscarImpostosCanal('MULTIMARCAS', multimarcas),
+      buscarImpostosCanal('FRANQUIAS', franquias),
+      buscarImpostosCanal('REVENDA', revenda),
+    ]);
 
     const resultado = {
       varejo: impostosVarejo,
@@ -4518,6 +4544,148 @@ router.post(
     console.log('✅ Impostos calculados:', resultado);
 
     successResponse(res, resultado, 'Impostos calculados com sucesso');
+  }),
+);
+
+/**
+ * @route POST /financial/cmv-por-transacoes
+ * @desc Calcular CMV das transações separadas por canal
+ * @access Public
+ * @body { varejo: [nr_transacao], multimarcas: [nr_transacao], franquias: [nr_transacao], revenda: [nr_transacao] }
+ */
+router.post(
+  '/cmv-por-transacoes',
+  sanitizeInput,
+  asyncHandler(async (req, res) => {
+    const {
+      varejo = [],
+      multimarcas = [],
+      franquias = [],
+      revenda = [],
+    } = req.body;
+
+    console.log('📊 CMV por transações (POST) - Recebido:', {
+      varejo: varejo.length,
+      multimarcas: multimarcas.length,
+      franquias: franquias.length,
+      revenda: revenda.length,
+    });
+
+    // Função para calcular CMV de um array de transações
+    const calcularCMVCanal = async (nomeCanal, transacoes) => {
+      if (!transacoes || transacoes.length === 0) {
+        console.log(`📊 ${nomeCanal}: Nenhuma transação recebida`);
+        return { cmv: 0, produtosSaida: 0, produtosEntrada: 0 };
+      }
+
+      // Filtrar transações válidas
+      const transacoesValidas = transacoes.filter(
+        (t) =>
+          t !== null &&
+          t !== undefined &&
+          !isNaN(parseInt(t)) &&
+          parseInt(t) > 0,
+      );
+
+      console.log(
+        `📊 ${nomeCanal}: ${transacoes.length} transações recebidas, ${transacoesValidas.length} válidas`,
+      );
+
+      if (transacoesValidas.length === 0) {
+        return { cmv: 0, produtosSaida: 0, produtosEntrada: 0 };
+      }
+
+      // Query para calcular CMV
+      const placeholders = transacoesValidas
+        .map((_, idx) => `$${idx + 1}`)
+        .join(',');
+      const params = transacoesValidas.map((t) => parseInt(t));
+
+      const query = `
+        SELECT
+          COALESCE(SUM(
+            CASE
+              WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado <> 0 AND fisnf.tp_operacao = 'S' THEN fisnf.qt_faturado
+              ELSE 0
+            END), 0) as produtos_saida,
+          COALESCE(SUM(
+            CASE
+              WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado <> 0 AND fisnf.tp_operacao = 'E' THEN fisnf.qt_faturado
+              ELSE 0
+            END), 0) as produtos_entrada,
+          COALESCE(SUM(
+            CASE
+              WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado <> 0 AND fisnf.tp_operacao = 'S' THEN vpv.vl_produto
+              ELSE 0
+            END -
+            CASE
+              WHEN fisnf.qt_faturado IS NOT NULL AND fisnf.qt_faturado <> 0 AND fisnf.tp_operacao = 'E' THEN vpv.vl_produto
+              ELSE 0
+            END), 0) as cmv
+        FROM
+          vr_fis_nfitemprod fisnf
+        LEFT JOIN prd_valor vpv ON fisnf.cd_produto = vpv.cd_produto
+        WHERE
+          fisnf.tp_situacao NOT IN ('C', 'X')
+          AND fisnf.vl_unitbruto IS NOT NULL
+          AND fisnf.vl_unitliquido IS NOT NULL
+          AND fisnf.qt_faturado IS NOT NULL
+          AND fisnf.qt_faturado <> 0
+          AND vpv.cd_valor = 3
+          AND vpv.cd_empresa = 1
+          AND vpv.tp_valor = 'C'
+          AND fisnf.nr_transacao IN (${placeholders})
+      `;
+
+      const { rows } = await pool.query(query, params);
+
+      const resultado = {
+        cmv: parseFloat(rows[0]?.cmv || 0),
+        produtosSaida: parseFloat(rows[0]?.produtos_saida || 0),
+        produtosEntrada: parseFloat(rows[0]?.produtos_entrada || 0),
+      };
+
+      console.log(`📊 ${nomeCanal}: CMV = ${resultado.cmv.toFixed(2)}`);
+
+      return resultado;
+    };
+
+    // Calcular CMV para cada canal em paralelo
+    const [cmvVarejo, cmvMultimarcas, cmvFranquias, cmvRevenda] =
+      await Promise.all([
+        calcularCMVCanal('VAREJO', varejo),
+        calcularCMVCanal('MULTIMARCAS', multimarcas),
+        calcularCMVCanal('FRANQUIAS', franquias),
+        calcularCMVCanal('REVENDA', revenda),
+      ]);
+
+    const resultado = {
+      varejo: cmvVarejo,
+      multimarcas: cmvMultimarcas,
+      franquias: cmvFranquias,
+      revenda: cmvRevenda,
+      total: {
+        cmv:
+          cmvVarejo.cmv +
+          cmvMultimarcas.cmv +
+          cmvFranquias.cmv +
+          cmvRevenda.cmv,
+        produtosSaida:
+          cmvVarejo.produtosSaida +
+          cmvMultimarcas.produtosSaida +
+          cmvFranquias.produtosSaida +
+          cmvRevenda.produtosSaida,
+        produtosEntrada:
+          cmvVarejo.produtosEntrada +
+          cmvMultimarcas.produtosEntrada +
+          cmvFranquias.produtosEntrada +
+          cmvRevenda.produtosEntrada,
+      },
+    };
+
+    console.log('✅ CMV calculado:', resultado);
+
+    successResponse(res, resultado, 'CMV calculado com sucesso');
   }),
 );
 
