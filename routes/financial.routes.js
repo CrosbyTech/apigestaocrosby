@@ -16,6 +16,11 @@ import { BankReturnParser } from '../utils/bankReturnParser.js';
 import fs from 'fs';
 import path from 'path';
 
+// Parsers específicos para batida de carteira
+import processConfiancaFile from '../utils/extratos/CONFIANCA.js';
+import processSicrediFile from '../utils/extratos/SICREDI.js';
+import processSistemaConfiancaFile from '../utils/extratos/SISTEMA_CONFIANCA.js';
+
 const router = express.Router();
 
 /**
@@ -69,6 +74,44 @@ const upload = multer({
     }
   },
   // Removidos os limites de tamanho de arquivo
+});
+
+// Configuração para upload de arquivos de batida de carteira (CSV, XLS, XLSX)
+const storageBatidaCarteira = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = './uploads';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+  },
+});
+
+const uploadBatidaCarteira = multer({
+  storage: storageBatidaCarteira,
+  fileFilter: (req, file, cb) => {
+    const fileName = file.originalname.toLowerCase();
+    const allowedExtensions = ['.csv', '.xls', '.xlsx', '.txt'];
+    const hasAllowedExtension = allowedExtensions.some((ext) =>
+      fileName.endsWith(ext),
+    );
+    if (
+      hasAllowedExtension ||
+      file.mimetype === 'text/plain' ||
+      file.mimetype === 'text/csv' ||
+      file.mimetype.includes('spreadsheet') ||
+      file.mimetype.includes('excel')
+    ) {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas arquivos CSV, XLS ou XLSX são permitidos'), false);
+    }
+  },
 });
 
 // Configuração para upload múltiplo
@@ -4844,6 +4887,104 @@ router.get(
       resultado.rows[0],
       'Telefone do cliente obtido com sucesso',
     );
+  }),
+);
+
+/**
+ * @route POST /financial/batida-carteira/upload
+ * @desc Upload e processamento de arquivo para batida de carteira
+ * @access Public
+ * @body {file} arquivo - Arquivo CSV/XLS/XLSX do banco ou sistema
+ * @body {string} banco - Código do banco (CONFIANCA, SICREDI, SISTEMA_CONFIANCA, etc.)
+ */
+router.post(
+  '/batida-carteira/upload',
+  uploadBatidaCarteira.single('arquivo'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return errorResponse(
+        res,
+        'Nenhum arquivo foi enviado',
+        400,
+        'NO_FILE_UPLOADED',
+      );
+    }
+
+    const banco = req.body.banco?.toUpperCase();
+    if (!banco) {
+      // Limpar arquivo
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return errorResponse(
+        res,
+        'Código do banco é obrigatório',
+        400,
+        'MISSING_BANCO',
+      );
+    }
+
+    try {
+      // Ler o arquivo (como buffer para suportar XLS)
+      const fileContent = fs.readFileSync(req.file.path);
+
+      let result;
+
+      // Processar de acordo com o banco
+      switch (banco) {
+        case 'CONFIANCA':
+          result = processConfiancaFile(fileContent.toString('utf-8'));
+          break;
+
+        case 'SICREDI':
+          result = processSicrediFile(fileContent);
+          break;
+
+        case 'SISTEMA_CONFIANCA':
+          // Para importar dados do sistema via CSV
+          result = processSistemaConfiancaFile(fileContent.toString('utf-8'));
+          break;
+
+        default:
+          throw new Error(
+            `Banco não suportado para batida de carteira: ${banco}`,
+          );
+      }
+
+      // Limpar arquivo temporário
+      fs.unlinkSync(req.file.path);
+
+      if (!result.success) {
+        return errorResponse(
+          res,
+          result.error || 'Erro ao processar arquivo',
+          400,
+          'FILE_PROCESSING_ERROR',
+        );
+      }
+
+      // Adicionar informações do arquivo
+      result.arquivo = {
+        nomeOriginal: req.file.originalname,
+        tamanho: req.file.size,
+        dataUpload: new Date().toISOString(),
+        banco: banco,
+      };
+
+      successResponse(res, result, `Arquivo ${banco} processado com sucesso`);
+    } catch (error) {
+      // Limpar arquivo em caso de erro
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      return errorResponse(
+        res,
+        `Erro ao processar arquivo: ${error.message}`,
+        400,
+        'FILE_PROCESSING_ERROR',
+      );
+    }
   }),
 );
 
