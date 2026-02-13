@@ -20,6 +20,7 @@ import path from 'path';
 import processConfiancaFile from '../utils/extratos/CONFIANCA.js';
 import processSicrediFile from '../utils/extratos/SICREDI.js';
 import processSistemaConfiancaFile from '../utils/extratos/SISTEMA_CONFIANCA.js';
+import processSistemaSicrediFile from '../utils/extratos/SISTEMA_SICREDI.js';
 
 const router = express.Router();
 
@@ -4943,6 +4944,11 @@ router.post(
         case 'SISTEMA_CONFIANCA':
           // Para importar dados do sistema via CSV
           result = processSistemaConfiancaFile(fileContent.toString('utf-8'));
+          break;
+
+        case 'SISTEMA_SICREDI':
+          // Para importar dados do sistema via CSV (portador 748)
+          result = processSistemaSicrediFile(fileContent.toString('utf-8'));
           break;
 
         default:
