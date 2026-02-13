@@ -75,7 +75,10 @@ const parseConfiancaCSV = (csvContent) => {
     'SITUACAO',
   ];
 
-  const requiredColumns = tipoArquivo === 'LIQUIDADO' ? requiredColumnsLiquidado : requiredColumnsAberto;
+  const requiredColumns =
+    tipoArquivo === 'LIQUIDADO'
+      ? requiredColumnsLiquidado
+      : requiredColumnsAberto;
 
   for (const col of requiredColumns) {
     if (columnIndex[col] === undefined) {
@@ -211,7 +214,10 @@ const processConfiancaFile = (fileContent) => {
       valorTotalPago: registros.reduce((sum, r) => sum + r.vl_pago, 0),
       valorTotalJuros: registros.reduce((sum, r) => sum + r.vl_juros, 0),
       valorTotalDesconto: registros.reduce((sum, r) => sum + r.vl_desconto, 0),
-      valorTotalAtualizado: registros.reduce((sum, r) => sum + (r.vl_atualizado || 0), 0),
+      valorTotalAtualizado: registros.reduce(
+        (sum, r) => sum + (r.vl_atualizado || 0),
+        0,
+      ),
       situacoes: {},
       dataProcessamento: new Date().toISOString(),
     };
