@@ -305,3 +305,5 @@ export {
   agruparPorCnpj,
   agruparPorFatura,
 };
+
+export default processConfiancaFile;
