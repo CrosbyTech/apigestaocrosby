@@ -1380,7 +1380,7 @@ router.post(
 router.post(
   '/legal-entity/search-by-name',
   asyncHandler(async (req, res) => {
-    const { fantasyName, page = 1, pageSize = 1000 } = req.body;
+    const { fantasyName, page = 1, pageSize = 999999 } = req.body;
 
     if (!fantasyName || fantasyName.trim().length < 2) {
       return errorResponse(
