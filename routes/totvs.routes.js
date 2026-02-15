@@ -1367,4 +1367,151 @@ router.post(
   }),
 );
 
+/**
+ * @route POST /totvs/legal-entity/search-by-name
+ * @desc Busca pessoa jurídica por nome fantasia na API TOTVS
+ * @access Public
+ * @body {
+ *   fantasyName: string (obrigatório) - Nome fantasia para buscar
+ *   page: number (opcional) - Página para buscar (default: 1)
+ *   pageSize: number (opcional) - Tamanho da página (default: 100)
+ * }
+ */
+router.post(
+  '/legal-entity/search-by-name',
+  asyncHandler(async (req, res) => {
+    const { fantasyName, page = 1, pageSize = 100 } = req.body;
+
+    if (!fantasyName || fantasyName.trim().length < 2) {
+      return errorResponse(
+        res,
+        'O campo fantasyName é obrigatório e deve ter pelo menos 2 caracteres',
+        400,
+        'MISSING_FANTASY_NAME',
+      );
+    }
+
+    const searchTerm = fantasyName.trim().toUpperCase();
+
+    try {
+      // Obter token
+      const tokenData = await getToken();
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+
+      // Payload sem filtro específico para buscar múltiplos clientes
+      const payload = {
+        filter: {
+          isCustomer: true, // Filtra apenas clientes
+        },
+        expand: 'phones,emails,addresses,contacts,classifications,observations',
+        page: page,
+        pageSize: pageSize,
+        order: 'name',
+      };
+
+      console.log('🔍 Buscando clientes por nome fantasia na API TOTVS:', {
+        endpoint,
+        searchTerm,
+        page,
+        pageSize,
+      });
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000, // Timeout maior para busca ampla
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      // Filtrar resultados pelo nome fantasia localmente
+      const allItems = response.data?.items || [];
+      const filteredItems = allItems.filter((item) => {
+        const itemFantasyName = (item.fantasyName || '').toUpperCase();
+        const itemName = (item.name || '').toUpperCase();
+        return (
+          itemFantasyName.includes(searchTerm) || itemName.includes(searchTerm)
+        );
+      });
+
+      console.log(
+        `✅ Busca concluída: ${filteredItems.length} de ${allItems.length} clientes encontrados`,
+      );
+
+      successResponse(
+        res,
+        {
+          items: filteredItems,
+          totalFiltered: filteredItems.length,
+          totalFetched: allItems.length,
+          hasMore: response.data?.hasNext || false,
+          page: page,
+          pageSize: pageSize,
+        },
+        `${filteredItems.length} cliente(s) encontrado(s)`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar clientes por nome na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        let errorMessage = 'Erro ao buscar clientes na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
 export default router;
