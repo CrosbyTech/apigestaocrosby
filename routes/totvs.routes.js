@@ -1380,7 +1380,7 @@ router.post(
 router.post(
   '/legal-entity/search-by-name',
   asyncHandler(async (req, res) => {
-    const { fantasyName, page = 1, pageSize = 999999 } = req.body;
+    const { fantasyName, maxPages = 50 } = req.body;
 
     if (!fantasyName || fantasyName.trim().length < 2) {
       return errorResponse(
@@ -1399,47 +1399,65 @@ router.post(
 
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
-      // Payload sem filtro específico para buscar todas as pessoas jurídicas
-      const payload = {
-        filter: {},
-        expand: 'phones,emails,addresses,contacts,classifications,observations',
-        page: page,
-        pageSize: pageSize,
-        order: 'name',
-      };
-
       console.log('🔍 Buscando clientes por nome fantasia na API TOTVS:', {
         endpoint,
         searchTerm,
-        page,
-        pageSize,
+        maxPages,
       });
 
-      const doRequest = async (accessToken) =>
-        axios.post(endpoint, payload, {
+      const doRequest = async (accessToken, page) => {
+        const payload = {
+          filter: {},
+          expand:
+            'phones,emails,addresses,contacts,classifications,observations',
+          page: page,
+          pageSize: 100, // Limite da API TOTVS
+          order: 'name',
+        };
+
+        return axios.post(endpoint, payload, {
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
-          timeout: 60000, // Timeout maior para busca ampla
+          timeout: 60000,
         });
+      };
 
-      let response;
-      try {
-        response = await doRequest(tokenData.access_token);
-      } catch (error) {
-        if (error.response?.status === 401) {
-          console.log('🔄 Token inválido. Renovando token...');
-          const newTokenData = await getToken(true);
-          response = await doRequest(newTokenData.access_token);
-        } else {
-          throw error;
+      // Buscar múltiplas páginas até encontrar resultados ou atingir limite
+      let allItems = [];
+      let currentPage = 1;
+      let hasMore = true;
+      let token = tokenData.access_token;
+
+      while (hasMore && currentPage <= maxPages) {
+        let response;
+        try {
+          response = await doRequest(token, currentPage);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            console.log('🔄 Token inválido. Renovando token...');
+            const newTokenData = await getToken(true);
+            token = newTokenData.access_token;
+            response = await doRequest(token, currentPage);
+          } else {
+            throw error;
+          }
         }
+
+        const pageItems = response.data?.items || [];
+        allItems = allItems.concat(pageItems);
+        hasMore = response.data?.hasNext || false;
+
+        console.log(
+          `📄 Página ${currentPage}: ${pageItems.length} itens (total: ${allItems.length})`,
+        );
+
+        currentPage++;
       }
 
       // Filtrar resultados pelo nome fantasia localmente
-      const allItems = response.data?.items || [];
       const filteredItems = allItems.filter((item) => {
         const itemFantasyName = (item.fantasyName || '').toUpperCase();
         const itemName = (item.name || '').toUpperCase();
@@ -1449,7 +1467,7 @@ router.post(
       });
 
       console.log(
-        `✅ Busca concluída: ${filteredItems.length} de ${allItems.length} clientes encontrados`,
+        `✅ Busca concluída: ${filteredItems.length} de ${allItems.length} clientes encontrados em ${currentPage - 1} páginas`,
       );
 
       successResponse(
@@ -1458,9 +1476,8 @@ router.post(
           items: filteredItems,
           totalFiltered: filteredItems.length,
           totalFetched: allItems.length,
-          hasMore: response.data?.hasNext || false,
-          page: page,
-          pageSize: pageSize,
+          pagesSearched: currentPage - 1,
+          hasMore: hasMore,
         },
         `${filteredItems.length} cliente(s) encontrado(s)`,
       );
