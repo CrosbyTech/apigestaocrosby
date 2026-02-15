@@ -1380,7 +1380,7 @@ router.post(
 router.post(
   '/legal-entity/search-by-name',
   asyncHandler(async (req, res) => {
-    const { fantasyName, page = 1, pageSize = 100 } = req.body;
+    const { fantasyName, page = 1, pageSize = 1000 } = req.body;
 
     if (!fantasyName || fantasyName.trim().length < 2) {
       return errorResponse(
@@ -1399,11 +1399,9 @@ router.post(
 
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
-      // Payload sem filtro específico para buscar múltiplos clientes
+      // Payload sem filtro específico para buscar todas as pessoas jurídicas
       const payload = {
-        filter: {
-          isCustomer: true, // Filtra apenas clientes
-        },
+        filter: {},
         expand: 'phones,emails,addresses,contacts,classifications,observations',
         page: page,
         pageSize: pageSize,
