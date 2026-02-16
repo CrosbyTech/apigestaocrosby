@@ -1529,4 +1529,316 @@ router.post(
   }),
 );
 
+/**
+ * @route POST /totvs/individual/search
+ * @desc Busca dados de pessoa física (PF) na API TOTVS Moda
+ * @access Public
+ * @body {
+ *   personCode: number (código da pessoa - obrigatório)
+ * }
+ */
+router.post(
+  '/individual/search',
+  asyncHandler(async (req, res) => {
+    const { personCode } = req.body;
+
+    // Validação do personCode
+    if (personCode === undefined || personCode === null || personCode === '') {
+      return errorResponse(
+        res,
+        'O campo personCode é obrigatório',
+        400,
+        'MISSING_PERSON_CODE',
+      );
+    }
+
+    // Converter para número se vier como string
+    const personCodeNum =
+      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
+
+    if (isNaN(personCodeNum) || personCodeNum < 0) {
+      return errorResponse(
+        res,
+        'O campo personCode deve ser um número inteiro válido',
+        400,
+        'INVALID_PERSON_CODE',
+      );
+    }
+
+    try {
+      // Obter token atual (ou gerar novo se necessário)
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      // Preparar o payload para busca por código da pessoa
+      const payload = {
+        filter: {
+          personCodeList: [personCodeNum],
+        },
+        page: 1,
+        pageSize: 10,
+      };
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+      console.log('🔍 Consultando pessoa física na API TOTVS:', {
+        endpoint,
+        personCode: personCodeNum,
+      });
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      console.log('✅ Dados da pessoa física obtidos com sucesso');
+
+      successResponse(
+        res,
+        response.data,
+        'Dados da pessoa física obtidos com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao consultar pessoa física na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        let errorMessage = 'Erro ao consultar pessoa física na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              (error.response.status === 404
+                ? 'Pessoa física não encontrada'
+                : errorMessage);
+          }
+        } else if (error.response.status === 404) {
+          errorMessage = 'Pessoa física não encontrada';
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+          payload: { personCode: personCodeNum },
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada. Verifique se a URL está correta.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS. O servidor pode estar offline.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/individual/search-by-name
+ * @desc Busca pessoa física por nome na API TOTVS
+ * @access Public
+ * @body {
+ *   name: string (obrigatório) - Nome para buscar
+ *   maxPages: number (opcional) - Máximo de páginas (default: 50)
+ * }
+ */
+router.post(
+  '/individual/search-by-name',
+  asyncHandler(async (req, res) => {
+    const { name, maxPages = 50 } = req.body;
+
+    if (!name || name.trim().length < 2) {
+      return errorResponse(
+        res,
+        'O campo name é obrigatório e deve ter pelo menos 2 caracteres',
+        400,
+        'MISSING_NAME',
+      );
+    }
+
+    const searchTerm = name.trim().toUpperCase();
+
+    try {
+      // Obter token
+      const tokenData = await getToken();
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+      console.log('🔍 Buscando pessoas físicas por nome na API TOTVS:', {
+        endpoint,
+        searchTerm,
+        maxPages,
+      });
+
+      const doRequest = async (accessToken, page) => {
+        const payload = {
+          filter: {},
+          expand:
+            'phones,emails,addresses,contacts,classifications,observations',
+          page: page,
+          pageSize: 100, // Limite da API TOTVS
+          order: 'name',
+        };
+
+        return axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+        });
+      };
+
+      // Buscar múltiplas páginas até encontrar resultados ou atingir limite
+      let allItems = [];
+      let currentPage = 1;
+      let hasMore = true;
+      let token = tokenData.access_token;
+
+      while (hasMore && currentPage <= maxPages) {
+        let response;
+        try {
+          response = await doRequest(token, currentPage);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            console.log('🔄 Token inválido. Renovando token...');
+            const newTokenData = await getToken(true);
+            token = newTokenData.access_token;
+            response = await doRequest(token, currentPage);
+          } else {
+            throw error;
+          }
+        }
+
+        const pageItems = response.data?.items || [];
+        allItems = allItems.concat(pageItems);
+        hasMore = response.data?.hasNext || false;
+
+        console.log(
+          `📄 Página ${currentPage}: ${pageItems.length} itens (total: ${allItems.length})`,
+        );
+
+        currentPage++;
+      }
+
+      // Filtrar resultados pelo nome localmente
+      const filteredItems = allItems.filter((item) => {
+        const itemName = (item.name || '').toUpperCase();
+        const itemNickname = (item.nickname || '').toUpperCase();
+        return (
+          itemName.includes(searchTerm) || itemNickname.includes(searchTerm)
+        );
+      });
+
+      console.log(
+        `✅ Busca concluída: ${filteredItems.length} de ${allItems.length} pessoas encontradas em ${currentPage - 1} páginas`,
+      );
+
+      successResponse(
+        res,
+        {
+          items: filteredItems,
+          totalFiltered: filteredItems.length,
+          totalFetched: allItems.length,
+          pagesSearched: currentPage - 1,
+          hasMore: hasMore,
+        },
+        `${filteredItems.length} pessoa(s) encontrada(s)`,
+      );
+    } catch (error) {
+      console.error(
+        '❌ Erro ao buscar pessoas físicas por nome na API TOTVS:',
+        {
+          message: error.message,
+          code: error.code,
+          response: error.response?.data,
+          status: error.response?.status,
+        },
+      );
+
+      if (error.response) {
+        let errorMessage = 'Erro ao buscar pessoas físicas na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
 export default router;
