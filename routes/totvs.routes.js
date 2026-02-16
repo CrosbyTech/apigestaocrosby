@@ -1883,7 +1883,7 @@ router.get(
     params.append('Page', page || '1');
     params.append('PageSize', pageSize || '1000');
 
-    const url = `${TOTVS_BASE_URL}/branch/v2/branches?${params.toString()}`;
+    const url = `${TOTVS_BASE_URL}/person/v2/branchesList?${params.toString()}`;
 
     console.log('🏢 Buscando empresas TOTVS:', url);
 
@@ -1903,7 +1903,7 @@ router.get(
         pageParams.append('Page', currentPage.toString());
         pageParams.append('PageSize', '1000');
 
-        const pageUrl = `${TOTVS_BASE_URL}/branch/v2/branches?${pageParams.toString()}`;
+        const pageUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?${pageParams.toString()}`;
 
         const response = await axios.get(pageUrl, {
           headers: {
