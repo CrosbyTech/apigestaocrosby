@@ -1841,4 +1841,167 @@ router.post(
   }),
 );
 
+/**
+ * @route GET /totvs/branches
+ * @desc Busca lista de empresas/filiais da API TOTVS
+ * @access Public
+ * @example GET ${API_BASE_URL}/api/totvs/branches
+ * @query {
+ *   branchCodePool: number (opcional - código empresa base para filtro),
+ *   page: number (opcional - página inicial é 1),
+ *   pageSize: number (opcional - máximo 1000)
+ * }
+ */
+router.get(
+  '/branches',
+  asyncHandler(async (req, res) => {
+    const { branchCodePool, page, pageSize } = req.query;
+
+    // Obter token de autenticação
+    const tokenData = await getToken();
+    const accessToken = tokenData.access_token;
+
+    if (!accessToken) {
+      return errorResponse(
+        res,
+        'Não foi possível obter token de autenticação TOTVS',
+        500,
+        'TOKEN_ERROR',
+      );
+    }
+
+    // Construir query params
+    const params = new URLSearchParams();
+
+    if (branchCodePool) {
+      params.append('BranchCodePool', branchCodePool);
+    } else {
+      // Default: usar empresa 1 como pool base
+      params.append('BranchCodePool', '1');
+    }
+
+    params.append('Page', page || '1');
+    params.append('PageSize', pageSize || '1000');
+
+    const url = `${TOTVS_BASE_URL}/branch/v2/branches?${params.toString()}`;
+
+    console.log('🏢 Buscando empresas TOTVS:', url);
+
+    try {
+      // Buscar todas as páginas
+      let allBranches = [];
+      let currentPage = parseInt(page) || 1;
+      let hasNext = true;
+
+      while (hasNext) {
+        const pageParams = new URLSearchParams();
+        if (branchCodePool) {
+          pageParams.append('BranchCodePool', branchCodePool);
+        } else {
+          pageParams.append('BranchCodePool', '1');
+        }
+        pageParams.append('Page', currentPage.toString());
+        pageParams.append('PageSize', '1000');
+
+        const pageUrl = `${TOTVS_BASE_URL}/branch/v2/branches?${pageParams.toString()}`;
+
+        const response = await axios.get(pageUrl, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+          },
+          timeout: 60000,
+        });
+
+        const data = response.data;
+
+        if (data.items && Array.isArray(data.items)) {
+          allBranches = allBranches.concat(data.items);
+        }
+
+        hasNext = data.hasNext || false;
+        currentPage++;
+
+        // Limite de segurança para evitar loop infinito
+        if (currentPage > 50) {
+          console.log('⚠️ Limite de páginas atingido (50)');
+          break;
+        }
+      }
+
+      console.log(`✅ Total de empresas encontradas: ${allBranches.length}`);
+
+      // Mapear para formato compatível com FiltroEmpresa
+      const empresas = allBranches.map((branch) => ({
+        cd_empresa: String(branch.code),
+        nm_grupoempresa:
+          branch.branchGroupName ||
+          branch.fantasyName ||
+          branch.description ||
+          `Empresa ${branch.code}`,
+        cnpj: branch.cnpj,
+        personCode: branch.personCode,
+        personName: branch.personName,
+        fantasyName: branch.fantasyName,
+        description: branch.description,
+      }));
+
+      // Ordenar por código
+      empresas.sort((a, b) => parseInt(a.cd_empresa) - parseInt(b.cd_empresa));
+
+      return successResponse(
+        res,
+        {
+          data: empresas,
+          total: empresas.length,
+        },
+        `${empresas.length} empresas encontradas`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar empresas TOTVS:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        let errorMessage = 'Erro ao buscar empresas na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
 export default router;
