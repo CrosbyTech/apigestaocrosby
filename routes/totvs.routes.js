@@ -2550,17 +2550,35 @@ router.get(
         }
       }
 
-      if (status === 'Vencido') {
+      if (status === 'Pago') {
+        // PAGO: tem valor pago OU data de liquidação
+        filteredItems = filteredItems.filter(
+          (item) => (item.paidValue && item.paidValue > 0) || item.paymentDate,
+        );
+      } else if (status === 'Vencido') {
+        // VENCIDO: antes de hoje, SEM valor pago e SEM data de liquidação
         const hoje = new Date();
         hoje.setHours(0, 0, 0, 0);
         filteredItems = filteredItems.filter((item) => {
           const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
-          return dataVenc && dataVenc < hoje && !item.paymentDate;
+          const temPagamento = (item.paidValue && item.paidValue > 0) || item.paymentDate;
+          return dataVenc && dataVenc < hoje && !temPagamento;
         });
-      } else if (status === 'Pago' || status === 'Liquidado') {
-        filteredItems = filteredItems.filter(
-          (item) => item.paymentDate || item.dischargeType > 0,
-        );
+      } else if (status === 'A Vencer') {
+        // A VENCER: a partir de hoje, SEM valor pago e SEM data de liquidação
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
+        filteredItems = filteredItems.filter((item) => {
+          const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
+          const temPagamento = (item.paidValue && item.paidValue > 0) || item.paymentDate;
+          return dataVenc && dataVenc >= hoje && !temPagamento;
+        });
+      } else if (status === 'Em Aberto') {
+        // EM ABERTO: tudo que NÃO tem valor pago e NÃO tem data de liquidação (A Vencer + Vencido)
+        filteredItems = filteredItems.filter((item) => {
+          const temPagamento = (item.paidValue && item.paidValue > 0) || item.paymentDate;
+          return !temPagamento;
+        });
       }
 
       if (cd_portador) {
