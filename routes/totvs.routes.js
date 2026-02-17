@@ -2860,6 +2860,7 @@ const FRANCHISE_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
 /**
  * @route GET /totvs/franchise-clients
  * @desc Retorna lista de códigos de clientes FRANQUIA (classificação TOTVS)
+ * Classificações: type 2 codeList ["1"] OU type 20 codeList ["4"]
  */
 router.get(
   '/franchise-clients',
@@ -2899,10 +2900,23 @@ router.get(
       let token = tokenData.access_token;
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
-      const doRequest = async (accessToken, page) => {
+      // Buscar com filtro de classificação direto na API TOTVS
+      // Duas classificações de franquia: type 2 code 1 e type 20 code 4
+      const doRequest = async (
+        accessToken,
+        classificationType,
+        codeList,
+        page,
+      ) => {
         const payload = {
-          filter: {},
-          expand: 'classifications',
+          filter: {
+            classifications: [
+              {
+                type: classificationType,
+                codeList: codeList,
+              },
+            ],
+          },
           page,
           pageSize: 100,
           order: 'code',
@@ -2917,60 +2931,85 @@ router.get(
         });
       };
 
-      // Função para verificar se um cliente é franquia
-      const isFranquia = (item) => {
-        if (!item.classifications || !Array.isArray(item.classifications))
-          return false;
-        return item.classifications.some(
-          (c) =>
-            (c.typeCode === 2 && c.code === 1) ||
-            (c.typeCode === 20 && c.code === 4),
-        );
+      // Função para buscar TODAS as páginas de uma classificação
+      const fetchAllPages = async (classificationType, codeList) => {
+        let items = [];
+        let currentPage = 1;
+        let hasMore = true;
+        const maxPages = 200;
+
+        while (hasMore && currentPage <= maxPages) {
+          let response;
+          try {
+            response = await doRequest(
+              token,
+              classificationType,
+              codeList,
+              currentPage,
+            );
+          } catch (error) {
+            if (error.response?.status === 401) {
+              const newTokenData = await getToken(true);
+              token = newTokenData.access_token;
+              response = await doRequest(
+                token,
+                classificationType,
+                codeList,
+                currentPage,
+              );
+            } else {
+              throw error;
+            }
+          }
+
+          const pageItems = response.data?.items || [];
+          hasMore = response.data?.hasNext || false;
+
+          items = items.concat(
+            pageItems.map((item) => ({
+              code: item.code,
+              name: item.name || '',
+              fantasyName: item.fantasyName || '',
+              cnpj: item.cnpj || '',
+            })),
+          );
+
+          if (currentPage % 10 === 0 || !hasMore) {
+            console.log(
+              `📄 Type ${classificationType} - Página ${currentPage}: ${pageItems.length} itens (total: ${items.length})`,
+            );
+          }
+
+          currentPage++;
+        }
+
+        return items;
       };
 
-      let allFranquias = [];
-      let currentPage = 1;
-      let hasMore = true;
-      const maxPages = 200; // segurança
+      console.log(
+        '🔍 Buscando clientes FRANQUIA na API TOTVS (filtro por classificação)...',
+      );
 
-      console.log('🔍 Buscando clientes FRANQUIA na API TOTVS...');
+      // Buscar as duas classificações em PARALELO
+      const [franquiasTipo2, franquiasTipo20] = await Promise.all([
+        fetchAllPages(2, ['1']),
+        fetchAllPages(20, ['4']),
+      ]);
 
-      while (hasMore && currentPage <= maxPages) {
-        let response;
-        try {
-          response = await doRequest(token, currentPage);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const newTokenData = await getToken(true);
-            token = newTokenData.access_token;
-            response = await doRequest(token, currentPage);
-          } else {
-            throw error;
-          }
+      console.log(
+        `📊 Tipo 2/Code 1: ${franquiasTipo2.length} | Tipo 20/Code 4: ${franquiasTipo20.length}`,
+      );
+
+      // Mesclar e deduplicar por code
+      const codesSet = new Set();
+      const allFranquias = [];
+
+      [...franquiasTipo2, ...franquiasTipo20].forEach((item) => {
+        if (!codesSet.has(item.code)) {
+          codesSet.add(item.code);
+          allFranquias.push(item);
         }
-
-        const pageItems = response.data?.items || [];
-        hasMore = response.data?.hasNext || false;
-
-        // Filtrar apenas franquias desta página
-        const franquiasDaPagina = pageItems.filter(isFranquia);
-        allFranquias = allFranquias.concat(
-          franquiasDaPagina.map((item) => ({
-            code: item.code,
-            name: item.name || '',
-            fantasyName: item.fantasyName || '',
-            cnpj: item.cnpj || '',
-          })),
-        );
-
-        if (currentPage % 10 === 0 || !hasMore) {
-          console.log(
-            `📄 Página ${currentPage}: ${franquiasDaPagina.length} franquias nesta pág (total: ${allFranquias.length})`,
-          );
-        }
-
-        currentPage++;
-      }
+      });
 
       // Salvar no cache
       cachedFranchiseClients = allFranquias;
@@ -2978,7 +3017,7 @@ router.get(
 
       const totalTime = Date.now() - startTime;
       console.log(
-        `✅ ${allFranquias.length} franquias encontradas em ${totalTime}ms (${currentPage - 1} páginas)`,
+        `✅ ${allFranquias.length} franquias encontradas em ${totalTime}ms`,
       );
 
       successResponse(
