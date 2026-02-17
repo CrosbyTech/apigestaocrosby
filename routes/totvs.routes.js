@@ -3033,4 +3033,145 @@ router.get(
   }),
 );
 
+// ==========================================
+// ROTA: BUSCAR CLIENTES MULTIMARCAS (por classificação)
+// Cache em memória (recarrega a cada 60 min)
+// Classificação MULTIMARCAS: Tipo 20 / Classificação 2
+// ==========================================
+let cachedMultibrandClients = null;
+let multibrandCacheTimestamp = 0;
+const MULTIBRAND_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
+
+/**
+ * @route GET /totvs/multibrand-clients
+ * @desc Retorna lista de códigos de clientes MULTIMARCAS (classificação TOTVS)
+ * Classificação: type 20 codeList ["2"]
+ */
+router.get(
+  '/multibrand-clients',
+  asyncHandler(async (req, res) => {
+    const now = Date.now();
+    const forceRefresh = req.query.refresh === 'true';
+
+    // Retornar cache se válido
+    if (
+      !forceRefresh &&
+      cachedMultibrandClients &&
+      now - multibrandCacheTimestamp < MULTIBRAND_CACHE_TTL
+    ) {
+      console.log(
+        `📋 Multibrand clients (cache): ${cachedMultibrandClients.length} clientes`,
+      );
+      return successResponse(
+        res,
+        cachedMultibrandClients,
+        `${cachedMultibrandClients.length} multimarcas (cache)`,
+      );
+    }
+
+    const startTime = Date.now();
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Token indisponível',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      let token = tokenData.access_token;
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+
+      const doRequest = async (accessToken, page) => {
+        const payload = {
+          filter: {
+            classifications: [
+              {
+                type: 20,
+                codeList: ['2'],
+              },
+            ],
+          },
+          page,
+          pageSize: 100,
+          order: 'code',
+        };
+        return axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+        });
+      };
+
+      let allMultibrand = [];
+      let currentPage = 1;
+      let hasMore = true;
+      const maxPages = 200;
+
+      console.log(
+        '🔍 Buscando clientes MULTIMARCAS na API TOTVS (tipo 20, classificação 2)...',
+      );
+
+      while (hasMore && currentPage <= maxPages) {
+        let response;
+        try {
+          response = await doRequest(token, currentPage);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            const newTokenData = await getToken(true);
+            token = newTokenData.access_token;
+            response = await doRequest(token, currentPage);
+          } else {
+            throw error;
+          }
+        }
+
+        const pageItems = response.data?.items || [];
+        hasMore = response.data?.hasNext || false;
+
+        allMultibrand = allMultibrand.concat(
+          pageItems.map((item) => ({
+            code: item.code,
+            name: item.name || '',
+            fantasyName: item.fantasyName || '',
+            cnpj: item.cnpj || '',
+          })),
+        );
+
+        if (currentPage % 10 === 0 || !hasMore) {
+          console.log(
+            `📄 Multimarcas - Página ${currentPage}: ${pageItems.length} itens (total: ${allMultibrand.length})`,
+          );
+        }
+
+        currentPage++;
+      }
+
+      // Salvar no cache
+      cachedMultibrandClients = allMultibrand;
+      multibrandCacheTimestamp = Date.now();
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `✅ ${allMultibrand.length} multimarcas encontrados em ${totalTime}ms`,
+      );
+
+      successResponse(
+        res,
+        allMultibrand,
+        `${allMultibrand.length} multimarcas encontrados em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar multimarcas:', error.message);
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
 export default router;
