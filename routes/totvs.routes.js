@@ -2336,6 +2336,7 @@ router.get(
         tp_documento,
         tp_cobranca,
         tp_baixa,
+        situacao, // statusList TOTVS: 1=Normal, 2=Devolvido, 3=Cancelado, 4=Quebrada
         branches, // branchCodes das empresas selecionadas pelo usuário
       } = req.query;
 
@@ -2374,6 +2375,15 @@ router.get(
 
       // Montar filtro TOTVS
       const filter = { branchCodeList };
+
+      // Filtro de situação (statusList)
+      if (situacao) {
+        filter.statusList = situacao
+          .split(',')
+          .map((s) => parseInt(s.trim()))
+          .filter((s) => !isNaN(s));
+      }
+      // Se não informado, não filtra (retorna todas as situações)
 
       // Filtro de datas
       if (modo === 'emissao') {
@@ -2521,8 +2531,24 @@ router.get(
         `📊 ${allItems.length} itens buscados em ${Date.now() - startTime}ms`,
       );
 
-      // PASSO 3: Filtros locais (status vencido/pago e portador)
+      // PASSO 3: Filtros locais (status vencido/pago, situação e portador)
       let filteredItems = allItems;
+
+      // Filtro local de situação (fallback - API TOTVS pode ignorar statusList em certas combinações)
+      if (situacao) {
+        const statusPermitidos = situacao
+          .split(',')
+          .map((s) => parseInt(s.trim()))
+          .filter((s) => !isNaN(s));
+        if (statusPermitidos.length > 0) {
+          filteredItems = filteredItems.filter((item) =>
+            statusPermitidos.includes(item.status),
+          );
+          console.log(
+            `🔍 Filtro situação [${statusPermitidos}]: ${allItems.length} → ${filteredItems.length}`,
+          );
+        }
+      }
 
       if (status === 'Vencido') {
         const hoje = new Date();
