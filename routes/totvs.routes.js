@@ -2329,35 +2329,28 @@ async function fetchClientNames(customerCodes, token) {
     Authorization: `Bearer ${token}`,
   };
 
-  // Processar em batches paralelos (2 batches por vez para não sobrecarregar)
   for (let i = 0; i < uncachedCodes.length; i += BATCH_SIZE) {
     const batch = uncachedCodes.slice(i, i + BATCH_SIZE);
-    const payload = {
-      filter: { personCodeList: batch },
-      page: 1,
-      pageSize: batch.length,
-    };
 
     // Buscar PJ e PF em paralelo para o mesmo batch
     const [pjResult, pfResult] = await Promise.allSettled([
-      axios
-        .post(
-          `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-          payload,
-          { headers, timeout: 15000 },
-        )
-        .catch(() => null),
-      axios
-        .post(
-          `${TOTVS_BASE_URL}/person/v2/individuals/search`,
-          payload,
-          { headers, timeout: 15000 },
-        )
-        .catch(() => null),
+      axios.post(
+        `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+        { filter: { personCodeList: batch }, page: 1, pageSize: 100 },
+        { headers, timeout: 15000 },
+      ),
+      axios.post(
+        `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+        { filter: { personCodeList: batch }, page: 1, pageSize: 100 },
+        { headers, timeout: 15000 },
+      ),
     ]);
 
     // Processar PJ (fantasyName ou name)
     if (pjResult.status === 'fulfilled' && pjResult.value?.data?.items) {
+      console.log(
+        `👤 PJ batch ${i / BATCH_SIZE + 1}: ${pjResult.value.data.items.length} encontrados`,
+      );
       for (const person of pjResult.value.data.items) {
         if (person.personCode) {
           const nome =
@@ -2365,22 +2358,38 @@ async function fetchClientNames(customerCodes, token) {
           if (nome) clientNameCache.set(person.personCode, nome);
         }
       }
+    } else if (pjResult.status === 'rejected') {
+      console.log(
+        `⚠️ PJ batch ${i / BATCH_SIZE + 1} erro: ${pjResult.reason?.message || 'desconhecido'} (status: ${pjResult.reason?.response?.status})`,
+      );
     }
 
     // Processar PF (name ou personName)
     if (pfResult.status === 'fulfilled' && pfResult.value?.data?.items) {
+      console.log(
+        `👤 PF batch ${i / BATCH_SIZE + 1}: ${pfResult.value.data.items.length} encontrados`,
+      );
       for (const person of pfResult.value.data.items) {
         if (person.personCode && !clientNameCache.has(person.personCode)) {
           const nome = person.name || person.personName;
           if (nome) clientNameCache.set(person.personCode, nome);
         }
       }
+    } else if (pfResult.status === 'rejected') {
+      console.log(
+        `⚠️ PF batch ${i / BATCH_SIZE + 1} erro: ${pfResult.reason?.message || 'desconhecido'} (status: ${pfResult.reason?.response?.status})`,
+      );
     }
   }
 
+  // Contar quantos ficaram sem nome
+  const semNome = customerCodes.filter((code) => !clientNameCache.has(code));
   console.log(
-    `👤 ${clientNameCache.size} nomes em cache (${Date.now() - startTime}ms)`,
+    `👤 ${clientNameCache.size} nomes em cache, ${semNome.length} sem nome (${Date.now() - startTime}ms)`,
   );
+  if (semNome.length > 0 && semNome.length <= 10) {
+    console.log(`👤 Códigos sem nome: ${semNome.join(', ')}`);
+  }
 }
 
 async function getBranchCodes(token) {
@@ -2553,6 +2562,7 @@ router.get(
             page: pageNum,
             pageSize: PAGE_SIZE,
             order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
+            expand: 'person',
           },
           {
             headers: {
@@ -2704,15 +2714,55 @@ router.get(
         }
       }
 
-      // PASSO 4: Buscar nomes dos clientes em batch (PJ + PF paralelo, com cache)
-      const uniqueCustomerCodes = [
-        ...new Set(
-          filteredItems
-            .map((item) => item.customerCode)
-            .filter((code) => code != null),
-        ),
-      ];
-      await fetchClientNames(uniqueCustomerCodes, token);
+      // PASSO 4: Buscar nomes dos clientes
+      // Prioridade: 1) personName do expand:'person', 2) cache de nomes, 3) batch lookup PJ+PF
+      // Log para debug: verificar se expand:'person' retorna o nome
+      if (filteredItems.length > 0) {
+        const sample = filteredItems[0];
+        console.log('👤 Amostra item[0]:', {
+          customerCode: sample.customerCode,
+          customerCpfCnpj: sample.customerCpfCnpj,
+          personName: sample.personName,
+          person: sample.person ? Object.keys(sample.person) : 'sem person',
+          customerName: sample.customerName,
+          name: sample.name,
+        });
+      }
+
+      // Tentar usar o nome vindo direto do expand:'person' — gravar no cache
+      let expandWorked = false;
+      for (const item of filteredItems) {
+        const nome =
+          item.personName ||
+          item.customerName ||
+          item.name ||
+          item.person?.name ||
+          item.person?.fantasyName ||
+          item.person?.personName;
+        if (nome && item.customerCode) {
+          clientNameCache.set(item.customerCode, nome);
+          expandWorked = true;
+        }
+      }
+
+      // Se expand não trouxe nomes, fazer lookup em batch
+      if (!expandWorked) {
+        console.log(
+          '👤 expand:person não retornou nomes, fazendo batch lookup...',
+        );
+        const uniqueCustomerCodes = [
+          ...new Set(
+            filteredItems
+              .map((item) => item.customerCode)
+              .filter((code) => code != null),
+          ),
+        ];
+        await fetchClientNames(uniqueCustomerCodes, token);
+      } else {
+        console.log(
+          `👤 expand:person OK - ${clientNameCache.size} nomes em cache`,
+        );
+      }
 
       // PASSO 5: Mapear para formato frontend (com nomes de clientes)
       const mappedItems = filteredItems.map((item) => ({
