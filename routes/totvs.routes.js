@@ -2736,6 +2736,7 @@ router.post(
         const batch = uniqueCodes.slice(i, i + BATCH_SIZE);
         const payload = {
           filter: { personCodeList: batch },
+          expand: 'phones',
           page: 1,
           pageSize: batch.length,
         };
