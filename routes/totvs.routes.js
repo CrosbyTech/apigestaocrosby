@@ -2277,10 +2277,40 @@ router.post(
 );
 
 // ==========================================
-// ROTA OTIMIZADA PARA CONTAS A RECEBER V2
-// Filtros aplicados diretamente na API TOTVS
-// Busca nome do cliente via CPF/CNPJ
+// ROTA OTIMIZADA PARA CONTAS A RECEBER V3
+// Páginas buscadas em PARALELO (não sequencial)
+// Sem lookup de nomes (usa CPF/CNPJ direto)
+// BranchCodeList em cache de memória
 // ==========================================
+
+// Cache de branchCodes em memória (recarrega a cada 30 min)
+let cachedBranchCodes = null;
+let branchCacheTimestamp = 0;
+const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
+async function getBranchCodes(token) {
+  const now = Date.now();
+  if (cachedBranchCodes && (now - branchCacheTimestamp) < BRANCH_CACHE_TTL) {
+    return cachedBranchCodes;
+  }
+  try {
+    const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+    const resp = await axios.get(branchesUrl, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      timeout: 10000,
+    });
+    if (resp.data?.items?.length > 0) {
+      cachedBranchCodes = resp.data.items.map((b) => parseInt(b.code)).filter((c) => !isNaN(c) && c > 0);
+      branchCacheTimestamp = now;
+      return cachedBranchCodes;
+    }
+  } catch (err) {
+    console.log('⚠️ Erro ao buscar branches, usando cache/fallback');
+  }
+  // Fallback se cache expirou e API falhou
+  return cachedBranchCodes || [1,2,5,6,11,55,65,75,85,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,870,880,890,900,910,920,930,940,950,960,970,980,990];
+}
+
 router.get(
   '/accounts-receivable/filter',
   asyncHandler(async (req, res) => {
@@ -2300,57 +2330,24 @@ router.get(
         tp_baixa,
       } = req.query;
 
-      // Validar parâmetros obrigatórios
       if (!dt_inicio || !dt_fim) {
-        return errorResponse(
-          res,
-          'Parâmetros dt_inicio e dt_fim são obrigatórios',
-          400,
-          'MISSING_PARAMS',
-        );
+        return errorResponse(res, 'Parâmetros dt_inicio e dt_fim são obrigatórios', 400, 'MISSING_PARAMS');
       }
 
-      // Obter token de autenticação
       const tokenData = await getToken();
       if (!tokenData?.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
+        return errorResponse(res, 'Token indisponível', 503, 'TOKEN_UNAVAILABLE');
       }
 
       let token = tokenData.access_token;
 
-      // Buscar filiais disponíveis (cache em memória seria ideal)
-      let branchCodeList = [1, 2, 3, 4, 5];
-      try {
-        const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
-        const branchesResponse = await axios.get(branchesUrl, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/json',
-          },
-          timeout: 15000,
-        });
-        if (branchesResponse.data?.items) {
-          branchCodeList = branchesResponse.data.items
-            .map((b) => parseInt(b.code))
-            .filter((c) => !isNaN(c) && c > 0);
-        }
-      } catch (err) {
-        console.log('⚠️ Usando filiais padrão');
-      }
+      // BranchCodes com cache em memória
+      const branchCodeList = await getBranchCodes(token);
 
-      // Montar filtro usando campos CORRETOS do schema TOTVS
-      const filter = {
-        branchCodeList,
-        statusList: [1], // 1 = Normal (exclui cancelados/devolvidos/quebradas)
-        documentTypeList: [1], // 1 = Fatura
-      };
+      // Montar filtro TOTVS
+      const filter = { branchCodeList };
 
-      // Filtro de datas usando campos CORRETOS do schema
+      // Filtro de datas
       if (modo === 'emissao') {
         filter.startIssueDate = `${dt_inicio}T00:00:00`;
         filter.endIssueDate = `${dt_fim}T23:59:59`;
@@ -2359,56 +2356,40 @@ router.get(
         filter.endExpiredDate = `${dt_fim}T23:59:59`;
       }
 
-      // Filtro de cliente específico
+      // Filtros opcionais da API
       if (cd_cliente) {
         const clientes = cd_cliente.split(',').map((c) => parseInt(c.trim())).filter((c) => !isNaN(c));
-        if (clientes.length > 0) {
-          filter.customerCodeList = clientes;
-        }
+        if (clientes.length > 0) filter.customerCodeList = clientes;
       }
-
-      // Filtro de fatura específica
       if (nr_fatura) {
         const faturas = nr_fatura.split(',').map((f) => parseFloat(f.trim())).filter((f) => !isNaN(f));
-        if (faturas.length > 0) {
-          filter.receivableCodeList = faturas;
-        }
+        if (faturas.length > 0) filter.receivableCodeList = faturas;
       }
-
-      // Filtro de tipo de documento
       if (tp_documento) {
         filter.documentTypeList = tp_documento.split(',').map((d) => parseInt(d.trim())).filter((d) => !isNaN(d));
       }
-
-      // Filtro de tipo de cobrança
       if (tp_cobranca) {
         filter.chargeTypeList = tp_cobranca.split(',').map((c) => parseInt(c.trim())).filter((c) => !isNaN(c));
       }
-
-      // Filtro de tipo de baixa
       if (tp_baixa) {
         filter.dischargeTypeList = tp_baixa.split(',').map((b) => parseInt(b.trim())).filter((b) => !isNaN(b));
       }
-
-      // Filtro de status (aberto/pago/vencido)
       if (status === 'Em Aberto' || status === 'Aberto' || status === 'Vencido') {
         filter.hasOpenInvoices = true;
-        filter.dischargeTypeList = [0]; // 0 = Título não baixado
-      } else if (status === 'Pago' || status === 'Liquidado') {
-        // Não usar hasOpenInvoices, mas filtrar posteriormente
+        filter.dischargeTypeList = [0];
       }
 
       const endpoint = `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`;
+      const PAGE_SIZE = 100;
+      const PARALLEL_BATCH = 15; // 15 páginas em paralelo por vez
 
-      console.log('🔍 Contas a Receber V2:', { modo, dt_inicio, dt_fim, status });
+      console.log('🔍 Contas a Receber V3:', { modo, dt_inicio, dt_fim, status });
 
-      // Função de requisição com timeout otimizado
-      const doRequest = async (accessToken, page) => {
+      const makeRequest = async (accessToken, pageNum) => {
         return axios.post(endpoint, {
           filter,
-          page,
-          pageSize: 100,
-          expand: 'calculateValue',
+          page: pageNum,
+          pageSize: PAGE_SIZE,
           order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
         }, {
           headers: {
@@ -2420,39 +2401,55 @@ router.get(
         });
       };
 
-      // Buscar TODAS as páginas sem limite
-      let allItems = [];
-      let currentPage = 1;
-      let hasMore = true;
-
-      while (hasMore) {
-        let response;
-        try {
-          response = await doRequest(token, currentPage);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const newTokenData = await getToken(true);
-            token = newTokenData.access_token;
-            response = await doRequest(token, currentPage);
-          } else {
-            throw error;
-          }
-        }
-
-        const pageItems = response.data?.items || [];
-        allItems = allItems.concat(pageItems);
-        hasMore = response.data?.hasNext || false;
-        currentPage++;
-
-        // Log a cada 5 páginas
-        if (currentPage % 5 === 0) {
-          console.log(`📄 Página ${currentPage - 1}: total acumulado ${allItems.length}`);
+      // PASSO 1: Buscar página 1 para descobrir totalPages
+      let firstResponse;
+      try {
+        firstResponse = await makeRequest(token, 1);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newTokenData = await getToken(true);
+          token = newTokenData.access_token;
+          firstResponse = await makeRequest(token, 1);
+        } else {
+          throw error;
         }
       }
 
-      console.log(`📊 ${allItems.length} itens em ${currentPage - 1} páginas (${Date.now() - startTime}ms)`);
+      const totalPages = firstResponse.data?.totalPages || 1;
+      const totalCount = firstResponse.data?.count || 0;
+      let allItems = [...(firstResponse.data?.items || [])];
 
-      // Filtro de status local (vencido requer comparação de data)
+      console.log(`📄 Página 1/${totalPages} - Total: ${totalCount} registros (${Date.now() - startTime}ms)`);
+
+      // PASSO 2: Buscar páginas restantes em PARALELO (batches de PARALLEL_BATCH)
+      if (totalPages > 1) {
+        for (let batchStart = 2; batchStart <= totalPages; batchStart += PARALLEL_BATCH) {
+          const batchEnd = Math.min(batchStart + PARALLEL_BATCH - 1, totalPages);
+          const promises = [];
+
+          for (let p = batchStart; p <= batchEnd; p++) {
+            promises.push(
+              makeRequest(token, p).catch((err) => {
+                console.log(`⚠️ Erro página ${p}: ${err.message}`);
+                return null; // Não quebrar o batch inteiro
+              })
+            );
+          }
+
+          const results = await Promise.all(promises);
+          for (const r of results) {
+            if (r?.data?.items) {
+              allItems = allItems.concat(r.data.items);
+            }
+          }
+
+          console.log(`📄 Batch ${batchStart}-${batchEnd}/${totalPages}: acumulado ${allItems.length} (${Date.now() - startTime}ms)`);
+        }
+      }
+
+      console.log(`📊 ${allItems.length} itens buscados em ${Date.now() - startTime}ms`);
+
+      // PASSO 3: Filtros locais (status vencido/pago e portador)
       let filteredItems = allItems;
       
       if (status === 'Vencido') {
@@ -2468,7 +2465,6 @@ router.get(
         );
       }
 
-      // Filtro de portador (local pois não existe no schema de filtro)
       if (cd_portador) {
         const portadores = cd_portador.split(',').map((p) => parseInt(p.trim())).filter((p) => !isNaN(p));
         if (portadores.length > 0) {
@@ -2476,115 +2472,48 @@ router.get(
         }
       }
 
-      console.log(`✅ ${filteredItems.length} faturas após filtros locais`);
-
-      // Coletar CPF/CNPJs únicos para buscar nomes dos clientes
-      const cpfCnpjUnicos = [...new Set(filteredItems.map((item) => item.customerCpfCnpj).filter(Boolean))];
-      
-      // Buscar nomes dos clientes em paralelo (máximo 10 por vez)
-      const clientesMap = {};
-      const BATCH_SIZE = 10;
-      
-      for (let i = 0; i < cpfCnpjUnicos.length; i += BATCH_SIZE) {
-        const batch = cpfCnpjUnicos.slice(i, i + BATCH_SIZE);
-        
-        const promises = batch.map(async (cpfCnpj) => {
-          try {
-            // Determinar se é CPF (11 dígitos) ou CNPJ (14 dígitos)
-            const numerosApenas = cpfCnpj.replace(/\D/g, '');
-            const isPJ = numerosApenas.length === 14;
-            
-            const searchEndpoint = isPJ
-              ? `${TOTVS_BASE_URL}/person/v2/legal-entities/search`
-              : `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-            
-            const searchPayload = isPJ
-              ? { filter: { cnpj: numerosApenas }, pageSize: 1 }
-              : { filter: { cpf: numerosApenas }, pageSize: 1 };
-            
-            const searchResponse = await axios.post(searchEndpoint, searchPayload, {
-              headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-                Authorization: `Bearer ${token}`,
-              },
-              timeout: 10000,
-            });
-            
-            const pessoa = searchResponse.data?.items?.[0];
-            if (pessoa) {
-              return {
-                cpfCnpj,
-                nome: isPJ ? (pessoa.fantasyName || pessoa.companyName) : pessoa.name,
-                fantasia: isPJ ? pessoa.fantasyName : null,
-              };
-            }
-          } catch (err) {
-            // Ignora erros de busca de cliente
-          }
-          return null;
-        });
-        
-        const results = await Promise.all(promises);
-        results.filter(Boolean).forEach((r) => {
-          clientesMap[r.cpfCnpj] = r;
-        });
-      }
-
-      console.log(`👥 ${Object.keys(clientesMap).length} nomes de clientes encontrados`);
-
-      // Mapear para formato compatível com frontend
-      const mappedItems = filteredItems.map((item) => {
-        const clienteInfo = clientesMap[item.customerCpfCnpj];
-        return {
-          ...item,
-          cd_empresa: item.branchCode,
-          cd_cliente: item.customerCode,
-          nm_cliente: clienteInfo?.nome || item.customerCpfCnpj,
-          nm_fantasia: clienteInfo?.fantasia || null,
-          nr_cpfcnpj: item.customerCpfCnpj,
-          nr_fatura: item.receivableCode,
-          nr_fat: item.receivableCode,
-          nr_parcela: item.installmentCode,
-          dt_vencimento: item.expiredDate,
-          dt_liq: item.paymentDate || item.settlementDate,
-          dt_emissao: item.issueDate,
-          vl_fatura: item.installmentValue,
-          vl_pago: item.paidValue || 0,
-          vl_liquido: item.netValue,
-          vl_desconto: item.discountValue,
-          vl_abatimento: item.rebateValue,
-          vl_juros: item.interestValue,
-          vl_multa: item.assessmentValue,
-          cd_barras: item.barCode,
-          linha_digitavel: item.digitableLine,
-          nosso_numero: item.ourNumber,
-          qr_code_pix: item.qrCodePix,
-          tp_situacao: item.status,
-          tp_documento: item.documentType,
-          tp_faturamento: item.billingType,
-          tp_baixa: item.dischargeType,
-          tp_cobranca: item.chargeType,
-          cd_portador: item.bearerCode,
-          nm_portador: item.bearerName,
-          dias_atraso: item.calculatedValues?.daysLate,
-          vl_acrescimo: item.calculatedValues?.increaseValue,
-          vl_juros_calc: item.calculatedValues?.interestValue,
-          vl_multa_calc: item.calculatedValues?.fineValue,
-          vl_desconto_calc: item.calculatedValues?.discountValue,
-          vl_corrigido: item.calculatedValues?.correctedValue,
-        };
-      });
+      // PASSO 4: Mapear para formato frontend (sem lookup de nomes - usa CPF/CNPJ)
+      const mappedItems = filteredItems.map((item) => ({
+        cd_empresa: item.branchCode,
+        cd_cliente: item.customerCode,
+        nm_cliente: item.customerCpfCnpj || `Cliente ${item.customerCode}`,
+        nr_cpfcnpj: item.customerCpfCnpj,
+        nr_fatura: item.receivableCode,
+        nr_fat: item.receivableCode,
+        nr_parcela: item.installmentCode,
+        dt_vencimento: item.expiredDate,
+        dt_liq: item.paymentDate || item.settlementDate,
+        dt_emissao: item.issueDate,
+        vl_fatura: item.installmentValue,
+        vl_pago: item.paidValue || 0,
+        vl_liquido: item.netValue,
+        vl_desconto: item.discountValue,
+        vl_abatimento: item.rebateValue,
+        vl_juros: item.interestValue,
+        vl_multa: item.assessmentValue,
+        cd_barras: item.barCode,
+        linha_digitavel: item.digitableLine,
+        nosso_numero: item.ourNumber,
+        qr_code_pix: item.qrCodePix,
+        tp_situacao: item.status,
+        tp_documento: item.documentType,
+        tp_faturamento: item.billingType,
+        tp_baixa: item.dischargeType,
+        tp_cobranca: item.chargeType,
+        cd_portador: item.bearerCode,
+        nm_portador: item.bearerName,
+      }));
 
       const totalTime = Date.now() - startTime;
-      console.log(`✅ Concluído em ${totalTime}ms`);
+      console.log(`✅ ${mappedItems.length} faturas em ${totalTime}ms (${totalPages} páginas paralelas)`);
 
       successResponse(
         res,
         {
           items: mappedItems,
           totalItems: mappedItems.length,
-          pagesSearched: currentPage - 1,
+          totalCount,
+          pagesSearched: totalPages,
           hasMore: false,
           timeMs: totalTime,
         },
