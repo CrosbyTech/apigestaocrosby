@@ -2288,110 +2288,6 @@ let cachedBranchCodes = null;
 let branchCacheTimestamp = 0;
 const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
 
-// Cache de nomes de clientes em memória (limpa a cada 1h)
-const clientNameCache = new Map(); // customerCode -> nome
-let clientCacheLastClean = Date.now();
-const CLIENT_CACHE_TTL = 60 * 60 * 1000; // 1 hora
-
-/**
- * Busca nomes de clientes em batch (PJ + PF em paralelo)
- * Usa cache em memória para evitar re-consultas
- */
-async function fetchClientNames(customerCodes, token) {
-  const startTime = Date.now();
-
-  // Limpar cache se expirou
-  if (Date.now() - clientCacheLastClean > CLIENT_CACHE_TTL) {
-    clientNameCache.clear();
-    clientCacheLastClean = Date.now();
-  }
-
-  // Filtrar códigos que já estão no cache
-  const uncachedCodes = customerCodes.filter(
-    (code) => !clientNameCache.has(code),
-  );
-
-  if (uncachedCodes.length === 0) {
-    console.log(
-      `👤 Nomes: ${customerCodes.length} todos do cache (${Date.now() - startTime}ms)`,
-    );
-    return;
-  }
-
-  console.log(
-    `👤 Buscando ${uncachedCodes.length} nomes (${clientNameCache.size} no cache)...`,
-  );
-
-  const BATCH_SIZE = 50;
-  const headers = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-    Authorization: `Bearer ${token}`,
-  };
-
-  for (let i = 0; i < uncachedCodes.length; i += BATCH_SIZE) {
-    const batch = uncachedCodes.slice(i, i + BATCH_SIZE);
-
-    // Buscar PJ e PF em paralelo para o mesmo batch
-    const [pjResult, pfResult] = await Promise.allSettled([
-      axios.post(
-        `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-        { filter: { personCodeList: batch }, page: 1, pageSize: 100 },
-        { headers, timeout: 15000 },
-      ),
-      axios.post(
-        `${TOTVS_BASE_URL}/person/v2/individuals/search`,
-        { filter: { personCodeList: batch }, page: 1, pageSize: 100 },
-        { headers, timeout: 15000 },
-      ),
-    ]);
-
-    // Processar PJ (fantasyName ou name)
-    if (pjResult.status === 'fulfilled' && pjResult.value?.data?.items) {
-      console.log(
-        `👤 PJ batch ${i / BATCH_SIZE + 1}: ${pjResult.value.data.items.length} encontrados`,
-      );
-      for (const person of pjResult.value.data.items) {
-        if (person.personCode) {
-          const nome =
-            person.fantasyName || person.name || person.corporateName;
-          if (nome) clientNameCache.set(person.personCode, nome);
-        }
-      }
-    } else if (pjResult.status === 'rejected') {
-      console.log(
-        `⚠️ PJ batch ${i / BATCH_SIZE + 1} erro: ${pjResult.reason?.message || 'desconhecido'} (status: ${pjResult.reason?.response?.status})`,
-      );
-    }
-
-    // Processar PF (name ou personName)
-    if (pfResult.status === 'fulfilled' && pfResult.value?.data?.items) {
-      console.log(
-        `👤 PF batch ${i / BATCH_SIZE + 1}: ${pfResult.value.data.items.length} encontrados`,
-      );
-      for (const person of pfResult.value.data.items) {
-        if (person.personCode && !clientNameCache.has(person.personCode)) {
-          const nome = person.name || person.personName;
-          if (nome) clientNameCache.set(person.personCode, nome);
-        }
-      }
-    } else if (pfResult.status === 'rejected') {
-      console.log(
-        `⚠️ PF batch ${i / BATCH_SIZE + 1} erro: ${pfResult.reason?.message || 'desconhecido'} (status: ${pfResult.reason?.response?.status})`,
-      );
-    }
-  }
-
-  // Contar quantos ficaram sem nome
-  const semNome = customerCodes.filter((code) => !clientNameCache.has(code));
-  console.log(
-    `👤 ${clientNameCache.size} nomes em cache, ${semNome.length} sem nome (${Date.now() - startTime}ms)`,
-  );
-  if (semNome.length > 0 && semNome.length <= 10) {
-    console.log(`👤 Códigos sem nome: ${semNome.join(', ')}`);
-  }
-}
-
 async function getBranchCodes(token) {
   const now = Date.now();
   if (cachedBranchCodes && now - branchCacheTimestamp < BRANCH_CACHE_TTL) {
@@ -2562,7 +2458,6 @@ router.get(
             page: pageNum,
             pageSize: PAGE_SIZE,
             order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
-            expand: 'person',
           },
           {
             headers: {
@@ -2714,64 +2609,11 @@ router.get(
         }
       }
 
-      // PASSO 4: Buscar nomes dos clientes
-      // Prioridade: 1) personName do expand:'person', 2) cache de nomes, 3) batch lookup PJ+PF
-      // Log para debug: verificar se expand:'person' retorna o nome
-      if (filteredItems.length > 0) {
-        const sample = filteredItems[0];
-        console.log('👤 Amostra item[0]:', {
-          customerCode: sample.customerCode,
-          customerCpfCnpj: sample.customerCpfCnpj,
-          personName: sample.personName,
-          person: sample.person ? Object.keys(sample.person) : 'sem person',
-          customerName: sample.customerName,
-          name: sample.name,
-        });
-      }
-
-      // Tentar usar o nome vindo direto do expand:'person' — gravar no cache
-      let expandWorked = false;
-      for (const item of filteredItems) {
-        const nome =
-          item.personName ||
-          item.customerName ||
-          item.name ||
-          item.person?.name ||
-          item.person?.fantasyName ||
-          item.person?.personName;
-        if (nome && item.customerCode) {
-          clientNameCache.set(item.customerCode, nome);
-          expandWorked = true;
-        }
-      }
-
-      // Se expand não trouxe nomes, fazer lookup em batch
-      if (!expandWorked) {
-        console.log(
-          '👤 expand:person não retornou nomes, fazendo batch lookup...',
-        );
-        const uniqueCustomerCodes = [
-          ...new Set(
-            filteredItems
-              .map((item) => item.customerCode)
-              .filter((code) => code != null),
-          ),
-        ];
-        await fetchClientNames(uniqueCustomerCodes, token);
-      } else {
-        console.log(
-          `👤 expand:person OK - ${clientNameCache.size} nomes em cache`,
-        );
-      }
-
-      // PASSO 5: Mapear para formato frontend (com nomes de clientes)
+      // PASSO 4: Mapear para formato frontend
       const mappedItems = filteredItems.map((item) => ({
         cd_empresa: item.branchCode,
         cd_cliente: item.customerCode,
-        nm_cliente:
-          clientNameCache.get(item.customerCode) ||
-          item.customerCpfCnpj ||
-          `Cliente ${item.customerCode}`,
+        nm_cliente: item.customerCpfCnpj || `Cliente ${item.customerCode}`,
         nr_cpfcnpj: item.customerCpfCnpj,
         nr_fatura: item.receivableCode,
         nr_fat: item.receivableCode,
@@ -2828,6 +2670,177 @@ router.get(
         });
       }
 
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/persons/batch-lookup
+ * @desc Busca dados de pessoas (PJ + PF) em lote via API TOTVS Moda
+ *       Retorna nome, nome fantasia e telefone para cada código de pessoa
+ * @body { personCodes: number[] }
+ */
+router.post(
+  '/persons/batch-lookup',
+  asyncHandler(async (req, res) => {
+    const { personCodes } = req.body;
+
+    if (!Array.isArray(personCodes) || personCodes.length === 0) {
+      return errorResponse(
+        res,
+        'personCodes deve ser um array não vazio',
+        400,
+        'INVALID_INPUT',
+      );
+    }
+
+    const startTime = Date.now();
+
+    // Deduplica e converte para inteiro
+    const uniqueCodes = [
+      ...new Set(
+        personCodes
+          .map((c) => parseInt(c, 10))
+          .filter((c) => !isNaN(c) && c > 0),
+      ),
+    ];
+    console.log(`👥 Batch lookup: ${uniqueCodes.length} códigos únicos`);
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const result = {}; // { personCode: { name, fantasyName, phone, uf } }
+      const BATCH_SIZE = 50;
+
+      const doRequest = async (endpoint, payload, accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      // Processar em lotes de BATCH_SIZE
+      for (let i = 0; i < uniqueCodes.length; i += BATCH_SIZE) {
+        const batch = uniqueCodes.slice(i, i + BATCH_SIZE);
+        const payload = {
+          filter: { personCodeList: batch },
+          page: 1,
+          pageSize: batch.length,
+        };
+
+        // Buscar PJ e PF em paralelo para cada lote
+        const [pjResult, pfResult] = await Promise.allSettled([
+          (async () => {
+            try {
+              const resp = await doRequest(
+                `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+                payload,
+                tokenData.access_token,
+              );
+              return resp.data?.items || [];
+            } catch (err) {
+              if (err.response?.status === 401) {
+                const newToken = await getToken(true);
+                const resp = await doRequest(
+                  `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+                  payload,
+                  newToken.access_token,
+                );
+                return resp.data?.items || [];
+              }
+              console.warn(
+                `⚠️ PJ batch ${i / BATCH_SIZE + 1} falhou:`,
+                err.message,
+              );
+              return [];
+            }
+          })(),
+          (async () => {
+            try {
+              const resp = await doRequest(
+                `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+                payload,
+                tokenData.access_token,
+              );
+              return resp.data?.items || [];
+            } catch (err) {
+              if (err.response?.status === 401) {
+                const newToken = await getToken(true);
+                const resp = await doRequest(
+                  `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+                  payload,
+                  newToken.access_token,
+                );
+                return resp.data?.items || [];
+              }
+              console.warn(
+                `⚠️ PF batch ${i / BATCH_SIZE + 1} falhou:`,
+                err.message,
+              );
+              return [];
+            }
+          })(),
+        ]);
+
+        // Extrair dados de PJ
+        const pjItems = pjResult.status === 'fulfilled' ? pjResult.value : [];
+        for (const item of pjItems) {
+          const code = item.code;
+          if (!code) continue;
+          const defaultPhone =
+            item.phones?.find((p) => p.isDefault) || item.phones?.[0];
+          result[code] = {
+            name: item.name || '',
+            fantasyName: item.fantasyName || '',
+            phone: defaultPhone?.number || '',
+            uf: item.uf || '',
+          };
+        }
+
+        // Extrair dados de PF
+        const pfItems = pfResult.status === 'fulfilled' ? pfResult.value : [];
+        for (const item of pfItems) {
+          const code = item.code;
+          if (!code || result[code]) continue; // PJ tem prioridade
+          const defaultPhone =
+            item.phones?.find((p) => p.isDefault) || item.phones?.[0];
+          result[code] = {
+            name: item.name || '',
+            fantasyName: item.fantasyName || item.name || '',
+            phone: defaultPhone?.number || '',
+            uf: item.uf || '',
+          };
+        }
+
+        console.log(
+          `👤 Batch ${i / BATCH_SIZE + 1}: PJ=${pjItems.length}, PF=${pfItems.length}`,
+        );
+      }
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `✅ Batch lookup: ${Object.keys(result).length} pessoas encontradas em ${totalTime}ms`,
+      );
+
+      successResponse(
+        res,
+        result,
+        `${Object.keys(result).length} pessoas encontradas em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro batch lookup:', error.message);
       return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
     }
   }),
