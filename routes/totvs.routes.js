@@ -2279,7 +2279,7 @@ router.post(
 // ==========================================
 // ROTA OTIMIZADA PARA CONTAS A RECEBER V3
 // Páginas buscadas em PARALELO (não sequencial)
-// Sem lookup de nomes (usa CPF/CNPJ direto)
+// Lookup de nomes em batch (PJ+PF paralelo, com cache)
 // BranchCodeList em cache de memória
 // ==========================================
 
@@ -2287,6 +2287,101 @@ router.post(
 let cachedBranchCodes = null;
 let branchCacheTimestamp = 0;
 const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
+// Cache de nomes de clientes em memória (limpa a cada 1h)
+const clientNameCache = new Map(); // customerCode -> nome
+let clientCacheLastClean = Date.now();
+const CLIENT_CACHE_TTL = 60 * 60 * 1000; // 1 hora
+
+/**
+ * Busca nomes de clientes em batch (PJ + PF em paralelo)
+ * Usa cache em memória para evitar re-consultas
+ */
+async function fetchClientNames(customerCodes, token) {
+  const startTime = Date.now();
+
+  // Limpar cache se expirou
+  if (Date.now() - clientCacheLastClean > CLIENT_CACHE_TTL) {
+    clientNameCache.clear();
+    clientCacheLastClean = Date.now();
+  }
+
+  // Filtrar códigos que já estão no cache
+  const uncachedCodes = customerCodes.filter(
+    (code) => !clientNameCache.has(code),
+  );
+
+  if (uncachedCodes.length === 0) {
+    console.log(
+      `👤 Nomes: ${customerCodes.length} todos do cache (${Date.now() - startTime}ms)`,
+    );
+    return;
+  }
+
+  console.log(
+    `👤 Buscando ${uncachedCodes.length} nomes (${clientNameCache.size} no cache)...`,
+  );
+
+  const BATCH_SIZE = 50;
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    Authorization: `Bearer ${token}`,
+  };
+
+  // Processar em batches paralelos (2 batches por vez para não sobrecarregar)
+  for (let i = 0; i < uncachedCodes.length; i += BATCH_SIZE) {
+    const batch = uncachedCodes.slice(i, i + BATCH_SIZE);
+    const payload = {
+      filter: { personCodeList: batch },
+      page: 1,
+      pageSize: batch.length,
+    };
+
+    // Buscar PJ e PF em paralelo para o mesmo batch
+    const [pjResult, pfResult] = await Promise.allSettled([
+      axios
+        .post(
+          `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+          payload,
+          { headers, timeout: 15000 },
+        )
+        .catch(() => null),
+      axios
+        .post(
+          `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+          payload,
+          { headers, timeout: 15000 },
+        )
+        .catch(() => null),
+    ]);
+
+    // Processar PJ (fantasyName ou name)
+    if (pjResult.status === 'fulfilled' && pjResult.value?.data?.items) {
+      for (const person of pjResult.value.data.items) {
+        if (person.personCode) {
+          const nome =
+            person.fantasyName || person.name || person.corporateName;
+          if (nome) clientNameCache.set(person.personCode, nome);
+        }
+      }
+    }
+
+    // Processar PF (name ou personName)
+    if (pfResult.status === 'fulfilled' && pfResult.value?.data?.items) {
+      for (const person of pfResult.value.data.items) {
+        if (person.personCode && !clientNameCache.has(person.personCode)) {
+          const nome = person.name || person.personName;
+          if (nome) clientNameCache.set(person.personCode, nome);
+        }
+      }
+    }
+  }
+
+  console.log(
+    `👤 ${clientNameCache.size} nomes em cache (${Date.now() - startTime}ms)`,
+  );
+}
 
 async function getBranchCodes(token) {
   const now = Date.now();
@@ -2609,11 +2704,24 @@ router.get(
         }
       }
 
-      // PASSO 4: Mapear para formato frontend (sem lookup de nomes - usa CPF/CNPJ)
+      // PASSO 4: Buscar nomes dos clientes em batch (PJ + PF paralelo, com cache)
+      const uniqueCustomerCodes = [
+        ...new Set(
+          filteredItems
+            .map((item) => item.customerCode)
+            .filter((code) => code != null),
+        ),
+      ];
+      await fetchClientNames(uniqueCustomerCodes, token);
+
+      // PASSO 5: Mapear para formato frontend (com nomes de clientes)
       const mappedItems = filteredItems.map((item) => ({
         cd_empresa: item.branchCode,
         cd_cliente: item.customerCode,
-        nm_cliente: item.customerCpfCnpj || `Cliente ${item.customerCode}`,
+        nm_cliente:
+          clientNameCache.get(item.customerCode) ||
+          item.customerCpfCnpj ||
+          `Cliente ${item.customerCode}`,
         nr_cpfcnpj: item.customerCpfCnpj,
         nr_fatura: item.receivableCode,
         nr_fat: item.receivableCode,
