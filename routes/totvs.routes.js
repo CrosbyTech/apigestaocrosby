@@ -2561,7 +2561,8 @@ router.get(
         hoje.setHours(0, 0, 0, 0);
         filteredItems = filteredItems.filter((item) => {
           const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
-          const temPagamento = (item.paidValue && item.paidValue > 0) || item.paymentDate;
+          const temPagamento =
+            (item.paidValue && item.paidValue > 0) || item.paymentDate;
           return dataVenc && dataVenc < hoje && !temPagamento;
         });
       } else if (status === 'A Vencer') {
@@ -2570,13 +2571,15 @@ router.get(
         hoje.setHours(0, 0, 0, 0);
         filteredItems = filteredItems.filter((item) => {
           const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
-          const temPagamento = (item.paidValue && item.paidValue > 0) || item.paymentDate;
+          const temPagamento =
+            (item.paidValue && item.paidValue > 0) || item.paymentDate;
           return dataVenc && dataVenc >= hoje && !temPagamento;
         });
       } else if (status === 'Em Aberto') {
         // EM ABERTO: tudo que NÃO tem valor pago e NÃO tem data de liquidação (A Vencer + Vencido)
         filteredItems = filteredItems.filter((item) => {
-          const temPagamento = (item.paidValue && item.paidValue > 0) || item.paymentDate;
+          const temPagamento =
+            (item.paidValue && item.paidValue > 0) || item.paymentDate;
           return !temPagamento;
         });
       }
@@ -2589,6 +2592,19 @@ router.get(
         if (portadores.length > 0) {
           filteredItems = filteredItems.filter((item) =>
             portadores.includes(item.bearerCode),
+          );
+        }
+      }
+
+      // Filtro local de cobrança (fallback - API TOTVS pode ignorar chargeTypeList)
+      if (tp_cobranca) {
+        const cobrancas = tp_cobranca
+          .split(',')
+          .map((c) => parseInt(c.trim()))
+          .filter((c) => !isNaN(c));
+        if (cobrancas.length > 0) {
+          filteredItems = filteredItems.filter((item) =>
+            cobrancas.includes(item.chargeType),
           );
         }
       }
