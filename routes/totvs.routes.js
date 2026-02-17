@@ -2076,7 +2076,9 @@ router.post(
         }
       }
 
-      console.log(`✅ Contas a receber obtidas: ${response.data?.items?.length || 0} itens`);
+      console.log(
+        `✅ Contas a receber obtidas: ${response.data?.items?.length || 0} itens`,
+      );
 
       successResponse(
         res,
@@ -2205,12 +2207,16 @@ router.post(
         allItems = allItems.concat(pageItems);
         hasMore = response.data?.hasNext || false;
 
-        console.log(`📄 Página ${currentPage}: ${pageItems.length} itens (total: ${allItems.length})`);
+        console.log(
+          `📄 Página ${currentPage}: ${pageItems.length} itens (total: ${allItems.length})`,
+        );
 
         currentPage++;
       }
 
-      console.log(`✅ Busca concluída: ${allItems.length} faturas em ${currentPage - 1} páginas`);
+      console.log(
+        `✅ Busca concluída: ${allItems.length} faturas em ${currentPage - 1} páginas`,
+      );
 
       successResponse(
         res,
@@ -2271,12 +2277,15 @@ router.post(
 );
 
 // ==========================================
-// ROTA OTIMIZADA PARA CONTAS A RECEBER
+// ROTA OTIMIZADA PARA CONTAS A RECEBER V2
 // Filtros aplicados diretamente na API TOTVS
+// Busca nome do cliente via CPF/CNPJ
 // ==========================================
 router.get(
   '/accounts-receivable/filter',
   asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    
     try {
       const {
         dt_inicio,
@@ -2287,7 +2296,8 @@ router.get(
         nr_fatura,
         cd_portador,
         tp_documento,
-        maxPages,
+        tp_cobranca,
+        tp_baixa,
       } = req.query;
 
       // Validar parâmetros obrigatórios
@@ -2311,16 +2321,18 @@ router.get(
         );
       }
 
-      // Buscar filiais disponíveis
-      let branchCodeList = [1, 2, 3, 4, 5]; // Default
+      let token = tokenData.access_token;
+
+      // Buscar filiais disponíveis (cache em memória seria ideal)
+      let branchCodeList = [1, 2, 3, 4, 5];
       try {
         const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
         const branchesResponse = await axios.get(branchesUrl, {
           headers: {
-            Authorization: `Bearer ${tokenData.access_token}`,
+            Authorization: `Bearer ${token}`,
             Accept: 'application/json',
           },
-          timeout: 30000,
+          timeout: 15000,
         });
         if (branchesResponse.data?.items) {
           branchCodeList = branchesResponse.data.items
@@ -2328,21 +2340,23 @@ router.get(
             .filter((c) => !isNaN(c) && c > 0);
         }
       } catch (err) {
-        console.log('⚠️ Usando filiais padrão:', branchCodeList);
+        console.log('⚠️ Usando filiais padrão');
       }
 
-      // Montar filtro para API TOTVS
+      // Montar filtro usando campos CORRETOS do schema TOTVS
       const filter = {
         branchCodeList,
+        statusList: [1], // 1 = Normal (exclui cancelados/devolvidos/quebradas)
+        documentTypeList: [1], // 1 = Fatura
       };
 
-      // Filtro de datas (vencimento ou emissão)
+      // Filtro de datas usando campos CORRETOS do schema
       if (modo === 'emissao') {
-        filter.issueDateStart = dt_inicio;
-        filter.issueDateEnd = dt_fim;
+        filter.startIssueDate = `${dt_inicio}T00:00:00`;
+        filter.endIssueDate = `${dt_fim}T23:59:59`;
       } else {
-        filter.expiredDateStart = dt_inicio;
-        filter.expiredDateEnd = dt_fim;
+        filter.startExpiredDate = `${dt_inicio}T00:00:00`;
+        filter.endExpiredDate = `${dt_fim}T23:59:59`;
       }
 
       // Filtro de cliente específico
@@ -2355,74 +2369,68 @@ router.get(
 
       // Filtro de fatura específica
       if (nr_fatura) {
-        const faturas = nr_fatura.split(',').map((f) => parseInt(f.trim())).filter((f) => !isNaN(f));
+        const faturas = nr_fatura.split(',').map((f) => parseFloat(f.trim())).filter((f) => !isNaN(f));
         if (faturas.length > 0) {
           filter.receivableCodeList = faturas;
         }
       }
 
-      // Filtro de portador
-      if (cd_portador) {
-        const portadores = cd_portador.split(',').map((p) => parseInt(p.trim())).filter((p) => !isNaN(p));
-        if (portadores.length > 0) {
-          filter.bearerCodeList = portadores;
-        }
-      }
-
       // Filtro de tipo de documento
       if (tp_documento) {
-        filter.documentTypeList = tp_documento.split(',').map((d) => d.trim());
+        filter.documentTypeList = tp_documento.split(',').map((d) => parseInt(d.trim())).filter((d) => !isNaN(d));
       }
 
-      // Filtro de status (aberto/pago)
+      // Filtro de tipo de cobrança
+      if (tp_cobranca) {
+        filter.chargeTypeList = tp_cobranca.split(',').map((c) => parseInt(c.trim())).filter((c) => !isNaN(c));
+      }
+
+      // Filtro de tipo de baixa
+      if (tp_baixa) {
+        filter.dischargeTypeList = tp_baixa.split(',').map((b) => parseInt(b.trim())).filter((b) => !isNaN(b));
+      }
+
+      // Filtro de status (aberto/pago/vencido)
       if (status === 'Em Aberto' || status === 'Aberto' || status === 'Vencido') {
         filter.hasOpenInvoices = true;
-        filter.dischargeTypeList = [0]; // Título não baixado
+        filter.dischargeTypeList = [0]; // 0 = Título não baixado
+      } else if (status === 'Pago' || status === 'Liquidado') {
+        // Não usar hasOpenInvoices, mas filtrar posteriormente
       }
 
       const endpoint = `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`;
-      let token = tokenData.access_token;
 
-      console.log('🔍 Contas a Receber (filtro otimizado):', {
-        modo,
-        dt_inicio,
-        dt_fim,
-        status,
-        filter,
-      });
+      console.log('🔍 Contas a Receber V2:', { modo, dt_inicio, dt_fim, status });
 
+      // Função de requisição com timeout otimizado
       const doRequest = async (accessToken, page) => {
-        const payload = {
+        return axios.post(endpoint, {
           filter,
           page,
           pageSize: 100,
-          expand: 'invoice,calculateValue',
+          expand: 'calculateValue',
           order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
-        };
-
-        return axios.post(endpoint, payload, {
+        }, {
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
-          timeout: 60000,
+          timeout: 30000,
         });
       };
 
-      // Buscar páginas
+      // Buscar TODAS as páginas sem limite
       let allItems = [];
       let currentPage = 1;
       let hasMore = true;
-      const maxPagesLimit = parseInt(maxPages) || 10; // Limite menor para performance
 
-      while (hasMore && currentPage <= maxPagesLimit) {
+      while (hasMore) {
         let response;
         try {
           response = await doRequest(token, currentPage);
         } catch (error) {
           if (error.response?.status === 401) {
-            console.log('🔄 Token inválido. Renovando...');
             const newTokenData = await getToken(true);
             token = newTokenData.access_token;
             response = await doRequest(token, currentPage);
@@ -2434,28 +2442,19 @@ router.get(
         const pageItems = response.data?.items || [];
         allItems = allItems.concat(pageItems);
         hasMore = response.data?.hasNext || false;
-
-        console.log(`📄 Página ${currentPage}: ${pageItems.length} itens`);
         currentPage++;
+
+        // Log a cada 5 páginas
+        if (currentPage % 5 === 0) {
+          console.log(`📄 Página ${currentPage - 1}: total acumulado ${allItems.length}`);
+        }
       }
 
-      // Filtrar FATURA + NORMAL no backend
-      let filteredItems = allItems.filter((item) => {
-        const isFatura =
-          item.documentType === 'FATURA' ||
-          item.documentType === 1 ||
-          String(item.documentType).toUpperCase().includes('FATURA');
-
-        const isNormal =
-          item.status === 'NORMAL' ||
-          item.status === 1 ||
-          item.status === 0 ||
-          String(item.status).toUpperCase() === 'NORMAL';
-
-        return isFatura && isNormal;
-      });
+      console.log(`📊 ${allItems.length} itens em ${currentPage - 1} páginas (${Date.now() - startTime}ms)`);
 
       // Filtro de status local (vencido requer comparação de data)
+      let filteredItems = allItems;
+      
       if (status === 'Vencido') {
         const hoje = new Date();
         hoje.setHours(0, 0, 0, 0);
@@ -2469,48 +2468,116 @@ router.get(
         );
       }
 
-      console.log(`✅ ${filteredItems.length} faturas após filtros`);
+      // Filtro de portador (local pois não existe no schema de filtro)
+      if (cd_portador) {
+        const portadores = cd_portador.split(',').map((p) => parseInt(p.trim())).filter((p) => !isNaN(p));
+        if (portadores.length > 0) {
+          filteredItems = filteredItems.filter((item) => portadores.includes(item.bearerCode));
+        }
+      }
 
-      // Mapear para formato compatível
-      const mappedItems = filteredItems.map((item) => ({
-        ...item,
-        cd_empresa: item.branchCode,
-        cd_cliente: item.customerCode,
-        nm_cliente: item.customerName || item.customerCpfCnpj,
-        nr_cpfcnpj: item.customerCpfCnpj,
-        nr_fatura: item.receivableCode,
-        nr_fat: item.receivableCode,
-        nr_parcela: item.installmentCode,
-        dt_vencimento: item.expiredDate,
-        dt_liq: item.paymentDate || item.settlementDate,
-        dt_emissao: item.issueDate,
-        vl_fatura: item.installmentValue,
-        vl_pago: item.paidValue || 0,
-        vl_liquido: item.netValue,
-        vl_desconto: item.discountValue,
-        vl_abatimento: item.rebateValue,
-        vl_juros: item.interestValue,
-        vl_multa: item.assessmentValue,
-        cd_barras: item.barCode,
-        linha_digitavel: item.digitableLine,
-        nosso_numero: item.ourNumber,
-        qr_code_pix: item.qrCodePix,
-        tp_situacao: item.status,
-        tp_documento: item.documentType,
-        tp_faturamento: item.billingType,
-        tp_baixa: item.dischargeType,
-        tp_cobranca: item.chargeType,
-        cd_portador: item.bearerCode,
-        nm_portador: item.bearerName,
-        cancelado: item.canceled,
-        dias_atraso: item.calculatedValues?.daysLate,
-        vl_acrescimo: item.calculatedValues?.increaseValue,
-        vl_juros_calc: item.calculatedValues?.interestValue,
-        vl_multa_calc: item.calculatedValues?.fineValue,
-        vl_desconto_calc: item.calculatedValues?.discountValue,
-        vl_corrigido: item.calculatedValues?.correctedValue,
-        invoice: item.invoice,
-      }));
+      console.log(`✅ ${filteredItems.length} faturas após filtros locais`);
+
+      // Coletar CPF/CNPJs únicos para buscar nomes dos clientes
+      const cpfCnpjUnicos = [...new Set(filteredItems.map((item) => item.customerCpfCnpj).filter(Boolean))];
+      
+      // Buscar nomes dos clientes em paralelo (máximo 10 por vez)
+      const clientesMap = {};
+      const BATCH_SIZE = 10;
+      
+      for (let i = 0; i < cpfCnpjUnicos.length; i += BATCH_SIZE) {
+        const batch = cpfCnpjUnicos.slice(i, i + BATCH_SIZE);
+        
+        const promises = batch.map(async (cpfCnpj) => {
+          try {
+            // Determinar se é CPF (11 dígitos) ou CNPJ (14 dígitos)
+            const numerosApenas = cpfCnpj.replace(/\D/g, '');
+            const isPJ = numerosApenas.length === 14;
+            
+            const searchEndpoint = isPJ
+              ? `${TOTVS_BASE_URL}/person/v2/legal-entities/search`
+              : `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+            
+            const searchPayload = isPJ
+              ? { filter: { cnpj: numerosApenas }, pageSize: 1 }
+              : { filter: { cpf: numerosApenas }, pageSize: 1 };
+            
+            const searchResponse = await axios.post(searchEndpoint, searchPayload, {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              timeout: 10000,
+            });
+            
+            const pessoa = searchResponse.data?.items?.[0];
+            if (pessoa) {
+              return {
+                cpfCnpj,
+                nome: isPJ ? (pessoa.fantasyName || pessoa.companyName) : pessoa.name,
+                fantasia: isPJ ? pessoa.fantasyName : null,
+              };
+            }
+          } catch (err) {
+            // Ignora erros de busca de cliente
+          }
+          return null;
+        });
+        
+        const results = await Promise.all(promises);
+        results.filter(Boolean).forEach((r) => {
+          clientesMap[r.cpfCnpj] = r;
+        });
+      }
+
+      console.log(`👥 ${Object.keys(clientesMap).length} nomes de clientes encontrados`);
+
+      // Mapear para formato compatível com frontend
+      const mappedItems = filteredItems.map((item) => {
+        const clienteInfo = clientesMap[item.customerCpfCnpj];
+        return {
+          ...item,
+          cd_empresa: item.branchCode,
+          cd_cliente: item.customerCode,
+          nm_cliente: clienteInfo?.nome || item.customerCpfCnpj,
+          nm_fantasia: clienteInfo?.fantasia || null,
+          nr_cpfcnpj: item.customerCpfCnpj,
+          nr_fatura: item.receivableCode,
+          nr_fat: item.receivableCode,
+          nr_parcela: item.installmentCode,
+          dt_vencimento: item.expiredDate,
+          dt_liq: item.paymentDate || item.settlementDate,
+          dt_emissao: item.issueDate,
+          vl_fatura: item.installmentValue,
+          vl_pago: item.paidValue || 0,
+          vl_liquido: item.netValue,
+          vl_desconto: item.discountValue,
+          vl_abatimento: item.rebateValue,
+          vl_juros: item.interestValue,
+          vl_multa: item.assessmentValue,
+          cd_barras: item.barCode,
+          linha_digitavel: item.digitableLine,
+          nosso_numero: item.ourNumber,
+          qr_code_pix: item.qrCodePix,
+          tp_situacao: item.status,
+          tp_documento: item.documentType,
+          tp_faturamento: item.billingType,
+          tp_baixa: item.dischargeType,
+          tp_cobranca: item.chargeType,
+          cd_portador: item.bearerCode,
+          nm_portador: item.bearerName,
+          dias_atraso: item.calculatedValues?.daysLate,
+          vl_acrescimo: item.calculatedValues?.increaseValue,
+          vl_juros_calc: item.calculatedValues?.interestValue,
+          vl_multa_calc: item.calculatedValues?.fineValue,
+          vl_desconto_calc: item.calculatedValues?.discountValue,
+          vl_corrigido: item.calculatedValues?.correctedValue,
+        };
+      });
+
+      const totalTime = Date.now() - startTime;
+      console.log(`✅ Concluído em ${totalTime}ms`);
 
       successResponse(
         res,
@@ -2518,12 +2585,13 @@ router.get(
           items: mappedItems,
           totalItems: mappedItems.length,
           pagesSearched: currentPage - 1,
-          hasMore,
+          hasMore: false,
+          timeMs: totalTime,
         },
-        `${mappedItems.length} fatura(s) encontrada(s)`,
+        `${mappedItems.length} fatura(s) encontrada(s) em ${totalTime}ms`,
       );
     } catch (error) {
-      console.error('❌ Erro contas a receber filtro:', error.message);
+      console.error('❌ Erro contas a receber:', error.message);
 
       if (error.response) {
         return res.status(error.response.status || 400).json({
