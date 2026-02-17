@@ -2846,4 +2846,151 @@ router.post(
   }),
 );
 
+// ==========================================
+// ROTA: BUSCAR CLIENTES FRANQUIA (por classificação)
+// Cache em memória (recarrega a cada 60 min)
+// Classificação FRANQUIA:
+//   Tipo Cliente 2 / Classificação 1
+//   OU Tipo Cliente 20 / Classificação 4
+// ==========================================
+let cachedFranchiseClients = null;
+let franchiseCacheTimestamp = 0;
+const FRANCHISE_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
+
+/**
+ * @route GET /totvs/franchise-clients
+ * @desc Retorna lista de códigos de clientes FRANQUIA (classificação TOTVS)
+ */
+router.get(
+  '/franchise-clients',
+  asyncHandler(async (req, res) => {
+    const now = Date.now();
+    const forceRefresh = req.query.refresh === 'true';
+
+    // Retornar cache se válido
+    if (
+      !forceRefresh &&
+      cachedFranchiseClients &&
+      now - franchiseCacheTimestamp < FRANCHISE_CACHE_TTL
+    ) {
+      console.log(
+        `📋 Franchise clients (cache): ${cachedFranchiseClients.length} clientes`,
+      );
+      return successResponse(
+        res,
+        cachedFranchiseClients,
+        `${cachedFranchiseClients.length} franquias (cache)`,
+      );
+    }
+
+    const startTime = Date.now();
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Token indisponível',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      let token = tokenData.access_token;
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+
+      const doRequest = async (accessToken, page) => {
+        const payload = {
+          filter: {},
+          expand: 'classifications',
+          page,
+          pageSize: 100,
+          order: 'code',
+        };
+        return axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+        });
+      };
+
+      // Função para verificar se um cliente é franquia
+      const isFranquia = (item) => {
+        if (!item.classifications || !Array.isArray(item.classifications))
+          return false;
+        return item.classifications.some(
+          (c) =>
+            (c.typeCode === 2 && c.code === 1) ||
+            (c.typeCode === 20 && c.code === 4),
+        );
+      };
+
+      let allFranquias = [];
+      let currentPage = 1;
+      let hasMore = true;
+      const maxPages = 200; // segurança
+
+      console.log('🔍 Buscando clientes FRANQUIA na API TOTVS...');
+
+      while (hasMore && currentPage <= maxPages) {
+        let response;
+        try {
+          response = await doRequest(token, currentPage);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            const newTokenData = await getToken(true);
+            token = newTokenData.access_token;
+            response = await doRequest(token, currentPage);
+          } else {
+            throw error;
+          }
+        }
+
+        const pageItems = response.data?.items || [];
+        hasMore = response.data?.hasNext || false;
+
+        // Filtrar apenas franquias desta página
+        const franquiasDaPagina = pageItems.filter(isFranquia);
+        allFranquias = allFranquias.concat(
+          franquiasDaPagina.map((item) => ({
+            code: item.code,
+            name: item.name || '',
+            fantasyName: item.fantasyName || '',
+            cnpj: item.cnpj || '',
+          })),
+        );
+
+        if (currentPage % 10 === 0 || !hasMore) {
+          console.log(
+            `📄 Página ${currentPage}: ${franquiasDaPagina.length} franquias nesta pág (total: ${allFranquias.length})`,
+          );
+        }
+
+        currentPage++;
+      }
+
+      // Salvar no cache
+      cachedFranchiseClients = allFranquias;
+      franchiseCacheTimestamp = Date.now();
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `✅ ${allFranquias.length} franquias encontradas em ${totalTime}ms (${currentPage - 1} páginas)`,
+      );
+
+      successResponse(
+        res,
+        allFranquias,
+        `${allFranquias.length} franquias encontradas em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar franquias:', error.message);
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
 export default router;
