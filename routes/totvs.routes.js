@@ -2290,7 +2290,7 @@ const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
 
 async function getBranchCodes(token) {
   const now = Date.now();
-  if (cachedBranchCodes && (now - branchCacheTimestamp) < BRANCH_CACHE_TTL) {
+  if (cachedBranchCodes && now - branchCacheTimestamp < BRANCH_CACHE_TTL) {
     return cachedBranchCodes;
   }
   try {
@@ -2300,7 +2300,9 @@ async function getBranchCodes(token) {
       timeout: 10000,
     });
     if (resp.data?.items?.length > 0) {
-      cachedBranchCodes = resp.data.items.map((b) => parseInt(b.code)).filter((c) => !isNaN(c) && c > 0);
+      cachedBranchCodes = resp.data.items
+        .map((b) => parseInt(b.code))
+        .filter((c) => !isNaN(c) && c > 0);
       branchCacheTimestamp = now;
       return cachedBranchCodes;
     }
@@ -2308,14 +2310,20 @@ async function getBranchCodes(token) {
     console.log('⚠️ Erro ao buscar branches, usando cache/fallback');
   }
   // Fallback se cache expirou e API falhou
-  return cachedBranchCodes || [1,2,5,6,11,55,65,75,85,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,870,880,890,900,910,920,930,940,950,960,970,980,990];
+  return (
+    cachedBranchCodes || [
+      1, 2, 5, 6, 11, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
+      97, 98, 99, 100, 101, 870, 880, 890, 900, 910, 920, 930, 940, 950, 960,
+      970, 980, 990,
+    ]
+  );
 }
 
 router.get(
   '/accounts-receivable/filter',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
-    
+
     try {
       const {
         dt_inicio,
@@ -2328,21 +2336,41 @@ router.get(
         tp_documento,
         tp_cobranca,
         tp_baixa,
+        branches, // branchCodes das empresas selecionadas pelo usuário
       } = req.query;
 
       if (!dt_inicio || !dt_fim) {
-        return errorResponse(res, 'Parâmetros dt_inicio e dt_fim são obrigatórios', 400, 'MISSING_PARAMS');
+        return errorResponse(
+          res,
+          'Parâmetros dt_inicio e dt_fim são obrigatórios',
+          400,
+          'MISSING_PARAMS',
+        );
       }
 
       const tokenData = await getToken();
       if (!tokenData?.access_token) {
-        return errorResponse(res, 'Token indisponível', 503, 'TOKEN_UNAVAILABLE');
+        return errorResponse(
+          res,
+          'Token indisponível',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
       }
 
       let token = tokenData.access_token;
 
-      // BranchCodes com cache em memória
-      const branchCodeList = await getBranchCodes(token);
+      // Usar branches do frontend se enviadas, senão buscar todas do cache
+      let branchCodeList;
+      if (branches) {
+        branchCodeList = branches
+          .split(',')
+          .map((b) => parseInt(b.trim()))
+          .filter((b) => !isNaN(b) && b > 0);
+      }
+      if (!branchCodeList || branchCodeList.length === 0) {
+        branchCodeList = await getBranchCodes(token);
+      }
 
       // Montar filtro TOTVS
       const filter = { branchCodeList };
@@ -2358,23 +2386,42 @@ router.get(
 
       // Filtros opcionais da API
       if (cd_cliente) {
-        const clientes = cd_cliente.split(',').map((c) => parseInt(c.trim())).filter((c) => !isNaN(c));
+        const clientes = cd_cliente
+          .split(',')
+          .map((c) => parseInt(c.trim()))
+          .filter((c) => !isNaN(c));
         if (clientes.length > 0) filter.customerCodeList = clientes;
       }
       if (nr_fatura) {
-        const faturas = nr_fatura.split(',').map((f) => parseFloat(f.trim())).filter((f) => !isNaN(f));
+        const faturas = nr_fatura
+          .split(',')
+          .map((f) => parseFloat(f.trim()))
+          .filter((f) => !isNaN(f));
         if (faturas.length > 0) filter.receivableCodeList = faturas;
       }
       if (tp_documento) {
-        filter.documentTypeList = tp_documento.split(',').map((d) => parseInt(d.trim())).filter((d) => !isNaN(d));
+        filter.documentTypeList = tp_documento
+          .split(',')
+          .map((d) => parseInt(d.trim()))
+          .filter((d) => !isNaN(d));
       }
       if (tp_cobranca) {
-        filter.chargeTypeList = tp_cobranca.split(',').map((c) => parseInt(c.trim())).filter((c) => !isNaN(c));
+        filter.chargeTypeList = tp_cobranca
+          .split(',')
+          .map((c) => parseInt(c.trim()))
+          .filter((c) => !isNaN(c));
       }
       if (tp_baixa) {
-        filter.dischargeTypeList = tp_baixa.split(',').map((b) => parseInt(b.trim())).filter((b) => !isNaN(b));
+        filter.dischargeTypeList = tp_baixa
+          .split(',')
+          .map((b) => parseInt(b.trim()))
+          .filter((b) => !isNaN(b));
       }
-      if (status === 'Em Aberto' || status === 'Aberto' || status === 'Vencido') {
+      if (
+        status === 'Em Aberto' ||
+        status === 'Aberto' ||
+        status === 'Vencido'
+      ) {
         filter.hasOpenInvoices = true;
         filter.dischargeTypeList = [0];
       }
@@ -2383,22 +2430,34 @@ router.get(
       const PAGE_SIZE = 100;
       const PARALLEL_BATCH = 15; // 15 páginas em paralelo por vez
 
-      console.log('🔍 Contas a Receber V3:', { modo, dt_inicio, dt_fim, status });
+      console.log('🔍 Contas a Receber V3:', {
+        modo,
+        dt_inicio,
+        dt_fim,
+        status,
+        branches_param: branches,
+        branchCodeList_usado: branchCodeList,
+        filtro_completo: JSON.stringify(filter),
+      });
 
       const makeRequest = async (accessToken, pageNum) => {
-        return axios.post(endpoint, {
-          filter,
-          page: pageNum,
-          pageSize: PAGE_SIZE,
-          order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
-        }, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
+        return axios.post(
+          endpoint,
+          {
+            filter,
+            page: pageNum,
+            pageSize: PAGE_SIZE,
+            order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
           },
-          timeout: 30000,
-        });
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 30000,
+          },
+        );
       };
 
       // PASSO 1: Buscar página 1 para descobrir totalPages
@@ -2419,12 +2478,21 @@ router.get(
       const totalCount = firstResponse.data?.count || 0;
       let allItems = [...(firstResponse.data?.items || [])];
 
-      console.log(`📄 Página 1/${totalPages} - Total: ${totalCount} registros (${Date.now() - startTime}ms)`);
+      console.log(
+        `📄 Página 1/${totalPages} - Total: ${totalCount} registros (${Date.now() - startTime}ms)`,
+      );
 
       // PASSO 2: Buscar páginas restantes em PARALELO (batches de PARALLEL_BATCH)
       if (totalPages > 1) {
-        for (let batchStart = 2; batchStart <= totalPages; batchStart += PARALLEL_BATCH) {
-          const batchEnd = Math.min(batchStart + PARALLEL_BATCH - 1, totalPages);
+        for (
+          let batchStart = 2;
+          batchStart <= totalPages;
+          batchStart += PARALLEL_BATCH
+        ) {
+          const batchEnd = Math.min(
+            batchStart + PARALLEL_BATCH - 1,
+            totalPages,
+          );
           const promises = [];
 
           for (let p = batchStart; p <= batchEnd; p++) {
@@ -2432,7 +2500,7 @@ router.get(
               makeRequest(token, p).catch((err) => {
                 console.log(`⚠️ Erro página ${p}: ${err.message}`);
                 return null; // Não quebrar o batch inteiro
-              })
+              }),
             );
           }
 
@@ -2443,15 +2511,19 @@ router.get(
             }
           }
 
-          console.log(`📄 Batch ${batchStart}-${batchEnd}/${totalPages}: acumulado ${allItems.length} (${Date.now() - startTime}ms)`);
+          console.log(
+            `📄 Batch ${batchStart}-${batchEnd}/${totalPages}: acumulado ${allItems.length} (${Date.now() - startTime}ms)`,
+          );
         }
       }
 
-      console.log(`📊 ${allItems.length} itens buscados em ${Date.now() - startTime}ms`);
+      console.log(
+        `📊 ${allItems.length} itens buscados em ${Date.now() - startTime}ms`,
+      );
 
       // PASSO 3: Filtros locais (status vencido/pago e portador)
       let filteredItems = allItems;
-      
+
       if (status === 'Vencido') {
         const hoje = new Date();
         hoje.setHours(0, 0, 0, 0);
@@ -2466,9 +2538,14 @@ router.get(
       }
 
       if (cd_portador) {
-        const portadores = cd_portador.split(',').map((p) => parseInt(p.trim())).filter((p) => !isNaN(p));
+        const portadores = cd_portador
+          .split(',')
+          .map((p) => parseInt(p.trim()))
+          .filter((p) => !isNaN(p));
         if (portadores.length > 0) {
-          filteredItems = filteredItems.filter((item) => portadores.includes(item.bearerCode));
+          filteredItems = filteredItems.filter((item) =>
+            portadores.includes(item.bearerCode),
+          );
         }
       }
 
@@ -2505,7 +2582,9 @@ router.get(
       }));
 
       const totalTime = Date.now() - startTime;
-      console.log(`✅ ${mappedItems.length} faturas em ${totalTime}ms (${totalPages} páginas paralelas)`);
+      console.log(
+        `✅ ${mappedItems.length} faturas em ${totalTime}ms (${totalPages} páginas paralelas)`,
+      );
 
       successResponse(
         res,
