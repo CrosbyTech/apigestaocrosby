@@ -2270,4 +2270,273 @@ router.post(
   }),
 );
 
+// ==========================================
+// ROTA OTIMIZADA PARA CONTAS A RECEBER
+// Filtros aplicados diretamente na API TOTVS
+// ==========================================
+router.get(
+  '/accounts-receivable/filter',
+  asyncHandler(async (req, res) => {
+    try {
+      const {
+        dt_inicio,
+        dt_fim,
+        modo, // 'vencimento' ou 'emissao'
+        status, // 'Todos', 'Pago', 'Em Aberto', 'Vencido'
+        cd_cliente,
+        nr_fatura,
+        cd_portador,
+        tp_documento,
+        maxPages,
+      } = req.query;
+
+      // Validar parâmetros obrigatórios
+      if (!dt_inicio || !dt_fim) {
+        return errorResponse(
+          res,
+          'Parâmetros dt_inicio e dt_fim são obrigatórios',
+          400,
+          'MISSING_PARAMS',
+        );
+      }
+
+      // Obter token de autenticação
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      // Buscar filiais disponíveis
+      let branchCodeList = [1, 2, 3, 4, 5]; // Default
+      try {
+        const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+        const branchesResponse = await axios.get(branchesUrl, {
+          headers: {
+            Authorization: `Bearer ${tokenData.access_token}`,
+            Accept: 'application/json',
+          },
+          timeout: 30000,
+        });
+        if (branchesResponse.data?.items) {
+          branchCodeList = branchesResponse.data.items
+            .map((b) => parseInt(b.code))
+            .filter((c) => !isNaN(c) && c > 0);
+        }
+      } catch (err) {
+        console.log('⚠️ Usando filiais padrão:', branchCodeList);
+      }
+
+      // Montar filtro para API TOTVS
+      const filter = {
+        branchCodeList,
+      };
+
+      // Filtro de datas (vencimento ou emissão)
+      if (modo === 'emissao') {
+        filter.issueDateStart = dt_inicio;
+        filter.issueDateEnd = dt_fim;
+      } else {
+        filter.expiredDateStart = dt_inicio;
+        filter.expiredDateEnd = dt_fim;
+      }
+
+      // Filtro de cliente específico
+      if (cd_cliente) {
+        const clientes = cd_cliente.split(',').map((c) => parseInt(c.trim())).filter((c) => !isNaN(c));
+        if (clientes.length > 0) {
+          filter.customerCodeList = clientes;
+        }
+      }
+
+      // Filtro de fatura específica
+      if (nr_fatura) {
+        const faturas = nr_fatura.split(',').map((f) => parseInt(f.trim())).filter((f) => !isNaN(f));
+        if (faturas.length > 0) {
+          filter.receivableCodeList = faturas;
+        }
+      }
+
+      // Filtro de portador
+      if (cd_portador) {
+        const portadores = cd_portador.split(',').map((p) => parseInt(p.trim())).filter((p) => !isNaN(p));
+        if (portadores.length > 0) {
+          filter.bearerCodeList = portadores;
+        }
+      }
+
+      // Filtro de tipo de documento
+      if (tp_documento) {
+        filter.documentTypeList = tp_documento.split(',').map((d) => d.trim());
+      }
+
+      // Filtro de status (aberto/pago)
+      if (status === 'Em Aberto' || status === 'Aberto' || status === 'Vencido') {
+        filter.hasOpenInvoices = true;
+        filter.dischargeTypeList = [0]; // Título não baixado
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`;
+      let token = tokenData.access_token;
+
+      console.log('🔍 Contas a Receber (filtro otimizado):', {
+        modo,
+        dt_inicio,
+        dt_fim,
+        status,
+        filter,
+      });
+
+      const doRequest = async (accessToken, page) => {
+        const payload = {
+          filter,
+          page,
+          pageSize: 100,
+          expand: 'invoice,calculateValue',
+          order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
+        };
+
+        return axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+        });
+      };
+
+      // Buscar páginas
+      let allItems = [];
+      let currentPage = 1;
+      let hasMore = true;
+      const maxPagesLimit = parseInt(maxPages) || 10; // Limite menor para performance
+
+      while (hasMore && currentPage <= maxPagesLimit) {
+        let response;
+        try {
+          response = await doRequest(token, currentPage);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            console.log('🔄 Token inválido. Renovando...');
+            const newTokenData = await getToken(true);
+            token = newTokenData.access_token;
+            response = await doRequest(token, currentPage);
+          } else {
+            throw error;
+          }
+        }
+
+        const pageItems = response.data?.items || [];
+        allItems = allItems.concat(pageItems);
+        hasMore = response.data?.hasNext || false;
+
+        console.log(`📄 Página ${currentPage}: ${pageItems.length} itens`);
+        currentPage++;
+      }
+
+      // Filtrar FATURA + NORMAL no backend
+      let filteredItems = allItems.filter((item) => {
+        const isFatura =
+          item.documentType === 'FATURA' ||
+          item.documentType === 1 ||
+          String(item.documentType).toUpperCase().includes('FATURA');
+
+        const isNormal =
+          item.status === 'NORMAL' ||
+          item.status === 1 ||
+          item.status === 0 ||
+          String(item.status).toUpperCase() === 'NORMAL';
+
+        return isFatura && isNormal;
+      });
+
+      // Filtro de status local (vencido requer comparação de data)
+      if (status === 'Vencido') {
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
+        filteredItems = filteredItems.filter((item) => {
+          const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
+          return dataVenc && dataVenc < hoje && !item.paymentDate;
+        });
+      } else if (status === 'Pago' || status === 'Liquidado') {
+        filteredItems = filteredItems.filter(
+          (item) => item.paymentDate || item.dischargeType > 0,
+        );
+      }
+
+      console.log(`✅ ${filteredItems.length} faturas após filtros`);
+
+      // Mapear para formato compatível
+      const mappedItems = filteredItems.map((item) => ({
+        ...item,
+        cd_empresa: item.branchCode,
+        cd_cliente: item.customerCode,
+        nm_cliente: item.customerName || item.customerCpfCnpj,
+        nr_cpfcnpj: item.customerCpfCnpj,
+        nr_fatura: item.receivableCode,
+        nr_fat: item.receivableCode,
+        nr_parcela: item.installmentCode,
+        dt_vencimento: item.expiredDate,
+        dt_liq: item.paymentDate || item.settlementDate,
+        dt_emissao: item.issueDate,
+        vl_fatura: item.installmentValue,
+        vl_pago: item.paidValue || 0,
+        vl_liquido: item.netValue,
+        vl_desconto: item.discountValue,
+        vl_abatimento: item.rebateValue,
+        vl_juros: item.interestValue,
+        vl_multa: item.assessmentValue,
+        cd_barras: item.barCode,
+        linha_digitavel: item.digitableLine,
+        nosso_numero: item.ourNumber,
+        qr_code_pix: item.qrCodePix,
+        tp_situacao: item.status,
+        tp_documento: item.documentType,
+        tp_faturamento: item.billingType,
+        tp_baixa: item.dischargeType,
+        tp_cobranca: item.chargeType,
+        cd_portador: item.bearerCode,
+        nm_portador: item.bearerName,
+        cancelado: item.canceled,
+        dias_atraso: item.calculatedValues?.daysLate,
+        vl_acrescimo: item.calculatedValues?.increaseValue,
+        vl_juros_calc: item.calculatedValues?.interestValue,
+        vl_multa_calc: item.calculatedValues?.fineValue,
+        vl_desconto_calc: item.calculatedValues?.discountValue,
+        vl_corrigido: item.calculatedValues?.correctedValue,
+        invoice: item.invoice,
+      }));
+
+      successResponse(
+        res,
+        {
+          items: mappedItems,
+          totalItems: mappedItems.length,
+          pagesSearched: currentPage - 1,
+          hasMore,
+        },
+        `${mappedItems.length} fatura(s) encontrada(s)`,
+      );
+    } catch (error) {
+      console.error('❌ Erro contas a receber filtro:', error.message);
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: error.response.data?.message || 'Erro na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          details: error.response.data,
+        });
+      }
+
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
 export default router;
