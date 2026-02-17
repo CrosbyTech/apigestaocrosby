@@ -3045,7 +3045,7 @@ const MULTIBRAND_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
 /**
  * @route GET /totvs/multibrand-clients
  * @desc Retorna lista de códigos de clientes MULTIMARCAS (classificação TOTVS)
- * Classificação: type 20 codeList ["2"]
+ * Classificações: type 20 codeList ["2"] e/ou type 5 codeList ["1"]
  */
 router.get(
   '/multibrand-clients',
@@ -3085,13 +3085,14 @@ router.get(
       let token = tokenData.access_token;
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
-      const doRequest = async (accessToken, page) => {
+      // Buscar com filtro de classificação direto na API TOTVS
+      const doRequest = async (accessToken, classificationType, codeList, page) => {
         const payload = {
           filter: {
             classifications: [
               {
-                type: 20,
-                codeList: ['2'],
+                type: classificationType,
+                codeList: codeList,
               },
             ],
           },
@@ -3109,49 +3110,75 @@ router.get(
         });
       };
 
-      let allMultibrand = [];
-      let currentPage = 1;
-      let hasMore = true;
-      const maxPages = 200;
+      // Função para buscar TODAS as páginas de uma classificação
+      const fetchAllPages = async (classificationType, codeList) => {
+        let items = [];
+        let currentPage = 1;
+        let hasMore = true;
+        const maxPages = 200;
+
+        while (hasMore && currentPage <= maxPages) {
+          let response;
+          try {
+            response = await doRequest(token, classificationType, codeList, currentPage);
+          } catch (error) {
+            if (error.response?.status === 401) {
+              const newTokenData = await getToken(true);
+              token = newTokenData.access_token;
+              response = await doRequest(token, classificationType, codeList, currentPage);
+            } else {
+              throw error;
+            }
+          }
+
+          const pageItems = response.data?.items || [];
+          hasMore = response.data?.hasNext || false;
+
+          items = items.concat(
+            pageItems.map((item) => ({
+              code: item.code,
+              name: item.name || '',
+              fantasyName: item.fantasyName || '',
+              cnpj: item.cnpj || '',
+            })),
+          );
+
+          if (currentPage % 10 === 0 || !hasMore) {
+            console.log(
+              `📄 Type ${classificationType} - Página ${currentPage}: ${pageItems.length} itens (total: ${items.length})`,
+            );
+          }
+
+          currentPage++;
+        }
+
+        return items;
+      };
 
       console.log(
-        '🔍 Buscando clientes MULTIMARCAS na API TOTVS (tipo 20, classificação 2)...',
+        '🔍 Buscando clientes MULTIMARCAS na API TOTVS (tipo 20/code 2 e/ou tipo 5/code 1)...',
       );
 
-      while (hasMore && currentPage <= maxPages) {
-        let response;
-        try {
-          response = await doRequest(token, currentPage);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const newTokenData = await getToken(true);
-            token = newTokenData.access_token;
-            response = await doRequest(token, currentPage);
-          } else {
-            throw error;
-          }
+      // Buscar as duas classificações em PARALELO
+      const [multimarcasTipo20, multimarcasTipo5] = await Promise.all([
+        fetchAllPages(20, ['2']),
+        fetchAllPages(5, ['1']),
+      ]);
+
+      console.log(
+        `📊 Tipo 20/Code 2: ${multimarcasTipo20.length} | Tipo 5/Code 1: ${multimarcasTipo5.length}`,
+      );
+
+      // Mesclar e deduplicar por code
+      const codesSet = new Set();
+      const allMultibrand = [];
+
+      [...multimarcasTipo20, ...multimarcasTipo5].forEach((item) => {
+        if (!codesSet.has(item.code)) {
+          codesSet.add(item.code);
+          allMultibrand.push(item);
         }
-
-        const pageItems = response.data?.items || [];
-        hasMore = response.data?.hasNext || false;
-
-        allMultibrand = allMultibrand.concat(
-          pageItems.map((item) => ({
-            code: item.code,
-            name: item.name || '',
-            fantasyName: item.fantasyName || '',
-            cnpj: item.cnpj || '',
-          })),
-        );
-
-        if (currentPage % 10 === 0 || !hasMore) {
-          console.log(
-            `📄 Multimarcas - Página ${currentPage}: ${pageItems.length} itens (total: ${allMultibrand.length})`,
-          );
-        }
-
-        currentPage++;
-      }
+      });
 
       // Salvar no cache
       cachedMultibrandClients = allMultibrand;
