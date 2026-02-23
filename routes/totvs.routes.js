@@ -3086,7 +3086,12 @@ router.get(
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
       // Buscar com filtro de classificação direto na API TOTVS
-      const doRequest = async (accessToken, classificationType, codeList, page) => {
+      const doRequest = async (
+        accessToken,
+        classificationType,
+        codeList,
+        page,
+      ) => {
         const payload = {
           filter: {
             classifications: [
@@ -3120,12 +3125,22 @@ router.get(
         while (hasMore && currentPage <= maxPages) {
           let response;
           try {
-            response = await doRequest(token, classificationType, codeList, currentPage);
+            response = await doRequest(
+              token,
+              classificationType,
+              codeList,
+              currentPage,
+            );
           } catch (error) {
             if (error.response?.status === 401) {
               const newTokenData = await getToken(true);
               token = newTokenData.access_token;
-              response = await doRequest(token, classificationType, codeList, currentPage);
+              response = await doRequest(
+                token,
+                classificationType,
+                codeList,
+                currentPage,
+              );
             } else {
               throw error;
             }
@@ -3300,9 +3315,12 @@ router.post(
       // Coletar todos os itens (paginação automática)
       let allItems = response.data?.items || response.data?.data || [];
       const hasNext = response.data?.hasNext ?? false;
-      const totalRecords = response.data?.total || response.data?.totalRecords || allItems.length;
+      const totalRecords =
+        response.data?.total || response.data?.totalRecords || allItems.length;
 
-      console.log(`📊 Página 1: ${allItems.length} itens | hasNext: ${hasNext} | total: ${totalRecords}`);
+      console.log(
+        `📊 Página 1: ${allItems.length} itens | hasNext: ${hasNext} | total: ${totalRecords}`,
+      );
 
       // Se há mais páginas, buscar todas
       if (hasNext && totalRecords > payload.pageSize) {
@@ -3313,9 +3331,12 @@ router.post(
           const nextPayload = { ...payload, page: p };
           try {
             const nextResponse = await doRequest(currentToken, nextPayload);
-            const nextItems = nextResponse.data?.items || nextResponse.data?.data || [];
+            const nextItems =
+              nextResponse.data?.items || nextResponse.data?.data || [];
             allItems = [...allItems, ...nextItems];
-            console.log(`📊 Página ${p}/${totalPages}: +${nextItems.length} itens (total acumulado: ${allItems.length})`);
+            console.log(
+              `📊 Página ${p}/${totalPages}: +${nextItems.length} itens (total acumulado: ${allItems.length})`,
+            );
 
             if (!nextResponse.data?.hasNext) break;
           } catch (pageError) {
@@ -3326,7 +3347,9 @@ router.post(
       }
 
       const totalTime = Date.now() - startTime;
-      console.log(`✅ Movimentos fiscais obtidos: ${allItems.length} itens em ${totalTime}ms`);
+      console.log(
+        `✅ Movimentos fiscais obtidos: ${allItems.length} itens em ${totalTime}ms`,
+      );
 
       successResponse(
         res,
@@ -3390,6 +3413,43 @@ router.post(
  *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
  * }
  */
+// Cache de nomes de branches (code → name)
+let cachedBranchNames = null;
+let branchNamesCacheTimestamp = 0;
+
+async function getBranchNames(token) {
+  const now = Date.now();
+  if (cachedBranchNames && now - branchNamesCacheTimestamp < BRANCH_CACHE_TTL) {
+    return cachedBranchNames;
+  }
+  try {
+    const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+    const resp = await axios.get(branchesUrl, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      timeout: 15000,
+    });
+    if (resp.data?.items?.length > 0) {
+      const namesMap = {};
+      resp.data.items.forEach((b) => {
+        const code = parseInt(b.code);
+        if (!isNaN(code) && code > 0) {
+          namesMap[code] =
+            b.name || b.tradeName || b.companyName || `Empresa ${code}`;
+        }
+      });
+      cachedBranchNames = namesMap;
+      branchNamesCacheTimestamp = now;
+      console.log(
+        `✅ Cache de nomes de branches atualizado: ${Object.keys(namesMap).length} branches`,
+      );
+      return namesMap;
+    }
+  } catch (err) {
+    console.log('⚠️ Erro ao buscar nomes de branches:', err.message);
+  }
+  return cachedBranchNames || {};
+}
+
 router.post(
   '/fiscal-movement/ranking-lojas',
   asyncHandler(async (req, res) => {
@@ -3417,11 +3477,15 @@ router.post(
         );
       }
 
-      // Usar branchCodes fornecidos ou buscar todos
+      // Usar branchCodes fornecidos ou buscar todos da API
       const branches =
         branchCodeList && branchCodeList.length > 0
           ? branchCodeList
           : await getBranchCodes(tokenData.access_token);
+
+      console.log(
+        `📊 [Ranking Lojas] Usando ${branches.length} branches: [${branches.join(',')}]`,
+      );
 
       const startMovementDate = `${startDate}T00:00:00.000Z`;
       const endMovementDate = `${endDate}T23:59:59.999Z`;
@@ -3434,6 +3498,16 @@ router.post(
       let hasMore = true;
       const PAGE_SIZE = 1000;
 
+      const doRequest = async (accessToken, payload) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 120000,
+        });
+
       while (hasMore) {
         const payload = {
           filter: {
@@ -3445,59 +3519,64 @@ router.post(
           pageSize: PAGE_SIZE,
         };
 
-        console.log(`📊 [Ranking Lojas] Página ${currentPage} - ${branches.length} filiais`);
-
-        const doRequest = async (accessToken) =>
-          axios.post(endpoint, payload, {
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
-            timeout: 60000,
-          });
+        console.log(
+          `📊 [Ranking Lojas] Página ${currentPage} - ${branches.length} filiais - branches: [${branches.join(',')}]`,
+        );
 
         let response;
         try {
-          response = await doRequest(tokenData.access_token);
+          response = await doRequest(tokenData.access_token, payload);
         } catch (error) {
           if (error.response?.status === 401) {
             const newTokenData = await getToken(true);
-            response = await doRequest(newTokenData.access_token);
+            response = await doRequest(newTokenData.access_token, payload);
           } else {
             throw error;
           }
         }
 
-        const items = response.data?.items || response.data?.data || [];
+        const items = response.data?.items || [];
         allItems = [...allItems, ...items];
 
         hasMore = response.data?.hasNext === true;
         if (items.length < PAGE_SIZE) hasMore = false;
         currentPage++;
 
-        console.log(`📊 [Ranking Lojas] +${items.length} itens (total: ${allItems.length}) | hasMore: ${hasMore}`);
+        console.log(
+          `📊 [Ranking Lojas] +${items.length} itens (total: ${allItems.length}) | hasMore: ${hasMore}`,
+        );
       }
 
-      console.log(`📊 [Ranking Lojas] Total de itens brutos: ${allItems.length}`);
-      console.log('📊 [Ranking Lojas] Amostra de item:', JSON.stringify(allItems[0], null, 2));
+      console.log(
+        `📊 [Ranking Lojas] Total de itens brutos: ${allItems.length}`,
+      );
+      if (allItems.length > 0) {
+        console.log(
+          '📊 [Ranking Lojas] CAMPOS DISPONÍVEIS:',
+          Object.keys(allItems[0]),
+        );
+        console.log(
+          '📊 [Ranking Lojas] Amostra de item:',
+          JSON.stringify(allItems[0], null, 2),
+        );
+      }
 
-      // Agregar por empresa (branchCode / branchName)
+      // Buscar nomes das branches em paralelo enquanto já temos os dados
+      const branchNames = await getBranchNames(tokenData.access_token);
+      console.log(
+        `📊 [Ranking Lojas] Nomes de branches disponíveis: ${Object.keys(branchNames).length}`,
+      );
+
+      // Agregar por empresa (branchCode)
+      // Campos reais: branchCode, productCode, personCode, representativeCode,
+      // movementDate, operationCode, operationModel, stockCode, buyerCode,
+      // sellerCode, grossValue, discountValue, netValue, quantity
       const lojasMap = {};
       allItems.forEach((item) => {
-        const branchCode = item.branchCode || item.branch_code || item.cd_empresa || 0;
-        const branchName =
-          item.branchName ||
-          item.branch_name ||
-          item.nome_fantasia ||
-          item.companyName ||
-          `Empresa ${branchCode}`;
-        const saleValue =
-          parseFloat(item.totalSaleValue || item.saleValue || item.faturamento || item.value || 0);
-        const itemQuantity =
-          parseInt(item.totalItemQuantity || item.itemQuantity || item.quantidade || 0, 10);
-        const transactionCount =
-          parseInt(item.transactionCount || item.totalTransactions || item.transacoes || 1, 10);
+        const branchCode = item.branchCode || 0;
+        const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
+        const saleValue = parseFloat(item.netValue || item.grossValue || 0);
+        const itemQuantity = parseInt(item.quantity || 0, 10);
 
         if (!lojasMap[branchCode]) {
           lojasMap[branchCode] = {
@@ -3511,7 +3590,7 @@ router.post(
 
         lojasMap[branchCode].faturamento += saleValue;
         lojasMap[branchCode].quantidade_itens += itemQuantity;
-        lojasMap[branchCode].transacoes += transactionCount;
+        lojasMap[branchCode].transacoes += 1; // Cada item é uma transação/movimento
       });
 
       // Converter para array e ordenar por faturamento
@@ -3527,7 +3606,9 @@ router.post(
         }));
 
       const totalTime = Date.now() - startTime;
-      console.log(`✅ [Ranking Lojas] ${lojas.length} lojas encontradas em ${totalTime}ms`);
+      console.log(
+        `✅ [Ranking Lojas] ${lojas.length} lojas encontradas em ${totalTime}ms`,
+      );
 
       successResponse(
         res,
@@ -3550,7 +3631,9 @@ router.post(
       if (error.response) {
         return res.status(error.response.status || 400).json({
           success: false,
-          message: error.response.data?.message || 'Erro ao buscar ranking de lojas na API TOTVS',
+          message:
+            error.response.data?.message ||
+            'Erro ao buscar ranking de lojas na API TOTVS',
           error: 'TOTVS_API_ERROR',
           details: error.response.data,
         });
@@ -3563,12 +3646,13 @@ router.post(
 
 /**
  * @route POST /totvs/fiscal-movement/ranking-vendedores
- * @desc Busca movimentos fiscais e agrega por vendedor
+ * @desc Busca vendedores via seller-fiscal-movement/search (TOTVS) - retorna {code, name} por vendedor
+ *       E depois cruza com fiscal-movement/search para obter faturamento por vendedor
  * @access Public
  * @body {
  *   startDate: string (YYYY-MM-DD, obrigatório),
  *   endDate: string (YYYY-MM-DD, obrigatório),
- *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
+ *   branchCodeList: number[] (opcional)
  * }
  */
 router.post(
@@ -3603,85 +3687,133 @@ router.post(
           ? branchCodeList
           : await getBranchCodes(tokenData.access_token);
 
+      console.log(`📊 [Ranking Vendedores] Usando ${branches.length} branches`);
+
       const startMovementDate = `${startDate}T00:00:00.000Z`;
       const endMovementDate = `${endDate}T23:59:59.999Z`;
 
-      const endpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+      const fiscalPayload = {
+        filter: {
+          branchCodeList: branches,
+          startMovementDate,
+          endMovementDate,
+        },
+        page: 1,
+        pageSize: 1000,
+      };
 
-      let allItems = [];
-      let currentPage = 1;
-      let hasMore = true;
-      const PAGE_SIZE = 1000;
+      // 1) Buscar nomes dos vendedores via seller-fiscal-movement/search
+      const sellerEndpoint = `${TOTVS_BASE_URL}/analytics/v2/seller-fiscal-movement/search`;
+      console.log('📊 [Ranking Vendedores] Buscando nomes via seller-fiscal-movement/search...');
 
-      while (hasMore) {
-        const payload = {
-          filter: {
-            branchCodeList: branches,
-            startMovementDate,
-            endMovementDate,
+      const doSellerRequest = async (accessToken, payload) =>
+        axios.post(sellerEndpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
           },
-          page: currentPage,
-          pageSize: PAGE_SIZE,
-        };
+          timeout: 120000,
+        });
 
-        console.log(`📊 [Ranking Vendedores] Página ${currentPage} - ${branches.length} filiais`);
+      // Buscar todas as páginas de sellers
+      let allSellers = [];
+      let sellerPage = 1;
+      let sellerHasMore = true;
 
-        const doRequest = async (accessToken) =>
-          axios.post(endpoint, payload, {
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
-            timeout: 60000,
-          });
-
-        let response;
+      while (sellerHasMore) {
+        const sellerPayload = { ...fiscalPayload, page: sellerPage, pageSize: 1000 };
+        let sellerResp;
         try {
-          response = await doRequest(tokenData.access_token);
+          sellerResp = await doSellerRequest(tokenData.access_token, sellerPayload);
         } catch (error) {
           if (error.response?.status === 401) {
             const newTokenData = await getToken(true);
-            response = await doRequest(newTokenData.access_token);
+            sellerResp = await doSellerRequest(newTokenData.access_token, sellerPayload);
           } else {
             throw error;
           }
         }
 
-        const items = response.data?.items || response.data?.data || [];
+        const sellerItems = sellerResp.data?.items || [];
+        allSellers = [...allSellers, ...sellerItems];
+        sellerHasMore = sellerResp.data?.hasNext === true;
+        if (sellerItems.length < 1000) sellerHasMore = false;
+        sellerPage++;
+
+        console.log(`📊 [Sellers] Página ${sellerPage - 1}: +${sellerItems.length} (total: ${allSellers.length}) | hasNext: ${sellerHasMore}`);
+      }
+
+      // Mapear code → name para lookup rápido
+      const sellerNamesMap = {};
+      allSellers.forEach((s) => {
+        if (s.code !== undefined) {
+          sellerNamesMap[s.code] = s.name || `Vendedor ${s.code}`;
+        }
+      });
+      console.log(`📊 [Ranking Vendedores] ${Object.keys(sellerNamesMap).length} nomes de vendedores obtidos`);
+      if (allSellers.length > 0) {
+        console.log('📊 [Sellers] Amostra:', JSON.stringify(allSellers.slice(0, 3), null, 2));
+      }
+
+      // 2) Buscar movimentos fiscais para obter faturamento por vendedor
+      const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+
+      const doFiscalRequest = async (accessToken, payload) =>
+        axios.post(fiscalEndpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 120000,
+        });
+
+      let allItems = [];
+      let currentPage = 1;
+      let hasMore = true;
+
+      while (hasMore) {
+        const payload = { ...fiscalPayload, page: currentPage };
+
+        console.log(`📊 [Ranking Vendedores] Fiscal página ${currentPage}`);
+
+        let response;
+        try {
+          response = await doFiscalRequest(tokenData.access_token, payload);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            const newTokenData = await getToken(true);
+            response = await doFiscalRequest(newTokenData.access_token, payload);
+          } else {
+            throw error;
+          }
+        }
+
+        const items = response.data?.items || [];
         allItems = [...allItems, ...items];
 
         hasMore = response.data?.hasNext === true;
-        if (items.length < PAGE_SIZE) hasMore = false;
+        if (items.length < 1000) hasMore = false;
         currentPage++;
-
-        console.log(`📊 [Ranking Vendedores] +${items.length} itens (total: ${allItems.length}) | hasMore: ${hasMore}`);
       }
 
-      console.log(`📊 [Ranking Vendedores] Total de itens brutos: ${allItems.length}`);
-      console.log('📊 [Ranking Vendedores] Amostra de item:', JSON.stringify(allItems[0], null, 2));
+      console.log(`📊 [Ranking Vendedores] Total movimentos fiscais: ${allItems.length}`);
 
-      // Agregar por vendedor (sellerCode / sellerName)
+      // Buscar nomes de branches para mostrar loja do vendedor
+      const branchNames = await getBranchNames(tokenData.access_token);
+
+      // 3) Agregar por vendedor (sellerCode) usando movimentos fiscais + nomes do seller endpoint
       const vendedoresMap = {};
       allItems.forEach((item) => {
-        const sellerCode =
-          item.sellerCode || item.seller_code || item.cd_vendedor || 0;
-        const sellerName =
-          item.sellerName ||
-          item.seller_name ||
-          item.nome_vendedor ||
-          `Vendedor ${sellerCode}`;
-        const branchCode = item.branchCode || item.branch_code || item.cd_empresa || 0;
-        const branchName =
-          item.branchName || item.branch_name || item.nome_fantasia || `Empresa ${branchCode}`;
-        const saleValue =
-          parseFloat(item.totalSaleValue || item.saleValue || item.faturamento || item.value || 0);
-        const itemQuantity =
-          parseInt(item.totalItemQuantity || item.itemQuantity || item.quantidade || 0, 10);
-        const transactionCount =
-          parseInt(item.transactionCount || item.totalTransactions || item.transacoes || 1, 10);
+        const sellerCode = item.sellerCode || 0;
+        const sellerName = sellerNamesMap[sellerCode] || `Vendedor ${sellerCode}`;
+        const branchCode = item.branchCode || 0;
+        const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
+        const saleValue = parseFloat(item.netValue || item.grossValue || 0);
+        const itemQuantity = parseInt(item.quantity || 0, 10);
 
-        // Chave composta: vendedor + loja (para não misturar vendedores com mesmo nome em lojas diferentes)
+        // Chave composta: vendedor + loja
         const key = `${sellerCode}_${branchCode}`;
 
         if (!vendedoresMap[key]) {
@@ -3698,7 +3830,7 @@ router.post(
 
         vendedoresMap[key].faturamento += saleValue;
         vendedoresMap[key].quantidade_itens += itemQuantity;
-        vendedoresMap[key].transacoes += transactionCount;
+        vendedoresMap[key].transacoes += 1;
       });
 
       const vendedores = Object.values(vendedoresMap)
@@ -3718,7 +3850,7 @@ router.post(
         }));
 
       const totalTime = Date.now() - startTime;
-      console.log(`✅ [Ranking Vendedores] ${vendedores.length} vendedores encontrados em ${totalTime}ms`);
+      console.log(`✅ [Ranking Vendedores] ${vendedores.length} vendedores em ${totalTime}ms`);
 
       successResponse(
         res,
@@ -3726,6 +3858,7 @@ router.post(
           periodo: { startDate, endDate },
           count: vendedores.length,
           totalMovimentos: allItems.length,
+          totalSellers: allSellers.length,
           queryTime: totalTime,
           data: vendedores,
         },
@@ -3741,7 +3874,9 @@ router.post(
       if (error.response) {
         return res.status(error.response.status || 400).json({
           success: false,
-          message: error.response.data?.message || 'Erro ao buscar ranking de vendedores na API TOTVS',
+          message:
+            error.response.data?.message ||
+            'Erro ao buscar ranking de vendedores na API TOTVS',
           error: 'TOTVS_API_ERROR',
           details: error.response.data,
         });
