@@ -3428,13 +3428,31 @@ async function getBranchNames(token) {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
       timeout: 15000,
     });
-    if (resp.data?.items?.length > 0) {
+    const branchItems = resp.data?.items || [];
+    if (branchItems.length > 0) {
+      // Log dos campos disponíveis para debug
+      console.log(
+        '🔍 [BranchNames] Campos do primeiro item:',
+        Object.keys(branchItems[0]),
+      );
+      console.log(
+        '🔍 [BranchNames] Amostra:',
+        JSON.stringify(branchItems[0], null, 2),
+      );
+
       const namesMap = {};
-      resp.data.items.forEach((b) => {
+      branchItems.forEach((b) => {
         const code = parseInt(b.code);
         if (!isNaN(code) && code > 0) {
           namesMap[code] =
-            b.name || b.tradeName || b.companyName || `Empresa ${code}`;
+            b.tradeName ||
+            b.name ||
+            b.shortName ||
+            b.corporateName ||
+            b.companyName ||
+            b.fantasyName ||
+            b.description ||
+            `Empresa ${code}`;
         }
       });
       cachedBranchNames = namesMap;
@@ -3448,6 +3466,88 @@ async function getBranchNames(token) {
     console.log('⚠️ Erro ao buscar nomes de branches:', err.message);
   }
   return cachedBranchNames || {};
+}
+
+/**
+ * Helper: busca TODAS as páginas de um endpoint TOTVS POST em PARALELO
+ * Faz 1 request sequencial (página 1) para descobrir totalPages,
+ * depois busca as demais em lotes paralelos de `concurrency` páginas.
+ */
+async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
+  const { concurrency = 10, pageSize = 1000, timeout = 30000 } = options;
+
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    Authorization: `Bearer ${accessToken}`,
+  };
+
+  const doRequest = async (page) => {
+    try {
+      return await axios.post(
+        endpoint,
+        { ...body, page, pageSize },
+        { headers, timeout },
+      );
+    } catch (err) {
+      if (err.response?.status === 401) {
+        const newToken = await getToken(true);
+        return axios.post(
+          endpoint,
+          { ...body, page, pageSize },
+          {
+            headers: {
+              ...headers,
+              Authorization: `Bearer ${newToken.access_token}`,
+            },
+            timeout,
+          },
+        );
+      }
+      throw err;
+    }
+  };
+
+  // Página 1: descobre totalPages
+  const resp1 = await doRequest(1);
+  const items1 = resp1.data?.items || [];
+  const totalPages = resp1.data?.totalPages || 1;
+  const totalItems = resp1.data?.totalItems || items1.length;
+
+  console.log(
+    `📄 [TOTVS Paginação] Página 1/${totalPages}: ${items1.length} itens (totalItems: ${totalItems})`,
+  );
+
+  if (totalPages <= 1) return items1;
+
+  // Buscar páginas 2..totalPages em lotes paralelos
+  const allItems = [...items1];
+
+  for (let i = 2; i <= totalPages; i += concurrency) {
+    const batch = [];
+    for (let p = i; p < Math.min(i + concurrency, totalPages + 1); p++) {
+      batch.push(p);
+    }
+
+    const batchResults = await Promise.all(
+      batch.map((p) =>
+        doRequest(p)
+          .then((r) => ({ page: p, items: r.data?.items || [] }))
+          .catch((err) => {
+            console.warn(`⚠️ Página ${p} falhou: ${err.message}`);
+            return { page: p, items: [] };
+          }),
+      ),
+    );
+
+    batchResults.forEach((r) => allItems.push(...r.items));
+    const batchCount = batchResults.reduce((sum, r) => sum + r.items.length, 0);
+    console.log(
+      `📄 [TOTVS Paginação] Lote [${batch.join(',')}]: +${batchCount} (total: ${allItems.length})`,
+    );
+  }
+
+  return allItems;
 }
 
 router.post(
@@ -3484,99 +3584,41 @@ router.post(
           : await getBranchCodes(tokenData.access_token);
 
       console.log(
-        `📊 [Ranking Lojas] Usando ${branches.length} branches: [${branches.join(',')}]`,
+        `📊 [Ranking Lojas] ${branches.length} branches, período ${startDate} a ${endDate}`,
       );
 
       const startMovementDate = `${startDate}T00:00:00.000Z`;
       const endMovementDate = `${endDate}T23:59:59.999Z`;
 
-      const endpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+      const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+      const filterBody = {
+        filter: { branchCodeList: branches, startMovementDate, endMovementDate },
+      };
 
-      // Buscar todas as páginas
-      let allItems = [];
-      let currentPage = 1;
-      let hasMore = true;
-      const PAGE_SIZE = 1000;
-
-      const doRequest = async (accessToken, payload) =>
-        axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 120000,
-        });
-
-      while (hasMore) {
-        const payload = {
-          filter: {
-            branchCodeList: branches,
-            startMovementDate,
-            endMovementDate,
-          },
-          page: currentPage,
-          pageSize: PAGE_SIZE,
-        };
-
-        console.log(
-          `📊 [Ranking Lojas] Página ${currentPage} - ${branches.length} filiais - branches: [${branches.join(',')}]`,
-        );
-
-        let response;
-        try {
-          response = await doRequest(tokenData.access_token, payload);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const newTokenData = await getToken(true);
-            response = await doRequest(newTokenData.access_token, payload);
-          } else {
-            throw error;
-          }
-        }
-
-        const items = response.data?.items || [];
-        allItems = [...allItems, ...items];
-
-        hasMore = response.data?.hasNext === true;
-        if (items.length < PAGE_SIZE) hasMore = false;
-        currentPage++;
-
-        console.log(
-          `📊 [Ranking Lojas] +${items.length} itens (total: ${allItems.length}) | hasMore: ${hasMore}`,
-        );
-      }
+      // Buscar movimentos fiscais E nomes de branches EM PARALELO
+      const [allItems, branchNames] = await Promise.all([
+        fetchAllTotvsPages(fiscalEndpoint, filterBody, tokenData.access_token),
+        getBranchNames(tokenData.access_token),
+      ]);
 
       console.log(
-        `📊 [Ranking Lojas] Total de itens brutos: ${allItems.length}`,
+        `📊 [Ranking Lojas] ${allItems.length} movimentos | ${Object.keys(branchNames).length} nomes de branches`,
       );
       if (allItems.length > 0) {
-        console.log(
-          '📊 [Ranking Lojas] CAMPOS DISPONÍVEIS:',
-          Object.keys(allItems[0]),
-        );
-        console.log(
-          '📊 [Ranking Lojas] Amostra de item:',
-          JSON.stringify(allItems[0], null, 2),
-        );
+        console.log('📊 [Ranking Lojas] Campos:', Object.keys(allItems[0]));
+        console.log('📊 [Ranking Lojas] Amostra:', JSON.stringify(allItems[0], null, 2));
       }
 
-      // Buscar nomes das branches em paralelo enquanto já temos os dados
-      const branchNames = await getBranchNames(tokenData.access_token);
-      console.log(
-        `📊 [Ranking Lojas] Nomes de branches disponíveis: ${Object.keys(branchNames).length}`,
-      );
-
       // Agregar por empresa (branchCode)
-      // Campos reais: branchCode, productCode, personCode, representativeCode,
-      // movementDate, operationCode, operationModel, stockCode, buyerCode,
-      // sellerCode, grossValue, discountValue, netValue, quantity
+      // Usar ?? em vez de || para não tratar 0 como falsy
       const lojasMap = {};
       allItems.forEach((item) => {
-        const branchCode = item.branchCode || 0;
+        const branchCode = item.branchCode ?? 0;
         const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
-        const saleValue = parseFloat(item.netValue || item.grossValue || 0);
-        const itemQuantity = parseInt(item.quantity || 0, 10);
+        const saleValue = Number(item.netValue ?? item.grossValue ?? 0);
+        const itemQuantity = Number(item.quantity ?? 0);
+
+        if (isNaN(saleValue)) return; // pular itens inválidos
 
         if (!lojasMap[branchCode]) {
           lojasMap[branchCode] = {
@@ -3590,8 +3632,17 @@ router.post(
 
         lojasMap[branchCode].faturamento += saleValue;
         lojasMap[branchCode].quantidade_itens += itemQuantity;
-        lojasMap[branchCode].transacoes += 1; // Cada item é uma transação/movimento
+        lojasMap[branchCode].transacoes += 1;
       });
+
+      // Debug: mostrar estado da agregação
+      const mapEntries = Object.values(lojasMap);
+      console.log(`📊 [Ranking Lojas] ${mapEntries.length} branches no mapa`);
+      if (mapEntries.length > 0) {
+        console.log('📊 [Ranking Lojas] Top 3 pré-filtro:', mapEntries.slice(0, 3).map(l => ({
+          branchCode: l.branchCode, nome: l.nome_fantasia, fat: l.faturamento, trans: l.transacoes,
+        })));
+      }
 
       // Converter para array e ordenar por faturamento
       const lojas = Object.values(lojasMap)
@@ -3607,7 +3658,7 @@ router.post(
 
       const totalTime = Date.now() - startTime;
       console.log(
-        `✅ [Ranking Lojas] ${lojas.length} lojas encontradas em ${totalTime}ms`,
+        `✅ [Ranking Lojas] ${lojas.length} lojas em ${totalTime}ms`,
       );
 
       successResponse(
@@ -3687,133 +3738,54 @@ router.post(
           ? branchCodeList
           : await getBranchCodes(tokenData.access_token);
 
-      console.log(`📊 [Ranking Vendedores] Usando ${branches.length} branches`);
+      console.log(`📊 [Ranking Vendedores] ${branches.length} branches, período ${startDate} a ${endDate}`);
 
       const startMovementDate = `${startDate}T00:00:00.000Z`;
       const endMovementDate = `${endDate}T23:59:59.999Z`;
 
-      const fiscalPayload = {
-        filter: {
-          branchCodeList: branches,
-          startMovementDate,
-          endMovementDate,
-        },
-        page: 1,
-        pageSize: 1000,
+      const filterBody = {
+        filter: { branchCodeList: branches, startMovementDate, endMovementDate },
       };
 
-      // 1) Buscar nomes dos vendedores via seller-fiscal-movement/search
       const sellerEndpoint = `${TOTVS_BASE_URL}/analytics/v2/seller-fiscal-movement/search`;
-      console.log('📊 [Ranking Vendedores] Buscando nomes via seller-fiscal-movement/search...');
+      const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
 
-      const doSellerRequest = async (accessToken, payload) =>
-        axios.post(sellerEndpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 120000,
-        });
+      // Buscar sellers, movimentos fiscais e nomes de branches TUDO EM PARALELO
+      console.log('📊 [Ranking Vendedores] Buscando sellers + movimentos + branches em PARALELO...');
 
-      // Buscar todas as páginas de sellers
-      let allSellers = [];
-      let sellerPage = 1;
-      let sellerHasMore = true;
+      const [allSellers, allItems, branchNames] = await Promise.all([
+        fetchAllTotvsPages(sellerEndpoint, filterBody, tokenData.access_token),
+        fetchAllTotvsPages(fiscalEndpoint, filterBody, tokenData.access_token),
+        getBranchNames(tokenData.access_token),
+      ]);
 
-      while (sellerHasMore) {
-        const sellerPayload = { ...fiscalPayload, page: sellerPage, pageSize: 1000 };
-        let sellerResp;
-        try {
-          sellerResp = await doSellerRequest(tokenData.access_token, sellerPayload);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const newTokenData = await getToken(true);
-            sellerResp = await doSellerRequest(newTokenData.access_token, sellerPayload);
-          } else {
-            throw error;
-          }
-        }
+      console.log(`📊 [Ranking Vendedores] ${allSellers.length} sellers | ${allItems.length} movimentos | ${Object.keys(branchNames).length} branches`);
 
-        const sellerItems = sellerResp.data?.items || [];
-        allSellers = [...allSellers, ...sellerItems];
-        sellerHasMore = sellerResp.data?.hasNext === true;
-        if (sellerItems.length < 1000) sellerHasMore = false;
-        sellerPage++;
-
-        console.log(`📊 [Sellers] Página ${sellerPage - 1}: +${sellerItems.length} (total: ${allSellers.length}) | hasNext: ${sellerHasMore}`);
-      }
-
-      // Mapear code → name para lookup rápido
+      // Mapear seller code → name
       const sellerNamesMap = {};
       allSellers.forEach((s) => {
         if (s.code !== undefined) {
           sellerNamesMap[s.code] = s.name || `Vendedor ${s.code}`;
         }
       });
-      console.log(`📊 [Ranking Vendedores] ${Object.keys(sellerNamesMap).length} nomes de vendedores obtidos`);
+      console.log(`📊 [Ranking Vendedores] ${Object.keys(sellerNamesMap).length} nomes de vendedores`);
       if (allSellers.length > 0) {
         console.log('📊 [Sellers] Amostra:', JSON.stringify(allSellers.slice(0, 3), null, 2));
       }
 
-      // 2) Buscar movimentos fiscais para obter faturamento por vendedor
-      const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
-
-      const doFiscalRequest = async (accessToken, payload) =>
-        axios.post(fiscalEndpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 120000,
-        });
-
-      let allItems = [];
-      let currentPage = 1;
-      let hasMore = true;
-
-      while (hasMore) {
-        const payload = { ...fiscalPayload, page: currentPage };
-
-        console.log(`📊 [Ranking Vendedores] Fiscal página ${currentPage}`);
-
-        let response;
-        try {
-          response = await doFiscalRequest(tokenData.access_token, payload);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const newTokenData = await getToken(true);
-            response = await doFiscalRequest(newTokenData.access_token, payload);
-          } else {
-            throw error;
-          }
-        }
-
-        const items = response.data?.items || [];
-        allItems = [...allItems, ...items];
-
-        hasMore = response.data?.hasNext === true;
-        if (items.length < 1000) hasMore = false;
-        currentPage++;
-      }
-
-      console.log(`📊 [Ranking Vendedores] Total movimentos fiscais: ${allItems.length}`);
-
-      // Buscar nomes de branches para mostrar loja do vendedor
-      const branchNames = await getBranchNames(tokenData.access_token);
-
-      // 3) Agregar por vendedor (sellerCode) usando movimentos fiscais + nomes do seller endpoint
+      // Agregar por vendedor (sellerCode + branchCode)
+      // Usar ?? em vez de || para não tratar 0 como falsy
       const vendedoresMap = {};
       allItems.forEach((item) => {
-        const sellerCode = item.sellerCode || 0;
+        const sellerCode = item.sellerCode ?? 0;
         const sellerName = sellerNamesMap[sellerCode] || `Vendedor ${sellerCode}`;
-        const branchCode = item.branchCode || 0;
+        const branchCode = item.branchCode ?? 0;
         const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
-        const saleValue = parseFloat(item.netValue || item.grossValue || 0);
-        const itemQuantity = parseInt(item.quantity || 0, 10);
+        const saleValue = Number(item.netValue ?? item.grossValue ?? 0);
+        const itemQuantity = Number(item.quantity ?? 0);
 
-        // Chave composta: vendedor + loja
+        if (isNaN(saleValue)) return;
+
         const key = `${sellerCode}_${branchCode}`;
 
         if (!vendedoresMap[key]) {
