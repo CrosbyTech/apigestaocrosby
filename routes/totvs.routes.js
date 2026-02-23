@@ -3560,6 +3560,18 @@ async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
   return allItems;
 }
 
+/**
+ * @route POST /totvs/fiscal-movement/ranking-lojas
+ * @desc Busca invoices (notas fiscais) via fiscal/v2/invoices/search e agrega por empresa (ranking de lojas)
+ *       Filtra apenas operationType "Output" (vendas).
+ *       Usa filter.change.startDate/endDate + branchCodeList.
+ * @access Public
+ * @body {
+ *   startDate: string (YYYY-MM-DD, obrigatório),
+ *   endDate: string (YYYY-MM-DD, obrigatório),
+ *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
+ * }
+ */
 router.post(
   '/fiscal-movement/ranking-lojas',
   asyncHandler(async (req, res) => {
@@ -3597,26 +3609,27 @@ router.post(
         `📊 [Ranking Lojas] ${branches.length} branches, período ${startDate} a ${endDate}`,
       );
 
-      const startMovementDate = `${startDate}T00:00:00.000Z`;
-      const endMovementDate = `${endDate}T23:59:59.999Z`;
-
-      const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+      // Novo endpoint: fiscal/v2/invoices/search
+      // Usa filter.change.startDate / endDate
+      const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
       const filterBody = {
         filter: {
+          change: {
+            startDate: `${startDate}T00:00:00.000Z`,
+            endDate: `${endDate}T23:59:59.999Z`,
+          },
           branchCodeList: branches,
-          startMovementDate,
-          endMovementDate,
         },
       };
 
-      // Buscar movimentos fiscais E nomes de branches EM PARALELO
+      // Buscar invoices E nomes de branches EM PARALELO
       const [allItems, branchNames] = await Promise.all([
-        fetchAllTotvsPages(fiscalEndpoint, filterBody, tokenData.access_token),
+        fetchAllTotvsPages(invoicesEndpoint, filterBody, tokenData.access_token),
         getBranchNames(tokenData.access_token),
       ]);
 
       console.log(
-        `📊 [Ranking Lojas] ${allItems.length} movimentos | ${Object.keys(branchNames).length} nomes de branches`,
+        `📊 [Ranking Lojas] ${allItems.length} invoices | ${Object.keys(branchNames).length} nomes de branches`,
       );
       if (allItems.length > 0) {
         console.log('📊 [Ranking Lojas] Campos:', Object.keys(allItems[0]));
@@ -3627,15 +3640,19 @@ router.post(
       }
 
       // Agregar por empresa (branchCode)
-      // Usar ?? em vez de || para não tratar 0 como falsy
+      // Campos da API invoices: branchCode, totalValue, quantity, operationType
+      // Filtrar apenas operações de saída (vendas)
       const lojasMap = {};
       allItems.forEach((item) => {
+        // Filtrar apenas vendas (Output = saída/venda)
+        if (item.operationType && item.operationType !== 'Output') return;
+
         const branchCode = item.branchCode ?? 0;
         const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
-        const saleValue = Number(item.netValue ?? item.grossValue ?? 0);
+        const saleValue = Number(item.totalValue ?? 0);
         const itemQuantity = Number(item.quantity ?? 0);
 
-        if (isNaN(saleValue)) return; // pular itens inválidos
+        if (isNaN(saleValue) || saleValue <= 0) return;
 
         if (!lojasMap[branchCode]) {
           lojasMap[branchCode] = {
@@ -3658,12 +3675,15 @@ router.post(
       if (mapEntries.length > 0) {
         console.log(
           '📊 [Ranking Lojas] Top 3 pré-filtro:',
-          mapEntries.slice(0, 3).map((l) => ({
-            branchCode: l.branchCode,
-            nome: l.nome_fantasia,
-            fat: l.faturamento,
-            trans: l.transacoes,
-          })),
+          mapEntries
+            .sort((a, b) => b.faturamento - a.faturamento)
+            .slice(0, 3)
+            .map((l) => ({
+              branchCode: l.branchCode,
+              nome: l.nome_fantasia,
+              fat: l.faturamento,
+              trans: l.transacoes,
+            })),
         );
       }
 
@@ -3687,7 +3707,7 @@ router.post(
         {
           periodo: { startDate, endDate },
           count: lojas.length,
-          totalMovimentos: allItems.length,
+          totalInvoices: allItems.length,
           queryTime: totalTime,
           data: lojas,
         },
