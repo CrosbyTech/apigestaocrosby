@@ -3201,4 +3201,555 @@ router.get(
   }),
 );
 
+// ==========================================
+// FISCAL MOVEMENT - RANKING DE FATURAMENTO
+// Busca movimentos fiscais por empresa e por vendedor
+// Endpoint TOTVS: analytics/v2/fiscal-movement/search
+// ==========================================
+
+/**
+ * @route POST /totvs/fiscal-movement/search
+ * @desc Busca movimentos fiscais na API TOTVS (ranking de faturamento)
+ * @access Public
+ * @body {
+ *   filter: {
+ *     branchCodeList: number[] (obrigatório),
+ *     startMovementDate: string (ISO date-time, obrigatório),
+ *     endMovementDate: string (ISO date-time, obrigatório)
+ *   },
+ *   page: number (página inicial é 1),
+ *   pageSize: number (máx 1000)
+ * }
+ */
+router.post(
+  '/fiscal-movement/search',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const { filter, page, pageSize } = req.body;
+
+      if (
+        !filter ||
+        !filter.branchCodeList ||
+        !filter.startMovementDate ||
+        !filter.endMovementDate
+      ) {
+        return errorResponse(
+          res,
+          'Os campos filter.branchCodeList, filter.startMovementDate e filter.endMovementDate são obrigatórios',
+          400,
+          'MISSING_REQUIRED_FIELDS',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+
+      const payload = {
+        filter: {
+          branchCodeList: filter.branchCodeList,
+          startMovementDate: filter.startMovementDate,
+          endMovementDate: filter.endMovementDate,
+        },
+        page: page || 1,
+        pageSize: Math.min(pageSize || 1000, 1000),
+      };
+
+      console.log('📊 Buscando movimentos fiscais na API TOTVS:', {
+        endpoint,
+        branches: payload.filter.branchCodeList.length,
+        periodo: `${payload.filter.startMovementDate} a ${payload.filter.endMovementDate}`,
+        page: payload.page,
+        pageSize: payload.pageSize,
+      });
+
+      const doRequest = async (accessToken, requestPayload) =>
+        axios.post(endpoint, requestPayload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+        });
+
+      // Buscar primeira página
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token, payload);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token, payload);
+        } else {
+          throw error;
+        }
+      }
+
+      // Coletar todos os itens (paginação automática)
+      let allItems = response.data?.items || response.data?.data || [];
+      const hasNext = response.data?.hasNext ?? false;
+      const totalRecords = response.data?.total || response.data?.totalRecords || allItems.length;
+
+      console.log(`📊 Página 1: ${allItems.length} itens | hasNext: ${hasNext} | total: ${totalRecords}`);
+
+      // Se há mais páginas, buscar todas
+      if (hasNext && totalRecords > payload.pageSize) {
+        const totalPages = Math.ceil(totalRecords / payload.pageSize);
+        const currentToken = tokenData.access_token;
+
+        for (let p = 2; p <= totalPages; p++) {
+          const nextPayload = { ...payload, page: p };
+          try {
+            const nextResponse = await doRequest(currentToken, nextPayload);
+            const nextItems = nextResponse.data?.items || nextResponse.data?.data || [];
+            allItems = [...allItems, ...nextItems];
+            console.log(`📊 Página ${p}/${totalPages}: +${nextItems.length} itens (total acumulado: ${allItems.length})`);
+
+            if (!nextResponse.data?.hasNext) break;
+          } catch (pageError) {
+            console.error(`⚠️ Erro na página ${p}:`, pageError.message);
+            break;
+          }
+        }
+      }
+
+      const totalTime = Date.now() - startTime;
+      console.log(`✅ Movimentos fiscais obtidos: ${allItems.length} itens em ${totalTime}ms`);
+
+      successResponse(
+        res,
+        {
+          items: allItems,
+          total: allItems.length,
+          totalRecords,
+          hasNext: false,
+          queryTime: totalTime,
+        },
+        `${allItems.length} movimentos fiscais obtidos em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar movimentos fiscais na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        const errorMessage =
+          error.response.data?.message ||
+          error.response.data?.error ||
+          error.response.data?.error_description ||
+          (typeof error.response.data === 'string'
+            ? error.response.data
+            : 'Erro ao buscar movimentos fiscais na API TOTVS');
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data,
+          payload: req.body,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/fiscal-movement/ranking-lojas
+ * @desc Busca movimentos fiscais e agrega por empresa (ranking de lojas)
+ * @access Public
+ * @body {
+ *   startDate: string (YYYY-MM-DD, obrigatório),
+ *   endDate: string (YYYY-MM-DD, obrigatório),
+ *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
+ * }
+ */
+router.post(
+  '/fiscal-movement/ranking-lojas',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const { startDate, endDate, branchCodeList } = req.body;
+
+      if (!startDate || !endDate) {
+        return errorResponse(
+          res,
+          'Os campos startDate e endDate são obrigatórios (formato YYYY-MM-DD)',
+          400,
+          'MISSING_REQUIRED_FIELDS',
+        );
+      }
+
+      // Usar branchCodes fornecidos ou buscar todos
+      const branches =
+        branchCodeList && branchCodeList.length > 0
+          ? branchCodeList
+          : await getBranchCodes(tokenData.access_token);
+
+      const startMovementDate = `${startDate}T00:00:00.000Z`;
+      const endMovementDate = `${endDate}T23:59:59.999Z`;
+
+      const endpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+
+      // Buscar todas as páginas
+      let allItems = [];
+      let currentPage = 1;
+      let hasMore = true;
+      const PAGE_SIZE = 1000;
+
+      while (hasMore) {
+        const payload = {
+          filter: {
+            branchCodeList: branches,
+            startMovementDate,
+            endMovementDate,
+          },
+          page: currentPage,
+          pageSize: PAGE_SIZE,
+        };
+
+        console.log(`📊 [Ranking Lojas] Página ${currentPage} - ${branches.length} filiais`);
+
+        const doRequest = async (accessToken) =>
+          axios.post(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 60000,
+          });
+
+        let response;
+        try {
+          response = await doRequest(tokenData.access_token);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            const newTokenData = await getToken(true);
+            response = await doRequest(newTokenData.access_token);
+          } else {
+            throw error;
+          }
+        }
+
+        const items = response.data?.items || response.data?.data || [];
+        allItems = [...allItems, ...items];
+
+        hasMore = response.data?.hasNext === true;
+        if (items.length < PAGE_SIZE) hasMore = false;
+        currentPage++;
+
+        console.log(`📊 [Ranking Lojas] +${items.length} itens (total: ${allItems.length}) | hasMore: ${hasMore}`);
+      }
+
+      console.log(`📊 [Ranking Lojas] Total de itens brutos: ${allItems.length}`);
+      console.log('📊 [Ranking Lojas] Amostra de item:', JSON.stringify(allItems[0], null, 2));
+
+      // Agregar por empresa (branchCode / branchName)
+      const lojasMap = {};
+      allItems.forEach((item) => {
+        const branchCode = item.branchCode || item.branch_code || item.cd_empresa || 0;
+        const branchName =
+          item.branchName ||
+          item.branch_name ||
+          item.nome_fantasia ||
+          item.companyName ||
+          `Empresa ${branchCode}`;
+        const saleValue =
+          parseFloat(item.totalSaleValue || item.saleValue || item.faturamento || item.value || 0);
+        const itemQuantity =
+          parseInt(item.totalItemQuantity || item.itemQuantity || item.quantidade || 0, 10);
+        const transactionCount =
+          parseInt(item.transactionCount || item.totalTransactions || item.transacoes || 1, 10);
+
+        if (!lojasMap[branchCode]) {
+          lojasMap[branchCode] = {
+            branchCode,
+            nome_fantasia: branchName,
+            faturamento: 0,
+            quantidade_itens: 0,
+            transacoes: 0,
+          };
+        }
+
+        lojasMap[branchCode].faturamento += saleValue;
+        lojasMap[branchCode].quantidade_itens += itemQuantity;
+        lojasMap[branchCode].transacoes += transactionCount;
+      });
+
+      // Converter para array e ordenar por faturamento
+      const lojas = Object.values(lojasMap)
+        .filter((l) => l.faturamento > 0)
+        .sort((a, b) => b.faturamento - a.faturamento)
+        .map((loja, index) => ({
+          ...loja,
+          rank: index + 1,
+          ticket_medio:
+            loja.transacoes > 0 ? loja.faturamento / loja.transacoes : 0,
+          pa: loja.transacoes > 0 ? loja.quantidade_itens / loja.transacoes : 0,
+        }));
+
+      const totalTime = Date.now() - startTime;
+      console.log(`✅ [Ranking Lojas] ${lojas.length} lojas encontradas em ${totalTime}ms`);
+
+      successResponse(
+        res,
+        {
+          periodo: { startDate, endDate },
+          count: lojas.length,
+          totalMovimentos: allItems.length,
+          queryTime: totalTime,
+          data: lojas,
+        },
+        `Ranking de ${lojas.length} lojas obtido em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro no ranking de lojas:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: error.response.data?.message || 'Erro ao buscar ranking de lojas na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          details: error.response.data,
+        });
+      }
+
+      throw new Error(`Erro ao buscar ranking de lojas: ${error.message}`);
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/fiscal-movement/ranking-vendedores
+ * @desc Busca movimentos fiscais e agrega por vendedor
+ * @access Public
+ * @body {
+ *   startDate: string (YYYY-MM-DD, obrigatório),
+ *   endDate: string (YYYY-MM-DD, obrigatório),
+ *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
+ * }
+ */
+router.post(
+  '/fiscal-movement/ranking-vendedores',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const { startDate, endDate, branchCodeList } = req.body;
+
+      if (!startDate || !endDate) {
+        return errorResponse(
+          res,
+          'Os campos startDate e endDate são obrigatórios (formato YYYY-MM-DD)',
+          400,
+          'MISSING_REQUIRED_FIELDS',
+        );
+      }
+
+      const branches =
+        branchCodeList && branchCodeList.length > 0
+          ? branchCodeList
+          : await getBranchCodes(tokenData.access_token);
+
+      const startMovementDate = `${startDate}T00:00:00.000Z`;
+      const endMovementDate = `${endDate}T23:59:59.999Z`;
+
+      const endpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+
+      let allItems = [];
+      let currentPage = 1;
+      let hasMore = true;
+      const PAGE_SIZE = 1000;
+
+      while (hasMore) {
+        const payload = {
+          filter: {
+            branchCodeList: branches,
+            startMovementDate,
+            endMovementDate,
+          },
+          page: currentPage,
+          pageSize: PAGE_SIZE,
+        };
+
+        console.log(`📊 [Ranking Vendedores] Página ${currentPage} - ${branches.length} filiais`);
+
+        const doRequest = async (accessToken) =>
+          axios.post(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 60000,
+          });
+
+        let response;
+        try {
+          response = await doRequest(tokenData.access_token);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            const newTokenData = await getToken(true);
+            response = await doRequest(newTokenData.access_token);
+          } else {
+            throw error;
+          }
+        }
+
+        const items = response.data?.items || response.data?.data || [];
+        allItems = [...allItems, ...items];
+
+        hasMore = response.data?.hasNext === true;
+        if (items.length < PAGE_SIZE) hasMore = false;
+        currentPage++;
+
+        console.log(`📊 [Ranking Vendedores] +${items.length} itens (total: ${allItems.length}) | hasMore: ${hasMore}`);
+      }
+
+      console.log(`📊 [Ranking Vendedores] Total de itens brutos: ${allItems.length}`);
+      console.log('📊 [Ranking Vendedores] Amostra de item:', JSON.stringify(allItems[0], null, 2));
+
+      // Agregar por vendedor (sellerCode / sellerName)
+      const vendedoresMap = {};
+      allItems.forEach((item) => {
+        const sellerCode =
+          item.sellerCode || item.seller_code || item.cd_vendedor || 0;
+        const sellerName =
+          item.sellerName ||
+          item.seller_name ||
+          item.nome_vendedor ||
+          `Vendedor ${sellerCode}`;
+        const branchCode = item.branchCode || item.branch_code || item.cd_empresa || 0;
+        const branchName =
+          item.branchName || item.branch_name || item.nome_fantasia || `Empresa ${branchCode}`;
+        const saleValue =
+          parseFloat(item.totalSaleValue || item.saleValue || item.faturamento || item.value || 0);
+        const itemQuantity =
+          parseInt(item.totalItemQuantity || item.itemQuantity || item.quantidade || 0, 10);
+        const transactionCount =
+          parseInt(item.transactionCount || item.totalTransactions || item.transacoes || 1, 10);
+
+        // Chave composta: vendedor + loja (para não misturar vendedores com mesmo nome em lojas diferentes)
+        const key = `${sellerCode}_${branchCode}`;
+
+        if (!vendedoresMap[key]) {
+          vendedoresMap[key] = {
+            sellerCode,
+            nome_vendedor: sellerName,
+            branchCode,
+            nome_loja: branchName,
+            faturamento: 0,
+            quantidade_itens: 0,
+            transacoes: 0,
+          };
+        }
+
+        vendedoresMap[key].faturamento += saleValue;
+        vendedoresMap[key].quantidade_itens += itemQuantity;
+        vendedoresMap[key].transacoes += transactionCount;
+      });
+
+      const vendedores = Object.values(vendedoresMap)
+        .filter((v) => v.faturamento > 0)
+        .sort((a, b) => b.faturamento - a.faturamento)
+        .map((vendedor, index) => ({
+          ...vendedor,
+          rank: index + 1,
+          ticket_medio:
+            vendedor.transacoes > 0
+              ? vendedor.faturamento / vendedor.transacoes
+              : 0,
+          pa:
+            vendedor.transacoes > 0
+              ? vendedor.quantidade_itens / vendedor.transacoes
+              : 0,
+        }));
+
+      const totalTime = Date.now() - startTime;
+      console.log(`✅ [Ranking Vendedores] ${vendedores.length} vendedores encontrados em ${totalTime}ms`);
+
+      successResponse(
+        res,
+        {
+          periodo: { startDate, endDate },
+          count: vendedores.length,
+          totalMovimentos: allItems.length,
+          queryTime: totalTime,
+          data: vendedores,
+        },
+        `Ranking de ${vendedores.length} vendedores obtido em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro no ranking de vendedores:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: error.response.data?.message || 'Erro ao buscar ranking de vendedores na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          details: error.response.data,
+        });
+      }
+
+      throw new Error(`Erro ao buscar ranking de vendedores: ${error.message}`);
+    }
+  }),
+);
+
 export default router;
