@@ -3406,13 +3406,15 @@ router.post(
 /**
  * @route POST /totvs/invoices/search
  * @desc Proxy para fiscal/v2/invoices/search da API TOTVS Moda.
+ *       Usa startIssueDate/endIssueDate (data de EMISSÃO da NF, max 6 meses).
  *       Popula branchCodeList automaticamente se não informado.
  *       Retorna os dados brutos da API TOTVS.
  * @access Public
  * @body {
  *   startDate: string (YYYY-MM-DD, obrigatório),
  *   endDate: string (YYYY-MM-DD, obrigatório),
- *   branchCodeList: number[] (opcional)
+ *   branchCodeList: number[] (opcional),
+ *   operationType: string (opcional - "Output" para vendas, "Input" para entradas, default: todos)
  * }
  */
 router.post(
@@ -3431,7 +3433,7 @@ router.post(
         );
       }
 
-      const { startDate, endDate, branchCodeList } = req.body;
+      const { startDate, endDate, branchCodeList, operationType } = req.body;
 
       if (!startDate || !endDate) {
         return errorResponse(
@@ -3448,17 +3450,22 @@ router.post(
           : await getBranchCodes(tokenData.access_token);
 
       const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
-      const payload = {
-        filter: {
-          change: {
-            startDate: `${startDate}T00:00:00.000Z`,
-            endDate: `${endDate}T23:59:59.999Z`,
-          },
-          branchCodeList: branches,
-        },
+      const filter = {
+        branchCodeList: branches,
+        startIssueDate: `${startDate}T00:00:00.000Z`,
+        endIssueDate: `${endDate}T23:59:59.999Z`,
       };
 
-      console.log(`📊 [Invoices] ${branches.length} branches | ${startDate} a ${endDate}`);
+      // Filtro opcional de tipo de operação
+      if (operationType) {
+        filter.operationType = operationType;
+      }
+
+      const payload = { filter };
+
+      console.log(
+        `📊 [Invoices] ${branches.length} branches | emissão ${startDate} a ${endDate}${operationType ? ` | tipo: ${operationType}` : ''}`,
+      );
 
       const doRequest = async (accessToken) =>
         axios.post(endpoint, payload, {
@@ -3489,7 +3496,11 @@ router.post(
         `✅ [Invoices] ${data?.items?.length || 0} invoices | count: ${data?.count} | totalPages: ${data?.totalPages} | ${totalTime}ms`,
       );
 
-      successResponse(res, data, `${data?.items?.length || 0} invoices em ${totalTime}ms`);
+      successResponse(
+        res,
+        data,
+        `${data?.items?.length || 0} invoices em ${totalTime}ms`,
+      );
     } catch (error) {
       console.error('❌ Erro ao buscar invoices:', {
         message: error.message,
@@ -3500,7 +3511,9 @@ router.post(
       if (error.response) {
         return res.status(error.response.status || 400).json({
           success: false,
-          message: error.response.data?.message || 'Erro ao buscar invoices na API TOTVS',
+          message:
+            error.response.data?.message ||
+            'Erro ao buscar invoices na API TOTVS',
           error: 'TOTVS_API_ERROR',
           details: error.response.data,
         });
