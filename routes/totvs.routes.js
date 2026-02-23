@@ -3404,176 +3404,19 @@ router.post(
 );
 
 /**
- * @route POST /totvs/fiscal-movement/ranking-lojas
- * @desc Busca movimentos fiscais e agrega por empresa (ranking de lojas)
+ * @route POST /totvs/invoices/search
+ * @desc Proxy para fiscal/v2/invoices/search da API TOTVS Moda.
+ *       Popula branchCodeList automaticamente se não informado.
+ *       Retorna os dados brutos da API TOTVS.
  * @access Public
  * @body {
  *   startDate: string (YYYY-MM-DD, obrigatório),
  *   endDate: string (YYYY-MM-DD, obrigatório),
- *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
- * }
- */
-// Cache de nomes de branches (code → name)
-let cachedBranchNames = null;
-let branchNamesCacheTimestamp = 0;
-
-async function getBranchNames(token) {
-  const now = Date.now();
-  if (cachedBranchNames && now - branchNamesCacheTimestamp < BRANCH_CACHE_TTL) {
-    return cachedBranchNames;
-  }
-  try {
-    const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
-    const resp = await axios.get(branchesUrl, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      timeout: 15000,
-    });
-    const branchItems = resp.data?.items || [];
-    if (branchItems.length > 0) {
-      // Log dos campos disponíveis para debug
-      console.log(
-        '🔍 [BranchNames] Campos do primeiro item:',
-        Object.keys(branchItems[0]),
-      );
-      console.log(
-        '🔍 [BranchNames] Amostra:',
-        JSON.stringify(branchItems[0], null, 2),
-      );
-
-      const namesMap = {};
-      branchItems.forEach((b) => {
-        const code = parseInt(b.code);
-        if (!isNaN(code) && code > 0) {
-          namesMap[code] =
-            b.tradeName ||
-            b.name ||
-            b.shortName ||
-            b.corporateName ||
-            b.companyName ||
-            b.fantasyName ||
-            b.description ||
-            `Empresa ${code}`;
-        }
-      });
-      cachedBranchNames = namesMap;
-      branchNamesCacheTimestamp = now;
-      console.log(
-        `✅ Cache de nomes de branches atualizado: ${Object.keys(namesMap).length} branches`,
-      );
-      return namesMap;
-    }
-  } catch (err) {
-    console.log('⚠️ Erro ao buscar nomes de branches:', err.message);
-  }
-  return cachedBranchNames || {};
-}
-
-/**
- * Helper: busca TODOS os itens de um endpoint TOTVS POST.
- * 1ª chamada SEM page/pageSize (deixa API decidir).
- * Se a resposta indicar mais páginas (hasNext), busca as demais em PARALELO.
- */
-async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
-  const { concurrency = 10, timeout = 60000 } = options;
-  const startMs = Date.now();
-
-  const headers = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-    Authorization: `Bearer ${accessToken}`,
-  };
-
-  const doRequest = async (payload) => {
-    try {
-      return await axios.post(endpoint, payload, { headers, timeout });
-    } catch (err) {
-      if (err.response?.status === 401) {
-        const newToken = await getToken(true);
-        return axios.post(endpoint, payload, {
-          headers: {
-            ...headers,
-            Authorization: `Bearer ${newToken.access_token}`,
-          },
-          timeout,
-        });
-      }
-      throw err;
-    }
-  };
-
-  // 1ª chamada: SEM page/pageSize — deixar a API retornar o máximo possível
-  console.log(`📄 [TOTVS] Chamada inicial SEM page/pageSize...`);
-  const resp1 = await doRequest(body);
-  const items1 = resp1.data?.items || [];
-  const count = resp1.data?.count || 0;
-  const totalPages = resp1.data?.totalPages || 1;
-  const hasNext = resp1.data?.hasNext === true;
-  const returnedPageSize = items1.length;
-
-  console.log(
-    `📄 [TOTVS] Resposta: ${items1.length} itens | count: ${count} | totalPages: ${totalPages} | hasNext: ${hasNext} (${Date.now() - startMs}ms)`,
-  );
-
-  // Se não tem mais páginas ou veio tudo, retorna direto
-  if (!hasNext || totalPages <= 1) {
-    console.log(
-      `✅ [TOTVS] Todos os ${items1.length} itens em 1 request (${Date.now() - startMs}ms)`,
-    );
-    return items1;
-  }
-
-  // Tem mais páginas — buscar as restantes em PARALELO usando o pageSize detectado
-  const PAGE_SIZE = returnedPageSize || 1000;
-  const allItems = [...items1];
-
-  console.log(
-    `📄 [TOTVS] Buscando páginas 2-${totalPages} em paralelo (pageSize: ${PAGE_SIZE}, concurrency: ${concurrency})...`,
-  );
-
-  for (let i = 2; i <= totalPages; i += concurrency) {
-    const batch = [];
-    for (let p = i; p < Math.min(i + concurrency, totalPages + 1); p++) {
-      batch.push(p);
-    }
-
-    const batchResults = await Promise.all(
-      batch.map((p) =>
-        doRequest({ ...body, page: p, pageSize: PAGE_SIZE })
-          .then((r) => ({ page: p, items: r.data?.items || [] }))
-          .catch((err) => {
-            console.warn(`⚠️ Página ${p} falhou: ${err.message}`);
-            return { page: p, items: [] };
-          }),
-      ),
-    );
-
-    batchResults.forEach((r) => allItems.push(...r.items));
-    const batchCount = batchResults.reduce((sum, r) => sum + r.items.length, 0);
-    console.log(
-      `📄 [TOTVS] Lote [${batch.join(',')}]: +${batchCount} (total: ${allItems.length}) (${Date.now() - startMs}ms)`,
-    );
-  }
-
-  console.log(
-    `✅ [TOTVS] Total: ${allItems.length} itens em ${totalPages} páginas (${Date.now() - startMs}ms)`,
-  );
-  return allItems;
-}
-
-/**
- * @route POST /totvs/fiscal-movement/ranking-lojas
- * @desc Busca invoices (notas fiscais) via fiscal/v2/invoices/search e agrega por empresa (ranking de lojas)
- *       Filtra apenas operationType "Output" (vendas).
- *       Usa filter.change.startDate/endDate + branchCodeList.
- * @access Public
- * @body {
- *   startDate: string (YYYY-MM-DD, obrigatório),
- *   endDate: string (YYYY-MM-DD, obrigatório),
- *   branchCodeList: number[] (opcional - se não informado, usa todas as filiais)
+ *   branchCodeList: number[] (opcional)
  * }
  */
 router.post(
-  '/fiscal-movement/ranking-lojas',
+  '/invoices/search',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     try {
@@ -3599,20 +3442,13 @@ router.post(
         );
       }
 
-      // Usar branchCodes fornecidos ou buscar todos da API
       const branches =
         branchCodeList && branchCodeList.length > 0
           ? branchCodeList
           : await getBranchCodes(tokenData.access_token);
 
-      console.log(
-        `📊 [Ranking Lojas] ${branches.length} branches, período ${startDate} a ${endDate}`,
-      );
-
-      // Novo endpoint: fiscal/v2/invoices/search
-      // Usa filter.change.startDate / endDate
-      const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
-      const filterBody = {
+      const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      const payload = {
         filter: {
           change: {
             startDate: `${startDate}T00:00:00.000Z`,
@@ -3622,99 +3458,40 @@ router.post(
         },
       };
 
-      // Buscar invoices E nomes de branches EM PARALELO
-      const [allItems, branchNames] = await Promise.all([
-        fetchAllTotvsPages(invoicesEndpoint, filterBody, tokenData.access_token),
-        getBranchNames(tokenData.access_token),
-      ]);
+      console.log(`📊 [Invoices] ${branches.length} branches | ${startDate} a ${endDate}`);
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 120000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      const data = response.data;
+      const totalTime = Date.now() - startTime;
 
       console.log(
-        `📊 [Ranking Lojas] ${allItems.length} invoices | ${Object.keys(branchNames).length} nomes de branches`,
+        `✅ [Invoices] ${data?.items?.length || 0} invoices | count: ${data?.count} | totalPages: ${data?.totalPages} | ${totalTime}ms`,
       );
-      if (allItems.length > 0) {
-        console.log('📊 [Ranking Lojas] Campos:', Object.keys(allItems[0]));
-        console.log(
-          '📊 [Ranking Lojas] Amostra:',
-          JSON.stringify(allItems[0], null, 2),
-        );
-      }
 
-      // Agregar por empresa (branchCode)
-      // Campos da API invoices: branchCode, totalValue, quantity, operationType
-      // Filtrar apenas operações de saída (vendas)
-      const lojasMap = {};
-      allItems.forEach((item) => {
-        // Filtrar apenas vendas (Output = saída/venda)
-        if (item.operationType && item.operationType !== 'Output') return;
-
-        const branchCode = item.branchCode ?? 0;
-        const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
-        const saleValue = Number(item.totalValue ?? 0);
-        const itemQuantity = Number(item.quantity ?? 0);
-
-        if (isNaN(saleValue) || saleValue <= 0) return;
-
-        if (!lojasMap[branchCode]) {
-          lojasMap[branchCode] = {
-            branchCode,
-            nome_fantasia: branchName,
-            faturamento: 0,
-            quantidade_itens: 0,
-            transacoes: 0,
-          };
-        }
-
-        lojasMap[branchCode].faturamento += saleValue;
-        lojasMap[branchCode].quantidade_itens += itemQuantity;
-        lojasMap[branchCode].transacoes += 1;
-      });
-
-      // Debug: mostrar estado da agregação
-      const mapEntries = Object.values(lojasMap);
-      console.log(`📊 [Ranking Lojas] ${mapEntries.length} branches no mapa`);
-      if (mapEntries.length > 0) {
-        console.log(
-          '📊 [Ranking Lojas] Top 3 pré-filtro:',
-          mapEntries
-            .sort((a, b) => b.faturamento - a.faturamento)
-            .slice(0, 3)
-            .map((l) => ({
-              branchCode: l.branchCode,
-              nome: l.nome_fantasia,
-              fat: l.faturamento,
-              trans: l.transacoes,
-            })),
-        );
-      }
-
-      // Converter para array e ordenar por faturamento
-      const lojas = Object.values(lojasMap)
-        .filter((l) => l.faturamento > 0)
-        .sort((a, b) => b.faturamento - a.faturamento)
-        .map((loja, index) => ({
-          ...loja,
-          rank: index + 1,
-          ticket_medio:
-            loja.transacoes > 0 ? loja.faturamento / loja.transacoes : 0,
-          pa: loja.transacoes > 0 ? loja.quantidade_itens / loja.transacoes : 0,
-        }));
-
-      const totalTime = Date.now() - startTime;
-      console.log(`✅ [Ranking Lojas] ${lojas.length} lojas em ${totalTime}ms`);
-
-      successResponse(
-        res,
-        {
-          periodo: { startDate, endDate },
-          count: lojas.length,
-          totalInvoices: allItems.length,
-          queryTime: totalTime,
-          data: lojas,
-        },
-        `Ranking de ${lojas.length} lojas obtido em ${totalTime}ms`,
-      );
+      successResponse(res, data, `${data?.items?.length || 0} invoices em ${totalTime}ms`);
     } catch (error) {
-      console.error('❌ Erro no ranking de lojas:', {
+      console.error('❌ Erro ao buscar invoices:', {
         message: error.message,
         response: error.response?.data,
         status: error.response?.status,
@@ -3723,197 +3500,13 @@ router.post(
       if (error.response) {
         return res.status(error.response.status || 400).json({
           success: false,
-          message:
-            error.response.data?.message ||
-            'Erro ao buscar ranking de lojas na API TOTVS',
+          message: error.response.data?.message || 'Erro ao buscar invoices na API TOTVS',
           error: 'TOTVS_API_ERROR',
           details: error.response.data,
         });
       }
 
-      throw new Error(`Erro ao buscar ranking de lojas: ${error.message}`);
-    }
-  }),
-);
-
-/**
- * @route POST /totvs/fiscal-movement/ranking-vendedores
- * @desc Busca vendedores via seller-fiscal-movement/search (TOTVS) - retorna {code, name} por vendedor
- *       E depois cruza com fiscal-movement/search para obter faturamento por vendedor
- * @access Public
- * @body {
- *   startDate: string (YYYY-MM-DD, obrigatório),
- *   endDate: string (YYYY-MM-DD, obrigatório),
- *   branchCodeList: number[] (opcional)
- * }
- */
-router.post(
-  '/fiscal-movement/ranking-vendedores',
-  asyncHandler(async (req, res) => {
-    const startTime = Date.now();
-    try {
-      const tokenData = await getToken();
-
-      if (!tokenData || !tokenData.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      const { startDate, endDate, branchCodeList } = req.body;
-
-      if (!startDate || !endDate) {
-        return errorResponse(
-          res,
-          'Os campos startDate e endDate são obrigatórios (formato YYYY-MM-DD)',
-          400,
-          'MISSING_REQUIRED_FIELDS',
-        );
-      }
-
-      const branches =
-        branchCodeList && branchCodeList.length > 0
-          ? branchCodeList
-          : await getBranchCodes(tokenData.access_token);
-
-      console.log(
-        `📊 [Ranking Vendedores] ${branches.length} branches, período ${startDate} a ${endDate}`,
-      );
-
-      const startMovementDate = `${startDate}T00:00:00.000Z`;
-      const endMovementDate = `${endDate}T23:59:59.999Z`;
-
-      const filterBody = {
-        filter: {
-          branchCodeList: branches,
-          startMovementDate,
-          endMovementDate,
-        },
-      };
-
-      const sellerEndpoint = `${TOTVS_BASE_URL}/analytics/v2/seller-fiscal-movement/search`;
-      const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
-
-      // Buscar sellers, movimentos fiscais e nomes de branches TUDO EM PARALELO
-      console.log(
-        '📊 [Ranking Vendedores] Buscando sellers + movimentos + branches em PARALELO...',
-      );
-
-      const [allSellers, allItems, branchNames] = await Promise.all([
-        fetchAllTotvsPages(sellerEndpoint, filterBody, tokenData.access_token),
-        fetchAllTotvsPages(fiscalEndpoint, filterBody, tokenData.access_token),
-        getBranchNames(tokenData.access_token),
-      ]);
-
-      console.log(
-        `📊 [Ranking Vendedores] ${allSellers.length} sellers | ${allItems.length} movimentos | ${Object.keys(branchNames).length} branches`,
-      );
-
-      // Mapear seller code → name
-      const sellerNamesMap = {};
-      allSellers.forEach((s) => {
-        if (s.code !== undefined) {
-          sellerNamesMap[s.code] = s.name || `Vendedor ${s.code}`;
-        }
-      });
-      console.log(
-        `📊 [Ranking Vendedores] ${Object.keys(sellerNamesMap).length} nomes de vendedores`,
-      );
-      if (allSellers.length > 0) {
-        console.log(
-          '📊 [Sellers] Amostra:',
-          JSON.stringify(allSellers.slice(0, 3), null, 2),
-        );
-      }
-
-      // Agregar por vendedor (sellerCode + branchCode)
-      // Usar ?? em vez de || para não tratar 0 como falsy
-      const vendedoresMap = {};
-      allItems.forEach((item) => {
-        const sellerCode = item.sellerCode ?? 0;
-        const sellerName =
-          sellerNamesMap[sellerCode] || `Vendedor ${sellerCode}`;
-        const branchCode = item.branchCode ?? 0;
-        const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
-        const saleValue = Number(item.netValue ?? item.grossValue ?? 0);
-        const itemQuantity = Number(item.quantity ?? 0);
-
-        if (isNaN(saleValue)) return;
-
-        const key = `${sellerCode}_${branchCode}`;
-
-        if (!vendedoresMap[key]) {
-          vendedoresMap[key] = {
-            sellerCode,
-            nome_vendedor: sellerName,
-            branchCode,
-            nome_loja: branchName,
-            faturamento: 0,
-            quantidade_itens: 0,
-            transacoes: 0,
-          };
-        }
-
-        vendedoresMap[key].faturamento += saleValue;
-        vendedoresMap[key].quantidade_itens += itemQuantity;
-        vendedoresMap[key].transacoes += 1;
-      });
-
-      const vendedores = Object.values(vendedoresMap)
-        .filter((v) => v.faturamento > 0)
-        .sort((a, b) => b.faturamento - a.faturamento)
-        .map((vendedor, index) => ({
-          ...vendedor,
-          rank: index + 1,
-          ticket_medio:
-            vendedor.transacoes > 0
-              ? vendedor.faturamento / vendedor.transacoes
-              : 0,
-          pa:
-            vendedor.transacoes > 0
-              ? vendedor.quantidade_itens / vendedor.transacoes
-              : 0,
-        }));
-
-      const totalTime = Date.now() - startTime;
-      console.log(
-        `✅ [Ranking Vendedores] ${vendedores.length} vendedores em ${totalTime}ms`,
-      );
-
-      successResponse(
-        res,
-        {
-          periodo: { startDate, endDate },
-          count: vendedores.length,
-          totalMovimentos: allItems.length,
-          totalSellers: allSellers.length,
-          queryTime: totalTime,
-          data: vendedores,
-        },
-        `Ranking de ${vendedores.length} vendedores obtido em ${totalTime}ms`,
-      );
-    } catch (error) {
-      console.error('❌ Erro no ranking de vendedores:', {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
-
-      if (error.response) {
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message:
-            error.response.data?.message ||
-            'Erro ao buscar ranking de vendedores na API TOTVS',
-          error: 'TOTVS_API_ERROR',
-          details: error.response.data,
-        });
-      }
-
-      throw new Error(`Erro ao buscar ranking de vendedores: ${error.message}`);
+      throw new Error(`Erro ao buscar invoices: ${error.message}`);
     }
   }),
 );
