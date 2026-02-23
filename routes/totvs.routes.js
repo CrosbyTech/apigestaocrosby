@@ -3469,12 +3469,13 @@ async function getBranchNames(token) {
 }
 
 /**
- * Helper: busca TODAS as páginas de um endpoint TOTVS POST em PARALELO
- * Faz 1 request sequencial (página 1) para descobrir totalPages,
- * depois busca as demais em lotes paralelos de `concurrency` páginas.
+ * Helper: busca TODOS os itens de um endpoint TOTVS POST.
+ * 1ª chamada SEM page/pageSize (deixa API decidir).
+ * Se a resposta indicar mais páginas (hasNext), busca as demais em PARALELO.
  */
 async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
-  const { concurrency = 10, pageSize = 1000, timeout = 30000 } = options;
+  const { concurrency = 10, timeout = 60000 } = options;
+  const startMs = Date.now();
 
   const headers = {
     'Content-Type': 'application/json',
@@ -3482,46 +3483,52 @@ async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
     Authorization: `Bearer ${accessToken}`,
   };
 
-  const doRequest = async (page) => {
+  const doRequest = async (payload) => {
     try {
-      return await axios.post(
-        endpoint,
-        { ...body, page, pageSize },
-        { headers, timeout },
-      );
+      return await axios.post(endpoint, payload, { headers, timeout });
     } catch (err) {
       if (err.response?.status === 401) {
         const newToken = await getToken(true);
-        return axios.post(
-          endpoint,
-          { ...body, page, pageSize },
-          {
-            headers: {
-              ...headers,
-              Authorization: `Bearer ${newToken.access_token}`,
-            },
-            timeout,
+        return axios.post(endpoint, payload, {
+          headers: {
+            ...headers,
+            Authorization: `Bearer ${newToken.access_token}`,
           },
-        );
+          timeout,
+        });
       }
       throw err;
     }
   };
 
-  // Página 1: descobre totalPages
-  const resp1 = await doRequest(1);
+  // 1ª chamada: SEM page/pageSize — deixar a API retornar o máximo possível
+  console.log(`📄 [TOTVS] Chamada inicial SEM page/pageSize...`);
+  const resp1 = await doRequest(body);
   const items1 = resp1.data?.items || [];
+  const count = resp1.data?.count || 0;
   const totalPages = resp1.data?.totalPages || 1;
-  const totalItems = resp1.data?.totalItems || items1.length;
+  const hasNext = resp1.data?.hasNext === true;
+  const returnedPageSize = items1.length;
 
   console.log(
-    `📄 [TOTVS Paginação] Página 1/${totalPages}: ${items1.length} itens (totalItems: ${totalItems})`,
+    `📄 [TOTVS] Resposta: ${items1.length} itens | count: ${count} | totalPages: ${totalPages} | hasNext: ${hasNext} (${Date.now() - startMs}ms)`,
   );
 
-  if (totalPages <= 1) return items1;
+  // Se não tem mais páginas ou veio tudo, retorna direto
+  if (!hasNext || totalPages <= 1) {
+    console.log(
+      `✅ [TOTVS] Todos os ${items1.length} itens em 1 request (${Date.now() - startMs}ms)`,
+    );
+    return items1;
+  }
 
-  // Buscar páginas 2..totalPages em lotes paralelos
+  // Tem mais páginas — buscar as restantes em PARALELO usando o pageSize detectado
+  const PAGE_SIZE = returnedPageSize || 1000;
   const allItems = [...items1];
+
+  console.log(
+    `📄 [TOTVS] Buscando páginas 2-${totalPages} em paralelo (pageSize: ${PAGE_SIZE}, concurrency: ${concurrency})...`,
+  );
 
   for (let i = 2; i <= totalPages; i += concurrency) {
     const batch = [];
@@ -3531,7 +3538,7 @@ async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
 
     const batchResults = await Promise.all(
       batch.map((p) =>
-        doRequest(p)
+        doRequest({ ...body, page: p, pageSize: PAGE_SIZE })
           .then((r) => ({ page: p, items: r.data?.items || [] }))
           .catch((err) => {
             console.warn(`⚠️ Página ${p} falhou: ${err.message}`);
@@ -3543,10 +3550,13 @@ async function fetchAllTotvsPages(endpoint, body, accessToken, options = {}) {
     batchResults.forEach((r) => allItems.push(...r.items));
     const batchCount = batchResults.reduce((sum, r) => sum + r.items.length, 0);
     console.log(
-      `📄 [TOTVS Paginação] Lote [${batch.join(',')}]: +${batchCount} (total: ${allItems.length})`,
+      `📄 [TOTVS] Lote [${batch.join(',')}]: +${batchCount} (total: ${allItems.length}) (${Date.now() - startMs}ms)`,
     );
   }
 
+  console.log(
+    `✅ [TOTVS] Total: ${allItems.length} itens em ${totalPages} páginas (${Date.now() - startMs}ms)`,
+  );
   return allItems;
 }
 
@@ -3592,7 +3602,11 @@ router.post(
 
       const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
       const filterBody = {
-        filter: { branchCodeList: branches, startMovementDate, endMovementDate },
+        filter: {
+          branchCodeList: branches,
+          startMovementDate,
+          endMovementDate,
+        },
       };
 
       // Buscar movimentos fiscais E nomes de branches EM PARALELO
@@ -3606,7 +3620,10 @@ router.post(
       );
       if (allItems.length > 0) {
         console.log('📊 [Ranking Lojas] Campos:', Object.keys(allItems[0]));
-        console.log('📊 [Ranking Lojas] Amostra:', JSON.stringify(allItems[0], null, 2));
+        console.log(
+          '📊 [Ranking Lojas] Amostra:',
+          JSON.stringify(allItems[0], null, 2),
+        );
       }
 
       // Agregar por empresa (branchCode)
@@ -3639,9 +3656,15 @@ router.post(
       const mapEntries = Object.values(lojasMap);
       console.log(`📊 [Ranking Lojas] ${mapEntries.length} branches no mapa`);
       if (mapEntries.length > 0) {
-        console.log('📊 [Ranking Lojas] Top 3 pré-filtro:', mapEntries.slice(0, 3).map(l => ({
-          branchCode: l.branchCode, nome: l.nome_fantasia, fat: l.faturamento, trans: l.transacoes,
-        })));
+        console.log(
+          '📊 [Ranking Lojas] Top 3 pré-filtro:',
+          mapEntries.slice(0, 3).map((l) => ({
+            branchCode: l.branchCode,
+            nome: l.nome_fantasia,
+            fat: l.faturamento,
+            trans: l.transacoes,
+          })),
+        );
       }
 
       // Converter para array e ordenar por faturamento
@@ -3657,9 +3680,7 @@ router.post(
         }));
 
       const totalTime = Date.now() - startTime;
-      console.log(
-        `✅ [Ranking Lojas] ${lojas.length} lojas em ${totalTime}ms`,
-      );
+      console.log(`✅ [Ranking Lojas] ${lojas.length} lojas em ${totalTime}ms`);
 
       successResponse(
         res,
@@ -3738,20 +3759,28 @@ router.post(
           ? branchCodeList
           : await getBranchCodes(tokenData.access_token);
 
-      console.log(`📊 [Ranking Vendedores] ${branches.length} branches, período ${startDate} a ${endDate}`);
+      console.log(
+        `📊 [Ranking Vendedores] ${branches.length} branches, período ${startDate} a ${endDate}`,
+      );
 
       const startMovementDate = `${startDate}T00:00:00.000Z`;
       const endMovementDate = `${endDate}T23:59:59.999Z`;
 
       const filterBody = {
-        filter: { branchCodeList: branches, startMovementDate, endMovementDate },
+        filter: {
+          branchCodeList: branches,
+          startMovementDate,
+          endMovementDate,
+        },
       };
 
       const sellerEndpoint = `${TOTVS_BASE_URL}/analytics/v2/seller-fiscal-movement/search`;
       const fiscalEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
 
       // Buscar sellers, movimentos fiscais e nomes de branches TUDO EM PARALELO
-      console.log('📊 [Ranking Vendedores] Buscando sellers + movimentos + branches em PARALELO...');
+      console.log(
+        '📊 [Ranking Vendedores] Buscando sellers + movimentos + branches em PARALELO...',
+      );
 
       const [allSellers, allItems, branchNames] = await Promise.all([
         fetchAllTotvsPages(sellerEndpoint, filterBody, tokenData.access_token),
@@ -3759,7 +3788,9 @@ router.post(
         getBranchNames(tokenData.access_token),
       ]);
 
-      console.log(`📊 [Ranking Vendedores] ${allSellers.length} sellers | ${allItems.length} movimentos | ${Object.keys(branchNames).length} branches`);
+      console.log(
+        `📊 [Ranking Vendedores] ${allSellers.length} sellers | ${allItems.length} movimentos | ${Object.keys(branchNames).length} branches`,
+      );
 
       // Mapear seller code → name
       const sellerNamesMap = {};
@@ -3768,9 +3799,14 @@ router.post(
           sellerNamesMap[s.code] = s.name || `Vendedor ${s.code}`;
         }
       });
-      console.log(`📊 [Ranking Vendedores] ${Object.keys(sellerNamesMap).length} nomes de vendedores`);
+      console.log(
+        `📊 [Ranking Vendedores] ${Object.keys(sellerNamesMap).length} nomes de vendedores`,
+      );
       if (allSellers.length > 0) {
-        console.log('📊 [Sellers] Amostra:', JSON.stringify(allSellers.slice(0, 3), null, 2));
+        console.log(
+          '📊 [Sellers] Amostra:',
+          JSON.stringify(allSellers.slice(0, 3), null, 2),
+        );
       }
 
       // Agregar por vendedor (sellerCode + branchCode)
@@ -3778,7 +3814,8 @@ router.post(
       const vendedoresMap = {};
       allItems.forEach((item) => {
         const sellerCode = item.sellerCode ?? 0;
-        const sellerName = sellerNamesMap[sellerCode] || `Vendedor ${sellerCode}`;
+        const sellerName =
+          sellerNamesMap[sellerCode] || `Vendedor ${sellerCode}`;
         const branchCode = item.branchCode ?? 0;
         const branchName = branchNames[branchCode] || `Empresa ${branchCode}`;
         const saleValue = Number(item.netValue ?? item.grossValue ?? 0);
@@ -3822,7 +3859,9 @@ router.post(
         }));
 
       const totalTime = Date.now() - startTime;
-      console.log(`✅ [Ranking Vendedores] ${vendedores.length} vendedores em ${totalTime}ms`);
+      console.log(
+        `✅ [Ranking Vendedores] ${vendedores.length} vendedores em ${totalTime}ms`,
+      );
 
       successResponse(
         res,
