@@ -3572,8 +3572,8 @@ router.post(
       if (operationCodeList?.length > 0)
         filter.operationCodeList = operationCodeList;
 
-      // ====== OTIMIZAÇÃO: pageSize 500 + 10 paralelas + keep-alive ======
-      const PAGE_SIZE = 500;
+      // ====== OTIMIZAÇÃO: 10 paralelas + keep-alive + cache ======
+      const PAGE_SIZE = 100;
       const PARALLEL_BATCH = 10;
 
       console.log(
