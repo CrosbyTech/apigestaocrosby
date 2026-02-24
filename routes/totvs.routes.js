@@ -3467,12 +3467,23 @@ router.post(
           ? branchCodeList
           : await getBranchCodes(token);
 
+      // Margem de ±3 dias nas datas de alteração (change) para cobrir NFs
+      // cuja data de transação (invoiceDate) difere da data de alteração.
+      // O frontend filtra depois por invoiceDate dentro do range real.
+      const MARGIN_DAYS = 3;
+      const marginStart = new Date(startDate);
+      marginStart.setDate(marginStart.getDate() - MARGIN_DAYS);
+      const marginEnd = new Date(endDate);
+      marginEnd.setDate(marginEnd.getDate() + MARGIN_DAYS);
+      const changeStartDate = marginStart.toISOString().slice(0, 10);
+      const changeEndDate = marginEnd.toISOString().slice(0, 10);
+
       const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
       const filter = {
         branchCodeList: branches,
         change: {
-          startDate: `${startDate}T00:00:00.000Z`,
-          endDate: `${endDate}T23:59:59.999Z`,
+          startDate: `${changeStartDate}T00:00:00.000Z`,
+          endDate: `${changeEndDate}T23:59:59.999Z`,
         },
       };
 
@@ -3498,7 +3509,7 @@ router.post(
       const PARALLEL_BATCH = 5;
 
       console.log(
-        `📊 [Invoices] ${branches.length} branches | change ${startDate} a ${endDate}${operationType ? ` | tipo: ${operationType}` : ''}${personCodeList?.length ? ` | ${personCodeList.length} pessoa(s)` : ''}${invoiceStatusList?.length ? ` | status: ${invoiceStatusList.join(',')}` : ''}${operationCodeList?.length ? ` | ${operationCodeList.length} operações` : ''}`,
+        `📊 [Invoices] ${branches.length} branches | change ${changeStartDate} a ${changeEndDate} (margem ±${MARGIN_DAYS}d de ${startDate}→${endDate})${operationType ? ` | tipo: ${operationType}` : ''}${personCodeList?.length ? ` | ${personCodeList.length} pessoa(s)` : ''}${invoiceStatusList?.length ? ` | status: ${invoiceStatusList.join(',')}` : ''}${operationCodeList?.length ? ` | ${operationCodeList.length} operações` : ''}`,
       );
 
       // Função para fazer request de uma página específica
