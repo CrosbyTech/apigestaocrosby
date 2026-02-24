@@ -3408,13 +3408,16 @@ router.post(
  * @desc Proxy para fiscal/v2/invoices/search da API TOTVS Moda.
  *       Usa startIssueDate/endIssueDate (data de EMISSÃO da NF, max 6 meses).
  *       Popula branchCodeList automaticamente se não informado.
- *       Retorna os dados brutos da API TOTVS.
+ *       Busca TODAS as páginas automaticamente (paralelo em batches de 5).
+ *       Retorna todos os dados consolidados.
  * @access Public
  * @body {
  *   startDate: string (YYYY-MM-DD, obrigatório),
  *   endDate: string (YYYY-MM-DD, obrigatório),
  *   branchCodeList: number[] (opcional),
- *   operationType: string (opcional - "Output" para vendas, "Input" para entradas, default: todos)
+ *   operationType: string (opcional - "Output" para vendas, "Input" para entradas, default: todos),
+ *   personCodeList: number[] (opcional),
+ *   maxPages: number (opcional, default: 100 — limite de segurança)
  * }
  */
 router.post(
@@ -3433,7 +3436,18 @@ router.post(
         );
       }
 
-      const { startDate, endDate, branchCodeList, operationType } = req.body;
+      let token = tokenData.access_token;
+
+      const {
+        startDate,
+        endDate,
+        branchCodeList,
+        operationType,
+        personCodeList,
+        maxPages: maxPagesParam,
+      } = req.body;
+
+      const MAX_PAGES = Math.min(parseInt(maxPagesParam) || 100, 200);
 
       if (!startDate || !endDate) {
         return errorResponse(
@@ -3447,7 +3461,7 @@ router.post(
       const branches =
         branchCodeList && branchCodeList.length > 0
           ? branchCodeList
-          : await getBranchCodes(tokenData.access_token);
+          : await getBranchCodes(token);
 
       const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
       const filter = {
@@ -3456,50 +3470,111 @@ router.post(
         endIssueDate: `${endDate}T23:59:59.999Z`,
       };
 
-      // Filtro opcional de tipo de operação
       if (operationType) {
         filter.operationType = operationType;
       }
 
-      const payload = { filter };
+      if (personCodeList && personCodeList.length > 0) {
+        filter.personCodeList = personCodeList;
+      }
+
+      const PAGE_SIZE = 100;
+      const PARALLEL_BATCH = 5;
 
       console.log(
-        `📊 [Invoices] ${branches.length} branches | emissão ${startDate} a ${endDate}${operationType ? ` | tipo: ${operationType}` : ''}`,
+        `📊 [Invoices] ${branches.length} branches | emissão ${startDate} a ${endDate}${operationType ? ` | tipo: ${operationType}` : ''}${personCodeList?.length ? ` | ${personCodeList.length} pessoa(s)` : ''}`,
       );
 
-      const doRequest = async (accessToken) =>
-        axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
+      // Função para fazer request de uma página específica
+      const makeRequest = async (accessToken, pageNum) =>
+        axios.post(
+          endpoint,
+          { filter, page: pageNum, pageSize: PAGE_SIZE },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 60000,
           },
-          timeout: 120000,
-        });
+        );
 
-      let response;
+      // PASSO 1: Buscar página 1 para descobrir totalPages
+      let firstResponse;
       try {
-        response = await doRequest(tokenData.access_token);
+        firstResponse = await makeRequest(token, 1);
       } catch (error) {
         if (error.response?.status === 401) {
           const newTokenData = await getToken(true);
-          response = await doRequest(newTokenData.access_token);
+          token = newTokenData.access_token;
+          firstResponse = await makeRequest(token, 1);
         } else {
           throw error;
         }
       }
 
-      const data = response.data;
+      const apiTotalPages = firstResponse.data?.totalPages || 1;
+      const totalPages = Math.min(apiTotalPages, MAX_PAGES);
+      const totalCount = firstResponse.data?.count || 0;
+      let allItems = [...(firstResponse.data?.items || [])];
+
+      console.log(
+        `📄 [Invoices] Página 1/${totalPages} | count: ${totalCount} | acumulado: ${allItems.length} (${Date.now() - startTime}ms)`,
+      );
+
+      // PASSO 2: Buscar páginas restantes em batches paralelos
+      if (totalPages > 1) {
+        for (
+          let batchStart = 2;
+          batchStart <= totalPages;
+          batchStart += PARALLEL_BATCH
+        ) {
+          const batchEnd = Math.min(
+            batchStart + PARALLEL_BATCH - 1,
+            totalPages,
+          );
+          const promises = [];
+
+          for (let p = batchStart; p <= batchEnd; p++) {
+            promises.push(
+              makeRequest(token, p).catch((err) => {
+                console.warn(`⚠️ [Invoices] Erro página ${p}: ${err.message}`);
+                return null;
+              }),
+            );
+          }
+
+          const results = await Promise.all(promises);
+          for (const r of results) {
+            if (r?.data?.items) {
+              allItems = allItems.concat(r.data.items);
+            }
+          }
+
+          console.log(
+            `📄 [Invoices] Batch ${batchStart}-${batchEnd}/${totalPages} | acumulado: ${allItems.length} (${Date.now() - startTime}ms)`,
+          );
+        }
+      }
+
       const totalTime = Date.now() - startTime;
 
       console.log(
-        `✅ [Invoices] ${data?.items?.length || 0} invoices | count: ${data?.count} | totalPages: ${data?.totalPages} | ${totalTime}ms`,
+        `✅ [Invoices] ${allItems.length} invoices em ${totalPages} páginas | ${totalTime}ms`,
       );
 
       successResponse(
         res,
-        data,
-        `${data?.items?.length || 0} invoices em ${totalTime}ms`,
+        {
+          items: allItems,
+          count: totalCount,
+          totalPages,
+          totalItems: allItems.length,
+          hasNext: false,
+          queryTime: totalTime,
+        },
+        `${allItems.length} invoices em ${totalTime}ms`,
       );
     } catch (error) {
       console.error('❌ Erro ao buscar invoices:', {
