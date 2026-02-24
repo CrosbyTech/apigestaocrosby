@@ -3406,7 +3406,7 @@ router.post(
 /**
  * @route POST /totvs/invoices/search
  * @desc Proxy para fiscal/v2/invoices/search da API TOTVS Moda.
- *       Usa startIssueDate/endIssueDate (data de EMISSÃO da NF, max 6 meses).
+ *       Usa change.startDate/endDate (data de ALTERAÇÃO da NF).
  *       Popula branchCodeList automaticamente se não informado.
  *       Busca TODAS as páginas automaticamente (paralelo em batches de 5).
  *       Retorna todos os dados consolidados.
@@ -3417,6 +3417,8 @@ router.post(
  *   branchCodeList: number[] (opcional),
  *   operationType: string (opcional - "Output" para vendas, "Input" para entradas, default: todos),
  *   personCodeList: number[] (opcional),
+ *   invoiceStatusList: string[] (opcional - ex: ["Normal", "Issued"]),
+ *   operationCodeList: number[] (opcional - códigos de operação),
  *   maxPages: number (opcional, default: 100 — limite de segurança)
  * }
  */
@@ -3444,6 +3446,8 @@ router.post(
         branchCodeList,
         operationType,
         personCodeList,
+        invoiceStatusList,
+        operationCodeList,
         maxPages: maxPagesParam,
       } = req.body;
 
@@ -3466,8 +3470,10 @@ router.post(
       const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
       const filter = {
         branchCodeList: branches,
-        startIssueDate: `${startDate}T00:00:00.000Z`,
-        endIssueDate: `${endDate}T23:59:59.999Z`,
+        change: {
+          startDate: `${startDate}T00:00:00.000Z`,
+          endDate: `${endDate}T23:59:59.999Z`,
+        },
       };
 
       if (operationType) {
@@ -3478,11 +3484,21 @@ router.post(
         filter.personCodeList = personCodeList;
       }
 
+      // Filtro de status da NF (ex: ["Normal", "Issued"])
+      if (invoiceStatusList && invoiceStatusList.length > 0) {
+        filter.invoiceStatusList = invoiceStatusList;
+      }
+
+      // Filtro de código de operação
+      if (operationCodeList && operationCodeList.length > 0) {
+        filter.operationCodeList = operationCodeList;
+      }
+
       const PAGE_SIZE = 100;
       const PARALLEL_BATCH = 5;
 
       console.log(
-        `📊 [Invoices] ${branches.length} branches | emissão ${startDate} a ${endDate}${operationType ? ` | tipo: ${operationType}` : ''}${personCodeList?.length ? ` | ${personCodeList.length} pessoa(s)` : ''}`,
+        `📊 [Invoices] ${branches.length} branches | change ${startDate} a ${endDate}${operationType ? ` | tipo: ${operationType}` : ''}${personCodeList?.length ? ` | ${personCodeList.length} pessoa(s)` : ''}${invoiceStatusList?.length ? ` | status: ${invoiceStatusList.join(',')}` : ''}${operationCodeList?.length ? ` | ${operationCodeList.length} operações` : ''}`,
       );
 
       // Função para fazer request de uma página específica
