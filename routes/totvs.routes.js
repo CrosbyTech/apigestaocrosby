@@ -1,11 +1,32 @@
 import express from 'express';
 import axios from 'axios';
+import https from 'https';
+import http from 'http';
 import {
   asyncHandler,
   successResponse,
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+
+// ==========================================
+// AGENTS keep-alive para reutilizar conexões TCP/TLS
+// Evita handshake SSL a cada request (economia ~200-500ms/chamada)
+// ==========================================
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 20,
+  maxFreeSockets: 10,
+  timeout: 60000,
+  rejectUnauthorized: false,
+});
+
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 20,
+  maxFreeSockets: 10,
+  timeout: 60000,
+});
 
 const router = express.Router();
 
@@ -3403,23 +3424,63 @@ router.post(
   }),
 );
 
+// ==========================================
+// CACHE de invoices em memória (LRU simples)
+// Chave: hash dos parâmetros da consulta
+// TTL: 10 minutos
+// ==========================================
+const invoicesCache = new Map();
+const INVOICES_CACHE_TTL = 10 * 60 * 1000; // 10 minutos
+const INVOICES_CACHE_MAX_SIZE = 20;
+
+function getInvoicesCacheKey(body) {
+  return JSON.stringify({
+    s: body.startDate,
+    e: body.endDate,
+    b: body.branchCodeList ? [...body.branchCodeList].sort() : null,
+    o: body.operationType || null,
+    p: body.personCodeList ? [...body.personCodeList].sort() : null,
+    is: body.invoiceStatusList ? [...body.invoiceStatusList].sort() : null,
+    oc: body.operationCodeList ? [...body.operationCodeList].sort() : null,
+  });
+}
+
+function getFromInvoicesCache(key) {
+  const entry = invoicesCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > INVOICES_CACHE_TTL) {
+    invoicesCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setInvoicesCache(key, data) {
+  if (invoicesCache.size >= INVOICES_CACHE_MAX_SIZE) {
+    const oldestKey = invoicesCache.keys().next().value;
+    invoicesCache.delete(oldestKey);
+  }
+  invoicesCache.set(key, { data, timestamp: Date.now() });
+}
+
 /**
  * @route POST /totvs/invoices/search
  * @desc Proxy para fiscal/v2/invoices/search da API TOTVS Moda.
- *       Usa change.startDate/endDate (data de ALTERAÇÃO da NF).
+ *       OTIMIZADO: pageSize 500, 10 páginas paralelas, cache 10min, keep-alive.
+ *       Usa change.startDate/endDate (data de ALTERAÇÃO da NF) com margem ±3 dias.
  *       Popula branchCodeList automaticamente se não informado.
- *       Busca TODAS as páginas automaticamente (paralelo em batches de 5).
- *       Retorna todos os dados consolidados.
+ *       Busca TODAS as páginas automaticamente.
  * @access Public
  * @body {
  *   startDate: string (YYYY-MM-DD, obrigatório),
  *   endDate: string (YYYY-MM-DD, obrigatório),
  *   branchCodeList: number[] (opcional),
- *   operationType: string (opcional - "Output" para vendas, "Input" para entradas, default: todos),
+ *   operationType: string (opcional),
  *   personCodeList: number[] (opcional),
- *   invoiceStatusList: string[] (opcional - ex: ["Normal", "Issued"]),
- *   operationCodeList: number[] (opcional - códigos de operação),
- *   maxPages: number (opcional, default: 100 — limite de segurança)
+ *   invoiceStatusList: string[] (opcional),
+ *   operationCodeList: number[] (opcional),
+ *   maxPages: number (opcional, default: 100),
+ *   noCache: boolean (opcional, forçar bypass do cache)
  * }
  */
 router.post(
@@ -3427,6 +3488,23 @@ router.post(
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     try {
+      // ====== CACHE CHECK ======
+      const cacheKey = getInvoicesCacheKey(req.body);
+      if (!req.body.noCache) {
+        const cached = getFromInvoicesCache(cacheKey);
+        if (cached) {
+          const cacheTime = Date.now() - startTime;
+          console.log(
+            `⚡ [Invoices] CACHE HIT — ${cached.totalItems} itens em ${cacheTime}ms`,
+          );
+          return successResponse(
+            res,
+            { ...cached, fromCache: true, queryTime: cacheTime },
+            `${cached.totalItems} invoices (cache) em ${cacheTime}ms`,
+          );
+        }
+      }
+
       const tokenData = await getToken();
 
       if (!tokenData || !tokenData.access_token) {
@@ -3487,32 +3565,26 @@ router.post(
         },
       };
 
-      if (operationType) {
-        filter.operationType = operationType;
-      }
-
-      if (personCodeList && personCodeList.length > 0) {
-        filter.personCodeList = personCodeList;
-      }
-
-      // Filtro de status da NF (ex: ["Normal", "Issued"])
-      if (invoiceStatusList && invoiceStatusList.length > 0) {
+      if (operationType) filter.operationType = operationType;
+      if (personCodeList?.length > 0) filter.personCodeList = personCodeList;
+      if (invoiceStatusList?.length > 0)
         filter.invoiceStatusList = invoiceStatusList;
-      }
-
-      // Filtro de código de operação
-      if (operationCodeList && operationCodeList.length > 0) {
+      if (operationCodeList?.length > 0)
         filter.operationCodeList = operationCodeList;
-      }
 
-      const PAGE_SIZE = 100;
-      const PARALLEL_BATCH = 5;
+      // ====== OTIMIZAÇÃO: pageSize 500 + 10 paralelas + keep-alive ======
+      const PAGE_SIZE = 500;
+      const PARALLEL_BATCH = 10;
 
       console.log(
-        `📊 [Invoices] ${branches.length} branches | change ${changeStartDate} a ${changeEndDate} (margem ±${MARGIN_DAYS}d de ${startDate}→${endDate})${operationType ? ` | tipo: ${operationType}` : ''}${personCodeList?.length ? ` | ${personCodeList.length} pessoa(s)` : ''}${invoiceStatusList?.length ? ` | status: ${invoiceStatusList.join(',')}` : ''}${operationCodeList?.length ? ` | ${operationCodeList.length} operações` : ''}`,
+        `📊 [Invoices] ${branches.length} branches | change ${changeStartDate}→${changeEndDate} (±${MARGIN_DAYS}d)` +
+          `${operationType ? ` | tipo: ${operationType}` : ''}` +
+          `${invoiceStatusList?.length ? ` | status: ${invoiceStatusList.join(',')}` : ''}` +
+          `${operationCodeList?.length ? ` | ${operationCodeList.length} ops` : ''}` +
+          ` | pageSize: ${PAGE_SIZE} | parallel: ${PARALLEL_BATCH}`,
       );
 
-      // Função para fazer request de uma página específica
+      // Request com keep-alive agent para reutilizar conexão TCP/TLS
       const makeRequest = async (accessToken, pageNum) =>
         axios.post(
           endpoint,
@@ -3522,8 +3594,11 @@ router.post(
               'Content-Type': 'application/json',
               Accept: 'application/json',
               Authorization: `Bearer ${accessToken}`,
+              Connection: 'keep-alive',
             },
             timeout: 60000,
+            httpsAgent,
+            httpAgent,
           },
         );
 
@@ -3547,60 +3622,65 @@ router.post(
       let allItems = [...(firstResponse.data?.items || [])];
 
       console.log(
-        `📄 [Invoices] Página 1/${totalPages} | count: ${totalCount} | acumulado: ${allItems.length} (${Date.now() - startTime}ms)`,
+        `📄 [Invoices] Pg 1/${totalPages} | count: ${totalCount} | itens: ${allItems.length} (${Date.now() - startTime}ms)`,
       );
 
-      // PASSO 2: Buscar páginas restantes em batches paralelos
+      // PASSO 2: Buscar páginas restantes — PARALLEL_BATCH por vez
       if (totalPages > 1) {
-        for (
-          let batchStart = 2;
-          batchStart <= totalPages;
-          batchStart += PARALLEL_BATCH
-        ) {
-          const batchEnd = Math.min(
-            batchStart + PARALLEL_BATCH - 1,
-            totalPages,
-          );
-          const promises = [];
+        const remainingPages = [];
+        for (let p = 2; p <= totalPages; p++) remainingPages.push(p);
 
-          for (let p = batchStart; p <= batchEnd; p++) {
-            promises.push(
+        for (let i = 0; i < remainingPages.length; i += PARALLEL_BATCH) {
+          const batch = remainingPages.slice(i, i + PARALLEL_BATCH);
+
+          const results = await Promise.all(
+            batch.map((p) =>
               makeRequest(token, p).catch((err) => {
-                console.warn(`⚠️ [Invoices] Erro página ${p}: ${err.message}`);
+                // Retry uma vez em caso de timeout
+                if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+                  console.warn(`⚠️ [Invoices] Retry pg ${p} (timeout)`);
+                  return makeRequest(token, p).catch(() => null);
+                }
+                console.warn(`⚠️ [Invoices] Erro pg ${p}: ${err.message}`);
                 return null;
               }),
-            );
-          }
+            ),
+          );
 
-          const results = await Promise.all(promises);
           for (const r of results) {
             if (r?.data?.items) {
               allItems = allItems.concat(r.data.items);
             }
           }
 
+          const batchEnd = batch[batch.length - 1];
           console.log(
-            `📄 [Invoices] Batch ${batchStart}-${batchEnd}/${totalPages} | acumulado: ${allItems.length} (${Date.now() - startTime}ms)`,
+            `📄 [Invoices] Batch pg ${batch[0]}-${batchEnd}/${totalPages} | acum: ${allItems.length} (${Date.now() - startTime}ms)`,
           );
         }
       }
 
       const totalTime = Date.now() - startTime;
 
+      const responseData = {
+        items: allItems,
+        count: totalCount,
+        totalPages,
+        totalItems: allItems.length,
+        hasNext: false,
+        queryTime: totalTime,
+      };
+
+      // ====== SALVAR NO CACHE ======
+      setInvoicesCache(cacheKey, responseData);
+
       console.log(
-        `✅ [Invoices] ${allItems.length} invoices em ${totalPages} páginas | ${totalTime}ms`,
+        `✅ [Invoices] ${allItems.length} invoices | ${totalPages} pgs (×${PAGE_SIZE}) | ${totalTime}ms`,
       );
 
       successResponse(
         res,
-        {
-          items: allItems,
-          count: totalCount,
-          totalPages,
-          totalItems: allItems.length,
-          hasNext: false,
-          queryTime: totalTime,
-        },
+        responseData,
         `${allItems.length} invoices em ${totalTime}ms`,
       );
     } catch (error) {
