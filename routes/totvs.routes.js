@@ -3795,9 +3795,24 @@ router.post(
             ? parseFloat(item.paidValue)
             : item.paidValue;
 
-        // Data de liquidação = hoje
-        const now = new Date();
-        const settlementDate = now.toISOString();
+        // Data de liquidação: usar a data do arquivo (dt_pagamento) se fornecida, senão hoje
+        let settlementDate;
+        if (item.settlementDate) {
+          // Aceitar formatos ISO (2026-02-15) ou BR (15/02/2026)
+          const raw = item.settlementDate;
+          if (raw.includes('/')) {
+            // Formato BR: dd/mm/yyyy
+            const [dd, mm, yyyy] = raw.split('/');
+            settlementDate = new Date(
+              `${yyyy}-${mm}-${dd}T12:00:00`,
+            ).toISOString();
+          } else {
+            // Formato ISO ou similar
+            settlementDate = new Date(raw).toISOString();
+          }
+        } else {
+          settlementDate = new Date().toISOString();
+        }
 
         // Payload conforme InvoicesPaymentCommand do Swagger
         const payload = {
