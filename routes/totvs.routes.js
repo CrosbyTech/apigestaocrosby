@@ -3706,4 +3706,206 @@ router.post(
   }),
 );
 
+// ==========================================
+// BAIXA DE TÍTULOS (INVOICES SETTLE) - Confiança
+// POST /invoices-settle
+// Efetua baixa de títulos no TOTVS via accounts-receivable/v2/invoices-settle/create
+// ==========================================
+router.post(
+  '/invoices-settle',
+  asyncHandler(async (req, res) => {
+    const { items } = req.body;
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return errorResponse(
+        res,
+        'É necessário enviar um array de itens para baixa',
+        400,
+        'INVALID_ITEMS',
+      );
+    }
+
+    // Validar campos obrigatórios de cada item
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (
+        !item.branchCode ||
+        !item.customerCode ||
+        !item.receivableCode ||
+        !item.installmentCode
+      ) {
+        return errorResponse(
+          res,
+          `Item ${i + 1} está incompleto. Campos obrigatórios: branchCode, customerCode, receivableCode, installmentCode`,
+          400,
+          'INVALID_ITEM_FIELDS',
+        );
+      }
+    }
+
+    // Dados bancários fixos da Confiança
+    const CONFIANCA_BANK = {
+      bankNumber: 422,
+      agencyNumber: 1610,
+      account: '005818984',
+    };
+
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const results = [];
+      const errors = [];
+
+      // Processar cada item individualmente
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const payload = {
+          branchCode:
+            typeof item.branchCode === 'string'
+              ? parseInt(item.branchCode, 10)
+              : item.branchCode,
+          customerCode:
+            typeof item.customerCode === 'string'
+              ? parseInt(item.customerCode, 10)
+              : item.customerCode,
+          receivableCode:
+            typeof item.receivableCode === 'string'
+              ? parseInt(item.receivableCode, 10)
+              : item.receivableCode,
+          installmentCode:
+            typeof item.installmentCode === 'string'
+              ? parseInt(item.installmentCode, 10)
+              : item.installmentCode,
+          bankNumber: CONFIANCA_BANK.bankNumber,
+          agencyNumber: CONFIANCA_BANK.agencyNumber,
+          account: CONFIANCA_BANK.account,
+        };
+
+        try {
+          console.log(
+            `📋 [${i + 1}/${items.length}] Efetuando baixa no TOTVS:`,
+            {
+              branchCode: payload.branchCode,
+              customerCode: payload.customerCode,
+              receivableCode: payload.receivableCode,
+              installmentCode: payload.installmentCode,
+            },
+          );
+
+          const response = await axios.post(
+            `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-settle/create`,
+            payload,
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${tokenData.access_token}`,
+              },
+              httpsAgent,
+              timeout: 30000,
+            },
+          );
+
+          console.log(
+            `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso - Fatura ${payload.receivableCode}`,
+          );
+          results.push({
+            index: i,
+            receivableCode: payload.receivableCode,
+            installmentCode: payload.installmentCode,
+            branchCode: payload.branchCode,
+            success: true,
+            data: response.data,
+          });
+        } catch (itemError) {
+          console.error(
+            `❌ [${i + 1}/${items.length}] Erro na baixa - Fatura ${payload.receivableCode}:`,
+            {
+              status: itemError.response?.status,
+              message: itemError.response?.data?.message || itemError.message,
+            },
+          );
+
+          // Se for erro de token, tentar renovar uma vez
+          if (itemError.response?.status === 401) {
+            try {
+              const newTokenData = await getToken(true);
+              const retryResponse = await axios.post(
+                `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-settle/create`,
+                payload,
+                {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    Authorization: `Bearer ${newTokenData.access_token}`,
+                  },
+                  httpsAgent,
+                  timeout: 30000,
+                },
+              );
+
+              console.log(
+                `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso (retry) - Fatura ${payload.receivableCode}`,
+              );
+              results.push({
+                index: i,
+                receivableCode: payload.receivableCode,
+                installmentCode: payload.installmentCode,
+                branchCode: payload.branchCode,
+                success: true,
+                data: retryResponse.data,
+              });
+              continue;
+            } catch (retryError) {
+              // Falhou mesmo com retry
+            }
+          }
+
+          errors.push({
+            index: i,
+            receivableCode: payload.receivableCode,
+            installmentCode: payload.installmentCode,
+            branchCode: payload.branchCode,
+            success: false,
+            error: itemError.response?.data?.message || itemError.message,
+            status: itemError.response?.status,
+          });
+        }
+      }
+
+      const totalProcessed = results.length + errors.length;
+      console.log(
+        `📊 Baixa finalizada: ${results.length}/${totalProcessed} com sucesso, ${errors.length} erros`,
+      );
+
+      return res
+        .status(errors.length > 0 && results.length === 0 ? 400 : 200)
+        .json({
+          success: errors.length === 0,
+          message:
+            errors.length === 0
+              ? `Todas as ${results.length} baixas foram efetuadas com sucesso`
+              : `${results.length} baixas efetuadas, ${errors.length} falharam`,
+          totalProcessed,
+          successCount: results.length,
+          errorCount: errors.length,
+          results,
+          errors,
+        });
+    } catch (error) {
+      console.error('❌ Erro geral na baixa de títulos:', error.message);
+      throw new Error(`Erro ao efetuar baixa de títulos: ${error.message}`);
+    }
+  }),
+);
+
 export default router;
