@@ -3707,9 +3707,11 @@ router.post(
 );
 
 // ==========================================
-// BAIXA DE TÍTULOS (INVOICES SETTLE) - Confiança
+// BAIXA DE TÍTULOS (INVOICES PAYMENT) - Confiança
 // POST /invoices-settle
-// Efetua baixa de títulos no TOTVS via accounts-receivable/v2/invoices-settle/create
+// Efetua baixa de títulos no TOTVS via accounts-receivable/v2/invoices-payment
+// Usa invoices-payment ao invés de invoices-settle/create pois este último
+// não permite títulos vencidos (ExpiredInvoice).
 // ==========================================
 router.post(
   '/invoices-settle',
@@ -3732,11 +3734,12 @@ router.post(
         !item.branchCode ||
         !item.customerCode ||
         !item.receivableCode ||
-        !item.installmentCode
+        !item.installmentCode ||
+        !item.paidValue
       ) {
         return errorResponse(
           res,
-          `Item ${i + 1} está incompleto. Campos obrigatórios: branchCode, customerCode, receivableCode, installmentCode`,
+          `Item ${i + 1} está incompleto. Campos obrigatórios: branchCode, customerCode, receivableCode, installmentCode, paidValue`,
           400,
           'INVALID_ITEM_FIELDS',
         );
@@ -3765,39 +3768,71 @@ router.post(
       const results = [];
       const errors = [];
 
-      // Processar cada item individualmente
+      // Agrupar itens por branchCode (empresa de liquidação)
+      // O invoices-payment exige um branchCode de liquidação + settlementDate no nível raiz
+      // e aceita múltiplas faturas + múltiplos pagamentos
+      // Processamos cada item individualmente para melhor controle de erros
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
+        const branchCode =
+          typeof item.branchCode === 'string'
+            ? parseInt(item.branchCode, 10)
+            : item.branchCode;
+        const customerCode =
+          typeof item.customerCode === 'string'
+            ? parseInt(item.customerCode, 10)
+            : item.customerCode;
+        const receivableCode =
+          typeof item.receivableCode === 'string'
+            ? parseInt(item.receivableCode, 10)
+            : item.receivableCode;
+        const installmentCode =
+          typeof item.installmentCode === 'string'
+            ? parseInt(item.installmentCode, 10)
+            : item.installmentCode;
+        const paidValue =
+          typeof item.paidValue === 'string'
+            ? parseFloat(item.paidValue)
+            : item.paidValue;
+
+        // Data de liquidação = hoje
+        const now = new Date();
+        const settlementDate = now.toISOString();
+
+        // Payload conforme InvoicesPaymentCommand do Swagger
         const payload = {
-          branchCode:
-            typeof item.branchCode === 'string'
-              ? parseInt(item.branchCode, 10)
-              : item.branchCode,
-          customerCode:
-            typeof item.customerCode === 'string'
-              ? parseInt(item.customerCode, 10)
-              : item.customerCode,
-          receivableCode:
-            typeof item.receivableCode === 'string'
-              ? parseInt(item.receivableCode, 10)
-              : item.receivableCode,
-          installmentCode:
-            typeof item.installmentCode === 'string'
-              ? parseInt(item.installmentCode, 10)
-              : item.installmentCode,
-          bankNumber: CONFIANCA_BANK.bankNumber,
-          agencyNumber: CONFIANCA_BANK.agencyNumber,
-          account: CONFIANCA_BANK.account,
+          branchCode,
+          settlementDate,
+          invoices: [
+            {
+              branchCode,
+              customerCode,
+              receivableCode,
+              installmentCode,
+              paidValue,
+            },
+          ],
+          payments: [
+            {
+              value: paidValue,
+              paidType: 4, // 4 = Conta corrente (CurrentAccount)
+              bank: {
+                bankNumber: CONFIANCA_BANK.bankNumber,
+                agencyNumber: CONFIANCA_BANK.agencyNumber,
+                account: CONFIANCA_BANK.account,
+              },
+            },
+          ],
         };
 
         try {
           console.log(
-            `📋 [${i + 1}/${items.length}] Efetuando baixa no TOTVS:`,
+            `📋 [${i + 1}/${items.length}] Efetuando baixa no TOTVS (invoices-payment):`,
             JSON.stringify(payload, null, 2),
           );
 
           const response = await axios.post(
-            `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-settle/create`,
+            `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-payment`,
             payload,
             {
               headers: {
@@ -3811,19 +3846,20 @@ router.post(
           );
 
           console.log(
-            `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso - Fatura ${payload.receivableCode}`,
+            `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso - Fatura ${receivableCode}`,
+            JSON.stringify(response.data),
           );
           results.push({
             index: i,
-            receivableCode: payload.receivableCode,
-            installmentCode: payload.installmentCode,
-            branchCode: payload.branchCode,
+            receivableCode,
+            installmentCode,
+            branchCode,
             success: true,
             data: response.data,
           });
         } catch (itemError) {
           console.error(
-            `❌ [${i + 1}/${items.length}] Erro na baixa - Fatura ${payload.receivableCode}:`,
+            `❌ [${i + 1}/${items.length}] Erro na baixa - Fatura ${receivableCode}:`,
             {
               status: itemError.response?.status,
               data: JSON.stringify(itemError.response?.data, null, 2),
@@ -3836,7 +3872,7 @@ router.post(
             try {
               const newTokenData = await getToken(true);
               const retryResponse = await axios.post(
-                `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-settle/create`,
+                `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-payment`,
                 payload,
                 {
                   headers: {
@@ -3850,13 +3886,13 @@ router.post(
               );
 
               console.log(
-                `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso (retry) - Fatura ${payload.receivableCode}`,
+                `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso (retry) - Fatura ${receivableCode}`,
               );
               results.push({
                 index: i,
-                receivableCode: payload.receivableCode,
-                installmentCode: payload.installmentCode,
-                branchCode: payload.branchCode,
+                receivableCode,
+                installmentCode,
+                branchCode,
                 success: true,
                 data: retryResponse.data,
               });
@@ -3868,9 +3904,9 @@ router.post(
 
           errors.push({
             index: i,
-            receivableCode: payload.receivableCode,
-            installmentCode: payload.installmentCode,
-            branchCode: payload.branchCode,
+            receivableCode,
+            installmentCode,
+            branchCode,
             success: false,
             error: itemError.response?.data?.message || itemError.message,
             status: itemError.response?.status,
