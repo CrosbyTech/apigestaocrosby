@@ -3793,12 +3793,7 @@ router.post(
         try {
           console.log(
             `📋 [${i + 1}/${items.length}] Efetuando baixa no TOTVS:`,
-            {
-              branchCode: payload.branchCode,
-              customerCode: payload.customerCode,
-              receivableCode: payload.receivableCode,
-              installmentCode: payload.installmentCode,
-            },
+            JSON.stringify(payload, null, 2),
           );
 
           const response = await axios.post(
@@ -3831,6 +3826,7 @@ router.post(
             `❌ [${i + 1}/${items.length}] Erro na baixa - Fatura ${payload.receivableCode}:`,
             {
               status: itemError.response?.status,
+              data: JSON.stringify(itemError.response?.data, null, 2),
               message: itemError.response?.data?.message || itemError.message,
             },
           );
@@ -3878,6 +3874,8 @@ router.post(
             success: false,
             error: itemError.response?.data?.message || itemError.message,
             status: itemError.response?.status,
+            details: itemError.response?.data,
+            payloadSent: payload,
           });
         }
       }
