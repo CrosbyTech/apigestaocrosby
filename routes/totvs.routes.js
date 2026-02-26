@@ -3952,7 +3952,7 @@ router.post(
         });
     } catch (error) {
       console.error('❌ Erro geral na baixa de títulos:', error.message);
-      throw new Error(`Erro ao efetuar baixa de títulos: ${error.message}`);
+      throw new Error(`Erro ao efetuar baixa de título: ${error.message}`);
     }
   }),
 );
