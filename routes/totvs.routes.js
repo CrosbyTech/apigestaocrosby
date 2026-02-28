@@ -3826,8 +3826,11 @@ router.post(
         }
 
         // Payload conforme InvoicesPaymentCommand do Swagger
+        // Para adiantamento (paidType 3), a empresa de liquidação deve ser 99
+        const settlementBranchCode = requestPaidType === 3 ? 99 : branchCode;
+
         const payload = {
-          branchCode,
+          branchCode: settlementBranchCode,
           settlementDate,
           invoices: [
             {
