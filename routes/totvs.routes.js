@@ -4456,6 +4456,74 @@ router.post(
         };
       });
 
+      // PASSO 5: Enriquecer com nomes de fornecedores via API TOTVS Person
+      const uniqueSupplierCodes = [
+        ...new Set(mappedItems.map((i) => i.cd_fornecedor).filter(Boolean)),
+      ];
+
+      const supplierNameMap = new Map();
+      if (uniqueSupplierCodes.length > 0) {
+        const SUPPLIER_BATCH = 50; // API Person aceita batches de personCodeList
+        const supplierChunks = [];
+        for (let i = 0; i < uniqueSupplierCodes.length; i += SUPPLIER_BATCH) {
+          supplierChunks.push(uniqueSupplierCodes.slice(i, i + SUPPLIER_BATCH));
+        }
+
+        const personEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+
+        console.log(
+          `👤 Buscando nomes de ${uniqueSupplierCodes.length} fornecedores em ${supplierChunks.length} lotes...`,
+        );
+
+        const currentToken = await getToken();
+        const accessToken = currentToken?.access_token;
+
+        for (const chunk of supplierChunks) {
+          try {
+            const personPayload = {
+              filter: { personCodeList: chunk.map((c) => parseInt(c)) },
+              page: 1,
+              pageSize: chunk.length,
+            };
+
+            const personResp = await axios.post(personEndpoint, personPayload, {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              timeout: 30000,
+              httpsAgent,
+              httpAgent,
+            });
+
+            const items = personResp.data?.items || [];
+            items.forEach((p) => {
+              if (p.personCode) {
+                supplierNameMap.set(
+                  p.personCode,
+                  p.fantasyName || p.name || p.corporateName || '',
+                );
+              }
+            });
+          } catch (personErr) {
+            console.warn(
+              `⚠️ Erro ao buscar nomes de fornecedores (lote): ${personErr.message}`,
+            );
+          }
+        }
+
+        console.log(
+          `👤 ${supplierNameMap.size} nomes de fornecedores encontrados`,
+        );
+      }
+
+      // Aplicar nomes dos fornecedores nos itens mapeados
+      mappedItems.forEach((item) => {
+        const nome = supplierNameMap.get(item.cd_fornecedor);
+        if (nome) item.nm_fornecedor = nome;
+      });
+
       const totalTime = Date.now() - startTime;
       console.log(
         `✅ Contas a Pagar - ${mappedItems.length} itens mapeados em ${totalTime}ms (${totalPages} páginas)`,
