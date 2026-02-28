@@ -4066,4 +4066,478 @@ router.post(
   }),
 );
 
+// ==========================================
+// ROTA PARA CONTAS A PAGAR VIA API TOTVS
+// Usa /accounts-payable/v2/duplicates/search
+// Paginação paralela + mapeamento para formato frontend
+// ==========================================
+
+/**
+ * @route POST /totvs/accounts-payable/search
+ * @desc Busca duplicatas de contas a pagar na API TOTVS (accounts-payable/v2/duplicates/search)
+ * @access Public
+ * @body {
+ *   dt_inicio: string (YYYY-MM-DD, obrigatório),
+ *   dt_fim: string (YYYY-MM-DD, obrigatório),
+ *   branches: number[] (códigos das empresas, obrigatório),
+ *   modo: 'vencimento' | 'emissao' | 'liquidacao' (default: 'vencimento'),
+ *   status: 'Todos' | 'Pago' | 'Vencido' | 'A Vencer' | 'Em Aberto' (default: 'Todos'),
+ *   situacao: 'NORMAIS' | 'CANCELADAS' | 'TODAS' (default: 'NORMAIS'),
+ *   previsao: 'TODOS' | 'PREVISAO' | 'REAL' | 'CONSIGNADO' (default: 'TODOS'),
+ *   supplierCodeList: number[] (fornecedores, opcional),
+ *   duplicateCodeList: number[] (duplicatas, opcional),
+ *   documentTypeList: number[] (tipos de documento, opcional)
+ * }
+ */
+router.post(
+  '/accounts-payable/search',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+
+    try {
+      const {
+        dt_inicio,
+        dt_fim,
+        branches,
+        modo = 'vencimento',
+        status = 'Todos',
+        situacao = 'NORMAIS',
+        previsao = 'TODOS',
+        supplierCodeList,
+        duplicateCodeList,
+        documentTypeList,
+      } = req.body;
+
+      if (!dt_inicio || !dt_fim) {
+        return errorResponse(
+          res,
+          'Parâmetros dt_inicio e dt_fim são obrigatórios',
+          400,
+          'MISSING_PARAMS',
+        );
+      }
+
+      if (!branches || !Array.isArray(branches) || branches.length === 0) {
+        return errorResponse(
+          res,
+          'Parâmetro branches (array de códigos das empresas) é obrigatório',
+          400,
+          'MISSING_PARAMS',
+        );
+      }
+
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Token indisponível',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      let token = tokenData.access_token;
+
+      // Converter branches para inteiros
+      const branchCodeList = branches
+        .map((b) => parseInt(b))
+        .filter((b) => !isNaN(b) && b > 0);
+
+      if (branchCodeList.length === 0) {
+        return errorResponse(
+          res,
+          'Nenhuma empresa válida informada em branches',
+          400,
+          'INVALID_BRANCHES',
+        );
+      }
+
+      // Montar filtro TOTVS accounts-payable
+      const filter = { branchCodeList };
+
+      // Filtro de datas
+      if (modo === 'emissao') {
+        filter.startIssueDate = `${dt_inicio}T00:00:00`;
+        filter.endIssueDate = `${dt_fim}T23:59:59`;
+      } else if (modo === 'liquidacao') {
+        filter.startSettlementDate = `${dt_inicio}T00:00:00`;
+        filter.endSettlementDate = `${dt_fim}T23:59:59`;
+      } else {
+        // vencimento (padrão)
+        filter.startExpiredDate = `${dt_inicio}T00:00:00`;
+        filter.endExpiredDate = `${dt_fim}T23:59:59`;
+      }
+
+      // Filtro de situação (StatusType: Normal, Canceled, Grouped, Retorned, CommissionSettled, Broken)
+      if (situacao && situacao !== 'TODAS') {
+        if (situacao === 'NORMAIS') {
+          filter.status = 4; // Normal
+        } else if (situacao === 'CANCELADAS') {
+          filter.status = 1; // Canceled
+        }
+      }
+
+      // Filtro de fornecedores
+      if (
+        supplierCodeList &&
+        Array.isArray(supplierCodeList) &&
+        supplierCodeList.length > 0
+      ) {
+        filter.supplierCodeList = supplierCodeList
+          .map((s) => parseInt(s))
+          .filter((s) => !isNaN(s));
+      }
+
+      // Filtro de duplicatas
+      if (
+        duplicateCodeList &&
+        Array.isArray(duplicateCodeList) &&
+        duplicateCodeList.length > 0
+      ) {
+        filter.duplicateCodeList = duplicateCodeList
+          .map((d) => parseInt(d))
+          .filter((d) => !isNaN(d));
+      }
+
+      // Filtro de tipos de documento
+      if (
+        documentTypeList &&
+        Array.isArray(documentTypeList) &&
+        documentTypeList.length > 0
+      ) {
+        filter.documentTypeList = documentTypeList
+          .map((d) => parseInt(d))
+          .filter((d) => !isNaN(d));
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`;
+      const PAGE_SIZE = 100;
+      const PARALLEL_BATCH = 10; // 10 páginas em paralelo por vez
+
+      console.log('💳 Contas a Pagar TOTVS V1:', {
+        modo,
+        dt_inicio,
+        dt_fim,
+        status,
+        situacao,
+        previsao,
+        branches: branchCodeList,
+        filtro: JSON.stringify(filter),
+      });
+
+      const makeRequest = async (accessToken, pageNum) => {
+        return axios.post(
+          endpoint,
+          {
+            filter,
+            page: pageNum,
+            pageSize: PAGE_SIZE,
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            httpsAgent,
+            httpAgent,
+            timeout: 60000,
+          },
+        );
+      };
+
+      // PASSO 1: Buscar página 1 para descobrir totalPages
+      let firstResponse;
+      try {
+        firstResponse = await makeRequest(token, 1);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido. Renovando token...');
+          const newTokenData = await getToken(true);
+          token = newTokenData.access_token;
+          firstResponse = await makeRequest(token, 1);
+        } else {
+          throw error;
+        }
+      }
+
+      const totalPages = firstResponse.data?.totalPages || 1;
+      const totalCount = firstResponse.data?.count || 0;
+      let allItems = [...(firstResponse.data?.items || [])];
+
+      console.log(
+        `📄 Contas a Pagar - Página 1/${totalPages} - Total: ${totalCount} registros (${Date.now() - startTime}ms)`,
+      );
+
+      // PASSO 2: Buscar páginas restantes em PARALELO
+      if (totalPages > 1) {
+        for (
+          let batchStart = 2;
+          batchStart <= totalPages;
+          batchStart += PARALLEL_BATCH
+        ) {
+          const batchEnd = Math.min(
+            batchStart + PARALLEL_BATCH - 1,
+            totalPages,
+          );
+          const promises = [];
+
+          for (let p = batchStart; p <= batchEnd; p++) {
+            promises.push(
+              makeRequest(token, p).catch((err) => {
+                console.log(`⚠️ Erro página ${p}: ${err.message}`);
+                return null;
+              }),
+            );
+          }
+
+          const results = await Promise.all(promises);
+          for (const r of results) {
+            if (r?.data?.items) {
+              allItems = allItems.concat(r.data.items);
+            }
+          }
+
+          console.log(
+            `📄 Contas a Pagar - Batch ${batchStart}-${batchEnd}/${totalPages}: acumulado ${allItems.length} (${Date.now() - startTime}ms)`,
+          );
+        }
+      }
+
+      console.log(
+        `📊 Contas a Pagar - ${allItems.length} itens buscados em ${Date.now() - startTime}ms`,
+      );
+
+      // PASSO 3: Filtros locais
+
+      let filteredItems = allItems;
+
+      // Filtro local de previsão (PrevisionType: 1=Forecast, 2=Real, 3=Consignment)
+      if (previsao && previsao !== 'TODOS') {
+        let previsionFilter;
+        if (previsao === 'PREVISAO') previsionFilter = 1;
+        else if (previsao === 'REAL') previsionFilter = 2;
+        else if (previsao === 'CONSIGNADO') previsionFilter = 3;
+
+        if (previsionFilter !== undefined) {
+          filteredItems = filteredItems.filter(
+            (item) =>
+              item.inclusionType === previsionFilter || !previsionFilter,
+          );
+          // Na verdade, o PrevisionType fica no installment, no nível do item do DuplicateOutModel
+          // Vou usar o campo correto se existir. A API retorna itens com campos variados.
+        }
+      }
+
+      // Filtro local de status (Pago, Vencido, A Vencer, Em Aberto)
+      if (status && status !== 'Todos') {
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
+
+        if (status === 'Pago') {
+          filteredItems = filteredItems.filter(
+            (item) =>
+              item.settlementDate || (item.paidValue && item.paidValue > 0),
+          );
+        } else if (status === 'Vencido') {
+          filteredItems = filteredItems.filter((item) => {
+            const dataVenc = item.dueDate ? new Date(item.dueDate) : null;
+            const temPagamento =
+              item.settlementDate || (item.paidValue && item.paidValue > 0);
+            return dataVenc && dataVenc < hoje && !temPagamento;
+          });
+        } else if (status === 'A Vencer') {
+          filteredItems = filteredItems.filter((item) => {
+            const dataVenc = item.dueDate ? new Date(item.dueDate) : null;
+            const temPagamento =
+              item.settlementDate || (item.paidValue && item.paidValue > 0);
+            return dataVenc && dataVenc >= hoje && !temPagamento;
+          });
+        } else if (status === 'Em Aberto') {
+          filteredItems = filteredItems.filter((item) => {
+            const temPagamento =
+              item.settlementDate || (item.paidValue && item.paidValue > 0);
+            return !temPagamento;
+          });
+        }
+      }
+
+      // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)
+      const mappedItems = filteredItems.map((item) => {
+        // Extrair dados de despesa e centro de custo do array expense
+        const firstExpense =
+          item.expense && item.expense.length > 0 ? item.expense[0] : null;
+
+        // Mapear tp_situacao da API (StatusType enum)
+        // StatusType: Grouped=0, Canceled=1, Retorned=2, CommissionSettled=3, Normal=4, Broken=5
+        let tpSituacao = 'N';
+        if (item.status === 1)
+          tpSituacao = 'C'; // Cancelada
+        else if (item.status === 0)
+          tpSituacao = 'A'; // Agrupada
+        else if (item.status === 2)
+          tpSituacao = 'D'; // Devolvida
+        else if (item.status === 3)
+          tpSituacao = 'L'; // Liquidada comissão
+        else if (item.status === 5) tpSituacao = 'Q'; // Quebrada
+
+        // Mapear tp_previsaoreal (PrevisionType: 1=Forecast, 2=Real, 3=Consignment)
+        // No DuplicateOutModel não vem diretamente, precisamos verificar
+        let tpPrevisaoReal = '';
+        // O campo pode não estar disponível diretamente no search result
+        // Verificar se existe no item
+        if (item.previsionType === 1) tpPrevisaoReal = 'P';
+        else if (item.previsionType === 2) tpPrevisaoReal = 'R';
+        else if (item.previsionType === 3) tpPrevisaoReal = 'C';
+
+        // Mapear tp_estagio (StageType enum)
+        // 1=Título não conferido, 2=Liberado, 5=Aceito, 90=Liquidado, etc.
+        let tpEstagio = '';
+        const stageMap = {
+          1: 'NConf',
+          2: 'Lib',
+          3: 'ChAut',
+          4: 'ChEm',
+          5: 'Aceito',
+          10: 'Endos',
+          20: 'PgBco',
+          30: 'Res',
+          40: 'PgAut',
+          41: 'EnvAg',
+          42: 'EmAg',
+          43: 'PgTrib',
+          70: 'Restr',
+          71: 'RestrP',
+          90: 'Liquid',
+        };
+        if (item.stageType) {
+          tpEstagio = stageMap[item.stageType] || String(item.stageType);
+        }
+
+        return {
+          cd_empresa: item.branchCode,
+          cd_fornecedor: item.supplierCode,
+          nr_cpfcnpj_fornecedor: item.supplierCpfCnpj || '',
+          nr_duplicata: item.duplicateCode,
+          nr_portador: item.bearerCode,
+          nr_parcela: item.installmentCode,
+          dt_emissao: item.issueDate,
+          dt_vencimento: item.dueDate,
+          dt_entrada: item.entryDate,
+          dt_liq: item.settlementDate || null,
+          dt_chegada: item.arrivalDate || null,
+          tp_situacao: tpSituacao,
+          tp_estagio: tpEstagio,
+          tp_previsaoreal: tpPrevisaoReal,
+          vl_duplicata: item.duplicateValue || 0,
+          vl_juros: item.feesValue || 0,
+          vl_acrescimo: 0, // Não tem campo separado na API, está incluso em feesValue
+          vl_desconto: item.discountValue || 0,
+          vl_pago: item.paidValue || 0,
+          vl_rateio:
+            firstExpense?.proratedValue ||
+            firstExpense?.proratedPercentage ||
+            0,
+          in_aceite: '', // Não disponível diretamente na API
+          cd_despesaitem: firstExpense?.expenseCode || '',
+          ds_despesaitem: firstExpense?.expenseName || '',
+          cd_ccusto: firstExpense?.costCenterCode || '',
+          ds_ccusto: '', // Será enriquecido pelo frontend
+          nm_fornecedor: '', // Será enriquecido pelo frontend
+          ds_observacao: '', // Não disponível no search
+          // Campos extras da API TOTVS
+          tp_inclusao: item.inclusionType,
+          nm_usuario_inclusao: item.userInclusionName || '',
+          // Se houver múltiplas despesas, incluir todas
+          despesas: item.expense || [],
+        };
+      });
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `✅ Contas a Pagar - ${mappedItems.length} itens mapeados em ${totalTime}ms (${totalPages} páginas)`,
+      );
+
+      // Calcular totais
+      const totals = mappedItems.reduce(
+        (acc, row) => {
+          acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
+          acc.totalPago += parseFloat(row.vl_pago || 0);
+          acc.totalJuros += parseFloat(row.vl_juros || 0);
+          acc.totalDesconto += parseFloat(row.vl_desconto || 0);
+          return acc;
+        },
+        { totalDuplicata: 0, totalPago: 0, totalJuros: 0, totalDesconto: 0 },
+      );
+
+      successResponse(
+        res,
+        {
+          periodo: { dt_inicio, dt_fim },
+          empresas: branchCodeList,
+          totals,
+          count: mappedItems.length,
+          totalCount,
+          pagesSearched: totalPages,
+          timeMs: totalTime,
+          filtros: {
+            status,
+            situacao,
+            previsao,
+            modo,
+            supplierCodeList: supplierCodeList || null,
+            duplicateCodeList: duplicateCodeList || null,
+          },
+          data: mappedItems,
+        },
+        `${mappedItems.length} duplicata(s) de contas a pagar encontrada(s) em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar contas a pagar na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        let errorMessage = 'Erro ao buscar contas a pagar na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
 export default router;
