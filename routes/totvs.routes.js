@@ -4601,7 +4601,7 @@ router.post(
             ? 'URL da API TOTVS não encontrada.'
             : error.code === 'ECONNREFUSED'
               ? 'Conexão recusada pela API TOTVS.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+              : `Não foi possível conectar a API TOTVS (${error.code || 'Erro desconhecido'})`;
 
         return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
       }
