@@ -4463,59 +4463,127 @@ router.post(
 
       const supplierNameMap = new Map();
       if (uniqueSupplierCodes.length > 0) {
-        const SUPPLIER_BATCH = 50; // API Person aceita batches de personCodeList
-        const supplierChunks = [];
-        for (let i = 0; i < uniqueSupplierCodes.length; i += SUPPLIER_BATCH) {
-          supplierChunks.push(uniqueSupplierCodes.slice(i, i + SUPPLIER_BATCH));
-        }
-
-        const personEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-
         console.log(
-          `👤 Buscando nomes de ${uniqueSupplierCodes.length} fornecedores em ${supplierChunks.length} lotes...`,
+          `👤 Buscando nomes de ${uniqueSupplierCodes.length} fornecedores...`,
+        );
+        console.log(
+          `👤 Primeiros 5 códigos: ${uniqueSupplierCodes.slice(0, 5).join(', ')}`,
         );
 
         const currentToken = await getToken();
         const accessToken = currentToken?.access_token;
 
-        for (const chunk of supplierChunks) {
-          try {
-            const personPayload = {
-              filter: { personCodeList: chunk.map((c) => parseInt(c)) },
-              page: 1,
-              pageSize: chunk.length,
-            };
+        if (!accessToken) {
+          console.warn('⚠️ Token não disponível para buscar fornecedores');
+        } else {
+          // Buscar como PJ (legal-entities) e PF (individuals) em paralelo
+          const SUPPLIER_BATCH = 50;
+          const supplierChunks = [];
+          for (let i = 0; i < uniqueSupplierCodes.length; i += SUPPLIER_BATCH) {
+            supplierChunks.push(
+              uniqueSupplierCodes.slice(i, i + SUPPLIER_BATCH),
+            );
+          }
 
-            const personResp = await axios.post(personEndpoint, personPayload, {
-              headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-                Authorization: `Bearer ${accessToken}`,
-              },
-              timeout: 30000,
-              httpsAgent,
-              httpAgent,
-            });
+          const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+          const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
 
-            const items = personResp.data?.items || [];
-            items.forEach((p) => {
-              if (p.personCode) {
-                supplierNameMap.set(
-                  p.personCode,
-                  p.fantasyName || p.name || p.corporateName || '',
-                );
-              }
-            });
-          } catch (personErr) {
+          const headers = {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          };
+
+          // Buscar PJ em paralelo
+          const pjPromises = supplierChunks.map(async (chunk) => {
+            try {
+              const resp = await axios.post(
+                pjEndpoint,
+                {
+                  filter: {
+                    personCodeList: chunk.map((c) => parseInt(c)),
+                  },
+                  page: 1,
+                  pageSize: 100,
+                },
+                { headers, timeout: 30000, httpsAgent, httpAgent },
+              );
+              const items = resp.data?.items || [];
+              console.log(
+                `👤 PJ lote: buscou ${chunk.length} códigos, encontrou ${items.length} resultados`,
+              );
+              return items;
+            } catch (err) {
+              console.warn(
+                `⚠️ Erro PJ lote: ${err.message} | status: ${err.response?.status} | data: ${JSON.stringify(err.response?.data || '').slice(0, 200)}`,
+              );
+              return [];
+            }
+          });
+
+          // Buscar PF em paralelo
+          const pfPromises = supplierChunks.map(async (chunk) => {
+            try {
+              const resp = await axios.post(
+                pfEndpoint,
+                {
+                  filter: {
+                    personCodeList: chunk.map((c) => parseInt(c)),
+                  },
+                  page: 1,
+                  pageSize: 100,
+                },
+                { headers, timeout: 30000, httpsAgent, httpAgent },
+              );
+              const items = resp.data?.items || [];
+              console.log(
+                `👤 PF lote: buscou ${chunk.length} códigos, encontrou ${items.length} resultados`,
+              );
+              return items;
+            } catch (err) {
+              console.warn(
+                `⚠️ Erro PF lote: ${err.message} | status: ${err.response?.status} | data: ${JSON.stringify(err.response?.data || '').slice(0, 200)}`,
+              );
+              return [];
+            }
+          });
+
+          const [pjResults, pfResults] = await Promise.all([
+            Promise.all(pjPromises),
+            Promise.all(pfPromises),
+          ]);
+
+          // Processar resultados PJ
+          pjResults.flat().forEach((p) => {
+            if (p.personCode != null) {
+              supplierNameMap.set(
+                p.personCode,
+                p.fantasyName || p.name || p.corporateName || '',
+              );
+            }
+          });
+
+          // Processar resultados PF (nome completo)
+          pfResults.flat().forEach((p) => {
+            if (p.personCode != null && !supplierNameMap.has(p.personCode)) {
+              supplierNameMap.set(p.personCode, p.name || '');
+            }
+          });
+
+          console.log(
+            `👤 ${supplierNameMap.size} nomes de fornecedores encontrados de ${uniqueSupplierCodes.length} únicos`,
+          );
+
+          // Log de amostra
+          if (supplierNameMap.size > 0) {
+            const sample = Array.from(supplierNameMap.entries()).slice(0, 3);
+            console.log(`👤 Amostra: ${JSON.stringify(sample)}`);
+          } else {
             console.warn(
-              `⚠️ Erro ao buscar nomes de fornecedores (lote): ${personErr.message}`,
+              `⚠️ Nenhum fornecedor encontrado! Primeiros 3 códigos buscados: ${uniqueSupplierCodes.slice(0, 3).join(', ')}`,
             );
           }
         }
-
-        console.log(
-          `👤 ${supplierNameMap.size} nomes de fornecedores encontrados`,
-        );
       }
 
       // Aplicar nomes dos fornecedores nos itens mapeados
@@ -4601,7 +4669,7 @@ router.post(
             ? 'URL da API TOTVS não encontrada.'
             : error.code === 'ECONNREFUSED'
               ? 'Conexão recusada pela API TOTVS.'
-              : `Não foi possível conectar a API TOTVS (${error.code || 'Erro desconhecido'})`;
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
 
         return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
       }
