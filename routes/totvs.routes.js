@@ -4168,12 +4168,13 @@ router.post(
         filter.endExpiredDate = `${dt_fim}T23:59:59`;
       }
 
-      // Filtro de situação (StatusType: Normal, Canceled, Grouped, Retorned, CommissionSettled, Broken)
+      // Filtro de situação (statusList) - StatusType enum:
+      // Grouped=0, Canceled=1, Retorned=2, CommissionSettled=3, Normal=4, Broken=5
       if (situacao && situacao !== 'TODAS') {
         if (situacao === 'NORMAIS') {
-          filter.status = 4; // Normal
+          filter.statusList = [4]; // Normal
         } else if (situacao === 'CANCELADAS') {
-          filter.status = 1; // Canceled
+          filter.statusList = [1]; // Canceled
         }
       }
 
@@ -4311,6 +4312,8 @@ router.post(
       // PASSO 3: Filtros locais
 
       let filteredItems = allItems;
+
+      // Situação já filtrada via API (statusList no filter)
 
       // Filtro local de previsão (PrevisionType: 1=Forecast, 2=Real, 3=Consignment)
       if (previsao && previsao !== 'TODOS') {
