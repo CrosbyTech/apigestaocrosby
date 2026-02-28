@@ -3716,7 +3716,7 @@ router.post(
 router.post(
   '/invoices-settle',
   asyncHandler(async (req, res) => {
-    const { items } = req.body;
+    const { items, bank } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return errorResponse(
@@ -3746,12 +3746,23 @@ router.post(
       }
     }
 
-    // Dados bancários fixos da Confiança
-    const CONFIANCA_BANK = {
-      bankNumber: 422,
-      agencyNumber: 1610,
-      account: '005818984',
-    };
+    // Dados bancários: usar os enviados pelo frontend, senão fallback Confiança
+    const requestPaidType = req.body.paidType || 4; // Default: Conta corrente
+    const BANK_DATA =
+      bank && bank.bankNumber
+        ? {
+            bankNumber: bank.bankNumber,
+            agencyNumber: bank.agencyNumber,
+            account: String(bank.account),
+          }
+        : {
+            bankNumber: 422,
+            agencyNumber: 1610,
+            account: '005818984',
+          };
+
+    console.log('🏦 Banco selecionado para baixa:', BANK_DATA);
+    console.log('💳 Tipo de pagamento (paidType):', requestPaidType);
 
     try {
       const tokenData = await getToken();
@@ -3830,12 +3841,16 @@ router.post(
           payments: [
             {
               value: paidValue,
-              paidType: 4, // 4 = Conta corrente (CurrentAccount)
-              bank: {
-                bankNumber: CONFIANCA_BANK.bankNumber,
-                agencyNumber: CONFIANCA_BANK.agencyNumber,
-                account: CONFIANCA_BANK.account,
-              },
+              paidType: requestPaidType,
+              ...(requestPaidType === 4
+                ? {
+                    bank: {
+                      bankNumber: BANK_DATA.bankNumber,
+                      agencyNumber: BANK_DATA.agencyNumber,
+                      account: BANK_DATA.account,
+                    },
+                  }
+                : {}),
             },
           ],
         };
@@ -3952,7 +3967,7 @@ router.post(
         });
     } catch (error) {
       console.error('❌ Erro geral na baixa de títulos:', error.message);
-      throw new Error(`Erro ao efetuar baixa de título: ${error.message}`);
+      throw new Error(`Erro ao efetuar baixa de títulos: ${error.message}`);
     }
   }),
 );
