@@ -3983,6 +3983,45 @@ router.post(
             }
           }
 
+          // Traduzir erros do TOTVS para mensagens amigáveis
+          const TOTVS_ERROR_MAP = {
+            InvoiceNotOpen: 'Fatura já baixada ou não está em aberto',
+            AcountCustomerNotFound:
+              'Cliente não possui conta de adiantamento cadastrada',
+            FieldValueGreaterThan: 'Cliente não possui saldo suficiente',
+            ValidateBalanceAdvance: 'Cliente não possui saldo de adiantamento',
+            InvoiceNotFound: 'Fatura não encontrada no TOTVS',
+            CustomerNotFound: 'Cliente não encontrado no TOTVS',
+            BranchNotFound: 'Empresa não encontrada no TOTVS',
+            InvalidSettlementDate: 'Data de liquidação inválida',
+            SettlementDateLessThanIssueDate:
+              'Data de pagamento anterior à emissão',
+            PaymentValueExceedsInvoice:
+              'Valor do pagamento excede o valor da fatura',
+            DuplicatePayment: 'Pagamento duplicado detectado',
+          };
+
+          let mensagensTraducao = [];
+          const rawData = itemError.response?.data;
+          if (rawData) {
+            let errosTotvs = [];
+            if (typeof rawData === 'string') {
+              try {
+                errosTotvs = JSON.parse(rawData);
+              } catch (e) {
+                /* ignore */
+              }
+            } else if (Array.isArray(rawData)) {
+              errosTotvs = rawData;
+            }
+            if (Array.isArray(errosTotvs)) {
+              mensagensTraducao = errosTotvs.map((e) => {
+                const traduzido = TOTVS_ERROR_MAP[e.code];
+                return traduzido || e.message || e.code || 'Erro desconhecido';
+              });
+            }
+          }
+
           errors.push({
             index: i,
             receivableCode,
@@ -3990,6 +4029,10 @@ router.post(
             branchCode,
             success: false,
             error: itemError.response?.data?.message || itemError.message,
+            errorMessages:
+              mensagensTraducao.length > 0
+                ? mensagensTraducao
+                : ['Erro ao processar baixa no TOTVS'],
             status: itemError.response?.status,
             details: itemError.response?.data,
             payloadSent: payload,
