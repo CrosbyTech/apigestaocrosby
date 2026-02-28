@@ -4508,14 +4508,22 @@ router.post(
                 },
                 { headers, timeout: 30000, httpsAgent, httpAgent },
               );
-              const items = resp.data?.items || [];
+              // Inspecionar estrutura da resposta
+              const respData = resp.data;
+              console.log(
+                `👤 PJ resp keys: ${JSON.stringify(Object.keys(respData || {}))} | tipo: ${typeof respData}`,
+              );
+              console.log(
+                `👤 PJ resp amostra: ${JSON.stringify(respData).slice(0, 300)}`,
+              );
+              const items = respData?.items || [];
               console.log(
                 `👤 PJ lote: buscou ${chunk.length} códigos, encontrou ${items.length} resultados`,
               );
               return items;
             } catch (err) {
               console.warn(
-                `⚠️ Erro PJ lote: ${err.message} | status: ${err.response?.status} | data: ${JSON.stringify(err.response?.data || '').slice(0, 200)}`,
+                `⚠️ Erro PJ lote: ${err.message} | status: ${err.response?.status} | data: ${JSON.stringify(err.response?.data || '').slice(0, 300)}`,
               );
               return [];
             }
@@ -4535,14 +4543,18 @@ router.post(
                 },
                 { headers, timeout: 30000, httpsAgent, httpAgent },
               );
-              const items = resp.data?.items || [];
+              const respData = resp.data;
+              console.log(
+                `👤 PF resp keys: ${JSON.stringify(Object.keys(respData || {}))} | tipo: ${typeof respData}`,
+              );
+              const items = respData?.items || [];
               console.log(
                 `👤 PF lote: buscou ${chunk.length} códigos, encontrou ${items.length} resultados`,
               );
               return items;
             } catch (err) {
               console.warn(
-                `⚠️ Erro PF lote: ${err.message} | status: ${err.response?.status} | data: ${JSON.stringify(err.response?.data || '').slice(0, 200)}`,
+                `⚠️ Erro PF lote: ${err.message} | status: ${err.response?.status} | data: ${JSON.stringify(err.response?.data || '').slice(0, 300)}`,
               );
               return [];
             }
