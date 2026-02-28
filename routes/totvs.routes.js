@@ -3826,11 +3826,11 @@ router.post(
         }
 
         // Payload conforme InvoicesPaymentCommand do Swagger
-        // Para adiantamento (paidType 3), a empresa de liquidação deve ser 99
+        // Para adiantamento (paidType 3), tenta primeiro empresa 99, se falhar tenta empresa 1
         const settlementBranchCode = requestPaidType === 3 ? 99 : branchCode;
 
-        const payload = {
-          branchCode: settlementBranchCode,
+        const buildPayload = (sBranchCode) => ({
+          branchCode: sBranchCode,
           settlementDate,
           invoices: [
             {
@@ -3856,11 +3856,13 @@ router.post(
                 : {}),
             },
           ],
-        };
+        });
+
+        const payload = buildPayload(settlementBranchCode);
 
         try {
           console.log(
-            `📋 [${i + 1}/${items.length}] Efetuando baixa no TOTVS (invoices-payment):`,
+            `📋 [${i + 1}/${items.length}] Efetuando baixa no TOTVS (invoices-payment) - Empresa ${settlementBranchCode}:`,
             JSON.stringify(payload, null, 2),
           );
 
@@ -3879,7 +3881,7 @@ router.post(
           );
 
           console.log(
-            `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso - Fatura ${receivableCode}`,
+            `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso - Fatura ${receivableCode} (Empresa ${settlementBranchCode})`,
             JSON.stringify(response.data),
           );
           results.push({
@@ -3892,13 +3894,59 @@ router.post(
           });
         } catch (itemError) {
           console.error(
-            `❌ [${i + 1}/${items.length}] Erro na baixa - Fatura ${receivableCode}:`,
+            `❌ [${i + 1}/${items.length}] Erro na baixa - Fatura ${receivableCode} (Empresa ${settlementBranchCode}):`,
             {
               status: itemError.response?.status,
               data: JSON.stringify(itemError.response?.data, null, 2),
               message: itemError.response?.data?.message || itemError.message,
             },
           );
+
+          // Para adiantamento: se falhou na empresa 99, tentar na empresa 1
+          if (requestPaidType === 3 && settlementBranchCode === 99) {
+            try {
+              const fallbackPayload = buildPayload(1);
+              console.log(
+                `🔄 [${i + 1}/${items.length}] Tentando fallback na Empresa 1 para adiantamento...`,
+              );
+
+              const fallbackResponse = await axios.post(
+                `${TOTVS_BASE_URL}/accounts-receivable/v2/invoices-payment`,
+                fallbackPayload,
+                {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    Authorization: `Bearer ${tokenData.access_token}`,
+                  },
+                  httpsAgent,
+                  timeout: 30000,
+                },
+              );
+
+              console.log(
+                `✅ [${i + 1}/${items.length}] Baixa efetuada com sucesso (fallback Empresa 1) - Fatura ${receivableCode}`,
+              );
+              results.push({
+                index: i,
+                receivableCode,
+                installmentCode,
+                branchCode,
+                success: true,
+                data: fallbackResponse.data,
+              });
+              continue;
+            } catch (fallbackError) {
+              console.error(
+                `❌ [${i + 1}/${items.length}] Fallback Empresa 1 também falhou - Fatura ${receivableCode}:`,
+                {
+                  status: fallbackError.response?.status,
+                  data: JSON.stringify(fallbackError.response?.data, null, 2),
+                },
+              );
+              // Segue para o tratamento de erro normal abaixo
+            }
+          }
 
           // Se for erro de token, tentar renovar uma vez
           if (itemError.response?.status === 401) {
