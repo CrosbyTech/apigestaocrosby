@@ -4565,11 +4565,12 @@ router.post(
             Promise.all(pfPromises),
           ]);
 
-          // Processar resultados PJ
+          // Processar resultados PJ (API retorna 'code', não 'personCode')
           pjResults.flat().forEach((p) => {
-            if (p.personCode != null) {
+            const pCode = p.code ?? p.personCode;
+            if (pCode != null) {
               supplierNameMap.set(
-                p.personCode,
+                pCode,
                 p.fantasyName || p.name || p.corporateName || '',
               );
             }
@@ -4577,8 +4578,9 @@ router.post(
 
           // Processar resultados PF (nome completo)
           pfResults.flat().forEach((p) => {
-            if (p.personCode != null && !supplierNameMap.has(p.personCode)) {
-              supplierNameMap.set(p.personCode, p.name || '');
+            const pCode = p.code ?? p.personCode;
+            if (pCode != null && !supplierNameMap.has(pCode)) {
+              supplierNameMap.set(pCode, p.name || '');
             }
           });
 
