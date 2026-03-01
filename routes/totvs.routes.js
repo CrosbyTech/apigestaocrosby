@@ -4228,7 +4228,6 @@ router.post(
         modo,
         dt_inicio,
         dt_fim,
-        status,
         situacao,
         previsao,
         branches: branchCodeList,
@@ -4610,7 +4609,6 @@ router.post(
           pagesSearched: totalPages,
           timeMs: totalTime,
           filtros: {
-            status,
             situacao,
             previsao,
             modo,
