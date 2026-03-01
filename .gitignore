@@ -1,0 +1,7 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente
+.env
+backend/.env
+# ... outras regras existentes ...
