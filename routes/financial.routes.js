@@ -322,12 +322,15 @@ router.get(
         AND fd.cd_empresa IN (${empresaPlaceholders})
     `;
 
-    // Filtro por situação (Normais, Canceladas, Todas)
+    // Filtro por situação (N=Normal, C=Cancelada, A=Agrupada, D=Devolvida, L=Liquidada comissão, Q=Quebrada)
     if (situacao && situacao !== 'TODAS') {
-      if (situacao === 'NORMAIS') {
-        whereConditions += ` AND fd.tp_situacao = 'N'`;
-      } else if (situacao === 'CANCELADAS') {
-        whereConditions += ` AND fd.tp_situacao = 'C'`;
+      const situacaoMap = {
+        'N': 'N', 'C': 'C', 'A': 'A', 'D': 'D', 'L': 'L', 'Q': 'Q',
+        'NORMAIS': 'N', 'CANCELADAS': 'C',
+      };
+      const tpSituacao = situacaoMap[situacao];
+      if (tpSituacao) {
+        whereConditions += ` AND fd.tp_situacao = '${tpSituacao}'`;
       }
     }
 
@@ -545,12 +548,15 @@ router.get(
         AND fd.cd_empresa IN (${empresaPlaceholders})
     `;
 
-    // Filtro por situação (Normais, Canceladas, Todas)
+    // Filtro por situação (N=Normal, C=Cancelada, A=Agrupada, D=Devolvida, L=Liquidada comissão, Q=Quebrada)
     if (situacao && situacao !== 'TODAS') {
-      if (situacao === 'NORMAIS') {
-        whereConditions += ` AND fd.tp_situacao = 'N'`;
-      } else if (situacao === 'CANCELADAS') {
-        whereConditions += ` AND fd.tp_situacao = 'C'`;
+      const situacaoMap = {
+        'N': 'N', 'C': 'C', 'A': 'A', 'D': 'D', 'L': 'L', 'Q': 'Q',
+        'NORMAIS': 'N', 'CANCELADAS': 'C',
+      };
+      const tpSituacao = situacaoMap[situacao];
+      if (tpSituacao) {
+        whereConditions += ` AND fd.tp_situacao = '${tpSituacao}'`;
       }
     } else if (!situacao) {
       // Manter comportamento padrão original: apenas normais

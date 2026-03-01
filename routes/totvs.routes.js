@@ -4081,8 +4081,8 @@ router.post(
  *   dt_fim: string (YYYY-MM-DD, obrigatório),
  *   branches: number[] (códigos das empresas, obrigatório),
  *   modo: 'vencimento' | 'emissao' | 'liquidacao' (default: 'vencimento'),
- *   status: 'Todos' | 'Pago' | 'Vencido' | 'A Vencer' | 'Em Aberto' (default: 'Todos'),
- *   situacao: 'NORMAIS' | 'CANCELADAS' | 'TODAS' (default: 'NORMAIS'),
+ *   situacao: 'TODAS' | 'N' | 'C' | 'A' | 'D' | 'L' | 'Q' (default: 'N'),
+ *     N=Normal, C=Cancelada, A=Agrupada, D=Devolvida, L=Liquidada comissão, Q=Quebrada
  *   previsao: 'TODOS' | 'PREVISAO' | 'REAL' | 'CONSIGNADO' (default: 'TODOS'),
  *   supplierCodeList: number[] (fornecedores, opcional),
  *   duplicateCodeList: number[] (duplicatas, opcional),
@@ -4100,8 +4100,7 @@ router.post(
         dt_fim,
         branches,
         modo = 'vencimento',
-        status = 'Todos',
-        situacao = 'NORMAIS',
+        situacao = 'N',
         previsao = 'TODOS',
         supplierCodeList,
         duplicateCodeList,
@@ -4169,12 +4168,22 @@ router.post(
       }
 
       // Filtro de situação (statusList) - StatusType enum:
-      // Grouped=0, Canceled=1, Retorned=2, CommissionSettled=3, Normal=4, Broken=5
+      // Grouped=0 (A), Canceled=1 (C), Retorned=2 (D), CommissionSettled=3 (L), Normal=4 (N), Broken=5 (Q)
       if (situacao && situacao !== 'TODAS') {
-        if (situacao === 'NORMAIS') {
-          filter.statusList = [4]; // Normal
-        } else if (situacao === 'CANCELADAS') {
-          filter.statusList = [1]; // Canceled
+        const situacaoMap = {
+          'N': [4],    // Normal
+          'C': [1],    // Cancelada
+          'A': [0],    // Agrupada
+          'D': [2],    // Devolvida
+          'L': [3],    // Liquidada comissão
+          'Q': [5],    // Quebrada
+          // Backward compatibility
+          'NORMAIS': [4],
+          'CANCELADAS': [1],
+        };
+
+        if (situacaoMap[situacao]) {
+          filter.statusList = situacaoMap[situacao];
         }
       }
 
@@ -4329,39 +4338,6 @@ router.post(
           );
           // Na verdade, o PrevisionType fica no installment, no nível do item do DuplicateOutModel
           // Vou usar o campo correto se existir. A API retorna itens com campos variados.
-        }
-      }
-
-      // Filtro local de status (Pago, Vencido, A Vencer, Em Aberto)
-      if (status && status !== 'Todos') {
-        const hoje = new Date();
-        hoje.setHours(0, 0, 0, 0);
-
-        if (status === 'Pago') {
-          filteredItems = filteredItems.filter(
-            (item) =>
-              item.settlementDate || (item.paidValue && item.paidValue > 0),
-          );
-        } else if (status === 'Vencido') {
-          filteredItems = filteredItems.filter((item) => {
-            const dataVenc = item.dueDate ? new Date(item.dueDate) : null;
-            const temPagamento =
-              item.settlementDate || (item.paidValue && item.paidValue > 0);
-            return dataVenc && dataVenc < hoje && !temPagamento;
-          });
-        } else if (status === 'A Vencer') {
-          filteredItems = filteredItems.filter((item) => {
-            const dataVenc = item.dueDate ? new Date(item.dueDate) : null;
-            const temPagamento =
-              item.settlementDate || (item.paidValue && item.paidValue > 0);
-            return dataVenc && dataVenc >= hoje && !temPagamento;
-          });
-        } else if (status === 'Em Aberto') {
-          filteredItems = filteredItems.filter((item) => {
-            const temPagamento =
-              item.settlementDate || (item.paidValue && item.paidValue > 0);
-            return !temPagamento;
-          });
         }
       }
 
