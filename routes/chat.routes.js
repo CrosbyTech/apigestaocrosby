@@ -89,8 +89,8 @@ router.post(
         body: JSON.stringify({
           model: aiConfig.model,
           messages,
-          temperature: 0.7,
-          max_tokens: 1500,
+          temperature: 0.3,
+          max_tokens: 4096,
         }),
       });
 
