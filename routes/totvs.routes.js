@@ -4167,23 +4167,22 @@ router.post(
         filter.endExpiredDate = `${dt_fim}T23:59:59`;
       }
 
-      // Filtro de situação (statusList) - StatusType enum:
-      // Grouped=0 (A), Canceled=1 (C), Retorned=2 (D), CommissionSettled=3 (L), Normal=4 (N), Broken=5 (Q)
+      // Filtro de situação (status) - StatusType enum:
+      // Grouped (A), Canceled (C), Retorned (D), CommissionSettled (L), Normal (N), Broken (Q)
       if (situacao && situacao !== 'TODAS') {
-        const situacaoMap = {
-          'N': [4],    // Normal
-          'C': [1],    // Cancelada
-          'A': [0],    // Agrupada
-          'D': [2],    // Devolvida
-          'L': [3],    // Liquidada comissão
-          'Q': [5],    // Quebrada
-          // Backward compatibility
-          'NORMAIS': [4],
-          'CANCELADAS': [1],
+        const situacaoToEnum = {
+          'N': 'Normal',
+          'C': 'Canceled',
+          'A': 'Grouped',
+          'D': 'Retorned',
+          'L': 'CommissionSettled',
+          'Q': 'Broken',
+          'NORMAIS': 'Normal',
+          'CANCELADAS': 'Canceled',
         };
 
-        if (situacaoMap[situacao]) {
-          filter.statusList = situacaoMap[situacao];
+        if (situacaoToEnum[situacao]) {
+          filter.status = situacaoToEnum[situacao];
         }
       }
 
@@ -4321,7 +4320,7 @@ router.post(
 
       let filteredItems = allItems;
 
-      // Situação já filtrada via API (statusList no filter)
+      // Situação já filtrada via API (filter.status com enum string)
 
       // Filtro local de previsão (PrevisionType: 1=Forecast, 2=Real, 3=Consignment)
       if (previsao && previsao !== 'TODOS') {
