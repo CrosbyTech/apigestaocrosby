@@ -4346,18 +4346,21 @@ router.post(
         const firstExpense =
           item.expense && item.expense.length > 0 ? item.expense[0] : null;
 
-        // Mapear tp_situacao da API (StatusType enum)
-        // StatusType: Grouped=0, Canceled=1, Retorned=2, CommissionSettled=3, Normal=4, Broken=5
-        let tpSituacao = 'N';
-        if (item.status === 1)
-          tpSituacao = 'C'; // Cancelada
-        else if (item.status === 0)
-          tpSituacao = 'A'; // Agrupada
-        else if (item.status === 2)
-          tpSituacao = 'D'; // Devolvida
-        else if (item.status === 3)
-          tpSituacao = 'L'; // Liquidada comissão
-        else if (item.status === 5) tpSituacao = 'Q'; // Quebrada
+        // Mapear tp_situacao da API (StatusType)
+        // A API pode retornar como inteiro (enum) OU como string letra
+        // Inteiro: Grouped=0, Canceled=1, Retorned=2, CommissionSettled=3, Normal=4, Broken=5
+        // String:  A=Agrupada, C=Cancelada, D=Devolvida, L=Liquidada comissão, N=Normal, Q=Quebrada
+        const statusVal = item.status;
+        const situacaoMapFromApi = {
+          // Inteiros (enum)
+          0: 'A', 1: 'C', 2: 'D', 3: 'L', 4: 'N', 5: 'Q',
+          // Strings (letras diretas)
+          'A': 'A', 'C': 'C', 'D': 'D', 'L': 'L', 'N': 'N', 'Q': 'Q',
+          // Strings enum em inglês
+          'Grouped': 'A', 'Canceled': 'C', 'Retorned': 'D',
+          'CommissionSettled': 'L', 'Normal': 'N', 'Broken': 'Q',
+        };
+        const tpSituacao = situacaoMapFromApi[statusVal] || 'N';
 
         // Mapear tp_previsaoreal (PrevisionType: 1=Forecast, 2=Real, 3=Consignment)
         // No DuplicateOutModel não vem diretamente, precisamos verificar
