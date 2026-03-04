@@ -18,6 +18,10 @@ import {
   startTokenScheduler,
   stopTokenScheduler,
 } from './utils/totvsTokenManager.js';
+import {
+  startPesPessoaScheduler,
+  stopPesPessoaScheduler,
+} from './utils/syncPesPessoa.js';
 
 // Importar middlewares
 import { errorHandler } from './utils/errorHandler.js';
@@ -244,6 +248,9 @@ const gracefulShutdown = (signal) => {
     stopTokenScheduler(totvsTokenTask);
   }
 
+  // Parar scheduler de sync pes_pessoa
+  stopPesPessoaScheduler();
+
   server.close(async () => {
     logger.info('Servidor HTTP fechado.');
 
@@ -303,6 +310,9 @@ const server = app.listen(PORT, async () => {
 
   // Iniciar o scheduler de geração automática de token TOTVS
   totvsTokenTask = startTokenScheduler();
+
+  // Iniciar scheduler de sync pes_pessoa (diário às 03:00)
+  startPesPessoaScheduler();
 
   // Keep-alive: pingar a si mesmo a cada 14 minutos para evitar que o Render adormeça
   if (process.env.NODE_ENV === 'production') {
