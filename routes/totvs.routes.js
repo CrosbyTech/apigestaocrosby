@@ -8,6 +8,10 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+import {
+  syncFullPesPessoa,
+  syncIncrementalPesPessoa,
+} from '../utils/syncPesPessoa.js';
 
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
@@ -3832,6 +3836,7 @@ router.post(
         const buildPayload = (sBranchCode) => ({
           branchCode: sBranchCode,
           settlementDate,
+          movementDate: settlementDate,
           invoices: [
             {
               branchCode,
@@ -4171,14 +4176,14 @@ router.post(
       // Grouped (A), Canceled (C), Retorned (D), CommissionSettled (L), Normal (N), Broken (Q)
       if (situacao && situacao !== 'TODAS') {
         const situacaoToEnum = {
-          'N': 'Normal',
-          'C': 'Canceled',
-          'A': 'Grouped',
-          'D': 'Retorned',
-          'L': 'CommissionSettled',
-          'Q': 'Broken',
-          'NORMAIS': 'Normal',
-          'CANCELADAS': 'Canceled',
+          N: 'Normal',
+          C: 'Canceled',
+          A: 'Grouped',
+          D: 'Retorned',
+          L: 'CommissionSettled',
+          Q: 'Broken',
+          NORMAIS: 'Normal',
+          CANCELADAS: 'Canceled',
         };
 
         if (situacaoToEnum[situacao]) {
@@ -4352,12 +4357,26 @@ router.post(
         const statusVal = item.status;
         const situacaoMapFromApi = {
           // Inteiros (enum)
-          0: 'A', 1: 'C', 2: 'D', 3: 'L', 4: 'N', 5: 'Q',
+          0: 'A',
+          1: 'C',
+          2: 'D',
+          3: 'L',
+          4: 'N',
+          5: 'Q',
           // Strings (letras diretas)
-          'A': 'A', 'C': 'C', 'D': 'D', 'L': 'L', 'N': 'N', 'Q': 'Q',
+          A: 'A',
+          C: 'C',
+          D: 'D',
+          L: 'L',
+          N: 'N',
+          Q: 'Q',
           // Strings enum em inglês
-          'Grouped': 'A', 'Canceled': 'C', 'Retorned': 'D',
-          'CommissionSettled': 'L', 'Normal': 'N', 'Broken': 'Q',
+          Grouped: 'A',
+          Canceled: 'C',
+          Retorned: 'D',
+          CommissionSettled: 'L',
+          Normal: 'N',
+          Broken: 'Q',
         };
         const tpSituacao = situacaoMapFromApi[statusVal] || 'N';
 
@@ -4665,6 +4684,68 @@ router.post(
       }
 
       throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+// ==========================================
+// SYNC PES_PESSOA - TOTVS → Supabase
+// Rotas para sincronizar pessoas (PF + PJ)
+// ==========================================
+
+/**
+ * @route POST /totvs/sync/pes-pessoa/full
+ * @desc Carga COMPLETA de todas as pessoas (PF + PJ) do TOTVS para o Supabase.
+ *       Use apenas uma vez para popular a tabela pes_pessoa.
+ *       ATENÇÃO: Pode demorar vários minutos dependendo do volume de dados.
+ * @access Public
+ */
+router.post(
+  '/sync/pes-pessoa/full',
+  asyncHandler(async (req, res) => {
+    console.log('🚀 Iniciando SYNC FULL pes_pessoa (manual via API)');
+
+    const result = await syncFullPesPessoa();
+
+    if (result.success) {
+      successResponse(
+        res,
+        result,
+        'Sincronização completa concluída com sucesso',
+      );
+    } else {
+      errorResponse(
+        res,
+        `Erro na sincronização: ${result.error}`,
+        500,
+        'SYNC_FULL_ERROR',
+      );
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/sync/pes-pessoa/incremental
+ * @desc Sincronização INCREMENTAL: busca apenas pessoas alteradas/criadas nas últimas 24h
+ *       e faz upsert no Supabase. É o que roda automaticamente todo dia às 03:00.
+ * @access Public
+ */
+router.post(
+  '/sync/pes-pessoa/incremental',
+  asyncHandler(async (req, res) => {
+    console.log('🔄 Iniciando SYNC INCREMENTAL pes_pessoa (manual via API)');
+
+    const result = await syncIncrementalPesPessoa();
+
+    if (result.success) {
+      successResponse(res, result, 'Sincronização incremental concluída');
+    } else {
+      errorResponse(
+        res,
+        `Erro na sincronização incremental: ${result.error}`,
+        500,
+        'SYNC_INCREMENTAL_ERROR',
+      );
     }
   }),
 );
