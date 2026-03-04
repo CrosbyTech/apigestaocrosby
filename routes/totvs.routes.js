@@ -11,6 +11,10 @@ import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
 import {
   syncFullPesPessoa,
   syncIncrementalPesPessoa,
+  fetchAllPages,
+  mapIndividualToRow,
+  mapLegalEntityToRow,
+  upsertBatch,
 } from '../utils/syncPesPessoa.js';
 
 // ==========================================
@@ -4692,6 +4696,112 @@ router.post(
 // SYNC PES_PESSOA - TOTVS → Supabase
 // Rotas para sincronizar pessoas (PF + PJ)
 // ==========================================
+
+// ==========================================
+// CLIENTES TOTVS - Buscar + Enviar Supabase
+// Rotas para a página frontend ClientesTotvs
+// ==========================================
+
+/**
+ * @route GET /totvs/clientes/fetch-all
+ * @desc Busca TODOS os clientes (PF + PJ) do TOTVS e retorna a lista.
+ *       NÃO salva no Supabase. O frontend decide quando salvar.
+ */
+router.get(
+  '/clientes/fetch-all',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    console.log('🔍 Buscando TODOS os clientes do TOTVS...');
+
+    try {
+      const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+      const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+
+      // Buscar PF e PJ em sequência (evita sobrecarga de token)
+      const pfItems = await fetchAllPages(pfEndpoint, {}, 'PF');
+      const pjItems = await fetchAllPages(pjEndpoint, {}, 'PJ');
+
+      const pfRows = pfItems.map(mapIndividualToRow);
+      const pjRows = pjItems.map(mapLegalEntityToRow);
+      const allRows = [...pfRows, ...pjRows];
+
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`✅ ${allRows.length} clientes buscados em ${duration}s`);
+
+      successResponse(
+        res,
+        {
+          clientes: allRows,
+          totalPF: pfRows.length,
+          totalPJ: pjRows.length,
+          total: allRows.length,
+          duration: `${duration}s`,
+        },
+        `${allRows.length} clientes buscados com sucesso`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar clientes:', error.message);
+      errorResponse(
+        res,
+        `Erro ao buscar clientes do TOTVS: ${error.message}`,
+        500,
+        'FETCH_CLIENTES_ERROR',
+      );
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/clientes/save-supabase
+ * @desc Recebe array de clientes e faz upsert no Supabase (tabela pes_pessoa)
+ * @body { clientes: Array }
+ */
+router.post(
+  '/clientes/save-supabase',
+  asyncHandler(async (req, res) => {
+    const { clientes } = req.body;
+
+    if (!Array.isArray(clientes) || clientes.length === 0) {
+      return errorResponse(
+        res,
+        'O campo clientes é obrigatório e deve ser um array não-vazio',
+        400,
+        'MISSING_CLIENTES',
+      );
+    }
+
+    const startTime = Date.now();
+    console.log(`💾 Salvando ${clientes.length} clientes no Supabase...`);
+
+    try {
+      const result = await upsertBatch(clientes);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      console.log(
+        `✅ Upsert concluído: ${result.inserted} inseridos, ${result.errors} erros em ${duration}s`,
+      );
+
+      successResponse(
+        res,
+        {
+          inserted: result.inserted,
+          errors: result.errors,
+          total: clientes.length,
+          duration: `${duration}s`,
+        },
+        `${result.inserted} clientes salvos no Supabase`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao salvar no Supabase:', error.message);
+      errorResponse(
+        res,
+        `Erro ao salvar clientes no Supabase: ${error.message}`,
+        500,
+        'SAVE_SUPABASE_ERROR',
+      );
+    }
+  }),
+);
 
 /**
  * @route POST /totvs/sync/pes-pessoa/full
