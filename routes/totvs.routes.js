@@ -11,9 +11,8 @@ import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
 import {
   syncFullPesPessoa,
   syncIncrementalPesPessoa,
-  fetchAllPages,
-  mapIndividualToRow,
-  mapLegalEntityToRow,
+  fetchAndMapPersons,
+  mapPersonToRow,
   upsertBatch,
 } from '../utils/syncPesPessoa.js';
 
@@ -4698,17 +4697,19 @@ router.post(
 // ==========================================
 
 // ==========================================
-// CLIENTES TOTVS - Buscar + Enviar Supabase
-// Rotas para a página frontend ClientesTotvs
+// CLIENTES TOTVS v2 - Buscar + Enviar Supabase
+// Filtro obrigatório: data de cadastro (startDate/endDate)
+// Busca PF + PJ com expand de phones/emails/addresses
 // ==========================================
 
 /**
  * @route GET /totvs/clientes/fetch-all
- * @desc Busca clientes (PF + PJ) do TOTVS e retorna a lista.
+ * @desc Busca clientes (PF + PJ) do TOTVS com phones/emails expandidos.
+ *       Filtro principal: data de cadastro (insertDate).
  *       NÃO salva no Supabase. O frontend decide quando salvar.
- * @query startDate (opcional, YYYY-MM-DD) - Data início do filtro de cadastro/alteração
- * @query endDate (opcional, YYYY-MM-DD) - Data fim do filtro de cadastro/alteração
- * @query personCode (opcional) - Código(s) da pessoa para busca específica (ex: 180 ou 180,200,300)
+ * @query startDate (YYYY-MM-DD) - Data início do cadastro
+ * @query endDate (YYYY-MM-DD) - Data fim do cadastro
+ * @query personCode (opcional) - Código(s) da pessoa (ex: 180 ou 180,200)
  */
 router.get(
   '/clientes/fetch-all',
@@ -4716,7 +4717,7 @@ router.get(
     const startTime = Date.now();
     const { startDate, endDate, personCode } = req.query;
 
-    // Obter token
+    // Validar token
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
       return errorResponse(
@@ -4727,66 +4728,46 @@ router.get(
       );
     }
 
-    // Buscar TODAS as empresas para incluir no filtro
-    const allBranches = await getBranchCodes(tokenData.access_token);
-    console.log(`🏢 Empresas disponíveis: ${allBranches.length} → [${allBranches.join(', ')}]`);
-
-    // Montar filtro - incluir TODAS as empresas via branchCodeList
+    // Montar filtro
     let filter = {};
 
-    if (allBranches.length > 0) {
-      filter.branchCodeList = allBranches;
-    }
-
-    // Filtro por código(s) específico(s)
     if (personCode) {
+      // Busca por código(s) — filtro limpo, sem data
       const codes = personCode
         .split(',')
         .map((c) => parseInt(c.trim(), 10))
         .filter((c) => !isNaN(c) && c > 0);
       if (codes.length > 0) {
         filter.personCodeList = codes;
-        console.log(`🔍 Buscando clientes TOTVS por código: ${codes.join(', ')}`);
+        console.log(`🔍 Buscando por código(s): ${codes.join(', ')}`);
       }
-    }
-
-    // Filtro de data
-    if (startDate || endDate) {
+    } else if (startDate || endDate) {
+      // Filtro por data de cadastro (insertDate)
       const sd = startDate
-        ? new Date(startDate + 'T00:00:00.000Z').toISOString()
-        : new Date('2000-01-01T00:00:00.000Z').toISOString();
+        ? `${startDate}T00:00:00.000Z`
+        : '2000-01-01T00:00:00.000Z';
       const ed = endDate
-        ? new Date(endDate + 'T23:59:59.999Z').toISOString()
+        ? `${endDate}T23:59:59.999Z`
         : new Date().toISOString();
-
-      filter.change = {
-        startDate: sd,
-        endDate: ed,
-        inPerson: true,
-        inCustomer: true,
-      };
-      console.log(`🔍 Filtro de data: ${sd} → ${ed}`);
+      filter.startInsertDate = sd;
+      filter.endInsertDate = ed;
+      console.log(`🔍 Filtro de data de cadastro: ${sd} → ${ed}`);
+    } else {
+      console.log('🔍 Buscando TODOS os clientes (sem filtro)...');
     }
 
-    if (!personCode && !startDate && !endDate) {
-      console.log(
-        `🔍 Buscando TODOS os clientes do TOTVS (${allBranches.length} empresas)...`,
-      );
-    }
+    console.log('📤 Filtro:', JSON.stringify(filter));
 
     try {
-      const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-      const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-
-      const pfItems = await fetchAllPages(pfEndpoint, filter, 'PF');
-      const pjItems = await fetchAllPages(pjEndpoint, filter, 'PJ');
-
-      const pfRows = pfItems.map(mapIndividualToRow);
-      const pjRows = pjItems.map(mapLegalEntityToRow);
-      const allRows = [...pfRows, ...pjRows];
+      const { pfRows, pjRows, allRows } = await fetchAndMapPersons(
+        filter,
+        'FETCH',
+      );
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`✅ ${allRows.length} clientes buscados em ${duration}s`);
+      console.log(
+        `✅ ${allRows.length} clientes (PF:${pfRows.length} PJ:${pjRows.length}) em ${duration}s`,
+      );
 
       successResponse(
         res,
@@ -4796,7 +4777,6 @@ router.get(
           totalPJ: pjRows.length,
           total: allRows.length,
           duration: `${duration}s`,
-          branchesUsed: allBranches.length,
         },
         `${allRows.length} clientes buscados com sucesso`,
       );
