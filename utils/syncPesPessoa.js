@@ -27,7 +27,7 @@ const httpsAgent = new https.Agent({
 /**
  * Mapeia um registro de pessoa FÍSICA (individual) do TOTVS para o schema pes_pessoa
  */
-function mapIndividualToRow(item) {
+export function mapIndividualToRow(item) {
   return {
     code: item.code,
     cd_empresacad: item.registrationBranchCode ?? item.branchCode ?? 1,
@@ -55,7 +55,7 @@ function mapIndividualToRow(item) {
  * Mapeia um registro de pessoa JURÍDICA (legal-entity) do TOTVS para o schema pes_pessoa
  * Campos exclusivos de PF ficam null
  */
-function mapLegalEntityToRow(item) {
+export function mapLegalEntityToRow(item) {
   return {
     code: item.code,
     cd_empresacad: item.registrationBranchCode ?? item.branchCode ?? 1,
@@ -92,7 +92,7 @@ function mapLegalEntityToRow(item) {
  * @param {string} type - 'PF' ou 'PJ' (para log)
  * @returns {Promise<Array>} Lista de itens
  */
-async function fetchAllPages(endpoint, filter = {}, type = '') {
+export async function fetchAllPages(endpoint, filter = {}, type = '') {
   let token = (await getToken()).access_token;
   let allItems = [];
   let currentPage = 1;
@@ -169,7 +169,7 @@ async function fetchAllPages(endpoint, filter = {}, type = '') {
  * @param {Array} rows - Registros mapeados
  * @returns {Promise<{inserted: number, errors: number}>}
  */
-async function upsertBatch(rows) {
+export async function upsertBatch(rows) {
   const BATCH_SIZE = 500;
   let inserted = 0;
   let errors = 0;
