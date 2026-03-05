@@ -959,17 +959,52 @@ router.post(
 
       // 1) invoices/search -> obter accessKey
       const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
-      const invoicesDefaults = {
-        filter: { change: {} },
-        page: 1,
-        pageSize: 100,
-        expand: 'person',
-      };
-      const invoicesBody = {
-        ...invoicesDefaults,
-        ...searchPayload,
-        filter: { ...invoicesDefaults.filter, ...(searchPayload.filter || {}) },
-      };
+
+      // Detectar se é busca por invoiceCode (vindo do accounts-receivable)
+      // Nesse caso, transactionCode não está disponível - precisamos buscar por data + filial + pessoa
+      const filterData = searchPayload.filter || {};
+      const isInvoiceCodeSearch =
+        filterData.invoiceCode && !filterData.transactionCode;
+
+      let invoicesBody;
+      if (isInvoiceCodeSearch) {
+        // Busca alternativa: usar change date range + branchCodeList + personCodeList
+        const invoiceDate = filterData.invoiceDate || '';
+        const MARGIN_DAYS = 3;
+        const startDate = new Date(invoiceDate);
+        startDate.setDate(startDate.getDate() - MARGIN_DAYS);
+        const endDate = new Date(invoiceDate);
+        endDate.setDate(endDate.getDate() + MARGIN_DAYS);
+
+        invoicesBody = {
+          filter: {
+            branchCodeList: filterData.branchCodeList || [],
+            personCodeList: filterData.personCodeList || [],
+            change: {
+              startDate: `${startDate.toISOString().slice(0, 10)}T00:00:00.000Z`,
+              endDate: `${endDate.toISOString().slice(0, 10)}T23:59:59.999Z`,
+            },
+          },
+          page: 1,
+          pageSize: 100,
+          expand: 'person',
+        };
+      } else {
+        const invoicesDefaults = {
+          filter: { change: {} },
+          page: 1,
+          pageSize: 100,
+          expand: 'person',
+        };
+        invoicesBody = {
+          ...invoicesDefaults,
+          ...searchPayload,
+          filter: {
+            ...invoicesDefaults.filter,
+            ...(searchPayload.filter || {}),
+          },
+        };
+      }
 
       const doInvoicesRequest = async (accessToken) =>
         axios.post(invoicesEndpoint, invoicesBody, {
@@ -993,7 +1028,21 @@ router.post(
         }
       }
 
-      const items = invoicesResp?.data?.items || [];
+      let items = invoicesResp?.data?.items || [];
+
+      // Se busca por invoiceCode, filtrar os resultados para achar a NF correta
+      if (isInvoiceCodeSearch && Array.isArray(items) && items.length > 0) {
+        const targetInvoiceCode = parseInt(filterData.invoiceCode);
+        const targetBranchCode = filterData.branchCodeList?.[0];
+        items = items.filter((item) => {
+          const matchCode = parseInt(item.invoiceCode) === targetInvoiceCode;
+          const matchBranch = targetBranchCode
+            ? parseInt(item.branchCode) === parseInt(targetBranchCode)
+            : true;
+          return matchCode && matchBranch;
+        });
+      }
+
       if (!Array.isArray(items) || items.length === 0) {
         return errorResponse(
           res,
