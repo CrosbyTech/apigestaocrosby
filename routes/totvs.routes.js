@@ -15,6 +15,7 @@ import {
   mapPersonToRow,
   upsertBatch,
 } from '../utils/syncPesPessoa.js';
+import supabase from '../config/supabase.js';
 
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
@@ -4703,7 +4704,14 @@ router.post(
 // ==========================================
 
 // Cache de resultado da última busca (expira em 10 min)
-let clientesCache = { data: null, filter: null, timestamp: 0, totalPF: 0, totalPJ: 0, duration: '' };
+let clientesCache = {
+  data: null,
+  filter: null,
+  timestamp: 0,
+  totalPF: 0,
+  totalPJ: 0,
+  duration: '',
+};
 const CLIENTES_CACHE_TTL = 10 * 60 * 1000;
 
 /**
@@ -4723,7 +4731,10 @@ router.get(
     const startTime = Date.now();
     const { startDate, endDate, personCode } = req.query;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const pageSize = Math.min(5000, Math.max(1, parseInt(req.query.pageSize, 10) || 1000));
+    const pageSize = Math.min(
+      5000,
+      Math.max(1, parseInt(req.query.pageSize, 10) || 1000),
+    );
 
     // Validar token
     const tokenData = await getToken();
@@ -4763,7 +4774,11 @@ router.get(
     }
 
     const filterKey = JSON.stringify(filter);
-    console.log('📤 Filtro:', filterKey, `| Página: ${page} | PageSize: ${pageSize}`);
+    console.log(
+      '📤 Filtro:',
+      filterKey,
+      `| Página: ${page} | PageSize: ${pageSize}`,
+    );
 
     try {
       // Verificar se cache é válido (mesmo filtro e não expirou)
@@ -4798,7 +4813,9 @@ router.get(
           totalPJ,
           duration: fetchDuration,
         };
-        console.log(`✅ ${allRows.length} clientes buscados e cacheados em ${fetchDuration}`);
+        console.log(
+          `✅ ${allRows.length} clientes buscados e cacheados em ${fetchDuration}`,
+        );
       }
 
       // Paginar
@@ -4850,41 +4867,156 @@ router.get(
   '/clientes/fetch-batch',
   asyncHandler(async (req, res) => {
     const startCode = Math.max(1, parseInt(req.query.startCode, 10) || 1);
-    const endCode = Math.max(startCode, parseInt(req.query.endCode, 10) || startCode + 499);
+    const endCode = Math.max(
+      startCode,
+      parseInt(req.query.endCode, 10) || startCode + 499,
+    );
 
     if (endCode - startCode + 1 > 1000) {
-      return errorResponse(res, 'Máximo de 1000 códigos por lote', 400, 'BATCH_TOO_LARGE');
+      return errorResponse(
+        res,
+        'Máximo de 1000 códigos por lote',
+        400,
+        'BATCH_TOO_LARGE',
+      );
     }
 
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+      return errorResponse(
+        res,
+        'Não foi possível obter token TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
     }
 
-    const codes = Array.from({ length: endCode - startCode + 1 }, (_, i) => startCode + i);
+    const codes = Array.from(
+      { length: endCode - startCode + 1 },
+      (_, i) => startCode + i,
+    );
     const filter = { personCodeList: codes };
     const startTime = Date.now();
 
-    console.log(`📦 Buscando lote códigos ${startCode}-${endCode} (${codes.length} códigos)...`);
+    console.log(
+      `📦 Buscando lote códigos ${startCode}-${endCode} (${codes.length} códigos)...`,
+    );
 
     try {
-      const { pfRows, pjRows, allRows } = await fetchAndMapPersons(filter, `BATCH-${startCode}-${endCode}`);
+      const { pfRows, pjRows, allRows } = await fetchAndMapPersons(
+        filter,
+        `BATCH-${startCode}-${endCode}`,
+      );
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
-      console.log(`✅ Lote ${startCode}-${endCode}: ${allRows.length} clientes (PF:${pfRows.length} PJ:${pjRows.length}) em ${duration}s`);
+      console.log(
+        `✅ Lote ${startCode}-${endCode}: ${allRows.length} clientes (PF:${pfRows.length} PJ:${pjRows.length}) em ${duration}s`,
+      );
 
-      successResponse(res, {
-        clientes: allRows,
-        totalPF: pfRows.length,
-        totalPJ: pjRows.length,
-        total: allRows.length,
-        startCode,
-        endCode,
-        duration: `${duration}s`,
-      }, `Lote ${startCode}-${endCode}: ${allRows.length} clientes`);
+      successResponse(
+        res,
+        {
+          clientes: allRows,
+          totalPF: pfRows.length,
+          totalPJ: pjRows.length,
+          total: allRows.length,
+          startCode,
+          endCode,
+          duration: `${duration}s`,
+        },
+        `Lote ${startCode}-${endCode}: ${allRows.length} clientes`,
+      );
     } catch (error) {
       console.error(`❌ Erro no lote ${startCode}-${endCode}:`, error.message);
-      errorResponse(res, `Erro ao buscar lote: ${error.message}`, 500, 'FETCH_BATCH_ERROR');
+      errorResponse(
+        res,
+        `Erro ao buscar lote: ${error.message}`,
+        500,
+        'FETCH_BATCH_ERROR',
+      );
+    }
+  }),
+);
+
+/**
+ * @route GET /totvs/clientes/search-name
+ * @desc Busca clientes na tabela pes_pessoa do Supabase por nome ou nome fantasia.
+ *       Retorna código, nome, nome fantasia, CPF/CNPJ, tipo, empresa, telefone, email.
+ * @query nome - Termo para buscar no campo nm_pessoa (ILIKE)
+ * @query fantasia - Termo para buscar no campo fantasy_name (ILIKE)
+ */
+router.get(
+  '/clientes/search-name',
+  asyncHandler(async (req, res) => {
+    const { nome, fantasia } = req.query;
+
+    if (!nome && !fantasia) {
+      return errorResponse(
+        res,
+        'Informe pelo menos um dos campos: nome ou fantasia',
+        400,
+        'MISSING_SEARCH_TERM',
+      );
+    }
+
+    try {
+      let query = supabase
+        .from('pes_pessoa')
+        .select(
+          'code, cd_empresacad, nm_pessoa, fantasy_name, cpf, tipo_pessoa, telefone, email, is_customer, customer_status, person_status',
+        )
+        .order('nm_pessoa', { ascending: true })
+        .limit(50);
+
+      if (nome && fantasia) {
+        query = query.or(
+          `nm_pessoa.ilike.%${nome}%,fantasy_name.ilike.%${fantasia}%`,
+        );
+      } else if (nome) {
+        query = query.ilike('nm_pessoa', `%${nome}%`);
+      } else {
+        query = query.ilike('fantasy_name', `%${fantasia}%`);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        console.error('❌ Erro ao buscar clientes por nome:', error.message);
+        return errorResponse(
+          res,
+          `Erro na busca: ${error.message}`,
+          500,
+          'SUPABASE_SEARCH_ERROR',
+        );
+      }
+
+      // Deduplicar por code (pode ter mesmo cliente em várias empresas)
+      const uniqueMap = new Map();
+      for (const row of data || []) {
+        const existing = uniqueMap.get(row.code);
+        if (!existing) {
+          uniqueMap.set(row.code, row);
+        }
+      }
+      const clientes = Array.from(uniqueMap.values());
+
+      console.log(
+        `🔍 Busca por nome: "${nome || ''}" / fantasia: "${fantasia || ''}" → ${clientes.length} resultados`,
+      );
+
+      successResponse(
+        res,
+        { clientes, total: clientes.length },
+        `${clientes.length} clientes encontrados`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar clientes por nome:', error.message);
+      errorResponse(
+        res,
+        `Erro ao buscar: ${error.message}`,
+        500,
+        'SEARCH_NAME_ERROR',
+      );
     }
   }),
 );
