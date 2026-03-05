@@ -20,6 +20,50 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
 });
 
+// Cache de empresas em memória
+let cachedBranchCodes = null;
+let branchCacheTimestamp = 0;
+const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
+/**
+ * Busca TODAS as empresas disponíveis na API TOTVS
+ * Usa cache em memória (30 min)
+ */
+export async function getAllBranchCodes() {
+  const now = Date.now();
+  if (cachedBranchCodes && now - branchCacheTimestamp < BRANCH_CACHE_TTL) {
+    return cachedBranchCodes;
+  }
+  try {
+    const token = (await getToken()).access_token;
+    const url = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      timeout: 10000,
+      httpsAgent,
+    });
+    if (resp.data?.items?.length > 0) {
+      cachedBranchCodes = resp.data.items
+        .map((b) => parseInt(b.code))
+        .filter((c) => !isNaN(c) && c > 0);
+      branchCacheTimestamp = now;
+      logger.info(
+        `🏢 ${cachedBranchCodes.length} empresas carregadas: [${cachedBranchCodes.join(', ')}]`,
+      );
+      return cachedBranchCodes;
+    }
+  } catch (err) {
+    logger.warn('⚠️ Erro ao buscar empresas, usando fallback');
+  }
+  return (
+    cachedBranchCodes || [
+      1, 2, 5, 6, 11, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
+      97, 98, 99, 100, 101, 870, 880, 890, 900, 910, 920, 930, 940, 950, 960,
+      970, 980, 990,
+    ]
+  );
+}
+
 // ==========================================
 // MAPEAMENTO DE CAMPOS: TOTVS → pes_pessoa
 // ==========================================
@@ -224,16 +268,21 @@ export async function syncFullPesPessoa() {
   logger.info('🚀 ========================================');
 
   try {
+    // 0) Buscar todas as empresas
+    const branchCodes = await getAllBranchCodes();
+    const filter = { branchCodeList: branchCodes };
+    logger.info(`🏢 Buscando clientes de ${branchCodes.length} empresas`);
+
     // 1) Buscar todas PF
     logger.info('👤 Buscando TODAS as pessoas FÍSICAS...');
     const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-    const pfItems = await fetchAllPages(pfEndpoint, {}, 'PF');
+    const pfItems = await fetchAllPages(pfEndpoint, filter, 'PF');
     const pfRows = pfItems.map(mapIndividualToRow);
 
     // 2) Buscar todas PJ
     logger.info('🏢 Buscando TODAS as pessoas JURÍDICAS...');
     const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-    const pjItems = await fetchAllPages(pjEndpoint, {}, 'PJ');
+    const pjItems = await fetchAllPages(pjEndpoint, filter, 'PJ');
     const pjRows = pjItems.map(mapLegalEntityToRow);
 
     // 3) Unir e fazer upsert
@@ -296,7 +345,12 @@ export async function syncIncrementalPesPessoa() {
   logger.info(`🔄 Período: ${startDate} → ${endDate}`);
   logger.info('🔄 ========================================');
 
+  // Buscar todas as empresas
+  const branchCodes = await getAllBranchCodes();
+  logger.info(`🏢 Buscando alterações de ${branchCodes.length} empresas`);
+
   const changeFilter = {
+    branchCodeList: branchCodes,
     change: {
       startDate,
       endDate,

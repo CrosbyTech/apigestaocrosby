@@ -4708,15 +4708,49 @@ router.post(
  *       NÃO salva no Supabase. O frontend decide quando salvar.
  * @query startDate (opcional, YYYY-MM-DD) - Data início do filtro de cadastro/alteração
  * @query endDate (opcional, YYYY-MM-DD) - Data fim do filtro de cadastro/alteração
+ * @query personCode (opcional) - Código(s) da pessoa para busca específica (ex: 180 ou 180,200,300)
  */
 router.get(
   '/clientes/fetch-all',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, personCode } = req.query;
 
-    // Montar filtro change se datas informadas
+    // Obter token
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(
+        res,
+        'Não foi possível obter token de autenticação TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
+    }
+
+    // Buscar TODAS as empresas para incluir no filtro
+    const allBranches = await getBranchCodes(tokenData.access_token);
+    console.log(`🏢 Empresas disponíveis: ${allBranches.length} → [${allBranches.join(', ')}]`);
+
+    // Montar filtro - incluir TODAS as empresas via branchCodeList
     let filter = {};
+
+    if (allBranches.length > 0) {
+      filter.branchCodeList = allBranches;
+    }
+
+    // Filtro por código(s) específico(s)
+    if (personCode) {
+      const codes = personCode
+        .split(',')
+        .map((c) => parseInt(c.trim(), 10))
+        .filter((c) => !isNaN(c) && c > 0);
+      if (codes.length > 0) {
+        filter.personCodeList = codes;
+        console.log(`🔍 Buscando clientes TOTVS por código: ${codes.join(', ')}`);
+      }
+    }
+
+    // Filtro de data
     if (startDate || endDate) {
       const sd = startDate
         ? new Date(startDate + 'T00:00:00.000Z').toISOString()
@@ -4725,18 +4759,18 @@ router.get(
         ? new Date(endDate + 'T23:59:59.999Z').toISOString()
         : new Date().toISOString();
 
-      filter = {
-        change: {
-          startDate: sd,
-          endDate: ed,
-          inPerson: true,
-          inCustomer: true,
-        },
+      filter.change = {
+        startDate: sd,
+        endDate: ed,
+        inPerson: true,
+        inCustomer: true,
       };
-      console.log(`🔍 Buscando clientes TOTVS com filtro: ${sd} → ${ed}`);
-    } else {
+      console.log(`🔍 Filtro de data: ${sd} → ${ed}`);
+    }
+
+    if (!personCode && !startDate && !endDate) {
       console.log(
-        '🔍 Buscando TODOS os clientes do TOTVS (sem filtro de data)...',
+        `🔍 Buscando TODOS os clientes do TOTVS (${allBranches.length} empresas)...`,
       );
     }
 
@@ -4762,6 +4796,7 @@ router.get(
           totalPJ: pjRows.length,
           total: allRows.length,
           duration: `${duration}s`,
+          branchesUsed: allBranches.length,
         },
         `${allRows.length} clientes buscados com sucesso`,
       );
