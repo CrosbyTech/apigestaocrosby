@@ -4698,24 +4698,32 @@ router.post(
 
 // ==========================================
 // CLIENTES TOTVS v2 - Buscar + Enviar Supabase
-// Filtro obrigatório: data de cadastro (startDate/endDate)
 // Busca PF + PJ com expand de phones/emails/addresses
+// Paginação server-side (1000 por página) com cache em memória
 // ==========================================
+
+// Cache de resultado da última busca (expira em 10 min)
+let clientesCache = { data: null, filter: null, timestamp: 0, totalPF: 0, totalPJ: 0, duration: '' };
+const CLIENTES_CACHE_TTL = 10 * 60 * 1000;
 
 /**
  * @route GET /totvs/clientes/fetch-all
- * @desc Busca clientes (PF + PJ) do TOTVS com phones/emails expandidos.
- *       Filtro principal: data de cadastro (insertDate).
- *       NÃO salva no Supabase. O frontend decide quando salvar.
+ * @desc Busca clientes (PF + PJ) do TOTVS com paginação.
+ *       1a chamada: busca tudo da API TOTVS e guarda em cache.
+ *       Chamadas seguintes (mesmos filtros): retorna do cache.
  * @query startDate (YYYY-MM-DD) - Data início do cadastro
  * @query endDate (YYYY-MM-DD) - Data fim do cadastro
  * @query personCode (opcional) - Código(s) da pessoa (ex: 180 ou 180,200)
+ * @query page (opcional, default 1) - Página (1-indexed)
+ * @query pageSize (opcional, default 1000) - Itens por página
  */
 router.get(
   '/clientes/fetch-all',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const { startDate, endDate, personCode } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(5000, Math.max(1, parseInt(req.query.pageSize, 10) || 1000));
 
     // Validar token
     const tokenData = await getToken();
@@ -4732,7 +4740,6 @@ router.get(
     let filter = {};
 
     if (personCode) {
-      // Busca por código(s) — filtro limpo, sem data
       const codes = personCode
         .split(',')
         .map((c) => parseInt(c.trim(), 10))
@@ -4742,7 +4749,6 @@ router.get(
         console.log(`🔍 Buscando por código(s): ${codes.join(', ')}`);
       }
     } else if (startDate || endDate) {
-      // Filtro por data de cadastro (insertDate)
       const sd = startDate
         ? `${startDate}T00:00:00.000Z`
         : '2000-01-01T00:00:00.000Z';
@@ -4756,29 +4762,70 @@ router.get(
       console.log('🔍 Buscando TODOS os clientes (sem filtro)...');
     }
 
-    console.log('📤 Filtro:', JSON.stringify(filter));
+    const filterKey = JSON.stringify(filter);
+    console.log('📤 Filtro:', filterKey, `| Página: ${page} | PageSize: ${pageSize}`);
 
     try {
-      const { pfRows, pjRows, allRows } = await fetchAndMapPersons(
-        filter,
-        'FETCH',
-      );
+      // Verificar se cache é válido (mesmo filtro e não expirou)
+      const now = Date.now();
+      let allRows;
+      let totalPF, totalPJ, fetchDuration;
+
+      if (
+        clientesCache.data &&
+        clientesCache.filter === filterKey &&
+        now - clientesCache.timestamp < CLIENTES_CACHE_TTL
+      ) {
+        console.log(`📦 Usando cache (${clientesCache.data.length} clientes)`);
+        allRows = clientesCache.data;
+        totalPF = clientesCache.totalPF;
+        totalPJ = clientesCache.totalPJ;
+        fetchDuration = clientesCache.duration;
+      } else {
+        // Buscar tudo da API TOTVS
+        const result = await fetchAndMapPersons(filter, 'FETCH');
+        allRows = result.allRows;
+        totalPF = result.pfRows.length;
+        totalPJ = result.pjRows.length;
+        fetchDuration = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+
+        // Guardar no cache
+        clientesCache = {
+          data: allRows,
+          filter: filterKey,
+          timestamp: Date.now(),
+          totalPF,
+          totalPJ,
+          duration: fetchDuration,
+        };
+        console.log(`✅ ${allRows.length} clientes buscados e cacheados em ${fetchDuration}`);
+      }
+
+      // Paginar
+      const totalItems = allRows.length;
+      const totalPages = Math.ceil(totalItems / pageSize);
+      const startIdx = (page - 1) * pageSize;
+      const endIdx = startIdx + pageSize;
+      const pageData = allRows.slice(startIdx, endIdx);
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(
-        `✅ ${allRows.length} clientes (PF:${pfRows.length} PJ:${pjRows.length}) em ${duration}s`,
-      );
 
       successResponse(
         res,
         {
-          clientes: allRows,
-          totalPF: pfRows.length,
-          totalPJ: pjRows.length,
-          total: allRows.length,
+          clientes: pageData,
+          page,
+          pageSize,
+          totalPages,
+          totalItems,
+          totalPF,
+          totalPJ,
+          hasNext: page < totalPages,
+          hasPrev: page > 1,
           duration: `${duration}s`,
+          fetchDuration,
         },
-        `${allRows.length} clientes buscados com sucesso`,
+        `Página ${page}/${totalPages} — ${pageData.length} de ${totalItems} clientes`,
       );
     } catch (error) {
       console.error('❌ Erro ao buscar clientes:', error.message);
