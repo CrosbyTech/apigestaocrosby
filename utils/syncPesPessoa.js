@@ -170,12 +170,26 @@ export async function fetchAllPages(endpoint, filter = {}, type = '') {
  * @returns {Promise<{inserted: number, errors: number}>}
  */
 export async function upsertBatch(rows) {
+  // Deduplicar por chave (cd_empresacad, code) — mantém o último registro
+  const uniqueMap = new Map();
+  for (const row of rows) {
+    const key = `${row.cd_empresacad}_${row.code}`;
+    uniqueMap.set(key, row);
+  }
+  const uniqueRows = Array.from(uniqueMap.values());
+
+  if (uniqueRows.length < rows.length) {
+    logger.info(
+      `🔄 Deduplicados: ${rows.length} → ${uniqueRows.length} (${rows.length - uniqueRows.length} duplicatas removidas)`,
+    );
+  }
+
   const BATCH_SIZE = 500;
   let inserted = 0;
   let errors = 0;
 
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < uniqueRows.length; i += BATCH_SIZE) {
+    const batch = uniqueRows.slice(i, i + BATCH_SIZE);
 
     const { error } = await supabase.from('pes_pessoa').upsert(batch, {
       onConflict: 'cd_empresacad,code',
