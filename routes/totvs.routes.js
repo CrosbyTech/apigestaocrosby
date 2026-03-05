@@ -4704,22 +4704,48 @@ router.post(
 
 /**
  * @route GET /totvs/clientes/fetch-all
- * @desc Busca TODOS os clientes (PF + PJ) do TOTVS e retorna a lista.
+ * @desc Busca clientes (PF + PJ) do TOTVS e retorna a lista.
  *       NÃO salva no Supabase. O frontend decide quando salvar.
+ * @query startDate (opcional, YYYY-MM-DD) - Data início do filtro de cadastro/alteração
+ * @query endDate (opcional, YYYY-MM-DD) - Data fim do filtro de cadastro/alteração
  */
 router.get(
   '/clientes/fetch-all',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
-    console.log('🔍 Buscando TODOS os clientes do TOTVS...');
+    const { startDate, endDate } = req.query;
+
+    // Montar filtro change se datas informadas
+    let filter = {};
+    if (startDate || endDate) {
+      const sd = startDate
+        ? new Date(startDate + 'T00:00:00.000Z').toISOString()
+        : new Date('2000-01-01T00:00:00.000Z').toISOString();
+      const ed = endDate
+        ? new Date(endDate + 'T23:59:59.999Z').toISOString()
+        : new Date().toISOString();
+
+      filter = {
+        change: {
+          startDate: sd,
+          endDate: ed,
+          inPerson: true,
+          inCustomer: true,
+        },
+      };
+      console.log(`🔍 Buscando clientes TOTVS com filtro: ${sd} → ${ed}`);
+    } else {
+      console.log(
+        '🔍 Buscando TODOS os clientes do TOTVS (sem filtro de data)...',
+      );
+    }
 
     try {
       const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
       const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
-      // Buscar PF e PJ em sequência (evita sobrecarga de token)
-      const pfItems = await fetchAllPages(pfEndpoint, {}, 'PF');
-      const pjItems = await fetchAllPages(pjEndpoint, {}, 'PJ');
+      const pfItems = await fetchAllPages(pfEndpoint, filter, 'PF');
+      const pjItems = await fetchAllPages(pjEndpoint, filter, 'PJ');
 
       const pfRows = pfItems.map(mapIndividualToRow);
       const pjRows = pjItems.map(mapLegalEntityToRow);
