@@ -4840,6 +4840,56 @@ router.get(
 );
 
 /**
+ * @route GET /totvs/clientes/fetch-batch
+ * @desc Busca PF + PJ por faixa de códigos (ex: 1-500, 501-1000).
+ *       Usado para carga incremental em lotes.
+ * @query startCode (default 1) - Código inicial
+ * @query endCode (default 500) - Código final
+ */
+router.get(
+  '/clientes/fetch-batch',
+  asyncHandler(async (req, res) => {
+    const startCode = Math.max(1, parseInt(req.query.startCode, 10) || 1);
+    const endCode = Math.max(startCode, parseInt(req.query.endCode, 10) || startCode + 499);
+
+    if (endCode - startCode + 1 > 1000) {
+      return errorResponse(res, 'Máximo de 1000 códigos por lote', 400, 'BATCH_TOO_LARGE');
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+    }
+
+    const codes = Array.from({ length: endCode - startCode + 1 }, (_, i) => startCode + i);
+    const filter = { personCodeList: codes };
+    const startTime = Date.now();
+
+    console.log(`📦 Buscando lote códigos ${startCode}-${endCode} (${codes.length} códigos)...`);
+
+    try {
+      const { pfRows, pjRows, allRows } = await fetchAndMapPersons(filter, `BATCH-${startCode}-${endCode}`);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      console.log(`✅ Lote ${startCode}-${endCode}: ${allRows.length} clientes (PF:${pfRows.length} PJ:${pjRows.length}) em ${duration}s`);
+
+      successResponse(res, {
+        clientes: allRows,
+        totalPF: pfRows.length,
+        totalPJ: pjRows.length,
+        total: allRows.length,
+        startCode,
+        endCode,
+        duration: `${duration}s`,
+      }, `Lote ${startCode}-${endCode}: ${allRows.length} clientes`);
+    } catch (error) {
+      console.error(`❌ Erro no lote ${startCode}-${endCode}:`, error.message);
+      errorResponse(res, `Erro ao buscar lote: ${error.message}`, 500, 'FETCH_BATCH_ERROR');
+    }
+  }),
+);
+
+/**
  * @route POST /totvs/clientes/save-supabase
  * @desc Recebe array de clientes e faz upsert no Supabase (tabela pes_pessoa)
  * @body { clientes: Array }
