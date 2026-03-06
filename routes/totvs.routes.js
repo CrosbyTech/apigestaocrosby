@@ -5228,6 +5228,8 @@ router.post(
 
       const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics`;
 
+      const branchCodes = Array.from({ length: 99 }, (_, i) => i + 1);
+
       const doRequest = async (accessToken) =>
         axios.get(endpoint, {
           headers: {
@@ -5235,7 +5237,18 @@ router.post(
             Accept: 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
-          params: { CustomerCode: personCodeNum, BranchCode: branchCodeNum },
+          params: { CustomerCode: personCodeNum, BranchCode: branchCodes },
+          paramsSerializer: (params) => {
+            const parts = [];
+            for (const [key, value] of Object.entries(params)) {
+              if (Array.isArray(value)) {
+                value.forEach((v) => parts.push(`${key}=${v}`));
+              } else {
+                parts.push(`${key}=${value}`);
+              }
+            }
+            return parts.join('&');
+          },
           httpsAgent,
           timeout: 30000,
         });
