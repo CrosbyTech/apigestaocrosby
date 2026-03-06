@@ -5228,7 +5228,19 @@ router.post(
 
       const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics`;
 
-      const branchCodes = Array.from({ length: 99 }, (_, i) => i + 1);
+      // Buscar filiais válidas do TOTVS
+      const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+      const branchesResp = await axios.get(branchesUrl, {
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          Accept: 'application/json',
+        },
+        httpsAgent,
+        timeout: 30000,
+      });
+      const branchCodes = (branchesResp.data?.items || [])
+        .map((b) => b.code)
+        .filter((c) => c >= 1 && c <= 99);
 
       const doRequest = async (accessToken) =>
         axios.get(endpoint, {
