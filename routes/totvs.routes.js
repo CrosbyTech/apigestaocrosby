@@ -5223,7 +5223,7 @@ router.post(
         );
       }
 
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics/${personCodeNum}`;
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics`;
 
       const doRequest = async (accessToken) =>
         axios.get(endpoint, {
@@ -5232,6 +5232,7 @@ router.post(
             Accept: 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
+          params: { CustomerCode: personCodeNum },
           httpsAgent,
           timeout: 30000,
         });
