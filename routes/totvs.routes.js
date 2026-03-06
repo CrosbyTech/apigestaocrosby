@@ -5188,7 +5188,7 @@ router.post(
 router.post(
   '/person-statistics',
   asyncHandler(async (req, res) => {
-    const { personCode } = req.body;
+    const { personCode, branchCode } = req.body;
 
     if (personCode === undefined || personCode === null || personCode === '') {
       return errorResponse(
@@ -5211,6 +5211,9 @@ router.post(
       );
     }
 
+    // BranchCode: usar o informado ou default 1
+    const branchCodeNum = branchCode ? parseInt(branchCode, 10) : 1;
+
     try {
       const tokenData = await getToken();
 
@@ -5232,7 +5235,7 @@ router.post(
             Accept: 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
-          params: { CustomerCode: personCodeNum },
+          params: { CustomerCode: personCodeNum, BranchCode: branchCodeNum },
           httpsAgent,
           timeout: 30000,
         });
@@ -5258,6 +5261,7 @@ router.post(
       console.error('❌ Erro ao consultar person-statistics:', {
         message: error.message,
         status: error.response?.status,
+        responseData: error.response?.data,
       });
 
       errorResponse(
