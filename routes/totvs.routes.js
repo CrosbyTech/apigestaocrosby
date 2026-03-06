@@ -5240,7 +5240,7 @@ router.post(
       });
       const branchCodes = (branchesResp.data?.items || [])
         .map((b) => b.code)
-        .filter((c) => c >= 1 && c <= 99);
+        .filter((c) => c >= 1 && c <= 990);
 
       const doRequest = async (accessToken) =>
         axios.get(endpoint, {
