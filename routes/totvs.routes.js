@@ -5179,4 +5179,95 @@ router.post(
   }),
 );
 
+/**
+ * @route POST /totvs/person-statistics
+ * @desc Busca estatísticas de um cliente na API TOTVS Moda
+ * @access Public
+ * @body { personCode: number }
+ */
+router.post(
+  '/person-statistics',
+  asyncHandler(async (req, res) => {
+    const { personCode } = req.body;
+
+    if (personCode === undefined || personCode === null || personCode === '') {
+      return errorResponse(
+        res,
+        'O campo personCode é obrigatório',
+        400,
+        'MISSING_PERSON_CODE',
+      );
+    }
+
+    const personCodeNum =
+      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
+
+    if (isNaN(personCodeNum) || personCodeNum < 0) {
+      return errorResponse(
+        res,
+        'O campo personCode deve ser um número inteiro válido',
+        400,
+        'INVALID_PERSON_CODE',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics/${personCodeNum}`;
+
+      const doRequest = async (accessToken) =>
+        axios.get(endpoint, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          httpsAgent,
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      successResponse(
+        res,
+        response.data,
+        'Estatísticas do cliente obtidas com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao consultar person-statistics:', {
+        message: error.message,
+        status: error.response?.status,
+      });
+
+      errorResponse(
+        res,
+        error.response?.data?.message ||
+          `Erro ao consultar estatísticas do cliente: ${error.message}`,
+        error.response?.status || 500,
+        'PERSON_STATISTICS_ERROR',
+      );
+    }
+  }),
+);
+
 export default router;
