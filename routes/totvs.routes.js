@@ -5300,4 +5300,146 @@ router.post(
   }),
 );
 
+// ==========================================
+// RANKING DE PRODUTOS MAIS VENDIDOS
+// ==========================================
+
+/**
+ * @route POST /totvs/best-selling-products
+ * @desc Busca ranking de produtos mais vendidos em um período
+ * @body { branchs: number[], datemin: string, datemax: string }
+ */
+router.post(
+  '/best-selling-products',
+  asyncHandler(async (req, res) => {
+    const { branchs, datemin, datemax } = req.body;
+
+    if (!branchs || !Array.isArray(branchs) || branchs.length === 0) {
+      return errorResponse(
+        res,
+        'O campo branchs é obrigatório e deve ser um array de números',
+        400,
+        'MISSING_BRANCHS',
+      );
+    }
+
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'Os campos datemin e datemax são obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/best-selling-products/search`;
+
+      console.log('🏆 Buscando ranking de produtos mais vendidos:', {
+        endpoint,
+        branchs,
+        datemin,
+        datemax,
+      });
+
+      const response = await axios.post(
+        endpoint,
+        { branchs, datemin, datemax },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${tokenData.access_token}`,
+          },
+          httpsAgent,
+          httpAgent,
+          timeout: 60000,
+        },
+      );
+
+      console.log('✅ Ranking de produtos obtido com sucesso');
+
+      successResponse(
+        res,
+        response.data,
+        'Ranking de produtos mais vendidos obtido com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar ranking de produtos:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        try {
+          const newTokenData = await getToken(true);
+          const endpoint = `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/best-selling-products/search`;
+
+          const retryResponse = await axios.post(
+            endpoint,
+            { branchs, datemin, datemax },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${newTokenData.access_token}`,
+              },
+              httpsAgent,
+              httpAgent,
+              timeout: 60000,
+            },
+          );
+
+          return successResponse(
+            res,
+            retryResponse.data,
+            'Ranking de produtos mais vendidos obtido com sucesso',
+          );
+        } catch (retryError) {
+          return errorResponse(
+            res,
+            retryError.response?.data?.message ||
+              'Erro ao buscar ranking após renovar token',
+            retryError.response?.status || 500,
+            'TOTVS_API_ERROR',
+          );
+        }
+      }
+
+      if (error.response) {
+        return errorResponse(
+          res,
+          error.response.data?.message ||
+            'Erro ao buscar ranking de produtos na API TOTVS',
+          error.response.status || 500,
+          'TOTVS_API_ERROR',
+        );
+      }
+
+      if (error.request) {
+        return errorResponse(
+          res,
+          'Não foi possível conectar à API TOTVS',
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw error;
+    }
+  }),
+);
+
 export default router;
