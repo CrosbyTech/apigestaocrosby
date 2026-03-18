@@ -3201,9 +3201,14 @@ router.post(
           httpAgent,
         });
 
-      const buildPayload = (customerChunk, page) => ({
-        filter: {
-          change: {
+      const buildPayload = (customerChunk, page) => {
+        const filter = {
+          customerCodeList: customerChunk,
+        };
+
+        // Só incluir branchCodeList se tiver valores
+        if (normalizedBranchCodes.length > 0) {
+          filter.change = {
             startDate: nowIso,
             endDate: nowIso,
             branchCodeList: normalizedBranchCodes,
@@ -3216,14 +3221,18 @@ router.post(
             inTransactionOut: true,
             inConsigned: true,
             inSalesOrderAdvance: true,
-          },
-          customerCodeList: customerChunk,
-          customerCpfCnpjList: Array.isArray(customerCpfCnpjList)
-            ? customerCpfCnpjList
-            : [],
-        },
-        option: {
-          branchCodeList: normalizedBranchCodes,
+          };
+        }
+
+        // Só incluir cpfCnpjList se tiver valores
+        if (
+          Array.isArray(customerCpfCnpjList) &&
+          customerCpfCnpjList.length > 0
+        ) {
+          filter.customerCpfCnpjList = customerCpfCnpjList;
+        }
+
+        const option = {
           isLimit: true,
           isOpenInvoice: true,
           isRefundCredit: true,
@@ -3235,10 +3244,15 @@ router.post(
           isInvoiceBehindSchedule: true,
           dateInvoiceBehindSchedule: nowIso,
           isSalesOrderAdvance: true,
-        },
-        page,
-        pageSize: normalizedPageSize,
-      });
+        };
+
+        // Só incluir branchCodeList na option se tiver valores
+        if (normalizedBranchCodes.length > 0) {
+          option.branchCodeList = normalizedBranchCodes;
+        }
+
+        return { filter, option, page, pageSize: normalizedPageSize };
+      };
 
       const CHUNK_SIZE = 200;
       const allItems = [];
@@ -3249,21 +3263,24 @@ router.post(
         let hasNext = true;
 
         while (hasNext) {
+          const payload = buildPayload(customerChunk, currentPage);
+          console.log(
+            '📤 franchise-financial-balance payload:',
+            JSON.stringify(payload, null, 2).slice(0, 500),
+          );
           let response;
           try {
-            response = await doRequest(
-              token,
-              buildPayload(customerChunk, currentPage),
-            );
+            response = await doRequest(token, payload);
           } catch (error) {
             if (error.response?.status === 401) {
               const newTokenData = await getToken(true);
               token = newTokenData.access_token;
-              response = await doRequest(
-                token,
-                buildPayload(customerChunk, currentPage),
-              );
+              response = await doRequest(token, payload);
             } else {
+              console.error('❌ franchise-financial-balance TOTVS error:', {
+                status: error.response?.status,
+                data: JSON.stringify(error.response?.data).slice(0, 1000),
+              });
               throw error;
             }
           }
