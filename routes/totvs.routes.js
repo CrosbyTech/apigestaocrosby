@@ -3111,6 +3111,272 @@ router.get(
   }),
 );
 
+/**
+ * @route POST /totvs/franchise-financial-balance
+ * @desc Busca saldo/limite financeiro de clientes franquia na API TOTVS
+ * @access Public
+ * @body {
+ *   customerCodeList: number[] (obrigatório),
+ *   customerCpfCnpjList?: string[],
+ *   branchCodeList?: number[],
+ *   pageSize?: number
+ * }
+ */
+router.post(
+  '/franchise-financial-balance',
+  asyncHandler(async (req, res) => {
+    const {
+      customerCodeList,
+      customerCpfCnpjList = [],
+      branchCodeList = [],
+      pageSize = 200,
+    } = req.body || {};
+
+    if (!Array.isArray(customerCodeList) || customerCodeList.length === 0) {
+      return errorResponse(
+        res,
+        'O campo customerCodeList é obrigatório e deve conter ao menos 1 cliente',
+        400,
+        'MISSING_CUSTOMER_CODE_LIST',
+      );
+    }
+
+    const normalizedCodes = [
+      ...new Set(
+        customerCodeList
+          .map((code) => parseInt(code, 10))
+          .filter((code) => !Number.isNaN(code) && code > 0),
+      ),
+    ];
+
+    if (normalizedCodes.length === 0) {
+      return errorResponse(
+        res,
+        'Não há códigos de cliente válidos no customerCodeList',
+        400,
+        'INVALID_CUSTOMER_CODE_LIST',
+      );
+    }
+
+    const normalizedBranchCodes = Array.isArray(branchCodeList)
+      ? [
+          ...new Set(
+            branchCodeList
+              .map((code) => parseInt(code, 10))
+              .filter((code) => !Number.isNaN(code) && code >= 0),
+          ),
+        ]
+      : [];
+
+    const normalizedPageSize = Math.min(
+      Math.max(parseInt(pageSize, 10) || 200, 1),
+      500,
+    );
+
+    const nowIso = new Date().toISOString();
+    const endpoint = `${TOTVS_BASE_URL}/accounts-receivable/v2/customer-financial-balance/search`;
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      let token = tokenData.access_token;
+
+      const doRequest = async (accessToken, payload) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+          httpsAgent,
+          httpAgent,
+        });
+
+      const buildPayload = (customerChunk, page) => ({
+        filter: {
+          change: {
+            startDate: nowIso,
+            endDate: nowIso,
+            branchCodeList: normalizedBranchCodes,
+            inLimit: true,
+            inOpenInvoice: true,
+            inRefundCredit: true,
+            inAdvanceAmount: true,
+            inDofni: true,
+            inDofniCheck: true,
+            inTransactionOut: true,
+            inConsigned: true,
+            inSalesOrderAdvance: true,
+          },
+          customerCodeList: customerChunk,
+          customerCpfCnpjList: Array.isArray(customerCpfCnpjList)
+            ? customerCpfCnpjList
+            : [],
+        },
+        option: {
+          branchCodeList: normalizedBranchCodes,
+          isLimit: true,
+          isOpenInvoice: true,
+          isRefundCredit: true,
+          isAdvanceAmount: true,
+          isDofni: true,
+          isDofniCheck: true,
+          isTransactionOut: true,
+          isConsigned: true,
+          isInvoiceBehindSchedule: true,
+          dateInvoiceBehindSchedule: nowIso,
+          isSalesOrderAdvance: true,
+        },
+        page,
+        pageSize: normalizedPageSize,
+      });
+
+      const CHUNK_SIZE = 200;
+      const allItems = [];
+
+      for (let i = 0; i < normalizedCodes.length; i += CHUNK_SIZE) {
+        const customerChunk = normalizedCodes.slice(i, i + CHUNK_SIZE);
+        let currentPage = 1;
+        let hasNext = true;
+
+        while (hasNext) {
+          let response;
+          try {
+            response = await doRequest(
+              token,
+              buildPayload(customerChunk, currentPage),
+            );
+          } catch (error) {
+            if (error.response?.status === 401) {
+              const newTokenData = await getToken(true);
+              token = newTokenData.access_token;
+              response = await doRequest(
+                token,
+                buildPayload(customerChunk, currentPage),
+              );
+            } else {
+              throw error;
+            }
+          }
+
+          const pageItems = response.data?.items || [];
+          hasNext = Boolean(response.data?.hasNext);
+          allItems.push(...pageItems);
+
+          currentPage++;
+        }
+      }
+
+      // Consolidar resultados por cliente (somando filiais e removendo duplicados)
+      const consolidatedMap = new Map();
+
+      allItems.forEach((item) => {
+        const code = item?.code;
+        if (!code) return;
+
+        const values = Array.isArray(item.values) ? item.values : [];
+
+        if (!consolidatedMap.has(code)) {
+          consolidatedMap.set(code, {
+            code,
+            name: item.name || '',
+            cpfCnpj: item.cpfCnpj || '',
+            maxChangeFilterDate: item.maxChangeFilterDate || null,
+            values: [],
+            totals: {
+              limitValue: 0,
+              openInvoiceValue: 0,
+              refundCreditValue: 0,
+              advanceAmountValue: 0,
+              dofniValue: 0,
+              dofniCheckValue: 0,
+              transactionOutValue: 0,
+              consignedValue: 0,
+              invoicesBehindScheduleValue: 0,
+              salesOrderAdvanceValue: 0,
+            },
+          });
+        }
+
+        const current = consolidatedMap.get(code);
+
+        values.forEach((branchValue) => {
+          current.values.push(branchValue);
+          current.totals.limitValue += Number(branchValue.limitValue || 0);
+          current.totals.openInvoiceValue += Number(
+            branchValue.openInvoiceValue || 0,
+          );
+          current.totals.refundCreditValue += Number(
+            branchValue.refundCreditValue || 0,
+          );
+          current.totals.advanceAmountValue += Number(
+            branchValue.advanceAmountValue || 0,
+          );
+          current.totals.dofniValue += Number(branchValue.dofniValue || 0);
+          current.totals.dofniCheckValue += Number(
+            branchValue.dofniCheckValue || 0,
+          );
+          current.totals.transactionOutValue += Number(
+            branchValue.transactionOutValue || 0,
+          );
+          current.totals.consignedValue += Number(
+            branchValue.consignedValue || 0,
+          );
+          current.totals.invoicesBehindScheduleValue += Number(
+            branchValue.invoicesBehindScheduleValue || 0,
+          );
+          current.totals.salesOrderAdvanceValue += Number(
+            branchValue.salesOrderAdvanceValue || 0,
+          );
+        });
+      });
+
+      const consolidatedItems = Array.from(consolidatedMap.values()).map(
+        (item) => ({
+          ...item,
+          balanceLimitValue:
+            item.totals.limitValue - item.totals.openInvoiceValue,
+        }),
+      );
+
+      successResponse(
+        res,
+        {
+          count: consolidatedItems.length,
+          totalItems: consolidatedItems.length,
+          items: consolidatedItems,
+        },
+        `Saldo financeiro obtido para ${consolidatedItems.length} clientes`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao consultar saldo financeiro de franquias:', {
+        message: error.message,
+        status: error.response?.status,
+        response: error.response?.data,
+      });
+
+      return errorResponse(
+        res,
+        error.response?.data?.message ||
+          error.message ||
+          'Erro ao consultar saldo financeiro de franquias',
+        error.response?.status || 500,
+        'FRANCHISE_FINANCIAL_BALANCE_ERROR',
+        error.response?.data || null,
+      );
+    }
+  }),
+);
+
 // ==========================================
 // ROTA: BUSCAR CLIENTES MULTIMARCAS (por classificação)
 // Cache em memória (recarrega a cada 60 min)
