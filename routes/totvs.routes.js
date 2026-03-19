@@ -3113,7 +3113,7 @@ router.get(
 
 /**
  * @route POST /totvs/franchise-financial-balance
- * @desc Busca saldo/limite financeiro de clientes franquia na API TOTVS
+ * @desc Busca saldo financeiro de clientes franquia na API TOTVS
  * @access Public
  * @body {
  *   customerCodeList: number[] (obrigatório),
@@ -3163,7 +3163,7 @@ router.post(
           ...new Set(
             branchCodeList
               .map((code) => parseInt(code, 10))
-              .filter((code) => !Number.isNaN(code) && code >= 0),
+              .filter((code) => !Number.isNaN(code) && code > 0),
           ),
         ]
       : [];
@@ -3189,6 +3189,11 @@ router.post(
 
       let token = tokenData.access_token;
 
+      if (normalizedBranchCodes.length === 0) {
+        const allBranches = await getBranchCodes(token);
+        normalizedBranchCodes.push(...allBranches);
+      }
+
       const doRequest = async (accessToken, payload) =>
         axios.post(endpoint, payload, {
           headers: {
@@ -3196,62 +3201,42 @@ router.post(
             Accept: 'application/json',
             Authorization: `Bearer ${accessToken}`,
           },
-          timeout: 60000,
+          timeout: 180000,
           httpsAgent,
           httpAgent,
         });
 
       const buildPayload = (customerChunk, page) => {
-        const filter = {
-          customerCodeList: customerChunk,
+        const payload = {
+          filter: {
+            customerCodeList: customerChunk,
+          },
+          option: {
+            branchCodeList: normalizedBranchCodes,
+            isLimit: true,
+            isOpenInvoice: true,
+            isRefundCredit: true,
+            isAdvanceAmount: true,
+            isDofni: true,
+            isDofniCheck: true,
+            isTransactionOut: true,
+            isConsigned: true,
+            isInvoiceBehindSchedule: true,
+            dateInvoiceBehindSchedule: nowIso,
+            isSalesOrderAdvance: true,
+          },
+          page,
+          pageSize: normalizedPageSize,
         };
 
-        // Só incluir branchCodeList se tiver valores
-        if (normalizedBranchCodes.length > 0) {
-          filter.change = {
-            startDate: nowIso,
-            endDate: nowIso,
-            branchCodeList: normalizedBranchCodes,
-            inLimit: true,
-            inOpenInvoice: true,
-            inRefundCredit: true,
-            inAdvanceAmount: true,
-            inDofni: true,
-            inDofniCheck: true,
-            inTransactionOut: true,
-            inConsigned: true,
-            inSalesOrderAdvance: true,
-          };
-        }
-
-        // Só incluir cpfCnpjList se tiver valores
         if (
           Array.isArray(customerCpfCnpjList) &&
           customerCpfCnpjList.length > 0
         ) {
-          filter.customerCpfCnpjList = customerCpfCnpjList;
+          payload.filter.customerCpfCnpjList = customerCpfCnpjList;
         }
 
-        const option = {
-          isLimit: true,
-          isOpenInvoice: true,
-          isRefundCredit: true,
-          isAdvanceAmount: true,
-          isDofni: true,
-          isDofniCheck: true,
-          isTransactionOut: true,
-          isConsigned: true,
-          isInvoiceBehindSchedule: true,
-          dateInvoiceBehindSchedule: nowIso,
-          isSalesOrderAdvance: true,
-        };
-
-        // Só incluir branchCodeList na option se tiver valores
-        if (normalizedBranchCodes.length > 0) {
-          option.branchCodeList = normalizedBranchCodes;
-        }
-
-        return { filter, option, page, pageSize: normalizedPageSize };
+        return payload;
       };
 
       const CHUNK_SIZE = 200;
@@ -3264,10 +3249,6 @@ router.post(
 
         while (hasNext) {
           const payload = buildPayload(customerChunk, currentPage);
-          console.log(
-            '📤 franchise-financial-balance payload:',
-            JSON.stringify(payload, null, 2).slice(0, 500),
-          );
           let response;
           try {
             response = await doRequest(token, payload);
@@ -3279,7 +3260,10 @@ router.post(
             } else {
               console.error('❌ franchise-financial-balance TOTVS error:', {
                 status: error.response?.status,
-                data: JSON.stringify(error.response?.data).slice(0, 1000),
+                data: String(JSON.stringify(error.response?.data) || '').slice(
+                  0,
+                  1000,
+                ),
               });
               throw error;
             }
@@ -3293,7 +3277,6 @@ router.post(
         }
       }
 
-      // Consolidar resultados por cliente (somando filiais e removendo duplicados)
       const consolidatedMap = new Map();
 
       allItems.forEach((item) => {
