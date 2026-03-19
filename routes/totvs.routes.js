@@ -5263,12 +5263,12 @@ router.get(
 router.get(
   '/clientes/search-name',
   asyncHandler(async (req, res) => {
-    const { nome, fantasia } = req.query;
+    const { nome, fantasia, cnpj } = req.query;
 
-    if (!nome && !fantasia) {
+    if (!nome && !fantasia && !cnpj) {
       return errorResponse(
         res,
-        'Informe pelo menos um dos campos: nome ou fantasia',
+        'Informe pelo menos um dos campos: nome, fantasia ou cnpj',
         400,
         'MISSING_SEARCH_TERM',
       );
@@ -5283,7 +5283,11 @@ router.get(
         .order('nm_pessoa', { ascending: true })
         .limit(50);
 
-      if (nome && fantasia) {
+      if (cnpj) {
+        // Busca por CPF/CNPJ (campo cpf na tabela)
+        const cnpjLimpo = cnpj.replace(/[^\d]/g, '');
+        query = query.ilike('cpf', `%${cnpjLimpo}%`);
+      } else if (nome && fantasia) {
         query = query.or(
           `nm_pessoa.ilike.%${nome}%,fantasy_name.ilike.%${fantasia}%`,
         );
