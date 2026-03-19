@@ -2687,6 +2687,9 @@ router.get(
         }
       }
 
+      // Excluir chargeType 14 (Operadora de crédito) - interfere no relatório de cartão de crédito/débito
+      filteredItems = filteredItems.filter((item) => item.chargeType !== 14);
+
       // PASSO 4: Mapear para formato frontend
       const mappedItems = filteredItems.map((item) => ({
         cd_empresa: item.branchCode,
