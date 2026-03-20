@@ -2467,6 +2467,9 @@ router.get(
       if (modo === 'emissao') {
         filter.startIssueDate = `${dt_inicio}T00:00:00`;
         filter.endIssueDate = `${dt_fim}T23:59:59`;
+      } else if (modo === 'pagamento') {
+        filter.startSettlementDate = `${dt_inicio}T00:00:00`;
+        filter.endSettlementDate = `${dt_fim}T23:59:59`;
       } else {
         filter.startExpiredDate = `${dt_inicio}T00:00:00`;
         filter.endExpiredDate = `${dt_fim}T23:59:59`;
@@ -2689,6 +2692,11 @@ router.get(
 
       // Excluir chargeType 14 (Operadora de crédito) - interfere no relatório de cartão de crédito/débito
       filteredItems = filteredItems.filter((item) => item.chargeType !== 14);
+
+      // Excluir documentType 11 (Desconto Financeiro) e 12 (DOFNI)
+      filteredItems = filteredItems.filter(
+        (item) => item.documentType !== 11 && item.documentType !== 12,
+      );
 
       // PASSO 4: Mapear para formato frontend
       const mappedItems = filteredItems.map((item) => ({
