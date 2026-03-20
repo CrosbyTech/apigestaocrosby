@@ -2769,6 +2769,397 @@ router.get(
   }),
 );
 
+router.get(
+  '/accounts-receivable/pmr',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+
+    try {
+      const {
+        dt_inicio,
+        dt_fim,
+        modo = 'vencimento',
+        status,
+        cd_cliente,
+        nr_fatura,
+        cd_portador,
+        tp_documento,
+        tp_cobranca,
+        tp_baixa,
+        situacao,
+        branches,
+      } = req.query;
+
+      if (!dt_inicio || !dt_fim) {
+        return errorResponse(
+          res,
+          'Parâmetros dt_inicio e dt_fim são obrigatórios',
+          400,
+          'MISSING_PARAMS',
+        );
+      }
+
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Token indisponível',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      let token = tokenData.access_token;
+
+      let branchCodeList;
+      if (branches) {
+        branchCodeList = branches
+          .split(',')
+          .map((branch) => parseInt(branch.trim(), 10))
+          .filter((branch) => !Number.isNaN(branch) && branch > 0);
+      }
+      if (!branchCodeList || branchCodeList.length === 0) {
+        branchCodeList = await getBranchCodes(token);
+      }
+
+      const filter = { branchCodeList };
+
+      if (situacao) {
+        filter.statusList = situacao
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+      }
+
+      if (modo === 'emissao') {
+        filter.startIssueDate = `${dt_inicio}T00:00:00`;
+        filter.endIssueDate = `${dt_fim}T23:59:59`;
+      } else if (modo === 'pagamento') {
+        filter.startPaymentDate = `${dt_inicio}T00:00:00`;
+        filter.endPaymentDate = `${dt_fim}T23:59:59`;
+      } else {
+        filter.startExpiredDate = `${dt_inicio}T00:00:00`;
+        filter.endExpiredDate = `${dt_fim}T23:59:59`;
+      }
+
+      if (cd_cliente) {
+        const clientes = cd_cliente
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+        if (clientes.length > 0) filter.customerCodeList = clientes;
+      }
+      if (nr_fatura) {
+        const faturas = nr_fatura
+          .split(',')
+          .map((value) => parseFloat(value.trim()))
+          .filter((value) => !Number.isNaN(value));
+        if (faturas.length > 0) filter.receivableCodeList = faturas;
+      }
+      if (tp_documento) {
+        filter.documentTypeList = tp_documento
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+      }
+      if (tp_cobranca) {
+        filter.chargeTypeList = tp_cobranca
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+      }
+      if (tp_baixa) {
+        filter.dischargeTypeList = tp_baixa
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+      }
+      if (
+        status === 'Em Aberto' ||
+        status === 'Aberto' ||
+        status === 'Vencido'
+      ) {
+        filter.hasOpenInvoices = true;
+        filter.dischargeTypeList = [0];
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`;
+      const PAGE_SIZE = 100;
+      const PARALLEL_BATCH = 15;
+
+      console.log('📊 PMR contas a receber:', {
+        modo,
+        dt_inicio,
+        dt_fim,
+        branches_param: branches,
+        branchCodeList_usado: branchCodeList,
+        filtro_completo: JSON.stringify(filter),
+      });
+
+      const makeRequest = async (accessToken, pageNum) => {
+        return axios.post(
+          endpoint,
+          {
+            filter,
+            page: pageNum,
+            pageSize: PAGE_SIZE,
+            order:
+              modo === 'emissao'
+                ? '-issueDate'
+                : modo === 'pagamento'
+                  ? '-paymentDate'
+                  : '-expiredDate',
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 30000,
+          },
+        );
+      };
+
+      let firstResponse;
+      try {
+        firstResponse = await makeRequest(token, 1);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newTokenData = await getToken(true);
+          token = newTokenData.access_token;
+          firstResponse = await makeRequest(token, 1);
+        } else {
+          throw error;
+        }
+      }
+
+      const totalPages = firstResponse.data?.totalPages || 1;
+      const totalCount = firstResponse.data?.count || 0;
+      let allItems = [...(firstResponse.data?.items || [])];
+
+      console.log(
+        `📄 PMR página 1/${totalPages} - Total: ${totalCount} registros (${Date.now() - startTime}ms)`,
+      );
+
+      if (totalPages > 1) {
+        for (
+          let batchStart = 2;
+          batchStart <= totalPages;
+          batchStart += PARALLEL_BATCH
+        ) {
+          const batchEnd = Math.min(
+            batchStart + PARALLEL_BATCH - 1,
+            totalPages,
+          );
+          const promises = [];
+
+          for (let page = batchStart; page <= batchEnd; page++) {
+            promises.push(
+              makeRequest(token, page).catch((err) => {
+                console.log(`⚠️ Erro PMR página ${page}: ${err.message}`);
+                return null;
+              }),
+            );
+          }
+
+          const results = await Promise.all(promises);
+          for (const result of results) {
+            if (result?.data?.items) {
+              allItems = allItems.concat(result.data.items);
+            }
+          }
+
+          console.log(
+            `📄 PMR batch ${batchStart}-${batchEnd}/${totalPages}: acumulado ${allItems.length} (${Date.now() - startTime}ms)`,
+          );
+        }
+      }
+
+      let filteredItems = allItems;
+
+      if (situacao) {
+        const statusPermitidos = situacao
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+        if (statusPermitidos.length > 0) {
+          filteredItems = filteredItems.filter((item) =>
+            statusPermitidos.includes(item.status),
+          );
+        }
+      }
+
+      if (status === 'Pago') {
+        filteredItems = filteredItems.filter(
+          (item) =>
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01,
+        );
+      } else if (status === 'Vencido') {
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
+        filteredItems = filteredItems.filter((item) => {
+          const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
+          const temPagamento =
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01;
+          return dataVenc && dataVenc < hoje && !temPagamento;
+        });
+      } else if (status === 'A Vencer') {
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
+        filteredItems = filteredItems.filter((item) => {
+          const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
+          const temPagamento =
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01;
+          return dataVenc && dataVenc >= hoje && !temPagamento;
+        });
+      } else if (status === 'Em Aberto' || status === 'Aberto') {
+        filteredItems = filteredItems.filter((item) => {
+          const temPagamento =
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01;
+          return !temPagamento;
+        });
+      }
+
+      if (cd_portador) {
+        const portadores = cd_portador
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+        if (portadores.length > 0) {
+          filteredItems = filteredItems.filter((item) =>
+            portadores.includes(item.bearerCode),
+          );
+        }
+      }
+
+      if (tp_cobranca) {
+        const cobrancas = tp_cobranca
+          .split(',')
+          .map((value) => parseInt(value.trim(), 10))
+          .filter((value) => !Number.isNaN(value));
+        if (cobrancas.length > 0) {
+          filteredItems = filteredItems.filter((item) =>
+            cobrancas.includes(item.chargeType),
+          );
+        }
+      }
+
+      filteredItems = filteredItems.filter((item) => item.chargeType !== 14);
+      filteredItems = filteredItems.filter(
+        (item) => item.documentType !== 11 && item.documentType !== 12,
+      );
+
+      const inicio = new Date(`${dt_inicio}T00:00:00`);
+      const fim = new Date(`${dt_fim}T00:00:00`);
+      const diasPeriodo = Math.max(
+        1,
+        Math.floor((fim - inicio) / (1000 * 60 * 60 * 24)) + 1,
+      );
+
+      const summary = {
+        saldoContasReceber: 0,
+        vendasPrazo: 0,
+        vendasPrazoDia: 0,
+        pmrDias: 0,
+        quantidadeTitulosAbertos: 0,
+        quantidadeFaturas: 0,
+        diasPeriodo,
+      };
+
+      const byBranchMap = {};
+
+      filteredItems.forEach((item) => {
+        const branchCode = Number(item.branchCode || 0);
+        const valorFatura = Number(item.installmentValue || 0);
+        const valorPago = Number(item.paidValue || 0);
+        const saldoAberto = Math.max(0, valorFatura - valorPago);
+
+        if (!byBranchMap[branchCode]) {
+          byBranchMap[branchCode] = {
+            cd_empresa: branchCode,
+            saldoContasReceber: 0,
+            vendasPrazo: 0,
+            vendasPrazoDia: 0,
+            pmrDias: 0,
+            quantidadeTitulosAbertos: 0,
+            quantidadeFaturas: 0,
+          };
+        }
+
+        if (saldoAberto > 0.01) {
+          summary.saldoContasReceber += saldoAberto;
+          summary.quantidadeTitulosAbertos += 1;
+          byBranchMap[branchCode].saldoContasReceber += saldoAberto;
+          byBranchMap[branchCode].quantidadeTitulosAbertos += 1;
+        }
+
+        if (Number(item.documentType) === 1 && valorFatura > 0) {
+          summary.vendasPrazo += valorFatura;
+          summary.quantidadeFaturas += 1;
+          byBranchMap[branchCode].vendasPrazo += valorFatura;
+          byBranchMap[branchCode].quantidadeFaturas += 1;
+        }
+      });
+
+      summary.vendasPrazoDia =
+        diasPeriodo > 0 ? summary.vendasPrazo / diasPeriodo : 0;
+      summary.pmrDias =
+        summary.vendasPrazoDia > 0
+          ? summary.saldoContasReceber / summary.vendasPrazoDia
+          : 0;
+
+      const byBranch = Object.values(byBranchMap)
+        .map((branch) => {
+          const vendasPrazoDia =
+            diasPeriodo > 0 ? branch.vendasPrazo / diasPeriodo : 0;
+          return {
+            ...branch,
+            vendasPrazoDia,
+            pmrDias:
+              vendasPrazoDia > 0
+                ? branch.saldoContasReceber / vendasPrazoDia
+                : 0,
+          };
+        })
+        .sort((a, b) => b.saldoContasReceber - a.saldoContasReceber);
+
+      const totalTime = Date.now() - startTime;
+
+      successResponse(
+        res,
+        {
+          summary,
+          byBranch,
+          totalItems: filteredItems.length,
+          totalCount,
+          pagesSearched: totalPages,
+          hasMore: false,
+          timeMs: totalTime,
+        },
+        `PMR calculado com sucesso em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao calcular PMR contas a receber:', error.message);
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: error.response.data?.message || 'Erro na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          details: error.response.data,
+        });
+      }
+
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
 /**
  * @route POST /totvs/persons/batch-lookup
  * @desc Busca dados de pessoas (PJ + PF) em lote via API TOTVS Moda
