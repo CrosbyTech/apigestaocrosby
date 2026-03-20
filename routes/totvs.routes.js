@@ -2468,8 +2468,8 @@ router.get(
         filter.startIssueDate = `${dt_inicio}T00:00:00`;
         filter.endIssueDate = `${dt_fim}T23:59:59`;
       } else if (modo === 'pagamento') {
-        filter.startSettlementDate = `${dt_inicio}T00:00:00`;
-        filter.endSettlementDate = `${dt_fim}T23:59:59`;
+        filter.startPaymentDate = `${dt_inicio}T00:00:00`;
+        filter.endPaymentDate = `${dt_fim}T23:59:59`;
       } else {
         filter.startExpiredDate = `${dt_inicio}T00:00:00`;
         filter.endExpiredDate = `${dt_fim}T23:59:59`;
