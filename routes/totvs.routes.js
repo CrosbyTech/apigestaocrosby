@@ -2632,35 +2632,40 @@ router.get(
       }
 
       if (status === 'Pago') {
-        // PAGO: tem valor pago OU data de liquidação
+        // PAGO: precisa ter data de liquidação e valor pago acima de 0,01
         filteredItems = filteredItems.filter(
-          (item) => (item.paidValue && item.paidValue > 0) || item.paymentDate,
+          (item) =>
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01,
         );
       } else if (status === 'Vencido') {
-        // VENCIDO: antes de hoje, SEM valor pago e SEM data de liquidação
+        // VENCIDO: antes de hoje e sem pagamento efetivo
         const hoje = new Date();
         hoje.setHours(0, 0, 0, 0);
         filteredItems = filteredItems.filter((item) => {
           const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
           const temPagamento =
-            (item.paidValue && item.paidValue > 0) || item.paymentDate;
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01;
           return dataVenc && dataVenc < hoje && !temPagamento;
         });
       } else if (status === 'A Vencer') {
-        // A VENCER: a partir de hoje, SEM valor pago e SEM data de liquidação
+        // A VENCER: a partir de hoje e sem pagamento efetivo
         const hoje = new Date();
         hoje.setHours(0, 0, 0, 0);
         filteredItems = filteredItems.filter((item) => {
           const dataVenc = item.expiredDate ? new Date(item.expiredDate) : null;
           const temPagamento =
-            (item.paidValue && item.paidValue > 0) || item.paymentDate;
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01;
           return dataVenc && dataVenc >= hoje && !temPagamento;
         });
       } else if (status === 'Em Aberto') {
-        // EM ABERTO: tudo que NÃO tem valor pago e NÃO tem data de liquidação (A Vencer + Vencido)
+        // EM ABERTO: tudo que não tem pagamento efetivo (A Vencer + Vencido)
         filteredItems = filteredItems.filter((item) => {
           const temPagamento =
-            (item.paidValue && item.paidValue > 0) || item.paymentDate;
+            Boolean(item.paymentDate || item.settlementDate) &&
+            Number(item.paidValue || 0) > 0.01;
           return !temPagamento;
         });
       }
