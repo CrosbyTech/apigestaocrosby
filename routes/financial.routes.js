@@ -21,6 +21,7 @@ import processConfiancaFile from '../utils/extratos/CONFIANCA.js';
 import processSicrediFile from '../utils/extratos/SICREDI.js';
 import processSistemaConfiancaFile from '../utils/extratos/SISTEMA_CONFIANCA.js';
 import processSistemaSicrediFile from '../utils/extratos/SISTEMA_SICREDI.js';
+import processBBFile from '../utils/extratos/BB.js';
 
 const router = express.Router();
 
@@ -325,8 +326,14 @@ router.get(
     // Filtro por situação (N=Normal, C=Cancelada, A=Agrupada, D=Devolvida, L=Liquidada comissão, Q=Quebrada)
     if (situacao && situacao !== 'TODAS') {
       const situacaoMap = {
-        'N': 'N', 'C': 'C', 'A': 'A', 'D': 'D', 'L': 'L', 'Q': 'Q',
-        'NORMAIS': 'N', 'CANCELADAS': 'C',
+        N: 'N',
+        C: 'C',
+        A: 'A',
+        D: 'D',
+        L: 'L',
+        Q: 'Q',
+        NORMAIS: 'N',
+        CANCELADAS: 'C',
       };
       const tpSituacao = situacaoMap[situacao];
       if (tpSituacao) {
@@ -551,8 +558,14 @@ router.get(
     // Filtro por situação (N=Normal, C=Cancelada, A=Agrupada, D=Devolvida, L=Liquidada comissão, Q=Quebrada)
     if (situacao && situacao !== 'TODAS') {
       const situacaoMap = {
-        'N': 'N', 'C': 'C', 'A': 'A', 'D': 'D', 'L': 'L', 'Q': 'Q',
-        'NORMAIS': 'N', 'CANCELADAS': 'C',
+        N: 'N',
+        C: 'C',
+        A: 'A',
+        D: 'D',
+        L: 'L',
+        Q: 'Q',
+        NORMAIS: 'N',
+        CANCELADAS: 'C',
       };
       const tpSituacao = situacaoMap[situacao];
       if (tpSituacao) {
@@ -4955,6 +4968,10 @@ router.post(
         case 'SISTEMA_SICREDI':
           // Para importar dados do sistema via CSV (portador 748)
           result = processSistemaSicrediFile(fileContent.toString('utf-8'));
+          break;
+
+        case 'BB':
+          result = processBBFile(fileContent);
           break;
 
         default:
