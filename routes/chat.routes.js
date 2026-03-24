@@ -9,13 +9,13 @@ const router = express.Router();
 
 // Chaves de API suportadas (em ordem de prioridade)
 const getAIConfig = () => {
-  // Groq (gratuito, rápido, usa Llama/Mixtral)
+  // Groq (gratuito, rápido)
   if (process.env.GROQ_API_KEY) {
     return {
       provider: 'groq',
       apiKey: process.env.GROQ_API_KEY,
       apiUrl: 'https://api.groq.com/openai/v1/chat/completions',
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+      model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
     };
   }
 

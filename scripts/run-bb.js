@@ -3,7 +3,7 @@ import { processBBExtracts } from '../utils/extratos/bbExtractor.js';
 (async () => {
   try {
     const results = await processBBExtracts();
-    console.log('Resumo dos PDFs BB processados:');
+    console.log('Resumo dos PDFs BANCO DO BRASIL processados:');
     for (const r of results) {
       console.log(`\nArquivo: ${r.file}`);
       console.log('Texto extraído (primeiros 1000 caracteres):');

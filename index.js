@@ -32,7 +32,10 @@ import widgetsRoutes from './routes/widgets.routes.js';
 import totvsRoutes from './routes/totvs.routes.js';
 import chatRoutes from './routes/chat.routes.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
-import { initializeWhatsApp, client as whatsappClient } from './config/whatsapp.js';
+import {
+  initializeWhatsApp,
+  client as whatsappClient,
+} from './config/whatsapp.js';
 // Carregar variáveis de ambiente
 dotenv.config();
 

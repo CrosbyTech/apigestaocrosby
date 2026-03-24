@@ -92,9 +92,7 @@ class SupabaseSessionStore {
   async delete(options) {
     const filePath = `${SESSION_PATH}/${options.session}.zip`;
     try {
-      const { error } = await supabase.storage
-        .from(BUCKET)
-        .remove([filePath]);
+      const { error } = await supabase.storage.from(BUCKET).remove([filePath]);
 
       if (error) {
         logger.error('Erro ao deletar sessão WhatsApp:', error.message);

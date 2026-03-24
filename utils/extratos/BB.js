@@ -98,7 +98,11 @@ const encontrarLinhaHeader = (data) => {
  */
 const detectarTipoArquivo = (data, idxSituacao, headerRowIndex) => {
   if (idxSituacao < 0) return 'ABERTO';
-  for (let i = headerRowIndex + 1; i < Math.min(headerRowIndex + 20, data.length); i++) {
+  for (
+    let i = headerRowIndex + 1;
+    i < Math.min(headerRowIndex + 20, data.length);
+    i++
+  ) {
     const sit = String(data[i]?.[idxSituacao] || '').toLowerCase();
     if (sit.includes('liquidado') || sit.includes('baixado')) {
       return 'LIQUIDADO';
@@ -153,7 +157,12 @@ const parseBBExcel = (fileBuffer) => {
 
   // Encontrar índices das colunas
   const idxNossoNumero = findColumnIndex(['nosso número', 'nosso numero']);
-  const idxPagador = findColumnIndex(['nome pagador', 'pagador', 'sacado', 'cliente']);
+  const idxPagador = findColumnIndex([
+    'nome pagador',
+    'pagador',
+    'sacado',
+    'cliente',
+  ]);
   const idxNroBeneficiario = findColumnIndex([
     'nro beneficiário',
     'nro beneficiario',

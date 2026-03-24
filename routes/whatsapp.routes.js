@@ -85,7 +85,9 @@ router.post('/send-document', async (req, res) => {
 
     if (error || !data) {
       logger.error('Erro ao baixar arquivo do Supabase:', error?.message);
-      return res.status(404).json({ error: 'Arquivo não encontrado no storage' });
+      return res
+        .status(404)
+        .json({ error: 'Arquivo não encontrado no storage' });
     }
 
     // Converter para base64 para MessageMedia
@@ -107,7 +109,9 @@ router.post('/send-document', async (req, res) => {
       caption: mensagem || '',
     });
 
-    logger.info(`📤 Documento enviado via WhatsApp para ${chatId}: ${nomeArquivo}`);
+    logger.info(
+      `📤 Documento enviado via WhatsApp para ${chatId}: ${nomeArquivo}`,
+    );
 
     res.json({
       success: true,
