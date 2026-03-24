@@ -1,5 +1,6 @@
 import pkg from 'whatsapp-web.js';
 const { Client, RemoteAuth, MessageMedia } = pkg;
+import puppeteer from 'puppeteer';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import fs from 'fs';
@@ -14,11 +15,24 @@ let clientStatus = 'initializing'; // initializing | qr_needed | ready | disconn
 
 // Detectar Chrome no sistema
 const getChromePath = () => {
-  // Usar variável de ambiente se disponível (set por start.sh no Render)
+  // 1. Variável de ambiente (set por start.sh no Render)
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    return process.env.PUPPETEER_EXECUTABLE_PATH;
+    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (fs.existsSync(envPath)) return envPath;
   }
 
+  // 2. Usar o caminho resolvido pelo próprio puppeteer (mais confiável)
+  try {
+    const resolved = puppeteer.executablePath();
+    if (resolved && fs.existsSync(resolved)) {
+      logger.info(`Chrome via puppeteer.executablePath(): ${resolved}`);
+      return resolved;
+    }
+  } catch (err) {
+    logger.warn(`puppeteer.executablePath() falhou: ${err.message}`);
+  }
+
+  // 3. Fallback: caminhos manuais do sistema
   const paths = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
