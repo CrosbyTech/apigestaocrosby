@@ -38,6 +38,9 @@ dotenv.config();
 
 const app = express();
 
+// Trust proxy (Render usa proxy reverso)
+app.set('trust proxy', 1);
+
 // =============================================================================
 // CONFIGURAÇÕES DE SEGURANÇA E MIDDLEWARE
 // =============================================================================

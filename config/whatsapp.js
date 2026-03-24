@@ -12,9 +12,12 @@ let qrCodeData = null;
 let clientReady = false;
 let clientStatus = 'initializing'; // initializing | qr_needed | ready | disconnected | auth_failure
 
-// Detectar Chrome no sistema (dev local)
+// Detectar Chrome no sistema
 const getChromePath = () => {
-  if (process.env.NODE_ENV === 'production') return undefined;
+  // Usar variável de ambiente se disponível (set por start.sh no Render)
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
 
   const paths = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -22,6 +25,7 @@ const getChromePath = () => {
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
   ];
 
   for (const p of paths) {
@@ -121,9 +125,12 @@ const getStatus = () => clientStatus;
 const initializeWhatsApp = async () => {
   try {
     logger.info('🚀 Inicializando WhatsApp client...');
+    const execPath = getChromePath();
+    logger.info(`Chromium path: ${execPath || 'bundled puppeteer'}`);
     await client.initialize();
   } catch (err) {
-    logger.error('Erro ao inicializar WhatsApp:', err.message);
+    logger.error(`Erro ao inicializar WhatsApp: ${err.message || err}`);
+    logger.error(err.stack || 'sem stack trace');
     clientStatus = 'disconnected';
   }
 };
