@@ -111,19 +111,19 @@ router.post('/send-document', async (req, res) => {
     } else {
       telefoneLimpo = `55${telefoneLimpo}`;
     }
-    const chatId = `${telefoneLimpo}@c.us`;
 
-    logger.info(`📞 Enviando para chatId: ${chatId}, arquivo: ${nomeArquivo}`);
-
-    // Verificar se o número existe no WhatsApp
-    const isRegistered = await client.isRegisteredUser(chatId);
-    if (!isRegistered) {
-      logger.warn(`⚠️ Número ${chatId} não registrado no WhatsApp`);
+    // Usar getNumberId para resolver o WID correto (evita erro "No LID for user")
+    const numberId = await client.getNumberId(telefoneLimpo);
+    if (!numberId) {
+      logger.warn(`⚠️ Número ${telefoneLimpo} não registrado no WhatsApp`);
       return res.status(400).json({
         error: `Número ${telefoneLimpo} não possui WhatsApp`,
         fallback: true,
       });
     }
+    const chatId = numberId._serialized;
+
+    logger.info(`📞 Enviando para chatId: ${chatId}, arquivo: ${nomeArquivo}`);
 
     // Enviar documento com caption
     await client.sendMessage(chatId, media, {
