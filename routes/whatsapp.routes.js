@@ -97,11 +97,17 @@ router.post('/send-document', async (req, res) => {
     const buffer = Buffer.from(await data.arrayBuffer());
     const base64 = buffer.toString('base64');
 
-    const media = new MessageMedia(
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      base64,
-      nomeArquivo,
-    );
+    // Detectar MIME type pelo nome do arquivo
+    const mimeTypes = {
+      '.pdf': 'application/pdf',
+      '.docx':
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.doc': 'application/msword',
+    };
+    const ext = (nomeArquivo.match(/\.[^.]+$/) || ['.pdf'])[0].toLowerCase();
+    const mimeType = mimeTypes[ext] || 'application/octet-stream';
+
+    const media = new MessageMedia(mimeType, base64, nomeArquivo);
 
     // Formatar telefone: 55 + DDD + número (sem caracteres especiais)
     let telefoneLimpo = telefone.replace(/\D/g, '');
