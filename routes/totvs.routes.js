@@ -1239,11 +1239,17 @@ router.post(
           eletronicInvoiceStatusList: ['Authorized'],
           startIssueDate: `${minDate.toISOString().slice(0, 10)}T00:00:00`,
           endIssueDate: `${maxDate.toISOString().slice(0, 10)}T23:59:59`,
+          change: {},
         },
         page: 1,
         pageSize: 200,
         expand: 'person',
       };
+
+      console.log(
+        '🔍 danfe-batch invoices-search payload:',
+        JSON.stringify(invoicesBody, null, 2),
+      );
 
       const doInvoicesReq = async (accessToken) =>
         axios.post(invoicesEndpoint, invoicesBody, {
@@ -1370,11 +1376,19 @@ router.post(
         `${danfes.length} DANFE(s) gerada(s) com sucesso`,
       );
     } catch (error) {
+      console.error('❌ danfe-batch erro:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
       const status = error.response?.status || 500;
+      const details = error.response?.data;
       return res.status(status).json({
         success: false,
-        message: error.message || 'Erro ao gerar DANFEs em lote',
+        message:
+          details?.message || error.message || 'Erro ao gerar DANFEs em lote',
         error: 'DANFE_BATCH_ERROR',
+        details,
       });
     }
   }),
