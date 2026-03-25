@@ -11,7 +11,6 @@ import {
 import supabase from '../config/supabase.js';
 import { logger } from '../utils/errorHandler.js';
 import { getToken } from '../utils/totvsTokenManager.js';
-import { PDFDocument } from 'pdf-lib';
 
 const router = express.Router();
 
@@ -58,35 +57,119 @@ client.on('message', async (msg) => {
       '⏳ *Carregando suas notas fiscais...*\n\nEsse processo pode levar alguns instantes. Você receberá os documentos assim que estiverem prontos.',
     );
 
-    // Processar NFs
-    const result = await processarNFsCliente(pending);
+    // 1) Buscar NFs únicas na TOTVS
+    const nfList = await buscarNFsUnicas(pending);
 
-    if (result.success) {
-      // Enviar PDF diretamente via WhatsApp (sem upload ao Supabase)
-      const nfNomeArquivo = `notas_fiscais_${pending.nomeCliente}.pdf`;
-      const base64 = result.pdfBuffer.toString('base64');
-      const media = new MessageMedia('application/pdf', base64, nfNomeArquivo);
-
-      const captionNF =
-        `📄 *NOTAS FISCAIS — DEMONSTRATIVO DE DÉBITO*\n\n` +
-        `Seguem anexas as Notas Fiscais (DANFEs) referentes aos títulos em aberto de *${pending.razaoSocial}*, ` +
-        `totalizando *${result.totalDanfes} nota(s) fiscal(is)*, que comprovam a origem do débito objeto da Notificação Extrajudicial.\n\n` +
-        `Valor total em aberto: *${pending.valor}*`;
-
-      await client.sendMessage(chatId, media, { caption: captionNF });
-
-      logger.info(`📤 ${result.totalDanfes} NFs enviadas para ${chatId}`);
-      pending.status = 'done';
-    } else {
+    if (nfList.length === 0) {
       await client.sendMessage(
         chatId,
         '📭 Não foram encontradas notas fiscais eletrônicas para os títulos em aberto. Entre em contato para mais informações.',
       );
       pending.status = 'done';
+      return;
     }
+
+    logger.info(`🔍 ${nfList.length} NFs únicas encontradas para ${chatId}`);
+
+    // 2) Processar e salvar cada DANFE no Supabase, uma por uma
+    const savedFiles = [];
+    for (let i = 0; i < nfList.length; i++) {
+      const nf = nfList[i];
+      try {
+        const danfeBase64 = await gerarDanfeIndividual(nf);
+        if (!danfeBase64) {
+          logger.warn(`⚠️ DANFE não gerada para NF ${nf.invoiceCode || i + 1}`);
+          continue;
+        }
+
+        const nfFileName = `nf_${pending.nomeCliente}_${nf.invoiceCode || i + 1}.pdf`;
+        const storagePath = `notificacoes/${nfFileName}`;
+        const pdfBuffer = Buffer.from(danfeBase64, 'base64');
+
+        const { error: uploadErr } = await supabase.storage
+          .from('clientes-confianca')
+          .upload(storagePath, pdfBuffer, {
+            contentType: 'application/pdf',
+            upsert: true,
+          });
+
+        if (uploadErr) {
+          logger.warn(`⚠️ Erro upload NF ${nfFileName}: ${uploadErr.message}`);
+          continue;
+        }
+
+        savedFiles.push({
+          fileName: nfFileName,
+          storagePath,
+          invoiceCode: nf.invoiceCode,
+        });
+        logger.info(`💾 NF ${i + 1}/${nfList.length} salva: ${nfFileName}`);
+      } catch (nfErr) {
+        logger.warn(`⚠️ Erro processando NF ${i + 1}: ${nfErr.message}`);
+      }
+    }
+
+    if (savedFiles.length === 0) {
+      await client.sendMessage(
+        chatId,
+        '📭 Não foi possível gerar as notas fiscais. Entre em contato para mais informações.',
+      );
+      pending.status = 'done';
+      return;
+    }
+
+    // 3) Enviar cada NF individualmente via WhatsApp
+    for (let i = 0; i < savedFiles.length; i++) {
+      const file = savedFiles[i];
+      try {
+        const { data: fileData, error: dlErr } = await supabase.storage
+          .from('clientes-confianca')
+          .download(file.storagePath);
+
+        if (dlErr || !fileData) {
+          logger.warn(`⚠️ Erro ao baixar ${file.fileName}: ${dlErr?.message}`);
+          continue;
+        }
+
+        const buffer = Buffer.from(await fileData.arrayBuffer());
+        const base64 = buffer.toString('base64');
+        const media = new MessageMedia(
+          'application/pdf',
+          base64,
+          file.fileName,
+        );
+
+        const caption =
+          i === 0
+            ? `📄 *NOTA FISCAL ${i + 1}/${savedFiles.length}*\n\n` +
+              `Seguem as Notas Fiscais (DANFEs) referentes aos títulos em aberto de *${pending.razaoSocial}*.\n` +
+              `Total: *${savedFiles.length} nota(s) fiscal(is)*\n` +
+              `Valor em aberto: *${pending.valor}*`
+            : `📄 *NOTA FISCAL ${i + 1}/${savedFiles.length}*`;
+
+        await client.sendMessage(chatId, media, { caption });
+
+        logger.info(
+          `📤 NF ${i + 1}/${savedFiles.length} enviada para ${chatId}`,
+        );
+
+        // Pequena pausa entre envios para não sobrecarregar
+        if (i < savedFiles.length - 1) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch (sendErr) {
+        logger.warn(
+          `⚠️ Erro ao enviar NF ${file.fileName}: ${sendErr.message}`,
+        );
+      }
+    }
+
+    logger.info(
+      `✅ ${savedFiles.length} NFs enviadas com sucesso para ${chatId}`,
+    );
+    pending.status = 'done';
   } catch (err) {
     logger.error(`Erro no listener de NF: ${err.message}`);
-    // Tentar notificar o cliente
     try {
       const chatId = msg.from;
       const pending = pendingNFRequests.get(chatId);
@@ -95,7 +178,7 @@ client.on('message', async (msg) => {
           chatId,
           '❌ Houve um erro ao processar suas notas fiscais. Tente novamente respondendo *1*.',
         );
-        pending.status = 'pending'; // permite retry
+        pending.status = 'pending';
       }
     } catch (_) {
       /* silenciar */
@@ -104,58 +187,70 @@ client.on('message', async (msg) => {
 });
 
 // ==========================================
-// Função: processar NFs de um cliente via TOTVS
+// Função: buscar NFs únicas de um cliente na TOTVS
 // ==========================================
-async function processarNFsCliente(data) {
+async function buscarNFsUnicas(data) {
   const { personCode, branchCodeList, issueDates } = data;
 
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível');
   let token = tokenData.access_token;
 
-  // Calcular range de datas
   const dates = issueDates.map((d) => new Date(d)).filter((d) => !isNaN(d));
-  if (dates.length === 0) return { success: false };
-
-  const minDate = new Date(Math.min(...dates));
-  const maxDate = new Date(Math.max(...dates));
-  minDate.setDate(minDate.getDate() - 3);
-  maxDate.setDate(maxDate.getDate() + 3);
+  if (dates.length === 0) return [];
 
   const branches = (branchCodeList || []).filter((c) => c >= 1 && c <= 99);
-
-  // invoices-search em chunks de 5 meses
   const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
-  const MAX_MONTHS = 5;
-  const dateChunks = [];
-  let chunkStart = new Date(minDate);
-  while (chunkStart < maxDate) {
-    const chunkEnd = new Date(chunkStart);
-    chunkEnd.setMonth(chunkEnd.getMonth() + MAX_MONTHS);
-    if (chunkEnd > maxDate) chunkEnd.setTime(maxDate.getTime());
-    dateChunks.push({
-      start: `${chunkStart.toISOString().slice(0, 10)}T00:00:00`,
-      end: `${chunkEnd.toISOString().slice(0, 10)}T23:59:59`,
-    });
-    chunkStart = new Date(chunkEnd);
-    chunkStart.setDate(chunkStart.getDate() + 1);
+
+  // Para cada data de emissão, criar range de ±3 dias
+  const ranges = dates.map((d) => {
+    const start = new Date(d);
+    start.setDate(start.getDate() - 3);
+    const end = new Date(d);
+    end.setDate(end.getDate() + 3);
+    return { start, end };
+  });
+
+  // Ordenar e mesclar ranges sobrepostos
+  ranges.sort((a, b) => a.start - b.start);
+  const mergedRanges = [
+    { start: new Date(ranges[0].start), end: new Date(ranges[0].end) },
+  ];
+  for (let i = 1; i < ranges.length; i++) {
+    const last = mergedRanges[mergedRanges.length - 1];
+    if (ranges[i].start <= last.end) {
+      if (ranges[i].end > last.end) last.end = new Date(ranges[i].end);
+    } else {
+      mergedRanges.push({
+        start: new Date(ranges[i].start),
+        end: new Date(ranges[i].end),
+      });
+    }
   }
 
+  logger.info(
+    `📅 ${issueDates.length} datas de emissão → ${mergedRanges.length} range(s) de busca (±3 dias cada)`,
+  );
+
   const allItems = [];
-  for (const chunk of dateChunks) {
+  for (const range of mergedRanges) {
     const body = {
       filter: {
         branchCodeList: branches,
         personCodeList: [parseInt(personCode)],
         eletronicInvoiceStatusList: ['Authorized'],
-        startIssueDate: chunk.start,
-        endIssueDate: chunk.end,
+        startIssueDate: `${range.start.toISOString().slice(0, 10)}T00:00:00`,
+        endIssueDate: `${range.end.toISOString().slice(0, 10)}T23:59:59`,
         change: {},
       },
       page: 1,
       pageSize: 100,
       expand: 'person',
     };
+
+    logger.info(
+      `🔎 Buscando NFs de ${body.filter.startIssueDate.slice(0, 10)} a ${body.filter.endIssueDate.slice(0, 10)}`,
+    );
 
     const doReq = async (t) =>
       axios.post(invoicesEndpoint, body, {
@@ -180,8 +275,6 @@ async function processarNFsCliente(data) {
     allItems.push(...(resp?.data?.items || []));
   }
 
-  if (allItems.length === 0) return { success: false };
-
   // Deduplicar por accessKey
   const uniqueNFs = [];
   const seenKeys = new Set();
@@ -193,92 +286,71 @@ async function processarNFsCliente(data) {
     }
   }
 
-  // Gerar DANFEs (xml-contents → danfe-search)
-  const CONCURRENCY = 3;
-  const danfeBuffers = [];
+  return uniqueNFs;
+}
 
-  const processNF = async (nf) => {
-    const accessKey = nf.eletronic.accessKey;
+// ==========================================
+// Função: gerar DANFE individual (retorna base64 ou null)
+// ==========================================
+async function gerarDanfeIndividual(nf) {
+  const tokenData = await getToken();
+  if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível');
+  let token = tokenData.access_token;
 
-    // xml-contents
-    const xmlEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${encodeURIComponent(accessKey)}`;
-    const doXml = async (t) =>
-      axios.get(xmlEndpoint, {
-        headers: { Accept: 'application/json', Authorization: `Bearer ${t}` },
+  const accessKey = nf?.eletronic?.accessKey;
+  if (!accessKey) return null;
+
+  // 1) xml-contents
+  const xmlEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${encodeURIComponent(accessKey)}`;
+  const doXml = async (t) =>
+    axios.get(xmlEndpoint, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${t}` },
+      timeout: 30000,
+      httpsAgent: httpsAgentNF,
+    });
+
+  let xmlResp;
+  try {
+    xmlResp = await doXml(token);
+  } catch (err) {
+    if (err.response?.status === 401) {
+      token = (await getToken(true))?.access_token;
+      xmlResp = await doXml(token);
+    } else throw err;
+  }
+
+  const mainInvoiceXml =
+    xmlResp?.data?.mainInvoiceXml || xmlResp?.data?.data?.mainInvoiceXml;
+  if (!mainInvoiceXml) return null;
+
+  // 2) danfe-search
+  const danfeEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`;
+  const doDanfe = async (t) =>
+    axios.post(
+      danfeEndpoint,
+      { mainInvoiceXml, nfeDocumentType: 'NFeNormal' },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${t}`,
+        },
         timeout: 30000,
         httpsAgent: httpsAgentNF,
-      });
+      },
+    );
 
-    let xmlResp;
-    try {
-      xmlResp = await doXml(token);
-    } catch (err) {
-      if (err.response?.status === 401) {
-        token = (await getToken(true))?.access_token;
-        xmlResp = await doXml(token);
-      } else throw err;
-    }
-
-    const mainInvoiceXml =
-      xmlResp?.data?.mainInvoiceXml || xmlResp?.data?.data?.mainInvoiceXml;
-    if (!mainInvoiceXml) return null;
-
-    // danfe-search
-    const danfeEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`;
-    const doDanfe = async (t) =>
-      axios.post(
-        danfeEndpoint,
-        { mainInvoiceXml, nfeDocumentType: 'NFeNormal' },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${t}`,
-          },
-          timeout: 30000,
-          httpsAgent: httpsAgentNF,
-        },
-      );
-
-    let danfeResp;
-    try {
+  let danfeResp;
+  try {
+    danfeResp = await doDanfe(token);
+  } catch (err) {
+    if (err.response?.status === 401) {
+      token = (await getToken(true))?.access_token;
       danfeResp = await doDanfe(token);
-    } catch (err) {
-      if (err.response?.status === 401) {
-        token = (await getToken(true))?.access_token;
-        danfeResp = await doDanfe(token);
-      } else throw err;
-    }
-
-    const base64 = danfeResp?.data?.danfePdfBase64;
-    if (!base64) return null;
-    return Buffer.from(base64, 'base64');
-  };
-
-  for (let i = 0; i < uniqueNFs.length; i += CONCURRENCY) {
-    const batch = uniqueNFs.slice(i, i + CONCURRENCY);
-    const results = await Promise.allSettled(batch.map(processNF));
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) danfeBuffers.push(r.value);
-    }
+    } else throw err;
   }
 
-  if (danfeBuffers.length === 0) return { success: false };
-
-  // Mesclar todos os PDFs com pdf-lib
-  const mergedPdf = await PDFDocument.create();
-  for (const buf of danfeBuffers) {
-    const srcDoc = await PDFDocument.load(buf);
-    const pages = await mergedPdf.copyPages(srcDoc, srcDoc.getPageIndices());
-    pages.forEach((page) => mergedPdf.addPage(page));
-  }
-  const mergedBytes = await mergedPdf.save();
-
-  return {
-    success: true,
-    pdfBuffer: Buffer.from(mergedBytes),
-    totalDanfes: danfeBuffers.length,
-  };
+  return danfeResp?.data?.danfePdfBase64 || null;
 }
 
 // GET /api/whatsapp/status — status do client
