@@ -1230,49 +1230,72 @@ router.post(
 
       const branches = (branchCodeList || []).filter((c) => c >= 1 && c <= 99);
 
-      // 2) Uma única invoices-search
+      // 2) invoices-search — dividir em chunks de até 5 meses (API limita 6 meses)
       const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
-      const invoicesBody = {
-        filter: {
-          branchCodeList: branches,
-          personCodeList: [parseInt(personCode)],
-          eletronicInvoiceStatusList: ['Authorized'],
-          startIssueDate: `${minDate.toISOString().slice(0, 10)}T00:00:00`,
-          endIssueDate: `${maxDate.toISOString().slice(0, 10)}T23:59:59`,
-          change: {},
-        },
-        page: 1,
-        pageSize: 200,
-        expand: 'person',
-      };
-
-      console.log(
-        '🔍 danfe-batch invoices-search payload:',
-        JSON.stringify(invoicesBody, null, 2),
-      );
-
-      const doInvoicesReq = async (accessToken) =>
-        axios.post(invoicesEndpoint, invoicesBody, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 30000,
-          httpsAgent,
+      const MAX_MONTHS = 5;
+      const dateChunks = [];
+      let chunkStart = new Date(minDate);
+      while (chunkStart < maxDate) {
+        const chunkEnd = new Date(chunkStart);
+        chunkEnd.setMonth(chunkEnd.getMonth() + MAX_MONTHS);
+        if (chunkEnd > maxDate) chunkEnd.setTime(maxDate.getTime());
+        dateChunks.push({
+          start: `${chunkStart.toISOString().slice(0, 10)}T00:00:00`,
+          end: `${chunkEnd.toISOString().slice(0, 10)}T23:59:59`,
         });
-
-      let invoicesResp;
-      try {
-        invoicesResp = await doInvoicesReq(token);
-      } catch (err) {
-        if (err.response?.status === 401) {
-          token = (await getToken(true))?.access_token;
-          invoicesResp = await doInvoicesReq(token);
-        } else throw err;
+        chunkStart = new Date(chunkEnd);
+        chunkStart.setDate(chunkStart.getDate() + 1);
       }
 
-      const items = invoicesResp?.data?.items || [];
+      console.log(
+        `🔍 danfe-batch: ${dateChunks.length} chunk(s) de datas, personCode=${personCode}`,
+      );
+
+      const allItems = [];
+      for (const chunk of dateChunks) {
+        const invoicesBody = {
+          filter: {
+            branchCodeList: branches,
+            personCodeList: [parseInt(personCode)],
+            eletronicInvoiceStatusList: ['Authorized'],
+            startIssueDate: chunk.start,
+            endIssueDate: chunk.end,
+            change: {},
+          },
+          page: 1,
+          pageSize: 100,
+          expand: 'person',
+        };
+
+        const doInvoicesReq = async (accessToken) =>
+          axios.post(invoicesEndpoint, invoicesBody, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 30000,
+            httpsAgent,
+          });
+
+        let invoicesResp;
+        try {
+          invoicesResp = await doInvoicesReq(token);
+        } catch (err) {
+          if (err.response?.status === 401) {
+            token = (await getToken(true))?.access_token;
+            invoicesResp = await doInvoicesReq(token);
+          } else throw err;
+        }
+
+        const chunkItems = invoicesResp?.data?.items || [];
+        console.log(
+          `  📄 Chunk ${chunk.start} ~ ${chunk.end}: ${chunkItems.length} NFs`,
+        );
+        allItems.push(...chunkItems);
+      }
+
+      const items = allItems;
       if (items.length === 0) {
         return successResponse(
           res,
