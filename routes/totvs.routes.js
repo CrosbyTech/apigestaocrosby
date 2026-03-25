@@ -1186,10 +1186,21 @@ router.post(
   asyncHandler(async (req, res) => {
     const { personCode, branchCodeList, issueDates } = req.body || {};
 
-    if (!personCode || !Array.isArray(issueDates) || issueDates.length === 0) {
+    console.log('📦 danfe-batch recebido:', {
+      personCode,
+      branchCodeList,
+      issueDates,
+    });
+
+    if (
+      personCode === undefined ||
+      personCode === null ||
+      !Array.isArray(issueDates) ||
+      issueDates.length === 0
+    ) {
       return errorResponse(
         res,
-        'personCode e issueDates[] são obrigatórios',
+        `personCode e issueDates[] são obrigatórios (recebido: personCode=${personCode}, issueDates=${JSON.stringify(issueDates)})`,
         400,
         'MISSING_PARAMS',
       );
