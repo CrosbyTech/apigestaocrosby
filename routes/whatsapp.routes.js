@@ -1,6 +1,7 @@
 import express from 'express';
 import axios from 'axios';
 import https from 'https';
+import { PDFDocument } from 'pdf-lib';
 import {
   client,
   MessageMedia,
@@ -118,9 +119,11 @@ client.on('message', async (msg) => {
       return;
     }
 
-    // 3) Enviar cada NF individualmente via WhatsApp
-    for (let i = 0; i < savedFiles.length; i++) {
-      const file = savedFiles[i];
+    // 3) Baixar todas as NFs do Supabase e mesclar em um único PDF
+    const mergedPdf = await PDFDocument.create();
+    let mergedCount = 0;
+
+    for (const file of savedFiles) {
       try {
         const { data: fileData, error: dlErr } = await supabase.storage
           .from('clientes-confianca')
@@ -132,40 +135,90 @@ client.on('message', async (msg) => {
         }
 
         const buffer = Buffer.from(await fileData.arrayBuffer());
-        const base64 = buffer.toString('base64');
-        const media = new MessageMedia(
-          'application/pdf',
-          base64,
-          file.fileName,
+        const srcDoc = await PDFDocument.load(buffer);
+        const pages = await mergedPdf.copyPages(
+          srcDoc,
+          srcDoc.getPageIndices(),
         );
-
-        const caption =
-          i === 0
-            ? `📄 *NOTA FISCAL ${i + 1}/${savedFiles.length}*\n\n` +
-              `Seguem as Notas Fiscais (DANFEs) referentes aos títulos em aberto de *${pending.razaoSocial}*.\n` +
-              `Total: *${savedFiles.length} nota(s) fiscal(is)*\n` +
-              `Valor em aberto: *${pending.valor}*`
-            : `📄 *NOTA FISCAL ${i + 1}/${savedFiles.length}*`;
-
-        await client.sendMessage(chatId, media, { caption });
-
+        pages.forEach((page) => mergedPdf.addPage(page));
+        mergedCount++;
         logger.info(
-          `📤 NF ${i + 1}/${savedFiles.length} enviada para ${chatId}`,
+          `📎 NF ${file.invoiceCode || mergedCount} adicionada ao PDF consolidado`,
         );
-
-        // Pequena pausa entre envios para não sobrecarregar
-        if (i < savedFiles.length - 1) {
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-      } catch (sendErr) {
+      } catch (mergeErr) {
         logger.warn(
-          `⚠️ Erro ao enviar NF ${file.fileName}: ${sendErr.message}`,
+          `⚠️ Erro ao mesclar NF ${file.fileName}: ${mergeErr.message}`,
         );
       }
     }
 
+    if (mergedCount === 0) {
+      await client.sendMessage(
+        chatId,
+        '📭 Não foi possível gerar o arquivo consolidado das notas fiscais. Entre em contato para mais informações.',
+      );
+      pending.status = 'done';
+      return;
+    }
+
+    // Salvar PDF consolidado no Supabase
+    const mergedBytes = await mergedPdf.save();
+    const mergedFileName = `nfs_consolidado_${pending.nomeCliente}.pdf`;
+    const mergedPath = `notificacoes/${mergedFileName}`;
+
+    const { error: mergedUploadErr } = await supabase.storage
+      .from('clientes-confianca')
+      .upload(mergedPath, Buffer.from(mergedBytes), {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+
+    if (mergedUploadErr) {
+      logger.error(
+        `❌ Erro ao salvar PDF consolidado: ${mergedUploadErr.message}`,
+      );
+      await client.sendMessage(
+        chatId,
+        '❌ Erro ao preparar o arquivo consolidado. Tente novamente respondendo *1*.',
+      );
+      pending.status = 'pending';
+      return;
+    }
+
     logger.info(
-      `✅ ${savedFiles.length} NFs enviadas com sucesso para ${chatId}`,
+      `💾 PDF consolidado salvo: ${mergedFileName} (${mergedCount} NFs, ${mergedBytes.length} bytes)`,
+    );
+
+    // 4) Baixar o consolidado e enviar via WhatsApp
+    const { data: consolidadoData, error: consolidadoDlErr } =
+      await supabase.storage.from('clientes-confianca').download(mergedPath);
+
+    if (consolidadoDlErr || !consolidadoData) {
+      logger.error(
+        `❌ Erro ao baixar PDF consolidado: ${consolidadoDlErr?.message}`,
+      );
+      pending.status = 'pending';
+      return;
+    }
+
+    const consolidadoBuffer = Buffer.from(await consolidadoData.arrayBuffer());
+    const consolidadoBase64 = consolidadoBuffer.toString('base64');
+    const media = new MessageMedia(
+      'application/pdf',
+      consolidadoBase64,
+      mergedFileName,
+    );
+
+    const caption =
+      `📄 *NOTAS FISCAIS (DANFEs)*\n\n` +
+      `Seguem as Notas Fiscais referentes aos títulos em aberto de *${pending.razaoSocial}*.\n` +
+      `Total: *${mergedCount} nota(s) fiscal(is)* em um único arquivo.\n` +
+      `Valor em aberto: *${pending.valor}*`;
+
+    await client.sendMessage(chatId, media, { caption });
+
+    logger.info(
+      `✅ PDF consolidado com ${mergedCount} NFs enviado para ${chatId}`,
     );
     pending.status = 'done';
   } catch (err) {
