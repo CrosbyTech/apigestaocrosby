@@ -62,38 +62,9 @@ client.on('message', async (msg) => {
     const result = await processarNFsCliente(pending);
 
     if (result.success) {
-      // Upload para Supabase
+      // Enviar PDF diretamente via WhatsApp (sem upload ao Supabase)
       const nfNomeArquivo = `notas_fiscais_${pending.nomeCliente}.pdf`;
-      const storagePath = `notificacoes/${nfNomeArquivo}`;
-
-      const { error: uploadErr } = await supabase.storage
-        .from('clientes-confianca')
-        .upload(storagePath, result.pdfBuffer, {
-          contentType: 'application/pdf',
-          upsert: true,
-        });
-
-      if (uploadErr) {
-        logger.error(`Erro upload NF PDF: ${uploadErr.message}`);
-        await client.sendMessage(chatId, '❌ Houve um erro ao processar suas notas fiscais. Tente novamente mais tarde.');
-        pending.status = 'pending'; // permite tentar novamente
-        return;
-      }
-
-      // Baixar e enviar como documento
-      const { data: fileData, error: dlErr } = await supabase.storage
-        .from('clientes-confianca')
-        .download(storagePath);
-
-      if (dlErr || !fileData) {
-        logger.error(`Erro ao baixar NF PDF: ${dlErr?.message}`);
-        await client.sendMessage(chatId, '❌ Houve um erro ao enviar suas notas fiscais.');
-        pending.status = 'pending';
-        return;
-      }
-
-      const buffer = Buffer.from(await fileData.arrayBuffer());
-      const base64 = buffer.toString('base64');
+      const base64 = result.pdfBuffer.toString('base64');
       const media = new MessageMedia('application/pdf', base64, nfNomeArquivo);
 
       const captionNF =
@@ -120,10 +91,15 @@ client.on('message', async (msg) => {
       const chatId = msg.from;
       const pending = pendingNFRequests.get(chatId);
       if (pending) {
-        await client.sendMessage(chatId, '❌ Houve um erro ao processar suas notas fiscais. Tente novamente respondendo *1*.');
+        await client.sendMessage(
+          chatId,
+          '❌ Houve um erro ao processar suas notas fiscais. Tente novamente respondendo *1*.',
+        );
         pending.status = 'pending'; // permite retry
       }
-    } catch (_) { /* silenciar */ }
+    } catch (_) {
+      /* silenciar */
+    }
   }
 });
 
@@ -234,31 +210,40 @@ async function processarNFsCliente(data) {
       });
 
     let xmlResp;
-    try { xmlResp = await doXml(token); } catch (err) {
+    try {
+      xmlResp = await doXml(token);
+    } catch (err) {
       if (err.response?.status === 401) {
         token = (await getToken(true))?.access_token;
         xmlResp = await doXml(token);
       } else throw err;
     }
 
-    const mainInvoiceXml = xmlResp?.data?.mainInvoiceXml || xmlResp?.data?.data?.mainInvoiceXml;
+    const mainInvoiceXml =
+      xmlResp?.data?.mainInvoiceXml || xmlResp?.data?.data?.mainInvoiceXml;
     if (!mainInvoiceXml) return null;
 
     // danfe-search
     const danfeEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`;
     const doDanfe = async (t) =>
-      axios.post(danfeEndpoint, { mainInvoiceXml, nfeDocumentType: 'NFeNormal' }, {
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: `Bearer ${t}`,
+      axios.post(
+        danfeEndpoint,
+        { mainInvoiceXml, nfeDocumentType: 'NFeNormal' },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${t}`,
+          },
+          timeout: 30000,
+          httpsAgent: httpsAgentNF,
         },
-        timeout: 30000,
-        httpsAgent: httpsAgentNF,
-      });
+      );
 
     let danfeResp;
-    try { danfeResp = await doDanfe(token); } catch (err) {
+    try {
+      danfeResp = await doDanfe(token);
+    } catch (err) {
       if (err.response?.status === 401) {
         token = (await getToken(true))?.access_token;
         danfeResp = await doDanfe(token);
@@ -445,14 +430,29 @@ router.post('/send-document', async (req, res) => {
 // POST /api/whatsapp/register-nf-request — registra solicitação de NF pendente
 router.post('/register-nf-request', async (req, res) => {
   try {
-    const { telefone, personCode, branchCodeList, issueDates, razaoSocial, valor, nomeCliente } = req.body;
+    const {
+      telefone,
+      personCode,
+      branchCodeList,
+      issueDates,
+      razaoSocial,
+      valor,
+      nomeCliente,
+    } = req.body;
 
-    if (!telefone || !personCode || !Array.isArray(issueDates) || issueDates.length === 0) {
+    if (
+      !telefone ||
+      !personCode ||
+      !Array.isArray(issueDates) ||
+      issueDates.length === 0
+    ) {
       return res.status(400).json({ error: 'Dados incompletos' });
     }
 
     if (!isReady()) {
-      return res.status(503).json({ error: 'WhatsApp não conectado', fallback: true });
+      return res
+        .status(503)
+        .json({ error: 'WhatsApp não conectado', fallback: true });
     }
 
     // Resolver chatId
@@ -463,7 +463,9 @@ router.post('/register-nf-request', async (req, res) => {
 
     const numberId = await client.getNumberId(telefoneLimpo);
     if (!numberId) {
-      return res.status(400).json({ error: `Número ${telefoneLimpo} não possui WhatsApp` });
+      return res
+        .status(400)
+        .json({ error: `Número ${telefoneLimpo} não possui WhatsApp` });
     }
     const chatId = numberId._serialized;
 
@@ -480,7 +482,9 @@ router.post('/register-nf-request', async (req, res) => {
       createdAt: Date.now(),
     });
 
-    logger.info(`📋 NF request registrado para ${chatId} (personCode=${personCode}, ${issueDates.length} datas)`);
+    logger.info(
+      `📋 NF request registrado para ${chatId} (personCode=${personCode}, ${issueDates.length} datas)`,
+    );
 
     // Enviar mensagem convidando o cliente a solicitar NFs
     const msgConvite =
@@ -493,22 +497,30 @@ router.post('/register-nf-request', async (req, res) => {
 
     logger.info(`📨 Convite de NF enviado para ${chatId}`);
 
-    res.json({ success: true, message: 'Solicitação registrada e convite enviado' });
+    res.json({
+      success: true,
+      message: 'Solicitação registrada e convite enviado',
+    });
   } catch (error) {
     logger.error(`Erro ao registrar NF request: ${error.message}`);
-    res.status(500).json({ error: 'Erro ao registrar solicitação', details: error.message });
+    res
+      .status(500)
+      .json({ error: 'Erro ao registrar solicitação', details: error.message });
   }
 });
 
 // Limpeza periódica de requests antigos (>24h)
-setInterval(() => {
-  const now = Date.now();
-  const DAY = 24 * 60 * 60 * 1000;
-  for (const [chatId, data] of pendingNFRequests.entries()) {
-    if (now - data.createdAt > DAY) {
-      pendingNFRequests.delete(chatId);
+setInterval(
+  () => {
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    for (const [chatId, data] of pendingNFRequests.entries()) {
+      if (now - data.createdAt > DAY) {
+        pendingNFRequests.delete(chatId);
+      }
     }
-  }
-}, 60 * 60 * 1000); // a cada 1h
+  },
+  60 * 60 * 1000,
+); // a cada 1h
 
 export default router;
