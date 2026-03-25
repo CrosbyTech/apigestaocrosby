@@ -115,6 +115,16 @@ router.post('/send-document', async (req, res) => {
 
     logger.info(`📞 Enviando para chatId: ${chatId}, arquivo: ${nomeArquivo}`);
 
+    // Verificar se o número existe no WhatsApp
+    const isRegistered = await client.isRegisteredUser(chatId);
+    if (!isRegistered) {
+      logger.warn(`⚠️ Número ${chatId} não registrado no WhatsApp`);
+      return res.status(400).json({
+        error: `Número ${telefoneLimpo} não possui WhatsApp`,
+        fallback: true,
+      });
+    }
+
     // Enviar documento com caption
     await client.sendMessage(chatId, media, {
       caption: mensagem || '',
@@ -130,10 +140,12 @@ router.post('/send-document', async (req, res) => {
       destinatario: chatId,
     });
   } catch (error) {
-    logger.error('Erro ao enviar documento WhatsApp:', error.message);
+    const errMsg = error?.message || error?.toString() || JSON.stringify(error);
+    logger.error(`Erro ao enviar documento WhatsApp: ${errMsg}`);
+    if (error?.stack) logger.error(error.stack);
     res.status(500).json({
       error: 'Erro ao enviar documento',
-      details: error.message,
+      details: errMsg,
       fallback: true,
     });
   }
