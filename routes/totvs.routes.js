@@ -1177,6 +1177,198 @@ router.post(
   }),
 );
 
+// ==========================================
+// DANFE em lote — busca + gera DANFE para múltiplas NFs de um cliente
+// Otimizado: 1 invoices-search + 2 calls por NF (xml + danfe)
+// ==========================================
+router.post(
+  '/danfe-batch',
+  asyncHandler(async (req, res) => {
+    const { personCode, branchCodeList, issueDates } = req.body || {};
+
+    if (!personCode || !Array.isArray(issueDates) || issueDates.length === 0) {
+      return errorResponse(
+        res,
+        'personCode e issueDates[] são obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Token TOTVS indisponível',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+      let token = tokenData.access_token;
+
+      // 1) Calcular range de datas (min-3 .. max+3)
+      const dates = issueDates.map((d) => new Date(d)).filter((d) => !isNaN(d));
+      if (dates.length === 0) {
+        return errorResponse(res, 'Nenhuma data válida', 400, 'INVALID_DATES');
+      }
+      const minDate = new Date(Math.min(...dates));
+      const maxDate = new Date(Math.max(...dates));
+      minDate.setDate(minDate.getDate() - 3);
+      maxDate.setDate(maxDate.getDate() + 3);
+
+      const branches = (branchCodeList || []).filter((c) => c >= 1 && c <= 99);
+
+      // 2) Uma única invoices-search
+      const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      const invoicesBody = {
+        filter: {
+          branchCodeList: branches,
+          personCodeList: [parseInt(personCode)],
+          eletronicInvoiceStatusList: ['Authorized'],
+          startIssueDate: `${minDate.toISOString().slice(0, 10)}T00:00:00`,
+          endIssueDate: `${maxDate.toISOString().slice(0, 10)}T23:59:59`,
+        },
+        page: 1,
+        pageSize: 200,
+        expand: 'person',
+      };
+
+      const doInvoicesReq = async (accessToken) =>
+        axios.post(invoicesEndpoint, invoicesBody, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+          httpsAgent,
+        });
+
+      let invoicesResp;
+      try {
+        invoicesResp = await doInvoicesReq(token);
+      } catch (err) {
+        if (err.response?.status === 401) {
+          token = (await getToken(true))?.access_token;
+          invoicesResp = await doInvoicesReq(token);
+        } else throw err;
+      }
+
+      const items = invoicesResp?.data?.items || [];
+      if (items.length === 0) {
+        return successResponse(
+          res,
+          { danfes: [], total: 0 },
+          'Nenhuma NF encontrada',
+        );
+      }
+
+      // 3) Deduplicar NFs por accessKey
+      const uniqueNFs = [];
+      const seenKeys = new Set();
+      for (const nf of items) {
+        const key = nf?.eletronic?.accessKey;
+        if (key && !seenKeys.has(key)) {
+          seenKeys.add(key);
+          uniqueNFs.push(nf);
+        }
+      }
+
+      // 4) Para cada NF: xml-contents → danfe-search (paralelo, max 3 concurrent)
+      const CONCURRENCY = 3;
+      const danfes = [];
+
+      const processNF = async (nf) => {
+        const accessKey = nf.eletronic.accessKey;
+        // xml-contents
+        const xmlEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${encodeURIComponent(accessKey)}`;
+        const doXml = async (t) =>
+          axios.get(xmlEndpoint, {
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${t}`,
+            },
+            timeout: 30000,
+            httpsAgent,
+          });
+
+        let xmlResp;
+        try {
+          xmlResp = await doXml(token);
+        } catch (err) {
+          if (err.response?.status === 401) {
+            token = (await getToken(true))?.access_token;
+            xmlResp = await doXml(token);
+          } else throw err;
+        }
+
+        const mainInvoiceXml =
+          xmlResp?.data?.mainInvoiceXml || xmlResp?.data?.data?.mainInvoiceXml;
+        if (!mainInvoiceXml) return null;
+
+        // danfe-search
+        const danfeEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`;
+        const doDanfe = async (t) =>
+          axios.post(
+            danfeEndpoint,
+            { mainInvoiceXml, nfeDocumentType: 'NFeNormal' },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${t}`,
+              },
+              timeout: 30000,
+              httpsAgent,
+            },
+          );
+
+        let danfeResp;
+        try {
+          danfeResp = await doDanfe(token);
+        } catch (err) {
+          if (err.response?.status === 401) {
+            token = (await getToken(true))?.access_token;
+            danfeResp = await doDanfe(token);
+          } else throw err;
+        }
+
+        const base64 = danfeResp?.data?.danfePdfBase64;
+        if (!base64) return null;
+
+        return {
+          invoiceCode: nf.invoiceCode,
+          branchCode: nf.branchCode,
+          danfePdfBase64: base64,
+        };
+      };
+
+      // Processar em lotes de CONCURRENCY
+      for (let i = 0; i < uniqueNFs.length; i += CONCURRENCY) {
+        const batch = uniqueNFs.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(batch.map(processNF));
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value) danfes.push(r.value);
+        }
+      }
+
+      return successResponse(
+        res,
+        { danfes, total: danfes.length, nfsFound: uniqueNFs.length },
+        `${danfes.length} DANFE(s) gerada(s) com sucesso`,
+      );
+    } catch (error) {
+      const status = error.response?.status || 500;
+      return res.status(status).json({
+        success: false,
+        message: error.message || 'Erro ao gerar DANFEs em lote',
+        error: 'DANFE_BATCH_ERROR',
+      });
+    }
+  }),
+);
+
 router.get(
   '/xml-contents/:accessKey?',
   asyncHandler(async (req, res) => {
