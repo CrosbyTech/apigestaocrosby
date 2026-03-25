@@ -79,15 +79,18 @@ router.post('/send-document', async (req, res) => {
 
     // Buscar arquivo do Supabase Storage
     const storagePath = `notificacoes/${nomeArquivo}`;
+    logger.info(`📥 Buscando arquivo: ${storagePath}`);
     const { data, error } = await supabase.storage
       .from('clientes-confianca')
       .download(storagePath);
 
     if (error || !data) {
-      logger.error('Erro ao baixar arquivo do Supabase:', error?.message);
+      logger.error(
+        `Erro ao baixar arquivo do Supabase: ${error?.message || 'sem data'}`,
+      );
       return res
         .status(404)
-        .json({ error: 'Arquivo não encontrado no storage' });
+        .json({ error: 'Arquivo não encontrado no storage', fallback: true });
     }
 
     // Converter para base64 para MessageMedia
@@ -101,8 +104,16 @@ router.post('/send-document', async (req, res) => {
     );
 
     // Formatar telefone: 55 + DDD + número (sem caracteres especiais)
-    const telefoneLimpo = telefone.replace(/\D/g, '');
-    const chatId = `55${telefoneLimpo}@c.us`;
+    let telefoneLimpo = telefone.replace(/\D/g, '');
+    // Se já começa com 55 e tem 12-13 dígitos (55 + DDD + número), não duplicar
+    if (telefoneLimpo.startsWith('55') && telefoneLimpo.length >= 12) {
+      // Já tem código do país
+    } else {
+      telefoneLimpo = `55${telefoneLimpo}`;
+    }
+    const chatId = `${telefoneLimpo}@c.us`;
+
+    logger.info(`📞 Enviando para chatId: ${chatId}, arquivo: ${nomeArquivo}`);
 
     // Enviar documento com caption
     await client.sendMessage(chatId, media, {
