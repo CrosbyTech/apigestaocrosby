@@ -20,6 +20,7 @@ import {
 // Importar middlewares
 import { errorHandler } from './utils/errorHandler.js';
 import { sanitizeInput } from './middlewares/validation.middleware.js';
+import { requireApiKey } from './middlewares/auth.middleware.js';
 
 // Importar rotas
 import financialRoutes from './routes/financial.routes.js';
@@ -76,7 +77,12 @@ app.use(
     credentials: false,
     optionsSuccessStatus: 200,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'x-api-key',
+    ],
   }),
 );
 
@@ -108,6 +114,9 @@ app.use(
 
 // Sanitização global de entrada
 app.use(sanitizeInput);
+
+// Autenticação via API Key para todas as rotas /api/
+app.use('/api/', requireApiKey);
 
 // =============================================================================
 // ROTAS DA API
