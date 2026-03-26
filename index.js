@@ -1,7 +1,22 @@
 import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
+import morgan from 'morgan';
 import axios from 'axios';
 import https from 'https';
 import http from 'http';
+
+// Importar rotas
+import financialRoutes from './routes/financial.routes.js';
+import salesRoutes from './routes/sales.routes.js';
+import franchiseRoutes from './routes/franchise.routes.js';
+import faturamentoRoutes from './routes/faturamento.routes.js';
+import companyRoutes from './routes/company.routes.js';
+import chatRoutes from './routes/chat.routes.js';
+import whatsappRoutes from './routes/whatsapp.routes.js';
+import utilsRoutes from './routes/utils.routes.js';
+import widgetsRoutes from './routes/widgets.routes.js';
 import {
   asyncHandler,
   successResponse,
@@ -6507,4 +6522,52 @@ router.post(
   }),
 );
 
-export default router;
+// =============================================================================
+// SERVER SETUP
+// =============================================================================
+
+const app = express();
+const PORT = process.env.PORT || 4000;
+
+// Middleware
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors());
+app.use(compression());
+app.use(morgan('combined'));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Montar rotas
+app.use('/api/totvs', router);
+app.use('/api/financial', financialRoutes);
+app.use('/api/sales', salesRoutes);
+app.use('/api/franchise', franchiseRoutes);
+app.use('/api/faturamento', faturamentoRoutes);
+app.use('/api/company', companyRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/utils', utilsRoutes);
+app.use('/api/widgets', widgetsRoutes);
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('❌ Unhandled error:', err.message);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Erro interno do servidor',
+    error: process.env.NODE_ENV === 'production' ? undefined : err.stack,
+  });
+});
+
+// Iniciar servidor
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+export default app;
