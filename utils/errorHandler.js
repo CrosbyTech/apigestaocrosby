@@ -221,7 +221,7 @@ export const executeQuery = async (pool, query, params = [], options = {}) => {
       }
       
       // Se não é retryable ou esgotou tentativas, lança o erro
-      console.error(`❌ [${queryName}] Falha após ${attempt} tentativas e ${duration}ms:`, error.message);
+      console.error(`❌ [${queryName}] Falha apos ${attempt} tentativas e ${duration}ms:`, error.message);
       throw error;
     }
   }
