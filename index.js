@@ -6,16 +6,16 @@ import {
   asyncHandler,
   successResponse,
   errorResponse,
-} from '../utils/errorHandler.js';
-import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+} from './utils/errorHandler.js';
+import { getToken, getTokenInfo } from './utils/totvsTokenManager.js';
 import {
   syncFullPesPessoa,
   syncIncrementalPesPessoa,
   fetchAndMapPersons,
   mapPersonToRow,
   upsertBatch,
-} from '../utils/syncPesPessoa.js';
-import supabase from '../config/supabase.js';
+} from './utils/syncPesPessoa.js';
+import supabase from './config/supabase.js';
 
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
