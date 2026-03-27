@@ -6428,7 +6428,12 @@ router.post(
 
       const { filter, option, page, pageSize, order, expand } = req.body;
 
-      if (!filter || !option || !option.balances || !Array.isArray(option.balances)) {
+      if (
+        !filter ||
+        !option ||
+        !option.balances ||
+        !Array.isArray(option.balances)
+      ) {
         return errorResponse(
           res,
           'Campos obrigatórios: filter, option.balances (array com branchCode e stockCodeList)',
@@ -6439,7 +6444,11 @@ router.post(
 
       // Validar cada item de balance
       for (const balance of option.balances) {
-        if (!balance.branchCode || !balance.stockCodeList || !Array.isArray(balance.stockCodeList)) {
+        if (
+          !balance.branchCode ||
+          !balance.stockCodeList ||
+          !Array.isArray(balance.stockCodeList)
+        ) {
           return errorResponse(
             res,
             'Cada item em option.balances deve ter branchCode (number) e stockCodeList (number[])',
@@ -6475,7 +6484,9 @@ router.post(
 
       const data = response.data;
 
-      console.log(`✅ Saldos encontrados: ${data.items?.length || 0} itens (total: ${data.totalItems || 0})`);
+      console.log(
+        `✅ Saldos encontrados: ${data.items?.length || 0} itens (total: ${data.totalItems || 0})`,
+      );
 
       return successResponse(
         res,
