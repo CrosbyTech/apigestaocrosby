@@ -6525,4 +6525,115 @@ router.post(
   }),
 );
 
+/**
+ * POST /product-search
+ * Busca produtos via API TOTVS com suporte a expand (barCodes, classifications, etc.)
+ */
+router.post(
+  '/product-search',
+  asyncHandler(async (req, res) => {
+    try {
+      const tokenData = await getToken();
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_ERROR',
+        );
+      }
+
+      const { filter, option, page, pageSize, order, expand } = req.body;
+
+      if (!filter || !option || option.branchInfoCode == null) {
+        return errorResponse(
+          res,
+          'Campos obrigatórios: filter, option.branchInfoCode',
+          400,
+          'MISSING_PARAMS',
+        );
+      }
+
+      const body = {
+        filter: filter || {},
+        option,
+        page: page || 1,
+        pageSize: Math.min(pageSize || 200, 1000),
+      };
+
+      if (order) body.order = order;
+      if (expand) body.expand = expand;
+
+      const url = `${TOTVS_BASE_URL}/product/v2/products/search`;
+      console.log('🔍 Buscando produtos TOTVS:', url);
+      console.log('🔍 Body:', JSON.stringify(body, null, 2));
+
+      const response = await axios.post(url, body, {
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        timeout: 120000,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      });
+
+      const data = response.data;
+
+      console.log(
+        `✅ Produtos encontrados: ${data.items?.length || 0} itens (total: ${data.totalItems || 0})`,
+      );
+
+      return successResponse(
+        res,
+        {
+          data: data.items || [],
+          total: data.totalItems || 0,
+          count: data.count || 0,
+          totalPages: data.totalPages || 0,
+          hasNext: data.hasNext || false,
+          page: body.page,
+          pageSize: body.pageSize,
+        },
+        `${data.items?.length || 0} produtos encontrados`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar produtos TOTVS:', {
+        message: error.message,
+        status: error.response?.status,
+        data: JSON.stringify(error.response?.data, null, 2),
+      });
+
+      if (error.response) {
+        const totvsMsg =
+          error.response.data?.message ||
+          error.response.data?.errors?.[0]?.message ||
+          error.response.data?.error ||
+          (typeof error.response.data === 'string'
+            ? error.response.data
+            : null) ||
+          'Erro ao buscar produtos na API TOTVS';
+        return errorResponse(
+          res,
+          totvsMsg,
+          error.response.status || 500,
+          'TOTVS_API_ERROR',
+          { totvs: error.response.data },
+        );
+      }
+
+      if (error.request) {
+        return errorResponse(
+          res,
+          'Não foi possível conectar à API TOTVS',
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw error;
+    }
+  }),
+);
+
 export default router;
