@@ -1863,6 +1863,197 @@ router.post(
 );
 
 /**
+ * @route POST /totvs/legal-entity/search-by-phone
+ * @desc Busca pessoa jurídica por número de telefone na API TOTVS
+ *       A API TOTVS PJ não suporta filtro direto por telefone,
+ *       então esta rota percorre as páginas e filtra localmente.
+ * @access Public
+ * @body {
+ *   phoneNumber: string (obrigatório) - Número de telefone (apenas números, mín. 8 dígitos)
+ *   maxPages: number (opcional) - Máximo de páginas a percorrer (default: 30)
+ * }
+ */
+router.post(
+  '/legal-entity/search-by-phone',
+  asyncHandler(async (req, res) => {
+    const { phoneNumber, maxPages = 30 } = req.body;
+
+    if (!phoneNumber || phoneNumber.trim().length < 8) {
+      return errorResponse(
+        res,
+        'O campo phoneNumber é obrigatório e deve ter pelo menos 8 dígitos',
+        400,
+        'MISSING_PHONE_NUMBER',
+      );
+    }
+
+    // Remover caracteres não numéricos
+    const cleanPhone = phoneNumber.replace(/\D/g, '');
+
+    if (cleanPhone.length < 8) {
+      return errorResponse(
+        res,
+        'O número de telefone deve ter pelo menos 8 dígitos numéricos',
+        400,
+        'INVALID_PHONE_NUMBER',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+
+      console.log('🔍 Buscando pessoa jurídica por telefone na API TOTVS:', {
+        endpoint,
+        phoneNumber: cleanPhone,
+        maxPages,
+      });
+
+      const doRequest = async (accessToken, page) => {
+        const payload = {
+          filter: {
+            isCustomer: true,
+          },
+          expand:
+            'phones,emails,addresses,contacts,classifications,observations',
+          page: page,
+          pageSize: 500,
+          order: 'personCode',
+        };
+
+        return axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 60000,
+        });
+      };
+
+      let allMatches = [];
+      let currentPage = 1;
+      let hasMore = true;
+      let token = tokenData.access_token;
+      let totalFetched = 0;
+
+      while (hasMore && currentPage <= maxPages) {
+        let response;
+        try {
+          response = await doRequest(token, currentPage);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            console.log('🔄 Token inválido. Renovando token...');
+            const newTokenData = await getToken(true);
+            token = newTokenData.access_token;
+            response = await doRequest(token, currentPage);
+          } else {
+            throw error;
+          }
+        }
+
+        const pageItems = response.data?.items || [];
+        totalFetched += pageItems.length;
+        hasMore = response.data?.hasNext || false;
+
+        // Filtrar por telefone localmente
+        const matches = pageItems.filter((item) => {
+          if (!item.phones || !Array.isArray(item.phones)) return false;
+          return item.phones.some((phone) => {
+            const num = (phone.number || '').replace(/\D/g, '');
+            return num.includes(cleanPhone) || cleanPhone.includes(num);
+          });
+        });
+
+        if (matches.length > 0) {
+          allMatches = allMatches.concat(matches);
+        }
+
+        console.log(
+          `📄 PJ Página ${currentPage}: ${pageItems.length} itens, ${matches.length} match(es) (total matches: ${allMatches.length})`,
+        );
+
+        currentPage++;
+      }
+
+      console.log(
+        `✅ Busca PJ por telefone concluída: ${allMatches.length} de ${totalFetched} em ${currentPage - 1} páginas`,
+      );
+
+      successResponse(
+        res,
+        {
+          items: allMatches,
+          totalFiltered: allMatches.length,
+          totalFetched: totalFetched,
+          pagesSearched: currentPage - 1,
+          hasMore: hasMore,
+        },
+        `${allMatches.length} pessoa(s) jurídica(s) encontrada(s) com o telefone informado`,
+      );
+    } catch (error) {
+      console.error(
+        '❌ Erro ao buscar pessoa jurídica por telefone na API TOTVS:',
+        {
+          message: error.message,
+          code: error.code,
+          response: error.response?.data,
+          status: error.response?.status,
+        },
+      );
+
+      if (error.response) {
+        let errorMessage =
+          'Erro ao buscar pessoa jurídica por telefone na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+/**
  * @route POST /totvs/individual/search
  * @desc Busca dados de pessoa física (PF) na API TOTVS Moda
  * @access Public
