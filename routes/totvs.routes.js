@@ -6964,7 +6964,7 @@ router.post(
       if (error.request) {
         return errorResponse(
           res,
-          'Não foi possível conectar a API TOTVS',
+          'Não foi possível conectar à API TOTVS',
           503,
           'TOTVS_CONNECTION_ERROR',
         );

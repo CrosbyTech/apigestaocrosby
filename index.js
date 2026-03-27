@@ -1971,6 +1971,7 @@ router.post(
           if (!item.phones || !Array.isArray(item.phones)) return false;
           return item.phones.some((phone) => {
             const num = (phone.number || '').replace(/\D/g, '');
+            if (num.length < 8) return false;
             return num.includes(cleanPhone) || cleanPhone.includes(num);
           });
         });
@@ -2327,6 +2328,159 @@ router.post(
 
       if (error.response) {
         let errorMessage = 'Erro ao buscar pessoas físicas na API TOTVS';
+
+        if (error.response.data) {
+          if (typeof error.response.data === 'string') {
+            errorMessage = error.response.data || errorMessage;
+          } else if (typeof error.response.data === 'object') {
+            errorMessage =
+              error.response.data?.message ||
+              error.response.data?.error ||
+              error.response.data?.error_description ||
+              error.response.data?.title ||
+              errorMessage;
+          }
+        }
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
+
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+// =============================================================================
+// BUSCA PESSOA FÍSICA POR TELEFONE
+// =============================================================================
+
+/**
+ * @route POST /totvs/individual/search-by-phone
+ * @desc Busca pessoa física por número de telefone na API TOTVS
+ *       A API TOTVS PF suporta filtro direto por phoneNumber.
+ * @access Public
+ * @body {
+ *   phoneNumber: string (obrigatório) - Número de telefone (apenas números, mín. 8 dígitos)
+ * }
+ */
+router.post(
+  '/individual/search-by-phone',
+  asyncHandler(async (req, res) => {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber || phoneNumber.trim().length < 8) {
+      return errorResponse(
+        res,
+        'O campo phoneNumber é obrigatório e deve ter pelo menos 8 dígitos',
+        400,
+        'MISSING_PHONE_NUMBER',
+      );
+    }
+
+    // Remover caracteres não numéricos
+    const cleanPhone = phoneNumber.replace(/\D/g, '');
+
+    if (cleanPhone.length < 8) {
+      return errorResponse(
+        res,
+        'O número de telefone deve ter pelo menos 8 dígitos numéricos',
+        400,
+        'INVALID_PHONE_NUMBER',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const payload = {
+        filter: {
+          phoneNumber: cleanPhone,
+          isCustomer: true,
+        },
+        expand: 'phones,emails,addresses,classifications,observations',
+        page: 1,
+        pageSize: 500,
+      };
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+      console.log('🔍 Buscando pessoa física por telefone na API TOTVS:', {
+        endpoint,
+        phoneNumber: cleanPhone,
+      });
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido. Renovando token...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      const items = response.data?.items || [];
+      console.log(
+        `✅ Busca por telefone concluída: ${items.length} pessoa(s) encontrada(s)`,
+      );
+
+      successResponse(
+        res,
+        response.data,
+        `${items.length} pessoa(s) encontrada(s) com o telefone informado`,
+      );
+    } catch (error) {
+      console.error(
+        '❌ Erro ao buscar pessoa física por telefone na API TOTVS:',
+        {
+          message: error.message,
+          code: error.code,
+          response: error.response?.data,
+          status: error.response?.status,
+        },
+      );
+
+      if (error.response) {
+        let errorMessage =
+          'Erro ao buscar pessoa física por telefone na API TOTVS';
 
         if (error.response.data) {
           if (typeof error.response.data === 'string') {
