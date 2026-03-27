@@ -6413,7 +6413,12 @@ router.post(
 
       const { filter, option, page, pageSize, order, expand } = req.body;
 
-      if (!filter || !option || !option.balances || !Array.isArray(option.balances)) {
+      if (
+        !filter ||
+        !option ||
+        !option.balances ||
+        !Array.isArray(option.balances)
+      ) {
         return errorResponse(
           res,
           'Campos obrigatórios: filter, option.balances (array com branchCode e stockCodeList)',
@@ -6424,7 +6429,11 @@ router.post(
 
       // Validar cada item de balance
       for (const balance of option.balances) {
-        if (!balance.branchCode || !balance.stockCodeList || !Array.isArray(balance.stockCodeList)) {
+        if (
+          !balance.branchCode ||
+          !balance.stockCodeList ||
+          !Array.isArray(balance.stockCodeList)
+        ) {
           return errorResponse(
             res,
             'Cada item em option.balances deve ter branchCode (number) e stockCodeList (number[])',
@@ -6460,7 +6469,9 @@ router.post(
 
       const data = response.data;
 
-      console.log(`✅ Saldos encontrados: ${data.items?.length || 0} itens (total: ${data.totalItems || 0})`);
+      console.log(
+        `✅ Saldos encontrados: ${data.items?.length || 0} itens (total: ${data.totalItems || 0})`,
+      );
 
       return successResponse(
         res,
@@ -6479,17 +6490,24 @@ router.post(
       console.error('❌ Erro ao buscar saldos de produtos TOTVS:', {
         message: error.message,
         status: error.response?.status,
-        data: error.response?.data,
+        data: JSON.stringify(error.response?.data, null, 2),
       });
 
       if (error.response) {
+        const totvsMsg =
+          error.response.data?.message ||
+          error.response.data?.errors?.[0]?.message ||
+          error.response.data?.error ||
+          (typeof error.response.data === 'string'
+            ? error.response.data
+            : null) ||
+          'Erro ao buscar saldos na API TOTVS';
         return errorResponse(
           res,
-          error.response.data?.message ||
-            error.response.data?.errors?.[0]?.message ||
-            'Erro ao buscar saldos na API TOTVS',
+          totvsMsg,
           error.response.status || 500,
           'TOTVS_API_ERROR',
+          { totvs: error.response.data },
         );
       }
 
