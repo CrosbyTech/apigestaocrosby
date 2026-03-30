@@ -6882,14 +6882,21 @@ router.post(
 // VOUCHERS
 // =============================================================================
 
+// Mapeamento de status frontend → enum numérico TOTVS
+const VOUCHER_STATUS_TO_API = {
+  InProgress: 1, // Em andamento
+  Closed: 4, // Encerrado
+  Canceled: 6, // Cancelado
+};
+
 /**
  * Helper: busca TODAS as páginas de vouchers de uma branch e retorna o array completo
  */
 async function fetchAllVouchers(token, queryParams) {
   const allItems = [];
-  let page = 1;
+  let currentPage = 1;
   let hasNext = true;
-  const pageSize = 200;
+  const pgSize = 200;
 
   while (hasNext) {
     const resp = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
@@ -6897,14 +6904,14 @@ async function fetchAllVouchers(token, queryParams) {
         accept: 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      params: { ...queryParams, page, pageSize },
+      params: { ...queryParams, Page: currentPage, PageSize: pgSize },
       httpsAgent,
       timeout: 30000,
     });
     const data = resp.data;
     allItems.push(...(data.items || []));
     hasNext = data.hasNext === true && allItems.length < 2000;
-    page++;
+    currentPage++;
   }
   return allItems;
 }
@@ -6982,18 +6989,32 @@ router.get(
 
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+      return errorResponse(
+        res,
+        'Não foi possível obter token TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
     }
     const token = tokenData.access_token;
 
     const params = {
-      page: Number(page),
-      pageSize: Math.min(Number(pageSize), 200),
+      Page: Number(page),
+      PageSize: Math.min(Number(pageSize), 200),
     };
-    if (status) params.status = status;
-    if (voucherCode) params.voucherCode = voucherCode;
-    if (startDate) params.startDate = startDate;
-    if (endDate) params.endDate = endDate;
+
+    // Status: mapear para enum numérico TOTVS
+    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
+      params.Status = VOUCHER_STATUS_TO_API[status];
+    }
+
+    if (voucherCode) params.VoucherCodeList = voucherCode;
+
+    // Filtro de vigência: parâmetros PascalCase conforme Swagger TOTVS
+    // EndDateInitial → voucher.endDate >= startDate (vigência não terminou antes do filtro)
+    // StartDateFinal → voucher.startDate <= endDate (vigência não começa depois do filtro)
+    if (startDate) params.EndDateInitial = `${startDate}T00:00:00`;
+    if (endDate) params.StartDateFinal = `${endDate}T23:59:59`;
 
     if (branches) {
       const branchList = branches
@@ -7014,7 +7035,19 @@ router.get(
     });
 
     const data = response.data;
-    const items = data.items || [];
+    let items = data.items || [];
+
+    // Filtro pós-busca pela vigência (safety net)
+    if (startDate || endDate) {
+      items = items.filter((v) => {
+        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
+        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
+        if (startDate && vEnd && vEnd < startDate) return false;
+        if (endDate && vStart && vStart > endDate) return false;
+        return true;
+      });
+    }
+
     const indicators = calcVoucherIndicators(items);
 
     successResponse(
@@ -7049,7 +7082,12 @@ router.get(
 
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+      return errorResponse(
+        res,
+        'Não foi possível obter token TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
     }
     const token = tokenData.access_token;
 
@@ -7066,9 +7104,16 @@ router.get(
     }
 
     const queryParams = {};
-    if (startDate) queryParams.startDate = startDate;
-    if (endDate) queryParams.endDate = endDate;
-    if (status) queryParams.status = status;
+    // Filtro de vigência via API TOTVS (parâmetros PascalCase conforme Swagger)
+    // EndDateInitial → voucher.endDate >= startDate
+    // StartDateFinal → voucher.startDate <= endDate
+    if (startDate) queryParams.EndDateInitial = `${startDate}T00:00:00`;
+    if (endDate) queryParams.StartDateFinal = `${endDate}T23:59:59`;
+
+    // Status: mapear para enum numérico TOTVS
+    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
+      queryParams.Status = VOUCHER_STATUS_TO_API[status];
+    }
 
     const CHUNK = 5;
     let allItems = [];
@@ -7093,6 +7138,17 @@ router.get(
       seen.add(key);
       return true;
     });
+
+    // Filtro pós-busca pela vigência (safety net)
+    if (startDate || endDate) {
+      allItems = allItems.filter((v) => {
+        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
+        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
+        if (startDate && vEnd && vEnd < startDate) return false;
+        if (endDate && vStart && vStart > endDate) return false;
+        return true;
+      });
+    }
 
     const indicators = calcVoucherIndicators(allItems);
 
