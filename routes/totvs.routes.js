@@ -6979,14 +6979,22 @@ router.post(
 // VOUCHERS
 // ==========================================
 
+// Mapeamento de status frontend → enum numérico TOTVS
+const VOUCHER_STATUS_TO_API = {
+  InProgress: 1, // Em andamento
+  Closed: 4, // Encerrado
+  Used: 4, // Utilizado → Encerrado na API
+  Canceled: 6, // Cancelado
+};
+
 /**
  * Helper: busca TODAS as páginas de uma query de vouchers e retorna o array completo
  */
 async function fetchAllVouchers(token, queryParams) {
   const allItems = [];
-  let page = 1;
+  let currentPage = 1;
   let hasNext = true;
-  const pageSize = 200;
+  const pgSize = 200;
 
   while (hasNext) {
     const resp = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
@@ -6994,14 +7002,14 @@ async function fetchAllVouchers(token, queryParams) {
         accept: 'application/json',
         Authorization: `Bearer ${token.access_token}`,
       },
-      params: { ...queryParams, page, pageSize },
+      params: { ...queryParams, Page: currentPage, PageSize: pgSize },
       httpsAgent,
       timeout: 30000,
     });
     const data = resp.data;
     allItems.push(...(data.items || []));
     hasNext = data.hasNext === true && allItems.length < 2000; // segurança
-    page++;
+    currentPage++;
   }
   return allItems;
 }
@@ -7088,13 +7096,22 @@ router.get(
     const token = await getToken();
 
     const params = {
-      page: Number(page),
-      pageSize: Math.min(Number(pageSize), 200),
+      Page: Number(page),
+      PageSize: Math.min(Number(pageSize), 200),
     };
-    if (status) params.status = status;
-    if (voucherCode) params.voucherCode = voucherCode;
-    if (startDate) params.startDate = startDate;
-    if (endDate) params.endDate = endDate;
+
+    // Status: mapear para enum numérico TOTVS
+    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
+      params.Status = VOUCHER_STATUS_TO_API[status];
+    }
+
+    if (voucherCode) params.VoucherCodeList = voucherCode;
+
+    // Filtro de vigência: buscar vouchers cuja vigência sobreponha o período selecionado
+    // EndDateInitial = filtro startDate → voucher.endDate >= startDate
+    // StartDateFinal = filtro endDate → voucher.startDate <= endDate
+    if (startDate) params.EndDateInitial = `${startDate}T00:00:00`;
+    if (endDate) params.StartDateFinal = `${endDate}T23:59:59`;
 
     // Filtro por empresa: aceita lista separada por vírgula
     if (branches) {
@@ -7178,9 +7195,16 @@ router.get(
     }
 
     const queryParams = {};
-    if (startDate) queryParams.startDate = startDate;
-    if (endDate) queryParams.endDate = endDate;
-    if (status) queryParams.status = status;
+    // Filtro de vigência via API TOTVS (parâmetros PascalCase)
+    // EndDateInitial = filtro startDate → voucher.endDate >= startDate
+    // StartDateFinal = filtro endDate → voucher.startDate <= endDate
+    if (startDate) queryParams.EndDateInitial = `${startDate}T00:00:00`;
+    if (endDate) queryParams.StartDateFinal = `${endDate}T23:59:59`;
+
+    // Status: mapear para enum numérico TOTVS
+    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
+      queryParams.Status = VOUCHER_STATUS_TO_API[status];
+    }
 
     // Busca em paralelo por empresa (máx 5 branches simultâneos)
     const CHUNK = 5;
