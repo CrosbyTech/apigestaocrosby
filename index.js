@@ -6879,6 +6879,257 @@ router.post(
 );
 
 // =============================================================================
+// VOUCHERS
+// =============================================================================
+
+/**
+ * Helper: busca TODAS as páginas de vouchers de uma branch e retorna o array completo
+ */
+async function fetchAllVouchers(token, queryParams) {
+  const allItems = [];
+  let page = 1;
+  let hasNext = true;
+  const pageSize = 200;
+
+  while (hasNext) {
+    const resp = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
+      headers: {
+        accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      params: { ...queryParams, page, pageSize },
+      httpsAgent,
+      timeout: 30000,
+    });
+    const data = resp.data;
+    allItems.push(...(data.items || []));
+    hasNext = data.hasNext === true && allItems.length < 2000;
+    page++;
+  }
+  return allItems;
+}
+
+/**
+ * Helper: calcula indicadores e agrupamentos a partir do array de vouchers
+ */
+function calcVoucherIndicators(items) {
+  const now = new Date();
+  const sevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+  const indicators = {
+    totalVouchers: items.length,
+    totalValue: 0,
+    usedValue: 0,
+    statusCount: {},
+    typeCount: {},
+    branchCount: {},
+    expiringSoon: 0,
+    timelinePorDia: {},
+  };
+
+  items.forEach((v) => {
+    const value = v.value || 0;
+    indicators.totalValue += value;
+
+    const st = v.status || 'Unknown';
+    indicators.statusCount[st] = (indicators.statusCount[st] || 0) + 1;
+    if (st === 'Used') indicators.usedValue += value;
+
+    const vType = v.voucherType || 'Unknown';
+    indicators.typeCount[vType] = (indicators.typeCount[vType] || 0) + 1;
+
+    const branch = v.branchCode != null ? String(v.branchCode) : 'N/A';
+    if (!indicators.branchCount[branch]) {
+      indicators.branchCount[branch] = { total: 0, value: 0 };
+    }
+    indicators.branchCount[branch].total++;
+    indicators.branchCount[branch].value += value;
+
+    if (st === 'InProgress' && v.endDate) {
+      const end = new Date(v.endDate);
+      if (end > now && end <= sevenDays) indicators.expiringSoon++;
+    }
+
+    if (v.startDate) {
+      const dia = v.startDate.split('T')[0];
+      if (!indicators.timelinePorDia[dia]) {
+        indicators.timelinePorDia[dia] = { total: 0, value: 0 };
+      }
+      indicators.timelinePorDia[dia].total++;
+      indicators.timelinePorDia[dia].value += value;
+    }
+  });
+
+  return indicators;
+}
+
+/**
+ * @route GET /totvs/vouchers
+ * @desc Busca vouchers com filtros, suporta múltiplas empresas (branches)
+ */
+router.get(
+  '/vouchers',
+  asyncHandler(async (req, res) => {
+    const {
+      page = 1,
+      pageSize = 50,
+      status,
+      voucherCode,
+      startDate,
+      endDate,
+      branches,
+    } = req.query;
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+    }
+    const token = tokenData.access_token;
+
+    const params = {
+      page: Number(page),
+      pageSize: Math.min(Number(pageSize), 200),
+    };
+    if (status) params.status = status;
+    if (voucherCode) params.voucherCode = voucherCode;
+    if (startDate) params.startDate = startDate;
+    if (endDate) params.endDate = endDate;
+
+    if (branches) {
+      const branchList = branches
+        .split(',')
+        .map((b) => parseInt(b.trim(), 10))
+        .filter((b) => !isNaN(b) && b > 0);
+      if (branchList.length > 0) params.branchCode = branchList[0];
+    }
+
+    const response = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
+      headers: {
+        accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      params,
+      httpsAgent,
+      timeout: 30000,
+    });
+
+    const data = response.data;
+    const items = data.items || [];
+    const indicators = calcVoucherIndicators(items);
+
+    successResponse(
+      res,
+      {
+        indicators,
+        items,
+        pagination: {
+          page: Number(page),
+          pageSize: params.pageSize,
+          totalItems: data.totalItems,
+          hasNext: data.hasNext,
+        },
+      },
+      'Vouchers obtidos com sucesso',
+    );
+  }),
+);
+
+/**
+ * @route GET /totvs/vouchers/dashboard
+ * @desc Dashboard de vouchers: KPIs + gráficos aggregados de todas as branches
+ * @query branches    - Empresas separadas por vírgula (opcional, default = todas)
+ * @query startDate   - Data início (YYYY-MM-DD)
+ * @query endDate     - Data fim (YYYY-MM-DD)
+ * @query status      - Filtro por status (opcional)
+ */
+router.get(
+  '/vouchers/dashboard',
+  asyncHandler(async (req, res) => {
+    const { branches, startDate, endDate, status } = req.query;
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+    }
+    const token = tokenData.access_token;
+
+    let branchCodeList = [];
+    if (branches) {
+      branchCodeList = branches
+        .split(',')
+        .map((b) => parseInt(b.trim(), 10))
+        .filter((b) => !isNaN(b) && b > 0);
+    }
+
+    if (branchCodeList.length === 0) {
+      branchCodeList = await getBranchCodes(token);
+    }
+
+    const queryParams = {};
+    if (startDate) queryParams.startDate = startDate;
+    if (endDate) queryParams.endDate = endDate;
+    if (status) queryParams.status = status;
+
+    const CHUNK = 5;
+    let allItems = [];
+
+    for (let i = 0; i < branchCodeList.length; i += CHUNK) {
+      const chunk = branchCodeList.slice(i, i + CHUNK);
+      const results = await Promise.allSettled(
+        chunk.map((bc) =>
+          fetchAllVouchers(token, { ...queryParams, branchCode: bc }),
+        ),
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') allItems.push(...r.value);
+      }
+    }
+
+    // Remove duplicatas
+    const seen = new Set();
+    allItems = allItems.filter((v) => {
+      const key = v.id || v.voucherCode;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const indicators = calcVoucherIndicators(allItems);
+
+    const statusChart = Object.entries(indicators.statusCount).map(
+      ([name, total]) => ({ name, total }),
+    );
+    const typeChart = Object.entries(indicators.typeCount).map(
+      ([name, total]) => ({ name, total }),
+    );
+    const branchChart = Object.entries(indicators.branchCount)
+      .map(([branch, { total, value }]) => ({ branch, total, value }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 15);
+    const timeline = Object.entries(indicators.timelinePorDia)
+      .map(([date, { total, value }]) => ({ date, total, value }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    successResponse(
+      res,
+      {
+        totalVouchers: indicators.totalVouchers,
+        totalValue: indicators.totalValue,
+        usedValue: indicators.usedValue,
+        expiringSoon: indicators.expiringSoon,
+        statusCount: indicators.statusCount,
+        statusChart,
+        typeChart,
+        branchChart,
+        timeline,
+        items: allItems,
+      },
+      'Dashboard de vouchers calculado com sucesso',
+    );
+  }),
+);
+
+// =============================================================================
 // SERVER SETUP
 // =============================================================================
 
