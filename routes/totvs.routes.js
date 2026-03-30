@@ -7116,7 +7116,19 @@ router.get(
     });
 
     const data = response.data;
-    const items = data.items || [];
+    let items = data.items || [];
+
+    // Filtrar pela vigência do voucher (startDate/endDate do registro)
+    if (startDate || endDate) {
+      items = items.filter((v) => {
+        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
+        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
+        if (startDate && vEnd && vEnd < startDate) return false;
+        if (endDate && vStart && vStart > endDate) return false;
+        return true;
+      });
+    }
+
     const indicators = calcVoucherIndicators(items);
 
     successResponse(
@@ -7194,6 +7206,17 @@ router.get(
       seen.add(key);
       return true;
     });
+
+    // Filtrar pela vigência do voucher (startDate/endDate do registro)
+    if (startDate || endDate) {
+      allItems = allItems.filter((v) => {
+        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
+        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
+        if (startDate && vEnd && vEnd < startDate) return false;
+        if (endDate && vStart && vStart > endDate) return false;
+        return true;
+      });
+    }
 
     const indicators = calcVoucherIndicators(allItems);
 
