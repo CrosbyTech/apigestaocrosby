@@ -6895,7 +6895,7 @@ async function callTotvsAnalytics(endpoint, body, res) {
     }
 
     const url = `${TOTVS_BASE_URL}${endpoint}`;
-    console.log(`📊 [PainelVendas] ${url}`);
+    console.log(`📊 [PainelVendas] ${url}`, JSON.stringify(body));
 
     const response = await axios.post(url, body, {
       headers: {
@@ -6937,9 +6937,15 @@ async function callTotvsAnalytics(endpoint, body, res) {
     }
 
     if (error.response) {
+      console.error(
+        `❌ [PainelVendas] ${endpoint} → ${error.response.status}`,
+        JSON.stringify(error.response.data),
+      );
       return errorResponse(
         res,
-        error.response.data?.message || 'Erro na API TOTVS',
+        error.response.data?.message ||
+          JSON.stringify(error.response.data) ||
+          'Erro na API TOTVS',
         error.response.status || 500,
         'TOTVS_API_ERROR',
       );
