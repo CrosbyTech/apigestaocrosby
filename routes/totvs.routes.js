@@ -6980,22 +6980,24 @@ router.post(
 // VOUCHERS
 // ==========================================
 
-// Mapeamento de status frontend → enum numérico TOTVS
-const VOUCHER_STATUS_TO_API = {
-  InProgress: 1, // Em andamento
-  Closed: 4, // Encerrado
-  Used: 4, // Utilizado → Encerrado na API
-  Canceled: 6, // Cancelado
+// Mapeamento de status frontend → inteiro conforme Swagger TOTVS
+// Status array[integer]: 1 = Em andamento, 4 = Encerrado, 6 = Cancelado
+const VOUCHER_STATUS_MAP = {
+  InProgress: 1,
+  Closed: 4,
+  Canceled: 6,
 };
 
 /**
- * Helper: busca TODAS as páginas de uma query de vouchers e retorna o array completo
+ * Helper: busca TODAS as páginas de vouchers e retorna o array completo.
+ * A API TOTVS /voucher/v2/search NÃO tem filtro por branch —
+ * branches é apenas um campo da resposta.
  */
 async function fetchAllVouchers(token, queryParams) {
   const allItems = [];
   let currentPage = 1;
   let hasNext = true;
-  const pgSize = 200;
+  const pgSize = 500;
 
   while (hasNext) {
     try {
@@ -7006,21 +7008,29 @@ async function fetchAllVouchers(token, queryParams) {
         },
         params: { ...queryParams, Page: currentPage, PageSize: pgSize },
         httpsAgent,
-        timeout: 30000,
+        timeout: 60000,
       });
       const data = resp.data;
       allItems.push(...(data.items || []));
-      hasNext = data.hasNext === true && allItems.length < 2000;
+      hasNext = data.hasNext === true && allItems.length < 5000;
       currentPage++;
     } catch (err) {
       console.error(
-        `⚠️ Voucher fetch falhou branch=${queryParams.branchCode} page=${currentPage}:`,
+        `⚠️ Voucher fetch falhou page=${currentPage}:`,
         err.response?.status || err.message,
       );
       break;
     }
   }
   return allItems;
+}
+
+/**
+ * Helper: extrai os branchCodes de um voucher (campo branchs do response)
+ */
+function getVoucherBranches(voucher) {
+  if (!voucher.branchs || !Array.isArray(voucher.branchs)) return [];
+  return voucher.branchs.map((b) => b.branchCode).filter(Boolean);
 }
 
 /**
@@ -7047,24 +7057,35 @@ function calcVoucherIndicators(items) {
 
     const st = v.status || 'Unknown';
     indicators.statusCount[st] = (indicators.statusCount[st] || 0) + 1;
-    if (st === 'Used') indicators.usedValue += value;
+    if (st === 'Closed') indicators.usedValue += value;
 
     const vType = v.voucherType || 'Unknown';
     indicators.typeCount[vType] = (indicators.typeCount[vType] || 0) + 1;
 
-    const branch = v.branchCode != null ? String(v.branchCode) : 'N/A';
-    if (!indicators.branchCount[branch]) {
-      indicators.branchCount[branch] = { total: 0, value: 0 };
+    // Agrupar por branches do voucher (campo branchs da resposta)
+    const vBranches = getVoucherBranches(v);
+    if (vBranches.length > 0) {
+      vBranches.forEach((bc) => {
+        const key = String(bc);
+        if (!indicators.branchCount[key]) {
+          indicators.branchCount[key] = { total: 0, value: 0 };
+        }
+        indicators.branchCount[key].total++;
+        indicators.branchCount[key].value += value;
+      });
+    } else {
+      if (!indicators.branchCount['N/A']) {
+        indicators.branchCount['N/A'] = { total: 0, value: 0 };
+      }
+      indicators.branchCount['N/A'].total++;
+      indicators.branchCount['N/A'].value += value;
     }
-    indicators.branchCount[branch].total++;
-    indicators.branchCount[branch].value += value;
 
     if (st === 'InProgress' && v.endDate) {
       const end = new Date(v.endDate);
       if (end > now && end <= sevenDays) indicators.expiringSoon++;
     }
 
-    // Agrupar por data de início para gráfico timeline
     if (v.startDate) {
       const dia = v.startDate.split('T')[0];
       if (!indicators.timelinePorDia[dia]) {
@@ -7080,14 +7101,7 @@ function calcVoucherIndicators(items) {
 
 /**
  * @route GET /totvs/vouchers
- * @desc Busca vouchers com filtros, suporta múltiplas empresas (branches)
- * @query branches       - Empresas separadas por vírgula (ex: 1,2,5)
- * @query status         - Filtro por status (InProgress, Used, Expired, Canceled)
- * @query voucherCode    - Código exato do voucher
- * @query startDate      - Data início (YYYY-MM-DD)
- * @query endDate        - Data fim (YYYY-MM-DD)
- * @query page           - Página (default: 1)
- * @query pageSize       - Itens por página (default: 50, max: 200)
+ * @desc Busca vouchers com filtros conforme Swagger TOTVS /voucher/v2/search
  */
 router.get(
   '/vouchers',
@@ -7106,30 +7120,15 @@ router.get(
 
     const params = {
       Page: Number(page),
-      PageSize: Math.min(Number(pageSize), 200),
+      PageSize: Math.min(Number(pageSize), 1000),
     };
 
-    // Status: mapear para enum numérico TOTVS
-    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
-      params.Status = VOUCHER_STATUS_TO_API[status];
+    if (status && VOUCHER_STATUS_MAP[status]) {
+      params.Status = VOUCHER_STATUS_MAP[status];
     }
-
     if (voucherCode) params.VoucherCodeList = voucherCode;
-
-    // Filtro de vigência: buscar vouchers cuja vigência sobreponha o período selecionado
-    // EndDateInitial = filtro startDate → voucher.endDate >= startDate
-    // StartDateFinal = filtro endDate → voucher.startDate <= endDate
     if (startDate) params.EndDateInitial = `${startDate}T00:00:00`;
     if (endDate) params.StartDateFinal = `${endDate}T23:59:59`;
-
-    // Filtro por empresa: aceita lista separada por vírgula
-    if (branches) {
-      const branchList = branches
-        .split(',')
-        .map((b) => parseInt(b.trim(), 10))
-        .filter((b) => !isNaN(b) && b > 0);
-      if (branchList.length > 0) params.branchCode = branchList[0]; // TOTVS v2 aceita um por vez
-    }
 
     const response = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
       headers: {
@@ -7138,21 +7137,28 @@ router.get(
       },
       params,
       httpsAgent,
-      timeout: 30000,
+      timeout: 60000,
     });
 
     const data = response.data;
     let items = data.items || [];
 
-    // Filtrar pela vigência do voucher (startDate/endDate do registro)
-    if (startDate || endDate) {
-      items = items.filter((v) => {
-        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
-        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
-        if (startDate && vEnd && vEnd < startDate) return false;
-        if (endDate && vStart && vStart > endDate) return false;
-        return true;
-      });
+    // Filtro pós-busca por branches
+    if (branches) {
+      const branchSet = new Set(
+        branches
+          .split(',')
+          .map((b) => parseInt(b.trim(), 10))
+          .filter((b) => !isNaN(b)),
+      );
+      if (branchSet.size > 0) {
+        items = items.filter((v) => {
+          const vBranches = getVoucherBranches(v);
+          return (
+            vBranches.length === 0 || vBranches.some((bc) => branchSet.has(bc))
+          );
+        });
+      }
     }
 
     const indicators = calcVoucherIndicators(items);
@@ -7164,7 +7170,7 @@ router.get(
         items,
         pagination: {
           page: Number(page),
-          pageSize: params.pageSize,
+          pageSize: Number(pageSize),
           totalItems: data.totalItems,
           hasNext: data.hasNext,
         },
@@ -7176,11 +7182,7 @@ router.get(
 
 /**
  * @route GET /totvs/vouchers/dashboard
- * @desc Dashboard de vouchers: KPIs + gráficos (busca todas as páginas automaticamente)
- * @query branches    - Empresas separadas por vírgula (opcional, default = todas)
- * @query startDate   - Data início (YYYY-MM-DD)
- * @query endDate     - Data fim (YYYY-MM-DD)
- * @query status      - Filtro por status (opcional)
+ * @desc Dashboard de vouchers: KPIs + gráficos (busca única, filtro de branches pós-busca)
  */
 router.get(
   '/vouchers/dashboard',
@@ -7198,115 +7200,62 @@ router.get(
       );
     }
 
-    // Montar lista de branchCodes a consultar
-    let branchCodeList = [];
-    if (branches) {
-      branchCodeList = branches
-        .split(',')
-        .map((b) => parseInt(b.trim(), 10))
-        .filter((b) => !isNaN(b) && b > 0);
-    }
-
-    // Se não informou branches, busca os disponíveis
-    if (branchCodeList.length === 0) {
-      branchCodeList = await getBranchCodes(token.access_token);
-    }
-
     const queryParams = {};
-    // Filtro de vigência via API TOTVS (parâmetros PascalCase)
-    // EndDateInitial = filtro startDate → voucher.endDate >= startDate
-    // StartDateFinal = filtro endDate → voucher.startDate <= endDate
     if (startDate) queryParams.EndDateInitial = `${startDate}T00:00:00`;
     if (endDate) queryParams.StartDateFinal = `${endDate}T23:59:59`;
-
-    // Status: mapear para enum numérico TOTVS
-    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
-      queryParams.Status = VOUCHER_STATUS_TO_API[status];
+    if (status && VOUCHER_STATUS_MAP[status]) {
+      queryParams.Status = VOUCHER_STATUS_MAP[status];
     }
 
-    // Limitar branches para evitar timeout (máx 10 por vez)
-    const effectiveBranches = branchCodeList.slice(0, 10);
-    console.log(
-      `🎫 Voucher dashboard: buscando ${effectiveBranches.length} branches de ${branchCodeList.length} total`,
-    );
+    console.log('🎫 Voucher dashboard params:', JSON.stringify(queryParams));
 
-    const CHUNK = 5;
     let allItems = [];
-    let failedBranches = 0;
-
-    for (let i = 0; i < effectiveBranches.length; i += CHUNK) {
-      const chunk = effectiveBranches.slice(i, i + CHUNK);
-      const results = await Promise.allSettled(
-        chunk.map((bc) =>
-          fetchAllVouchers(token, { ...queryParams, branchCode: bc }),
-        ),
-      );
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          allItems.push(...r.value);
-        } else {
-          failedBranches++;
-          console.error(
-            '❌ Voucher branch falhou:',
-            r.reason?.message || r.reason,
-          );
-        }
-      }
-    }
-
-    // Se TODAS as branches falharam, informar erro ao frontend
-    if (
-      failedBranches === effectiveBranches.length &&
-      effectiveBranches.length > 0
-    ) {
-      console.error('❌ Todas as branches de voucher falharam');
+    try {
+      allItems = await fetchAllVouchers(token, queryParams);
+    } catch (err) {
+      console.error('❌ Voucher dashboard fetch falhou:', err.message);
       return errorResponse(
         res,
-        'Não foi possível buscar vouchers na API TOTVS. Verifique se o módulo de vouchers está habilitado.',
+        'Não foi possível buscar vouchers na API TOTVS.',
         502,
         'VOUCHER_API_ERROR',
       );
     }
 
-    // Remove duplicatas por id/voucherCode
-    const seen = new Set();
-    allItems = allItems.filter((v) => {
-      const key = v.id || v.voucherCode;
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    console.log(
+      `🎫 Voucher dashboard: ${allItems.length} vouchers retornados da API`,
+    );
 
-    // Filtrar pela vigência do voucher (startDate/endDate do registro)
-    if (startDate || endDate) {
-      allItems = allItems.filter((v) => {
-        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
-        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
-        if (startDate && vEnd && vEnd < startDate) return false;
-        if (endDate && vStart && vStart > endDate) return false;
-        return true;
-      });
+    // Filtro pós-busca por branches selecionadas
+    if (branches) {
+      const branchSet = new Set(
+        branches
+          .split(',')
+          .map((b) => parseInt(b.trim(), 10))
+          .filter((b) => !isNaN(b)),
+      );
+      if (branchSet.size > 0) {
+        allItems = allItems.filter((v) => {
+          const vBranches = getVoucherBranches(v);
+          return (
+            vBranches.length === 0 || vBranches.some((bc) => branchSet.has(bc))
+          );
+        });
+      }
     }
 
     const indicators = calcVoucherIndicators(allItems);
 
-    // Prepare gráfico de status
     const statusChart = Object.entries(indicators.statusCount).map(
       ([name, total]) => ({ name, total }),
     );
-
-    // Prepare gráfico de tipo
     const typeChart = Object.entries(indicators.typeCount).map(
       ([name, total]) => ({ name, total }),
     );
-
-    // Prepare gráfico de empresas (top 15)
     const branchChart = Object.entries(indicators.branchCount)
       .map(([branch, { total, value }]) => ({ branch, total, value }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 15);
-
-    // Timeline ordenada
     const timeline = Object.entries(indicators.timelinePorDia)
       .map(([date, { total, value }]) => ({ date, total, value }))
       .sort((a, b) => a.date.localeCompare(b.date));
