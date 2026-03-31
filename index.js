@@ -6879,114 +6879,11 @@ router.post(
 );
 
 // =============================================================================
-// VOUCHERS
+// PAINEL DE VENDAS — Sale Panel & Seller Panel (Analytics)
 // =============================================================================
 
-// Mapeamento de status frontend → enum numérico TOTVS
-const VOUCHER_STATUS_TO_API = {
-  InProgress: 1, // Em andamento
-  Closed: 4, // Encerrado
-  Canceled: 6, // Cancelado
-};
-
-/**
- * Helper: busca TODAS as páginas de vouchers de uma branch e retorna o array completo
- */
-async function fetchAllVouchers(token, queryParams) {
-  const allItems = [];
-  let currentPage = 1;
-  let hasNext = true;
-  const pgSize = 200;
-
-  while (hasNext) {
-    const resp = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
-      headers: {
-        accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      params: { ...queryParams, Page: currentPage, PageSize: pgSize },
-      httpsAgent,
-      timeout: 30000,
-    });
-    const data = resp.data;
-    allItems.push(...(data.items || []));
-    hasNext = data.hasNext === true && allItems.length < 2000;
-    currentPage++;
-  }
-  return allItems;
-}
-
-/**
- * Helper: calcula indicadores e agrupamentos a partir do array de vouchers
- */
-function calcVoucherIndicators(items) {
-  const now = new Date();
-  const sevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-  const indicators = {
-    totalVouchers: items.length,
-    totalValue: 0,
-    usedValue: 0,
-    statusCount: {},
-    typeCount: {},
-    branchCount: {},
-    expiringSoon: 0,
-    timelinePorDia: {},
-  };
-
-  items.forEach((v) => {
-    const value = v.value || 0;
-    indicators.totalValue += value;
-
-    const st = v.status || 'Unknown';
-    indicators.statusCount[st] = (indicators.statusCount[st] || 0) + 1;
-    if (st === 'Used') indicators.usedValue += value;
-
-    const vType = v.voucherType || 'Unknown';
-    indicators.typeCount[vType] = (indicators.typeCount[vType] || 0) + 1;
-
-    const branch = v.branchCode != null ? String(v.branchCode) : 'N/A';
-    if (!indicators.branchCount[branch]) {
-      indicators.branchCount[branch] = { total: 0, value: 0 };
-    }
-    indicators.branchCount[branch].total++;
-    indicators.branchCount[branch].value += value;
-
-    if (st === 'InProgress' && v.endDate) {
-      const end = new Date(v.endDate);
-      if (end > now && end <= sevenDays) indicators.expiringSoon++;
-    }
-
-    if (v.startDate) {
-      const dia = v.startDate.split('T')[0];
-      if (!indicators.timelinePorDia[dia]) {
-        indicators.timelinePorDia[dia] = { total: 0, value: 0 };
-      }
-      indicators.timelinePorDia[dia].total++;
-      indicators.timelinePorDia[dia].value += value;
-    }
-  });
-
-  return indicators;
-}
-
-/**
- * @route GET /totvs/vouchers
- * @desc Busca vouchers com filtros, suporta múltiplas empresas (branches)
- */
-router.get(
-  '/vouchers',
-  asyncHandler(async (req, res) => {
-    const {
-      page = 1,
-      pageSize = 50,
-      status,
-      voucherCode,
-      startDate,
-      endDate,
-      branches,
-    } = req.query;
-
+async function callTotvsAnalytics(endpoint, body, res) {
+  try {
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
       return errorResponse(
@@ -6996,191 +6893,282 @@ router.get(
         'TOKEN_UNAVAILABLE',
       );
     }
-    const token = tokenData.access_token;
 
-    const params = {
-      Page: Number(page),
-      PageSize: Math.min(Number(pageSize), 200),
-    };
+    const url = `${TOTVS_BASE_URL}${endpoint}`;
+    console.log(`📊 [PainelVendas] ${url}`);
 
-    // Status: mapear para enum numérico TOTVS
-    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
-      params.Status = VOUCHER_STATUS_TO_API[status];
-    }
-
-    if (voucherCode) params.VoucherCodeList = voucherCode;
-
-    // Filtro de vigência: parâmetros PascalCase conforme Swagger TOTVS
-    // EndDateInitial → voucher.endDate >= startDate (vigência não terminou antes do filtro)
-    // StartDateFinal → voucher.startDate <= endDate (vigência não começa depois do filtro)
-    if (startDate) params.EndDateInitial = `${startDate}T00:00:00`;
-    if (endDate) params.StartDateFinal = `${endDate}T23:59:59`;
-
-    if (branches) {
-      const branchList = branches
-        .split(',')
-        .map((b) => parseInt(b.trim(), 10))
-        .filter((b) => !isNaN(b) && b > 0);
-      if (branchList.length > 0) params.branchCode = branchList[0];
-    }
-
-    const response = await axios.get(`${TOTVS_BASE_URL}/voucher/v2/search`, {
+    const response = await axios.post(url, body, {
       headers: {
-        accept: 'application/json',
-        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${tokenData.access_token}`,
       },
-      params,
       httpsAgent,
-      timeout: 30000,
+      httpAgent,
+      timeout: 60000,
     });
 
-    const data = response.data;
-    let items = data.items || [];
-
-    // Filtro pós-busca pela vigência (safety net)
-    if (startDate || endDate) {
-      items = items.filter((v) => {
-        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
-        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
-        if (startDate && vEnd && vEnd < startDate) return false;
-        if (endDate && vStart && vStart > endDate) return false;
-        return true;
-      });
+    return successResponse(res, response.data, 'Dados obtidos com sucesso');
+  } catch (error) {
+    // Retry on 401
+    if (error.response?.status === 401) {
+      try {
+        const newToken = await getToken(true);
+        const url = `${TOTVS_BASE_URL}${endpoint}`;
+        const retry = await axios.post(url, body, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${newToken.access_token}`,
+          },
+          httpsAgent,
+          httpAgent,
+          timeout: 60000,
+        });
+        return successResponse(res, retry.data, 'Dados obtidos com sucesso');
+      } catch (retryErr) {
+        return errorResponse(
+          res,
+          retryErr.response?.data?.message || 'Erro após renovar token',
+          retryErr.response?.status || 500,
+          'TOTVS_API_ERROR',
+        );
+      }
     }
 
-    const indicators = calcVoucherIndicators(items);
+    if (error.response) {
+      return errorResponse(
+        res,
+        error.response.data?.message || 'Erro na API TOTVS',
+        error.response.status || 500,
+        'TOTVS_API_ERROR',
+      );
+    }
 
-    successResponse(
+    if (error.request) {
+      return errorResponse(
+        res,
+        'Não foi possível conectar à API TOTVS',
+        503,
+        'TOTVS_CONNECTION_ERROR',
+      );
+    }
+
+    throw error;
+  }
+}
+
+router.post(
+  '/sale-panel/totals',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics('/sale-panel/v2/totals/search', req.body, res);
+  }),
+);
+
+router.post(
+  '/sale-panel/hours',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics('/sale-panel/v2/hours/search', req.body, res);
+  }),
+);
+
+router.post(
+  '/sale-panel/weekdays',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics('/sale-panel/v2/weekdays/search', req.body, res);
+  }),
+);
+
+router.post(
+  '/sale-panel/sellers',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics('/sale-panel/v2/sellers/search', req.body, res);
+  }),
+);
+
+router.post(
+  '/sale-panel/sellers-list',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/sale-panel/v2/sellers-list/search',
+      req.body,
       res,
-      {
-        indicators,
-        items,
-        pagination: {
-          page: Number(page),
-          pageSize: params.pageSize,
-          totalItems: data.totalItems,
-          hasNext: data.hasNext,
-        },
-      },
-      'Vouchers obtidos com sucesso',
     );
   }),
 );
 
-/**
- * @route GET /totvs/vouchers/dashboard
- * @desc Dashboard de vouchers: KPIs + gráficos aggregados de todas as branches
- * @query branches    - Empresas separadas por vírgula (opcional, default = todas)
- * @query startDate   - Data início (YYYY-MM-DD)
- * @query endDate     - Data fim (YYYY-MM-DD)
- * @query status      - Filtro por status (opcional)
- */
-router.get(
-  '/vouchers/dashboard',
+router.post(
+  '/sale-panel/totals-seller',
   asyncHandler(async (req, res) => {
-    const { branches, startDate, endDate, status } = req.query;
-
-    const tokenData = await getToken();
-    if (!tokenData?.access_token) {
-      return errorResponse(
-        res,
-        'Não foi possível obter token TOTVS',
-        503,
-        'TOKEN_UNAVAILABLE',
-      );
-    }
-    const token = tokenData.access_token;
-
-    let branchCodeList = [];
-    if (branches) {
-      branchCodeList = branches
-        .split(',')
-        .map((b) => parseInt(b.trim(), 10))
-        .filter((b) => !isNaN(b) && b > 0);
-    }
-
-    if (branchCodeList.length === 0) {
-      branchCodeList = await getBranchCodes(token);
-    }
-
-    const queryParams = {};
-    // Filtro de vigência via API TOTVS (parâmetros PascalCase conforme Swagger)
-    // EndDateInitial → voucher.endDate >= startDate
-    // StartDateFinal → voucher.startDate <= endDate
-    if (startDate) queryParams.EndDateInitial = `${startDate}T00:00:00`;
-    if (endDate) queryParams.StartDateFinal = `${endDate}T23:59:59`;
-
-    // Status: mapear para enum numérico TOTVS
-    if (status && VOUCHER_STATUS_TO_API[status] !== undefined) {
-      queryParams.Status = VOUCHER_STATUS_TO_API[status];
-    }
-
-    const CHUNK = 5;
-    let allItems = [];
-
-    for (let i = 0; i < branchCodeList.length; i += CHUNK) {
-      const chunk = branchCodeList.slice(i, i + CHUNK);
-      const results = await Promise.allSettled(
-        chunk.map((bc) =>
-          fetchAllVouchers(token, { ...queryParams, branchCode: bc }),
-        ),
-      );
-      for (const r of results) {
-        if (r.status === 'fulfilled') allItems.push(...r.value);
-      }
-    }
-
-    // Remove duplicatas
-    const seen = new Set();
-    allItems = allItems.filter((v) => {
-      const key = v.id || v.voucherCode;
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-
-    // Filtro pós-busca pela vigência (safety net)
-    if (startDate || endDate) {
-      allItems = allItems.filter((v) => {
-        const vStart = v.startDate ? v.startDate.split('T')[0] : null;
-        const vEnd = v.endDate ? v.endDate.split('T')[0] : null;
-        if (startDate && vEnd && vEnd < startDate) return false;
-        if (endDate && vStart && vStart > endDate) return false;
-        return true;
-      });
-    }
-
-    const indicators = calcVoucherIndicators(allItems);
-
-    const statusChart = Object.entries(indicators.statusCount).map(
-      ([name, total]) => ({ name, total }),
-    );
-    const typeChart = Object.entries(indicators.typeCount).map(
-      ([name, total]) => ({ name, total }),
-    );
-    const branchChart = Object.entries(indicators.branchCount)
-      .map(([branch, { total, value }]) => ({ branch, total, value }))
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 15);
-    const timeline = Object.entries(indicators.timelinePorDia)
-      .map(([date, { total, value }]) => ({ date, total, value }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    successResponse(
+    await callTotvsAnalytics(
+      '/sale-panel/v2/totals-seller/search',
+      req.body,
       res,
-      {
-        totalVouchers: indicators.totalVouchers,
-        totalValue: indicators.totalValue,
-        usedValue: indicators.usedValue,
-        expiringSoon: indicators.expiringSoon,
-        statusCount: indicators.statusCount,
-        statusChart,
-        typeChart,
-        branchChart,
-        timeline,
-        items: allItems,
-      },
-      'Dashboard de vouchers calculado com sucesso',
+    );
+  }),
+);
+
+router.post(
+  '/sale-panel/totals-branch',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/sale-panel/v2/totals-branch/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/sale-panel/totals-branch-type',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/sale-panel/v2/totals-branch-type/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/sale-panel/document-types',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/sale-panel/v2/document-types/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/sale-panel/product-classifications',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/sale-panel/v2/product-classifications/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.get(
+  '/sale-panel/product-classification-types',
+  asyncHandler(async (req, res) => {
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+      const url = `${TOTVS_BASE_URL}/sale-panel/v2/product-classification-types`;
+      const response = await axios.get(url, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${tokenData.access_token}`,
+        },
+        httpsAgent,
+        httpAgent,
+        timeout: 60000,
+      });
+      return successResponse(
+        res,
+        response.data,
+        'Tipos de classificação obtidos',
+      );
+    } catch (error) {
+      if (error.response) {
+        return errorResponse(
+          res,
+          error.response.data?.message || 'Erro TOTVS',
+          error.response.status || 500,
+          'TOTVS_API_ERROR',
+        );
+      }
+      throw error;
+    }
+  }),
+);
+
+router.post(
+  '/sale-panel/branch-ranking',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/sale-panel/v2/branch-ranking/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+// --- SellerPanel ---
+
+router.post(
+  '/seller-panel/totals',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/seller-panel/totals/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/seller-panel/sales-vs-returns',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/seller-panel/sales-vs-returns/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/seller-panel/weekdays',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/seller-panel/weekdays/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/seller-panel/product-classification',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/seller-panel/product-classification/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/seller-panel/sales-target',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/seller-panel/sales-target/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
+router.post(
+  '/seller-panel/top-customers',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/seller-panel/seller/top-customers',
+      req.body,
+      res,
     );
   }),
 );
