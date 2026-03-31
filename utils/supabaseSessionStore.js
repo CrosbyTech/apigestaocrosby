@@ -33,17 +33,33 @@ class SupabaseSessionStore {
   async save(options) {
     const filePath = `${SESSION_PATH}/${options.session}.zip`;
     try {
-      // options.session contém o nome, o zip está no path temporário
-      const tempPath = path.join(
-        os.tmpdir(),
-        `wwebjs_auth_${options.session}.zip`,
-      );
+      // O wwebjs salva o zip temporário no dataPath do RemoteAuth
+      const possiblePaths = [
+        path.join(os.tmpdir(), `wwebjs_auth_${options.session}.zip`),
+        path.join(os.tmpdir(), `RemoteAuth-${options.session}.zip`),
+        path.join(
+          process.cwd(),
+          '.wwebjs_auth',
+          `RemoteAuth-${options.session}.zip`,
+        ),
+      ];
 
-      if (!fs.existsSync(tempPath)) {
-        logger.warn(`Arquivo de sessão não encontrado: ${tempPath}`);
+      let tempPath = null;
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+          tempPath = p;
+          break;
+        }
+      }
+
+      if (!tempPath) {
+        logger.warn(
+          `Arquivo de sessão não encontrado em nenhum path conhecido`,
+        );
         return;
       }
 
+      logger.info(`Salvando sessão de: ${tempPath}`);
       const fileBuffer = fs.readFileSync(tempPath);
 
       const { error } = await supabase.storage

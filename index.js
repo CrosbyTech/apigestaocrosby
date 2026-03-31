@@ -3,35 +3,12 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
-import axios from 'axios';
-import https from 'https';
-import http from 'http';
 
-// Importar rotas
-import financialRoutes from './routes/financial.routes.js';
-import salesRoutes from './routes/sales.routes.js';
-import franchiseRoutes from './routes/franchise.routes.js';
-import faturamentoRoutes from './routes/faturamento.routes.js';
-import companyRoutes from './routes/company.routes.js';
+// ─── Rotas existentes ────────────────────────────────────────────────────────────────────
 import chatRoutes from './routes/chat.routes.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
-import utilsRoutes from './routes/utils.routes.js';
-import widgetsRoutes from './routes/widgets.routes.js';
-import {
-  asyncHandler,
-  successResponse,
-  errorResponse,
-} from './utils/errorHandler.js';
-import { getToken, getTokenInfo } from './utils/totvsTokenManager.js';
-import {
-  syncFullPesPessoa,
-  syncIncrementalPesPessoa,
-  fetchAndMapPersons,
-  mapPersonToRow,
-  upsertBatch,
-} from './utils/syncPesPessoa.js';
-import supabase from './config/supabase.js';
 
+<<<<<<< HEAD
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
 // Evita handshake SSL a cada request (economia ~200-500ms/chamada)
@@ -7178,6 +7155,17 @@ router.post(
     );
   }),
 );
+=======
+// ─── Rotas TOTVS (separadas por domínio) ────────────────────────────────────────────
+import authRouter from './totvsrouter/auth.js';
+import fiscalRouter from './totvsrouter/fiscal.js';
+import clientesRouter from './totvsrouter/clientes.js';
+import filiaisRouter from './totvsrouter/filiais.js';
+import financeiroRouter from './totvsrouter/financeiro.js';
+import estoqueRouter from './totvsrouter/estoque.js';
+import painelVendasRouter from './totvsrouter/painelVendas.js';
+import voucherRouter from './totvsrouter/voucher.js';
+>>>>>>> 535dd793 (refatoração completa no backend melhorando e otimizando as pastas)
 
 // =============================================================================
 // SERVER SETUP
@@ -7199,17 +7187,18 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Montar rotas
-app.use('/api/totvs', router);
-app.use('/api/financial', financialRoutes);
-app.use('/api/sales', salesRoutes);
-app.use('/api/franchise', franchiseRoutes);
-app.use('/api/faturamento', faturamentoRoutes);
-app.use('/api/company', companyRoutes);
+// ─── Montar rotas TOTVS (/api/totvs/*) ───────────────────────────────────────────────────────────────────
+app.use('/api/totvs', authRouter); // GET /token, POST /auth
+app.use('/api/totvs', fiscalRouter); // boleto, DANFE, XML, NFs, movimentos fiscais
+app.use('/api/totvs', clientesRouter); // legal-entity, individual, clientes, sync
+app.use('/api/totvs', filiaisRouter); // branches, franchise, multibrand
+app.use('/api/totvs', financeiroRouter); // accounts-receivable, accounts-payable
+app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
+app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
+
+// ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
-app.use('/api/utils', utilsRoutes);
-app.use('/api/widgets', widgetsRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
