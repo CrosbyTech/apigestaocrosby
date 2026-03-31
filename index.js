@@ -7146,6 +7146,18 @@ router.post(
   }),
 );
 
+// Busca lista de operações com seus tipos (model) — usa FiscalMovementInDto
+router.post(
+  '/operations-list',
+  asyncHandler(async (req, res) => {
+    await callTotvsAnalytics(
+      '/analytics/v2/operation-fiscal-movement/search',
+      req.body,
+      res,
+    );
+  }),
+);
+
 router.post(
   '/seller-panel/product-classification',
   asyncHandler(async (req, res) => {
