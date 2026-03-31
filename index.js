@@ -3,12 +3,17 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
+import https from 'https';
+import http from 'http';
 
 // ─── Rotas existentes ────────────────────────────────────────────────────────────────────
 import chatRoutes from './routes/chat.routes.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
 
-<<<<<<< HEAD
+import { asyncHandler, successResponse, errorResponse } from './utils/errorHandler.js';
+import { getToken, getTokenInfo } from './utils/totvsTokenManager.js';
+
+
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
 // Evita handshake SSL a cada request (economia ~200-500ms/chamada)
@@ -215,8 +220,8 @@ router.post(
             Accept: 'application/json',
           },
           timeout: 30000, // 30 segundos de timeout
-          // Pode ser necessário ignorar erros de certificado SSL em ambiente de desenvolvimento
-          // httpsAgent: new https.Agent({ rejectUnauthorized: false }) // Descomente se necessário
+  
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }) // Descomente se necessário
         },
       );
 
@@ -7155,7 +7160,7 @@ router.post(
     );
   }),
 );
-=======
+
 // ─── Rotas TOTVS (separadas por domínio) ────────────────────────────────────────────
 import authRouter from './totvsrouter/auth.js';
 import fiscalRouter from './totvsrouter/fiscal.js';
@@ -7164,8 +7169,6 @@ import filiaisRouter from './totvsrouter/filiais.js';
 import financeiroRouter from './totvsrouter/financeiro.js';
 import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
-import voucherRouter from './totvsrouter/voucher.js';
->>>>>>> 535dd793 (refatoração completa no backend melhorando e otimizando as pastas)
 
 // =============================================================================
 // SERVER SETUP
