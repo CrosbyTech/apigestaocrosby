@@ -9,10 +9,14 @@ import http from 'http';
 // ─── Rotas existentes ────────────────────────────────────────────────────────────────────
 import chatRoutes from './routes/chat.routes.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
+import financialRoutes from './routes/batidacarteira.routes.js';
 
-import { asyncHandler, successResponse, errorResponse } from './utils/errorHandler.js';
+import {
+  asyncHandler,
+  successResponse,
+  errorResponse,
+} from './utils/errorHandler.js';
 import { getToken, getTokenInfo } from './utils/totvsTokenManager.js';
-
 
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
@@ -220,8 +224,8 @@ router.post(
             Accept: 'application/json',
           },
           timeout: 30000, // 30 segundos de timeout
-  
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }) // Descomente se necessário
+
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }), // Descomente se necessário
         },
       );
 
@@ -7202,6 +7206,7 @@ app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/financial', financialRoutes); // batida-carteira upload
 
 // Error handling middleware
 app.use((err, req, res, next) => {
