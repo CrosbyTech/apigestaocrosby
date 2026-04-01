@@ -11,6 +11,7 @@ import {
   httpAgent,
   TOTVS_BASE_URL,
   TOTVS_AUTH_ENDPOINT,
+  getBranchCodes,
 } from './totvsHelper.js';
 
 const router = express.Router();
@@ -286,42 +287,6 @@ router.post(
 // Lookup de nomes em batch (PJ+PF paralelo, com cache)
 // BranchCodeList em cache de memória
 // ==========================================
-
-// Cache de branchCodes em memória (recarrega a cada 30 min)
-let cachedBranchCodes = null;
-let branchCacheTimestamp = 0;
-const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
-
-async function getBranchCodes(token) {
-  const now = Date.now();
-  if (cachedBranchCodes && now - branchCacheTimestamp < BRANCH_CACHE_TTL) {
-    return cachedBranchCodes;
-  }
-  try {
-    const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
-    const resp = await axios.get(branchesUrl, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      timeout: 10000,
-    });
-    if (resp.data?.items?.length > 0) {
-      cachedBranchCodes = resp.data.items
-        .map((b) => parseInt(b.code))
-        .filter((c) => !isNaN(c) && c > 0);
-      branchCacheTimestamp = now;
-      return cachedBranchCodes;
-    }
-  } catch (err) {
-    console.log('⚠️ Erro ao buscar branches, usando cache/fallback');
-  }
-  // Fallback se cache expirou e API falhou
-  return (
-    cachedBranchCodes || [
-      1, 2, 5, 6, 11, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
-      97, 98, 99, 100, 101, 870, 880, 890, 900, 910, 920, 930, 940, 950, 960,
-      970, 980, 990,
-    ]
-  );
-}
 
 router.get(
   '/accounts-receivable/filter',
