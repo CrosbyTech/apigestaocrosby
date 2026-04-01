@@ -5,315 +5,102 @@ import {
   successResponse,
   errorResponse,
 } from '../utils/errorHandler.js';
-import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+import { getToken } from '../utils/totvsTokenManager.js';
 import {
   httpsAgent,
   httpAgent,
   TOTVS_BASE_URL,
-  TOTVS_AUTH_ENDPOINT,
+  getBranchCodes,
 } from './totvsHelper.js';
 
 const router = express.Router();
 
-
 // =============================================================================
-// PAINEL DE VENDAS — Sale Panel & Seller Panel (Analytics)
+// PAINEL DE VENDAS — Faturamento Total
+// POST /api/totvs/sale-panel/totals
+// Body: { filtroempresa?: number[], datemin, datemax, operations?, sellers? }
+// filtroempresa → lista de branchCodes do FiltroEmpresa; se omitido, usa todos.
 // =============================================================================
+router.post(
+  '/sale-panel/totals',
+  asyncHandler(async (req, res) => {
+    const { filtroempresa, datemin, datemax, operations, sellers } = req.body;
 
-async function callTotvsAnalytics(endpoint, body, res) {
-  try {
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'Os campos datemin e datemax são obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
       return errorResponse(
         res,
-        'Não foi possível obter token TOTVS',
+        'Não foi possível obter token de autenticação TOTVS',
         503,
         'TOKEN_UNAVAILABLE',
       );
     }
 
-    const url = `${TOTVS_BASE_URL}${endpoint}`;
-    console.log(`📊 [PainelVendas] ${url}`, JSON.stringify(body));
+    let token = tokenData.access_token;
 
-    const response = await axios.post(url, body, {
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Bearer ${tokenData.access_token}`,
-      },
-      httpsAgent,
-      httpAgent,
-      timeout: 60000,
-    });
-
-    return successResponse(res, response.data, 'Dados obtidos com sucesso');
-  } catch (error) {
-    // Retry on 401
-    if (error.response?.status === 401) {
-      try {
-        const newToken = await getToken(true);
-        const url = `${TOTVS_BASE_URL}${endpoint}`;
-        const retry = await axios.post(url, body, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${newToken.access_token}`,
-          },
-          httpsAgent,
-          httpAgent,
-          timeout: 60000,
-        });
-        return successResponse(res, retry.data, 'Dados obtidos com sucesso');
-      } catch (retryErr) {
-        return errorResponse(
-          res,
-          retryErr.response?.data?.message || 'Erro após renovar token',
-          retryErr.response?.status || 500,
-          'TOTVS_API_ERROR',
-        );
-      }
+    // Resolver branchs: usa filtroempresa do frontend ou busca todas do cache
+    let branchs;
+    if (Array.isArray(filtroempresa) && filtroempresa.length > 0) {
+      branchs = filtroempresa
+        .map((b) => parseInt(b))
+        .filter((b) => !isNaN(b) && b > 0);
+    }
+    if (!branchs || branchs.length === 0) {
+      branchs = await getBranchCodes(token);
     }
 
-    if (error.response) {
-      console.error(
-        `❌ [PainelVendas] ${endpoint} → ${error.response.status}`,
-        JSON.stringify(error.response.data),
-      );
-      return errorResponse(
-        res,
-        error.response.data?.message ||
-          JSON.stringify(error.response.data) ||
-          'Erro na API TOTVS',
-        error.response.status || 500,
-        'TOTVS_API_ERROR',
-      );
-    }
+    const payload = {
+      branchs,
+      datemin,
+      datemax,
+      ...(Array.isArray(operations) && operations.length > 0 && { operations }),
+      ...(Array.isArray(sellers) && sellers.length > 0 && { sellers }),
+    };
 
-    if (error.request) {
-      return errorResponse(
-        res,
-        'Não foi possível conectar à API TOTVS',
-        503,
-        'TOTVS_CONNECTION_ERROR',
-      );
-    }
+    const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/totals/search`;
 
-    throw error;
-  }
-}
+    console.log(`📊 [PainelVendas] ${endpoint}`, JSON.stringify(payload));
 
-router.post(
-  '/sale-panel/totals',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics('/sale-panel/v2/totals/search', req.body, res);
-  }),
-);
-
-router.post(
-  '/sale-panel/hours',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics('/sale-panel/v2/hours/search', req.body, res);
-  }),
-);
-
-router.post(
-  '/sale-panel/weekdays',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics('/sale-panel/v2/weekdays/search', req.body, res);
-  }),
-);
-
-router.post(
-  '/sale-panel/sellers',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics('/sale-panel/v2/sellers/search', req.body, res);
-  }),
-);
-
-router.post(
-  '/sale-panel/sellers-list',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/sellers-list/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/sale-panel/totals-seller',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/totals-seller/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/sale-panel/totals-branch',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/totals-branch/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/sale-panel/totals-branch-type',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/totals-branch-type/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/sale-panel/document-types',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/document-types/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/sale-panel/product-classifications',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/product-classifications/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.get(
-  '/sale-panel/product-classification-types',
-  asyncHandler(async (req, res) => {
-    try {
-      const tokenData = await getToken();
-      if (!tokenData?.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-      const url = `${TOTVS_BASE_URL}/sale-panel/v2/product-classification-types`;
-      const response = await axios.get(url, {
+    const doRequest = async (accessToken) =>
+      axios.post(endpoint, payload, {
         headers: {
+          'Content-Type': 'application/json',
           Accept: 'application/json',
-          Authorization: `Bearer ${tokenData.access_token}`,
+          Authorization: `Bearer ${accessToken}`,
         },
         httpsAgent,
         httpAgent,
         timeout: 60000,
       });
-      return successResponse(
-        res,
-        response.data,
-        'Tipos de classificação obtidos',
-      );
+
+    let response;
+    try {
+      response = await doRequest(token);
     } catch (error) {
-      if (error.response) {
-        return errorResponse(
-          res,
-          error.response.data?.message || 'Erro TOTVS',
-          error.response.status || 500,
-          'TOTVS_API_ERROR',
-        );
+      if (error.response?.status === 401) {
+        console.log('🔄 [PainelVendas] Token expirado, renovando...');
+        const newTokenData = await getToken(true);
+        response = await doRequest(newTokenData.access_token);
+      } else {
+        throw error;
       }
-      throw error;
     }
-  }),
-);
 
-router.post(
-  '/sale-panel/branch-ranking',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/sale-panel/v2/branch-ranking/search',
-      req.body,
+    return successResponse(
       res,
+      response.data,
+      'Faturamento total obtido com sucesso',
     );
   }),
 );
 
-// --- SellerPanel ---
-
-router.post(
-  '/seller-panel/totals',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/analytics/v2/seller-panel/totals/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/seller-panel/sales-vs-returns',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/analytics/v2/seller-panel/sales-vs-returns/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/seller-panel/weekdays',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/analytics/v2/seller-panel/weekdays/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/seller-panel/product-classification',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/analytics/v2/seller-panel/product-classification/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/seller-panel/sales-target',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/analytics/v2/seller-panel/sales-target/search',
-      req.body,
-      res,
-    );
-  }),
-);
-
-router.post(
-  '/seller-panel/top-customers',
-  asyncHandler(async (req, res) => {
-    await callTotvsAnalytics(
-      '/analytics/v2/seller-panel/seller/top-customers',
-      req.body,
-      res,
-    );
-  }),
-);
 export default router;
