@@ -11,6 +11,7 @@ import {
   httpAgent,
   TOTVS_BASE_URL,
   TOTVS_AUTH_ENDPOINT,
+  getBranchCodes,
 } from './totvsHelper.js';
 
 const router = express.Router();

@@ -11,6 +11,7 @@ import {
   httpAgent,
   TOTVS_BASE_URL,
   TOTVS_AUTH_ENDPOINT,
+  getBranchCodes,
 } from './totvsHelper.js';
 
 const router = express.Router();
@@ -166,6 +167,13 @@ router.get(
     }
   }),
 );
+
+/**
+ * @route POST /totvs/accounts-receivable/search
+ * @desc Busca documentos de contas a receber (faturas) na API TOTVS
+ * @access Public
+ * @example POST ${API_BASE_URL}/api/totvs/accounts-receivable/search
+ * @body DocumentRequestModel conforme documentação TOTVS
 
 let cachedFranchiseClients = null;
 let franchiseCacheTimestamp = 0;
