@@ -137,7 +137,9 @@ router.post(
 
     let resolvedBranchs;
     if (Array.isArray(branchs) && branchs.length > 0) {
-      resolvedBranchs = branchs.map((b) => parseInt(b)).filter((b) => !isNaN(b) && b > 0);
+      resolvedBranchs = branchs
+        .map((b) => parseInt(b))
+        .filter((b) => !isNaN(b) && b > 0);
     } else {
       resolvedBranchs = await getBranchCodes(token);
     }
@@ -146,14 +148,22 @@ router.post(
       branchs: resolvedBranchs,
       datemin,
       datemax,
-      ...(Array.isArray(operations) && operations.length > 0 && { operations }),
+      operations: [
+        1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
+        9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405,
+        1205, 1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067,
+      ],
     };
 
     const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/totals-branch/search`;
 
     console.log(
       `🏆 [RankingFaturamento] ${endpoint}`,
-      JSON.stringify({ datemin, datemax, branchs: `[${resolvedBranchs.length} filiais]` }),
+      JSON.stringify({
+        datemin,
+        datemax,
+        branchs: `[${resolvedBranchs.length} filiais]`,
+      }),
     );
 
     const doRequest = async (accessToken) =>
