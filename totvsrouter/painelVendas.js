@@ -11,6 +11,7 @@ import {
   httpAgent,
   TOTVS_BASE_URL,
   getBranchCodes,
+  getBranchesWithNames,
 } from './totvsHelper.js';
 
 const router = express.Router();
@@ -265,9 +266,10 @@ router.post(
 );
 
 // =============================================================================
-// VENDEDORES DO PAINEL DE VENDAS
+// VENDEDORES DO PAINEL DE VENDAS (por filial)
 // POST /api/totvs/sale-panel/sellers
 // Body: { filtroempresa?: number[], datemin, datemax }
+// Retorna: { branches: [{ branch_code, branch_name, dataRow, invoiceQuantity, invoiceValue, itemQuantity }] }
 // =============================================================================
 router.post(
   '/sale-panel/sellers',
@@ -295,23 +297,24 @@ router.post(
 
     let token = tokenData.access_token;
 
-    let branchs;
+    // Resolver filiais com nomes
+    const allBranches = await getBranchesWithNames(token);
+    let branches;
     if (Array.isArray(filtroempresa) && filtroempresa.length > 0) {
-      branchs = filtroempresa
-        .map((b) => parseInt(b))
-        .filter((b) => !isNaN(b) && b > 0);
-    }
-    if (!branchs || branchs.length === 0) {
-      branchs = await getBranchCodes(token);
+      const filterSet = new Set(filtroempresa.map((b) => parseInt(b)).filter((b) => !isNaN(b) && b > 0));
+      branches = allBranches.filter((b) => filterSet.has(b.code));
+    } else {
+      branches = allBranches;
     }
 
-    const payload = { branchs, datemin, datemax };
     const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/sellers/search`;
 
-    console.log(`👤 [PainelVendas/Sellers] ${endpoint}`, JSON.stringify(payload));
+    console.log(
+      `👤 [PainelVendas/Sellers] ${endpoint} — ${branches.length} filiais`,
+    );
 
-    const doRequest = async (accessToken) =>
-      axios.post(endpoint, payload, {
+    const doRequest = async (accessToken, branchCode) =>
+      axios.post(endpoint, { branchs: [branchCode], datemin, datemax }, {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
@@ -322,23 +325,53 @@ router.post(
         timeout: 60000,
       });
 
-    let response;
-    try {
-      response = await doRequest(token);
-    } catch (error) {
-      if (error.response?.status === 401) {
-        console.log('🔄 [PainelVendas/Sellers] Token expirado, renovando...');
-        const newTokenData = await getToken(true);
-        response = await doRequest(newTokenData.access_token);
-      } else {
-        throw error;
-      }
+    // Chamar por filial em lotes de 5 para não sobrecarregar
+    const BATCH_SIZE = 5;
+    const results = [];
+    for (let i = 0; i < branches.length; i += BATCH_SIZE) {
+      const batch = branches.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (branch) => {
+          try {
+            let response;
+            try {
+              response = await doRequest(token, branch.code);
+            } catch (error) {
+              if (error.response?.status === 401) {
+                const newTokenData = await getToken(true);
+                token = newTokenData.access_token;
+                response = await doRequest(token, branch.code);
+              } else {
+                throw error;
+              }
+            }
+            const data = response.data;
+            if (data.dataRow && data.dataRow.length > 0) {
+              return {
+                branch_code: branch.code,
+                branch_name: branch.name,
+                dataRow: data.dataRow,
+                invoiceQuantity: data.invoiceQuantity || 0,
+                invoiceValue: data.invoiceValue || 0,
+                itemQuantity: data.itemQuantity || 0,
+              };
+            }
+            return null;
+          } catch (err) {
+            console.log(`⚠️ [Sellers] Erro filial ${branch.code}: ${err.message}`);
+            return null;
+          }
+        }),
+      );
+      results.push(...batchResults);
     }
+
+    const branchesData = results.filter(Boolean);
 
     return successResponse(
       res,
-      response.data,
-      'Vendedores obtidos com sucesso',
+      { branches: branchesData },
+      'Vendedores por filial obtidos com sucesso',
     );
   }),
 );

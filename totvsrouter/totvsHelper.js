@@ -31,13 +31,14 @@ export const API_BASE_URL =
 
 // Cache de branchCodes em memória (recarrega a cada 30 min)
 let cachedBranchCodes = null;
+let cachedBranchesWithNames = null;
 let branchCacheTimestamp = 0;
 const BRANCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
 
-export async function getBranchCodes(token) {
+async function fetchBranchesList(token) {
   const now = Date.now();
-  if (cachedBranchCodes && now - branchCacheTimestamp < BRANCH_CACHE_TTL) {
-    return cachedBranchCodes;
+  if (cachedBranchesWithNames && now - branchCacheTimestamp < BRANCH_CACHE_TTL) {
+    return cachedBranchesWithNames;
   }
   try {
     const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
@@ -46,21 +47,35 @@ export async function getBranchCodes(token) {
       timeout: 10000,
     });
     if (resp.data?.items?.length > 0) {
-      cachedBranchCodes = resp.data.items
-        .map((b) => parseInt(b.code))
-        .filter((c) => !isNaN(c) && c > 0);
+      cachedBranchesWithNames = resp.data.items
+        .map((b) => ({
+          code: parseInt(b.code),
+          name: b.branchGroupName || b.fantasyName || b.description || `Filial ${b.code}`,
+        }))
+        .filter((b) => !isNaN(b.code) && b.code > 0);
+      cachedBranchCodes = cachedBranchesWithNames.map((b) => b.code);
       branchCacheTimestamp = now;
-      return cachedBranchCodes;
+      return cachedBranchesWithNames;
     }
   } catch (err) {
     console.log('⚠️ Erro ao buscar branches, usando cache/fallback');
   }
-  // Fallback se cache expirou e API falhou
-  return (
-    cachedBranchCodes || [
-      1, 2, 5, 6, 11, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
-      97, 98, 99, 100, 101, 870, 880, 890, 900, 910, 920, 930, 940, 950, 960,
-      970, 980, 990,
-    ]
-  );
+  return cachedBranchesWithNames || null;
+}
+
+export async function getBranchCodes(token) {
+  const branches = await fetchBranchesList(token);
+  if (branches) return branches.map((b) => b.code);
+  return cachedBranchCodes || [
+    1, 2, 5, 6, 11, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
+    97, 98, 99, 100, 101, 870, 880, 890, 900, 910, 920, 930, 940, 950, 960,
+    970, 980, 990,
+  ];
+}
+
+export async function getBranchesWithNames(token) {
+  const branches = await fetchBranchesList(token);
+  if (branches) return branches;
+  const codes = await getBranchCodes(token);
+  return codes.map((c) => ({ code: c, name: `Filial ${c}` }));
 }
