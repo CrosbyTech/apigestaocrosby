@@ -144,16 +144,16 @@ router.post(
       resolvedBranchs = await getBranchCodes(token);
     }
 
-    const payload = {
-      branchs: resolvedBranchs,
-      datemin,
-      datemax,
-      operations: [
-        1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
-        9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405,
-        1205, 1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067,
-      ],
-    };
+    // Filiais que recebem filtro de operações específico
+    const SPECIAL_BRANCH_CODES = [92, 2, 99, 89]; // CASCAVEL, JOAO PESSOA, BREJINHO, TACARUNA
+    const SPECIAL_OPERATIONS = [1, 2, 55, 510, 511];
+
+    const specialBranchs = resolvedBranchs.filter((b) =>
+      SPECIAL_BRANCH_CODES.includes(b),
+    );
+    const otherBranchs = resolvedBranchs.filter(
+      (b) => !SPECIAL_BRANCH_CODES.includes(b),
+    );
 
     const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/totals-branch/search`;
 
@@ -162,12 +162,13 @@ router.post(
       JSON.stringify({
         datemin,
         datemax,
-        branchs: `[${resolvedBranchs.length} filiais]`,
+        specialBranchs: specialBranchs.length,
+        otherBranchs: otherBranchs.length,
       }),
     );
 
-    const doRequest = async (accessToken) =>
-      axios.post(endpoint, payload, {
+    const callTotvs = async (accessToken, body) =>
+      axios.post(endpoint, body, {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
@@ -178,23 +179,76 @@ router.post(
         timeout: 60000,
       });
 
-    let response;
-    try {
-      response = await doRequest(token);
-    } catch (error) {
-      if (error.response?.status === 401) {
-        console.log('🔄 [RankingFaturamento] Token expirado, renovando...');
-        const newTokenData = await getToken(true);
-        token = newTokenData.access_token;
-        response = await doRequest(token);
-      } else {
+    const safeCall = async (body) => {
+      try {
+        return await callTotvs(token, body);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 [RankingFaturamento] Token expirado, renovando...');
+          const newTokenData = await getToken(true);
+          token = newTokenData.access_token;
+          return callTotvs(token, body);
+        }
         throw error;
       }
+    };
+
+    // Executa as chamadas (em paralelo quando há dois grupos)
+    const callPromises = [];
+    if (specialBranchs.length > 0) {
+      callPromises.push(
+        safeCall({
+          branchs: specialBranchs,
+          datemin,
+          datemax,
+          operations: SPECIAL_OPERATIONS,
+        }),
+      );
     }
+    if (otherBranchs.length > 0) {
+      callPromises.push(safeCall({ branchs: otherBranchs, datemin, datemax }));
+    }
+
+    const responses = await Promise.all(callPromises);
+    const datasets = responses.map((r) => r.data);
+
+    // Mescla dataRow e dataRowLastYear das duas respostas
+    const mergedDataRow = datasets.flatMap((d) => d.dataRow || []);
+    const mergedDataRowLastYear = datasets.flatMap(
+      (d) => d.dataRowLastYear || [],
+    );
+
+    // Soma os totais e recalcula TM e PA
+    const sumTotals = (totalsArr) => {
+      const valid = totalsArr.filter(Boolean);
+      if (valid.length === 0) return null;
+      const summed = valid.reduce(
+        (acc, t) => ({
+          invoice_qty: acc.invoice_qty + (t.invoice_qty || 0),
+          invoice_value: acc.invoice_value + (t.invoice_value || 0),
+          itens_qty: acc.itens_qty + (t.itens_qty || 0),
+        }),
+        { invoice_qty: 0, invoice_value: 0, itens_qty: 0 },
+      );
+      summed.tm =
+        summed.invoice_qty > 0 ? summed.invoice_value / summed.invoice_qty : 0;
+      summed.pa =
+        summed.invoice_qty > 0 ? summed.itens_qty / summed.invoice_qty : 0;
+      summed.pmpv =
+        summed.itens_qty > 0 ? summed.invoice_value / summed.itens_qty : 0;
+      return summed;
+    };
+
+    const mergedData = {
+      dataRow: mergedDataRow,
+      dataRowLastYear: mergedDataRowLastYear,
+      total: sumTotals(datasets.map((d) => d.total)),
+      totalLastYear: sumTotals(datasets.map((d) => d.totalLastYear)),
+    };
 
     return successResponse(
       res,
-      response.data,
+      mergedData,
       'Ranking de faturamento por filial obtido com sucesso',
     );
   }),
