@@ -145,8 +145,12 @@ router.post(
     }
 
     // Filiais que recebem filtro de operações específico
-    const SPECIAL_BRANCH_CODES = [92, 2, 99, 89]; // CASCAVEL, JOAO PESSOA, BREJINHO, TACARUNA
-    const SPECIAL_OPERATIONS = [1, 2, 55, 510, 511];
+    const SPECIAL_BRANCH_CODES = [92, 2, 99, 89, 99, 98, 88]; // CASCAVEL, JOAO PESSOA, BREJINHO, TACARUNA
+    const SPECIAL_OPERATIONS = [
+      1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
+      9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
+      1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067,
+    ];
 
     const specialBranchs = resolvedBranchs.filter((b) =>
       SPECIAL_BRANCH_CODES.includes(b),
