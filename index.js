@@ -5032,7 +5032,7 @@ router.post(
 router.post(
   '/invoices-settle',
   asyncHandler(async (req, res) => {
-    const { items, bank } = req.body;
+    const { items, bank, dadosCartao } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return errorResponse(
@@ -5145,35 +5145,53 @@ router.post(
         // Para adiantamento (paidType 3), tenta primeiro empresa 99, se falhar tenta empresa 1
         const settlementBranchCode = requestPaidType === 3 ? 99 : branchCode;
 
-        const buildPayload = (sBranchCode) => ({
-          branchCode: sBranchCode,
-          settlementDate,
-          movementDate: settlementDate,
-          invoices: [
-            {
-              branchCode,
-              customerCode,
-              receivableCode,
-              installmentCode,
-              paidValue,
-            },
-          ],
-          payments: [
-            {
-              value: paidValue,
-              paidType: requestPaidType,
-              ...(requestPaidType === 4
-                ? {
-                    bank: {
-                      bankNumber: BANK_DATA.bankNumber,
-                      agencyNumber: BANK_DATA.agencyNumber,
-                      account: BANK_DATA.account,
-                    },
-                  }
-                : {}),
-            },
-          ],
-        });
+        const buildPayload = (sBranchCode) => {
+          const payment = {
+            value: paidValue,
+            paidType: requestPaidType,
+            movementDate: settlementDate,
+          };
+
+          // Conta corrente (Confiança / Sicredi)
+          if (requestPaidType === 4) {
+            payment.bank = {
+              bankNumber: BANK_DATA.bankNumber,
+              agencyNumber: BANK_DATA.agencyNumber,
+              account: BANK_DATA.account,
+            };
+          }
+
+          // Cartão de Crédito ou Débito
+          if ((requestPaidType === 1 || requestPaidType === 2) && dadosCartao) {
+            payment.card = {
+              nsu: parseInt(dadosCartao.nsu, 10) || 0,
+              autorization: dadosCartao.autorizacao || '',
+              cardBrand: dadosCartao.bandeira || '',
+            };
+          }
+
+          // CREDEV
+          if (requestPaidType === 5) {
+            payment.credev = {
+              branchCode: sBranchCode,
+            };
+          }
+
+          return {
+            branchCode: sBranchCode,
+            settlementDate,
+            invoices: [
+              {
+                branchCode,
+                customerCode,
+                receivableCode,
+                installmentCode,
+                paidValue,
+              },
+            ],
+            payments: [payment],
+          };
+        };
 
         const payload = buildPayload(settlementBranchCode);
 
