@@ -103,8 +103,9 @@ export function processConfiancaFile(fileContent) {
       const cols = parseLine(lines[i]);
       if (cols.length < 10) continue;
 
-      const situacao = stripQuotes(cols[idx.situacao] ?? '');
-      const isPago = situacao === 'BAIXADO';
+      const valPago = parseValorBR(cols[idx.valPago]);
+      const dataPaga = parseDataBR(cols[idx.dataPaga]);
+      const isPago = dataPaga !== null && valPago > 0;
 
       if (isPago) countLiquidado++;
       else countAberto++;
@@ -115,10 +116,10 @@ export function processConfiancaFile(fileContent) {
         nr_cpfcnpj: parseSacaId(cols[idx.sacaId]),
         nm_cliente: stripQuotes(cols[idx.nome] ?? ''),
         vl_original: parseValorBR(cols[idx.valOriginal]),
-        vl_pago: isPago ? parseValorBR(cols[idx.valPago]) : 0,
+        vl_pago: isPago ? valPago : 0,
         vl_juros: parseValorBR(cols[idx.valJuro]),
         dt_vencimento: parseDataBR(cols[idx.dataTitu]),
-        dt_pagamento: isPago ? parseDataBR(cols[idx.dataPaga]) : null,
+        dt_pagamento: isPago ? dataPaga : null,
         situacao: isPago ? 'LIQUIDADO' : 'ABERTO',
         descricao_baixa: stripQuotes(cols[idx.baixaDeta] ?? ''),
         banco: 'CONFIANCA',
