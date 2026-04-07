@@ -142,7 +142,13 @@ router.get(
     const queryTime = Date.now() - startTime;
 
     // Enriquecimento: buscar última compra com desconto para vouchers encerrados
-    const enrichEnabled = req.query.enrich === 'true';
+    let enrichEnabled = req.query.enrich === 'true';
+    // Só permite enrich se status for 'Encerrado' ou não informado
+    if (enrichEnabled) {
+      if (status && status !== 'Closed' && status !== 'Encerrado' && status !== '4') {
+        enrichEnabled = false;
+      }
+    }
     if (enrichEnabled) {
       const closedVouchers = data.filter(v => v.statusLabel === 'Encerrado' && v.customerCode);
 
