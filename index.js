@@ -10,6 +10,8 @@ import http from 'http';
 import chatRoutes from './routes/chat.routes.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
 import financialRoutes from './routes/batidacarteira.routes.js';
+import catalogoRoutes from './routes/catalogo.routes.js';
+import metaRoutes from './routes/meta.routes.js';
 
 import {
   asyncHandler,
@@ -7191,6 +7193,7 @@ import filiaisRouter from './totvsrouter/filiais.js';
 import financeiroRouter from './totvsrouter/financeiro.js';
 import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
+import voucherRouter from './totvsrouter/voucher.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7220,11 +7223,14 @@ app.use('/api/totvs', filiaisRouter); // branches, franchise, multibrand
 app.use('/api/totvs', financeiroRouter); // accounts-receivable, accounts-payable
 app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
 app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
+app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
 app.use('/api/financial', financialRoutes); // batida-carteira upload
+app.use('/api/catalogo', catalogoRoutes); // catálogo virtual
+app.use('/api/meta', metaRoutes);       // WhatsApp Official (Meta Graph API)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
