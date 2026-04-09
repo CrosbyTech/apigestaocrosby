@@ -11,6 +11,7 @@ import {
   httpAgent,
   TOTVS_BASE_URL,
 } from '../totvsrouter/totvsHelper.js';
+import supabase from '../config/supabase.js';
 
 const router = express.Router();
 
@@ -66,44 +67,29 @@ router.get(
     }
     const token = tokenData.access_token;
 
-    // Buscar vouchers com paginação
-    let allVouchers = [];
-    let page = 1;
-    const pageSize = 100;
-    let hasMore = true;
+    // Parâmetros de paginação do cliente
+    const clientPage = Math.max(1, parseInt(req.query.page || '1', 10));
+    const clientPageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
 
-    while (hasMore) {
-      const params = {
-        StartDateInitial: startDateInitial,
-        StartDateFinal: startDateFinal,
-        Page: page,
-        PageSize: pageSize,
-      };
-      // Status é enviado como array para a API TOTVS
-      if (status) params.Status = status;
+    // Buscar todos os vouchers da API TOTVS com fetch paralelo
+    const TOTVS_PAGE_SIZE = 100;
+    const makeVoucherReq = (p) => {
+      const qp = { StartDateInitial: startDateInitial, StartDateFinal: startDateFinal, Page: p, PageSize: TOTVS_PAGE_SIZE };
+      if (status) qp.Status = status;
+      return axios({ method: 'get', url: VOUCHER_SEARCH_ENDPOINT, params: qp,
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` },
+        timeout: 60000, httpsAgent, httpAgent });
+    };
 
-      const response = await axios({
-        method: 'get',
-        url: VOUCHER_SEARCH_ENDPOINT,
-        params,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        timeout: 60000,
-        httpsAgent,
-        httpAgent,
-      });
-
-      const items = response.data?.items || [];
-      allVouchers = allVouchers.concat(items);
-
-      const hasNext = response.data?.hasNext ?? false;
-      if (!hasNext || items.length === 0) {
-        hasMore = false;
-      } else {
-        page++;
+    const firstResp = await makeVoucherReq(1);
+    let allVouchers = firstResp.data?.items || [];
+    const totvsPages = firstResp.data?.totalPages || 1;
+    if (totvsPages > 1) {
+      const remaining = Array.from({ length: totvsPages - 1 }, (_, i) => i + 2);
+      const CONCURRENCY = 10;
+      for (let i = 0; i < remaining.length; i += CONCURRENCY) {
+        const batch = await Promise.all(remaining.slice(i, i + CONCURRENCY).map(makeVoucherReq));
+        for (const r of batch) allVouchers = allVouchers.concat(r.data?.items || []);
       }
     }
 
@@ -115,29 +101,43 @@ router.get(
       );
     }
 
-    // Normalizar dados
-    const data = allVouchers.map((v) => ({
-      voucherNumber: v.voucherNumber || null,
-      voucherCode: v.voucherCode || null,
-      description: v.description || null,
-      prefixCode: v.prefixCode || null,
-      voucherType: v.voucherType || null,
-      status: v.status,
-      statusLabel: STATUS_LABELS[v.status] || v.status || '—',
-      value: Number(v.value) || 0,
-      percentage: v.percentage || 0,
-      startDate: v.startDate || null,
-      endDate: v.endDate || null,
-      inclusionDate: v.inclusionDate || null,
-      closingDate: v.closingDate || null,
-      customerCode: v.customerCode != null ? v.customerCode : null,
-      customerName: v.customerName || null,
-      partnerCode: v.partnerCode || null,
-      partnerName: v.partnerName || null,
-      quantity: v.quantity || 0,
-      branchCode: v.branchs?.[0]?.branchCode || null,
-      branches: (v.branchs || []).map((b) => b.branchCode),
-    }));
+    // Normalizar dados e filtrar apenas vouchers com cliente vinculado
+    const data = allVouchers
+      .map((v) => ({
+        voucherNumber: v.voucherNumber || null,
+        voucherCode: v.voucherCode || null,
+        description: v.description || null,
+        prefixCode: v.prefixCode || null,
+        voucherType: v.voucherType || null,
+        status: v.status,
+        statusLabel: STATUS_LABELS[v.status] || v.status || '—',
+        value: Number(v.value) || 0,
+        percentage: v.percentage || 0,
+        startDate: v.startDate || null,
+        endDate: v.endDate || null,
+        inclusionDate: v.inclusionDate || null,
+        closingDate: v.closingDate || null,
+        customerCode: v.customerCode != null ? v.customerCode : null,
+        customerName: v.customerName || null,
+        partnerCode: v.partnerCode || null,
+        partnerName: v.partnerName || null,
+        quantity: v.quantity || 0,
+        branchCode: v.branchs?.[0]?.branchCode || null,
+        branches: (v.branchs || []).map((b) => b.branchCode),
+        phoneNumber: v.phoneNumber || v.customerPhone || null, // Adiciona telefone se disponível
+      }))
+      .filter((v) => v.customerCode != null && v.customerCode !== '' && v.customerCode !== 0 && !!v.customerName && v.customerName.trim() !== '');
+
+    // Resumo completo de todos os vouchers filtrados (antes de paginar)
+    const statusCounts = {};
+    for (const v of data) {
+      statusCounts[v.statusLabel] = (statusCounts[v.statusLabel] || 0) + 1;
+    }
+    const totalValue = Math.round(data.reduce((sum, v) => sum + v.value, 0) * 100) / 100;
+    const total = data.length;
+    const totalPages = Math.ceil(total / clientPageSize) || 1;
+    const pageStart = (clientPage - 1) * clientPageSize;
+    const pageData = data.slice(pageStart, pageStart + clientPageSize);
 
     const queryTime = Date.now() - startTime;
 
@@ -150,7 +150,7 @@ router.get(
       }
     }
     if (enrichEnabled) {
-      const closedVouchers = data.filter(v => v.statusLabel === 'Encerrado' && v.customerCode);
+      const closedVouchers = pageData.filter(v => v.statusLabel === 'Encerrado' && v.customerCode);
 
       if (closedVouchers.length > 0) {
         console.log(`🔍 Enriquecendo ${closedVouchers.length} vouchers encerrados com dados fiscais...`);
@@ -315,22 +315,119 @@ router.get(
       }
     }
 
-    // Resumo por status
-    const statusCounts = {};
-    for (const v of data) {
-      const label = v.statusLabel;
-      statusCounts[label] = (statusCounts[label] || 0) + 1;
-    }
-
     successResponse(res, {
-      data,
+      data: pageData,
       summary: {
-        total: data.length,
+        total,
+        totalPages,
+        currentPage: clientPage,
+        pageSize: clientPageSize,
         statusCounts,
-        totalValue: Math.round(data.reduce((sum, v) => sum + v.value, 0) * 100) / 100,
+        totalValue,
         queryTime,
       },
-    }, `${data.length} vouchers encontrados em ${queryTime}ms`);
+    }, `${pageData.length} vouchers (pág. ${clientPage}/${totalPages}, total ${total}) em ${queryTime}ms`);
+  }),
+);
+
+/**
+ * @route POST /vouchers/customers/phones
+ * @desc Retorna mapa de telefones para lista de códigos de clientes.
+ *       1º busca no Supabase (pes_pessoa); para os não encontrados, consulta o TOTVS.
+ * @body { customerCodes: number[] }
+ */
+router.post(
+  '/vouchers/customers/phones',
+  asyncHandler(async (req, res) => {
+    const { customerCodes } = req.body;
+
+    if (!Array.isArray(customerCodes) || customerCodes.length === 0) {
+      return errorResponse(res, 'customerCodes deve ser um array não vazio', 400, 'INVALID_INPUT');
+    }
+
+    const codes = customerCodes
+      .map((c) => parseInt(c, 10))
+      .filter((c) => !isNaN(c) && c > 0);
+
+    if (codes.length === 0) {
+      return successResponse(res, { phones: {} }, 'Nenhum código válido informado');
+    }
+
+    const phones = {};
+
+    // 1. Buscar no Supabase
+    const { data: supabaseData } = await supabase
+      .from('pes_pessoa')
+      .select('code, telefone, phones')
+      .in('code', codes);
+
+    for (const person of supabaseData || []) {
+      if (!person.code) continue;
+      let phone = person.telefone || '';
+      if (!phone && Array.isArray(person.phones) && person.phones.length > 0) {
+        const defaultPhone = person.phones.find((p) => p.isDefault) || person.phones[0];
+        phone = defaultPhone?.number || '';
+      }
+      if (phone) {
+        phones[String(person.code)] = phone.replace(/\D/g, '');
+      }
+    }
+
+    // 2. Para os não encontrados no Supabase, buscar no TOTVS
+    const missingCodes = codes.filter((c) => !phones[String(c)]);
+    if (missingCodes.length > 0) {
+      console.log(`🔍 Buscando ${missingCodes.length} telefones faltantes no TOTVS...`);
+      try {
+        const tokenData = await getToken();
+        if (tokenData?.access_token) {
+          const BATCH_SIZE = 50;
+          const doRequest = (endpoint, payload) =>
+            axios.post(endpoint, payload, {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${tokenData.access_token}`,
+              },
+              timeout: 30000,
+              httpsAgent,
+              httpAgent,
+            });
+
+          for (let i = 0; i < missingCodes.length; i += BATCH_SIZE) {
+            const batch = missingCodes.slice(i, i + BATCH_SIZE);
+            const payload = {
+              filter: { personCodeList: batch },
+              expand: 'phones',
+              page: 1,
+              pageSize: batch.length,
+            };
+
+            const [pjResult, pfResult] = await Promise.allSettled([
+              doRequest(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, payload),
+              doRequest(`${TOTVS_BASE_URL}/person/v2/individuals/search`, payload),
+            ]);
+
+            const allItems = [
+              ...(pjResult.status === 'fulfilled' ? pjResult.value.data?.items || [] : []),
+              ...(pfResult.status === 'fulfilled' ? pfResult.value.data?.items || [] : []),
+            ];
+
+            for (const item of allItems) {
+              const code = String(item.code);
+              if (!code || phones[code]) continue;
+              const defaultPhone = item.phones?.find((p) => p.isDefault) || item.phones?.[0];
+              const phone = (defaultPhone?.number || '').replace(/\D/g, '');
+              if (phone) phones[code] = phone;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('⚠️ Falha ao buscar telefones no TOTVS:', err.message);
+      }
+    }
+
+    console.log(`📞 Telefones encontrados: ${Object.keys(phones).length} de ${codes.length} clientes`);
+    successResponse(res, { phones }, `${Object.keys(phones).length} telefones encontrados`);
   }),
 );
 

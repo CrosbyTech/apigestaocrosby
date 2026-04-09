@@ -47,7 +47,7 @@ const router = express.Router();
 const API_BASE_URL =
   process.env.API_BASE_URL ||
   process.env.RENDER_EXTERNAL_URL ||
-  'http://localhost:4000';
+  'http://localhost:4001';
 
 /**
  * @route GET /totvs/token
@@ -7200,7 +7200,7 @@ import voucherRouter from './totvsrouter/voucher.js';
 // =============================================================================
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 4001;
 
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false }));
