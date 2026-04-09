@@ -109,14 +109,29 @@ router.get(
 router.post(
   '/media',
   asyncHandler(async (req, res) => {
-    const { messageId, instanceId, key, messageType } = req.body;
+    const { messageId } = req.body;
 
-    if (!key || !instanceId || !messageType) {
-      return errorResponse(
-        res,
-        'key, instanceId e messageType são obrigatórios',
-        400,
-      );
+    if (!messageId) {
+      return errorResponse(res, 'messageId é obrigatório', 400);
+    }
+
+    // Buscar a mensagem completa do banco (inclui instanceId, key, message, messageType)
+    const msgResult = await evolutionPool.query(
+      'SELECT message, key, "messageType", "instanceId" FROM "Message" WHERE id = $1 LIMIT 1',
+      [messageId],
+    );
+    if (msgResult.rows.length === 0) {
+      return errorResponse(res, 'Mensagem não encontrada', 404);
+    }
+
+    const msgData = msgResult.rows[0];
+    const msgKey = msgData.key;
+    const msgContent = msgData.message;
+    const messageType = msgData.messageType;
+    const instanceId = msgData.instanceId;
+
+    if (!instanceId) {
+      return errorResponse(res, 'Mensagem sem instanceId', 400);
     }
 
     // Resolver instanceId → instanceName (o Evolution API HTTP precisa do name, não id)
@@ -132,19 +147,6 @@ router.post(
       instanceName = instResult.rows[0].name;
       instanceNameCache.set(instanceId, instanceName);
     }
-
-    // Buscar a mensagem completa do banco para montar o payload
-    const msgResult = await evolutionPool.query(
-      'SELECT message, key FROM "Message" WHERE id = $1 LIMIT 1',
-      [messageId],
-    );
-    if (msgResult.rows.length === 0) {
-      return errorResponse(res, 'Mensagem não encontrada', 404);
-    }
-
-    const msgData = msgResult.rows[0];
-    const msgKey = msgData.key;
-    const msgContent = msgData.message;
 
     // Montar payload para a Evolution API
     const convertToMp4 =
