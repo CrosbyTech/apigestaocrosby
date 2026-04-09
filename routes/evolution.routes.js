@@ -1,4 +1,5 @@
 import express from 'express';
+import axios from 'axios';
 import evolutionPool from '../config/evolution.js';
 import {
   asyncHandler,
@@ -7,6 +8,15 @@ import {
 } from '../utils/errorHandler.js';
 
 const router = express.Router();
+
+// Evolution API HTTP config
+const EVOLUTION_API_URL =
+  process.env.EVOLUTION_API_URL || 'https://wsapi.crosbytech.com.br';
+const EVOLUTION_API_KEY =
+  process.env.EVOLUTION_API_KEY || 'bf8de105-8b03-4f1d-9abc-90f75234ab58';
+
+// Cache instanceId → instanceName
+const instanceNameCache = new Map();
 
 /**
  * @route GET /api/evolution/conversations/:phone
@@ -82,6 +92,113 @@ router.get(
       connected: true,
       serverTime: result.rows[0].time,
     });
+  }),
+);
+
+/**
+ * @route POST /api/evolution/media
+ * @desc Busca mídia (áudio, imagem, vídeo, documento) via Evolution API HTTP
+ *       Retorna base64 do arquivo descriptografado
+ * @body {
+ *   messageId: string (id da mensagem no banco),
+ *   instanceId: string (id da instância),
+ *   key: object (key da mensagem com id, remoteJid, fromMe),
+ *   messageType: string (imageMessage, audioMessage, videoMessage, documentMessage)
+ * }
+ */
+router.post(
+  '/media',
+  asyncHandler(async (req, res) => {
+    const { messageId, instanceId, key, messageType } = req.body;
+
+    if (!key || !instanceId || !messageType) {
+      return errorResponse(
+        res,
+        'key, instanceId e messageType são obrigatórios',
+        400,
+      );
+    }
+
+    // Resolver instanceId → instanceName (o Evolution API HTTP precisa do name, não id)
+    let instanceName = instanceNameCache.get(instanceId);
+    if (!instanceName) {
+      const instResult = await evolutionPool.query(
+        'SELECT name FROM "Instance" WHERE id = $1 LIMIT 1',
+        [instanceId],
+      );
+      if (instResult.rows.length === 0) {
+        return errorResponse(res, 'Instância não encontrada', 404);
+      }
+      instanceName = instResult.rows[0].name;
+      instanceNameCache.set(instanceId, instanceName);
+    }
+
+    // Buscar a mensagem completa do banco para montar o payload
+    const msgResult = await evolutionPool.query(
+      'SELECT message, key FROM "Message" WHERE id = $1 LIMIT 1',
+      [messageId],
+    );
+    if (msgResult.rows.length === 0) {
+      return errorResponse(res, 'Mensagem não encontrada', 404);
+    }
+
+    const msgData = msgResult.rows[0];
+    const msgKey = msgData.key;
+    const msgContent = msgData.message;
+
+    // Montar payload para a Evolution API
+    const convertToMp4 =
+      messageType === 'audioMessage' || messageType === 'ptvMessage';
+    const payload = {
+      message: {
+        key: {
+          id: msgKey.id,
+          remoteJid: msgKey.remoteJid,
+          fromMe: msgKey.fromMe,
+        },
+        message: msgContent,
+      },
+      convertToMp4,
+    };
+
+    try {
+      const response = await axios.post(
+        `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${encodeURIComponent(instanceName)}`,
+        payload,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: EVOLUTION_API_KEY,
+          },
+          timeout: 30000,
+        },
+      );
+
+      const base64Data = response.data?.base64;
+      const mimetype = response.data?.mimetype || response.data?.mediatype;
+
+      if (!base64Data) {
+        return errorResponse(res, 'Mídia não disponível ou expirada', 404);
+      }
+
+      return successResponse(res, {
+        base64: base64Data,
+        mimetype,
+        messageType,
+      });
+    } catch (error) {
+      console.error('❌ Erro ao buscar mídia Evolution:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
+      const status = error.response?.status || 500;
+      const msg =
+        error.response?.data?.message ||
+        error.message ||
+        'Erro ao buscar mídia';
+      return errorResponse(res, msg, status);
+    }
   }),
 );
 
