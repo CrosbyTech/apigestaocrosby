@@ -4,9 +4,12 @@ import puppeteer from 'puppeteer';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import SupabaseSessionStore from '../utils/supabaseSessionStore.js';
 import { logger } from '../utils/errorHandler.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const store = new SupabaseSessionStore();
 
 let qrCodeData = null;
@@ -32,7 +35,34 @@ const getChromePath = () => {
     logger.warn(`puppeteer.executablePath() falhou: ${err.message}`);
   }
 
-  // 3. Fallback: caminhos manuais do sistema
+  // 3. Buscar no cache dir do Puppeteer (consistente com .puppeteerrc.cjs)
+  const cacheDir = process.env.PUPPETEER_CACHE_DIR || path.join(__dirname, '..', '.cache', 'puppeteer');
+  try {
+    if (fs.existsSync(cacheDir)) {
+      const findChrome = (dir) => {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            const found = findChrome(full);
+            if (found) return found;
+          } else if (entry.name === 'chrome' || entry.name === 'chrome.exe') {
+            return full;
+          }
+        }
+        return null;
+      };
+      const found = findChrome(cacheDir);
+      if (found) {
+        logger.info(`Chrome via cache dir scan: ${found}`);
+        return found;
+      }
+    }
+  } catch (err) {
+    logger.warn(`Busca no cache dir falhou: ${err.message}`);
+  }
+
+  // 4. Fallback: caminhos manuais do sistema
   const paths = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
