@@ -9,8 +9,8 @@
     "npm": ">=8.0.0"
   },
   "scripts": {
-    "start": "node index.js",
-    "postinstall": "npx puppeteer browsers install chrome",
+    "start": "bash start.sh",
+     "postinstall": "npx puppeteer browsers install chrome",
     "dev": "cross-env NODE_ENV=development nodemon index.js",
     "test": "cross-env NODE_ENV=test jest",
     "lint": "eslint . --ext .js",
