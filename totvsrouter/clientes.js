@@ -1737,6 +1737,38 @@ router.post(
 );
 
 // ==========================================
+// CONSULTA CNPJ (BrasilAPI)
+// ==========================================
+
+/**
+ * @route GET /totvs/cnpj/:cnpj
+ * @desc Consulta dados públicos de um CNPJ via BrasilAPI
+ * @param cnpj — apenas números, 14 dígitos
+ */
+router.get(
+  '/cnpj/:cnpj',
+  asyncHandler(async (req, res) => {
+    const cnpj = (req.params.cnpj || '').replace(/\D/g, '');
+
+    if (cnpj.length !== 14) {
+      return errorResponse(
+        res,
+        'CNPJ deve conter exatamente 14 dígitos numéricos',
+        400,
+        'INVALID_CNPJ',
+      );
+    }
+
+    const { data } = await axios.get(
+      `https://brasilapi.com.br/api/cnpj/v1/${cnpj}`,
+      { timeout: 15000 },
+    );
+
+    successResponse(res, data, 'CNPJ consultado com sucesso');
+  }),
+);
+
+// ==========================================
 // RANKING DE PRODUTOS MAIS VENDIDOS
 // ==========================================
 
