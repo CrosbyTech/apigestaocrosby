@@ -44,7 +44,7 @@ const router = express.Router();
 const API_BASE_URL =
   process.env.API_BASE_URL ||
   process.env.RENDER_EXTERNAL_URL ||
-  'http://localhost:4000';
+  'http://localhost:4001';
 
 /**
  * @route GET /totvs/token
@@ -7343,6 +7343,25 @@ router.post(
       req.body,
       res,
     );
+  }),
+);
+
+/**
+ * @route GET /totvs/cnpj/:cnpj
+ * @desc Consulta dados completos de CNPJ via BrasilAPI (gratuita, sem auth)
+ */
+router.get(
+  '/cnpj/:cnpj',
+  asyncHandler(async (req, res) => {
+    const cnpj = req.params.cnpj.replace(/\D/g, '');
+    if (cnpj.length !== 14) {
+      return errorResponse(res, 'CNPJ inválido — deve conter 14 dígitos', 400);
+    }
+    const response = await axios.get(
+      `https://brasilapi.com.br/api/cnpj/v1/${cnpj}`,
+      { timeout: 15000 },
+    );
+    successResponse(res, response.data, 'CNPJ consultado com sucesso');
   }),
 );
 
