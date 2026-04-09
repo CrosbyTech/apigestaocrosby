@@ -163,6 +163,15 @@ router.post(
       convertToMp4,
     };
 
+    console.log('🔍 Evolution media request:', {
+      messageId,
+      instanceName,
+      messageType,
+      keyId: msgKey.id,
+      remoteJid: msgKey.remoteJid,
+      fromMe: msgKey.fromMe,
+    });
+
     try {
       const response = await axios.post(
         `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${encodeURIComponent(instanceName)}`,
@@ -191,8 +200,12 @@ router.post(
     } catch (error) {
       console.error('❌ Erro ao buscar mídia Evolution:', {
         status: error.response?.status,
-        data: error.response?.data,
+        data: JSON.stringify(error.response?.data),
         message: error.message,
+        payload: JSON.stringify({
+          key: payload.message.key,
+          convertToMp4: payload.convertToMp4,
+        }),
       });
       const status = error.response?.status || 500;
       const msg =
