@@ -1769,6 +1769,38 @@ router.get(
 );
 
 // ==========================================
+// CONSULTA CEP (BrasilAPI)
+// ==========================================
+
+/**
+ * @route GET /totvs/cep/:cep
+ * @desc Consulta endereço a partir de um CEP via BrasilAPI
+ * @param cep — apenas números, 8 dígitos
+ */
+router.get(
+  '/cep/:cep',
+  asyncHandler(async (req, res) => {
+    const cep = (req.params.cep || '').replace(/\D/g, '');
+
+    if (cep.length !== 8) {
+      return errorResponse(
+        res,
+        'CEP deve conter exatamente 8 dígitos numéricos',
+        400,
+        'INVALID_CEP',
+      );
+    }
+
+    const { data } = await axios.get(
+      `https://brasilapi.com.br/api/cep/v2/${cep}`,
+      { timeout: 15000 },
+    );
+
+    successResponse(res, data, 'CEP consultado com sucesso');
+  }),
+);
+
+// ==========================================
 // RANKING DE PRODUTOS MAIS VENDIDOS
 // ==========================================
 
