@@ -40,6 +40,33 @@ router.get(
 
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const offset = parseInt(req.query.offset) || 0;
+    const instanceId = req.query.instanceId || null;
+    const startDate = req.query.startDate || null;
+    const endDate = req.query.endDate || null;
+
+    let whereExtra = '';
+    const params = [phone];
+    let paramIdx = 2;
+
+    if (instanceId) {
+      whereExtra += ` AND "instanceId" = $${paramIdx}`;
+      params.push(instanceId);
+      paramIdx++;
+    }
+    if (startDate) {
+      whereExtra += ` AND msg_ts_tz >= $${paramIdx}::timestamp`;
+      params.push(`${startDate}T00:00:00`);
+      paramIdx++;
+    }
+    if (endDate) {
+      whereExtra += ` AND msg_ts_tz <= $${paramIdx}::timestamp`;
+      params.push(`${endDate}T23:59:59`);
+      paramIdx++;
+    }
+
+    const limitIdx = paramIdx;
+    const offsetIdx = paramIdx + 1;
+    params.push(limit, offset);
 
     const result = await evolutionPool.query(
       `SELECT
@@ -58,16 +85,17 @@ router.get(
         msisdn_55_v2,
         "instanceId"
       FROM "Message"
-      WHERE msisdn_55_v2 = $1
+      WHERE msisdn_55_v2 = $1 ${whereExtra}
       ORDER BY "messageTimestamp" ASC
-      LIMIT $2 OFFSET $3`,
-      [phone, limit, offset],
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
     );
 
-    // Contar total de mensagens
+    // Contar total de mensagens (mesmos filtros, sem limit/offset)
+    const countParams = params.slice(0, paramIdx - 1);
     const countResult = await evolutionPool.query(
-      `SELECT COUNT(*)::int as total FROM "Message" WHERE msisdn_55_v2 = $1`,
-      [phone],
+      `SELECT COUNT(*)::int as total FROM "Message" WHERE msisdn_55_v2 = $1 ${whereExtra}`,
+      countParams,
     );
 
     return successResponse(res, {
@@ -198,15 +226,27 @@ router.post(
         messageType,
       });
     } catch (error) {
+      const errData = error.response?.data;
+      const errStr =
+        typeof errData === 'string' ? errData : JSON.stringify(errData);
       console.error('❌ Erro ao buscar mídia Evolution:', {
         status: error.response?.status,
-        data: JSON.stringify(error.response?.data),
-        message: error.message,
-        payload: JSON.stringify({
-          key: payload.message.key,
-          convertToMp4: payload.convertToMp4,
-        }),
+        data: errStr,
+        keyId: msgKey.id,
       });
+
+      // Detectar mídia expirada (CDN URL não disponível mais)
+      const isExpired =
+        errStr?.includes('Failed to fetch stream') || errStr?.includes('404');
+      if (isExpired) {
+        return errorResponse(
+          res,
+          'Mídia expirada — o arquivo não está mais disponível no WhatsApp',
+          410,
+          'MEDIA_EXPIRED',
+        );
+      }
+
       const status = error.response?.status || 500;
       const msg =
         error.response?.data?.message ||
@@ -214,6 +254,62 @@ router.post(
         'Erro ao buscar mídia';
       return errorResponse(res, msg, status);
     }
+  }),
+);
+
+/**
+ * @route GET /api/evolution/instances/:phone
+ * @desc Lista instâncias que conversaram com esse telefone, agrupadas com contagem
+ * @param {string} phone - Número de telefone
+ * @query {string} startDate - Data início (YYYY-MM-DD)
+ * @query {string} endDate - Data fim (YYYY-MM-DD)
+ */
+router.get(
+  '/instances/:phone',
+  asyncHandler(async (req, res) => {
+    let phone = (req.params.phone || '').replace(/\D/g, '');
+    if (!phone || phone.length < 10) {
+      return errorResponse(res, 'Número de telefone inválido', 400);
+    }
+    if (!phone.startsWith('55')) phone = '55' + phone;
+
+    const startDate = req.query.startDate || null;
+    const endDate = req.query.endDate || null;
+
+    let dateFilter = '';
+    const params = [phone];
+    let paramIdx = 2;
+
+    if (startDate) {
+      dateFilter += ` AND msg_ts_tz >= $${paramIdx}::timestamp`;
+      params.push(`${startDate}T00:00:00`);
+      paramIdx++;
+    }
+    if (endDate) {
+      dateFilter += ` AND msg_ts_tz <= $${paramIdx}::timestamp`;
+      params.push(`${endDate}T23:59:59`);
+      paramIdx++;
+    }
+
+    const result = await evolutionPool.query(
+      `SELECT
+        m."instanceId",
+        i.name as "instanceName",
+        COUNT(*)::int as "messageCount",
+        MIN(m.msg_ts_tz) as "firstMessage",
+        MAX(m.msg_ts_tz) as "lastMessage"
+      FROM "Message" m
+      LEFT JOIN "Instance" i ON i.id = m."instanceId"
+      WHERE m.msisdn_55_v2 = $1 ${dateFilter}
+      GROUP BY m."instanceId", i.name
+      ORDER BY MAX(m."messageTimestamp") DESC`,
+      params,
+    );
+
+    return successResponse(res, {
+      instances: result.rows,
+      phone,
+    });
   }),
 );
 
