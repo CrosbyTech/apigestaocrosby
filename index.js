@@ -12,6 +12,7 @@ import whatsappRoutes from './routes/whatsapp.routes.js';
 import financialRoutes from './routes/batidacarteira.routes.js';
 import catalogoRoutes from './routes/catalogo.routes.js';
 import metaRoutes from './routes/meta.routes.js';
+import { initializeWhatsApp } from './config/whatsapp.js';
 
 import {
   asyncHandler,
@@ -7246,6 +7247,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  initializeWhatsApp();
 });
 
 export default app;
