@@ -1801,6 +1801,185 @@ router.get(
 );
 
 // ==========================================
+// BUSCA POR CNPJ / CPF DIRETO NO TOTVS
+// ==========================================
+
+/**
+ * @route POST /totvs/clientes/search-by-fiscal
+ * @desc Busca cliente por CNPJ (PJ) ou CPF (PF) diretamente na API TOTVS
+ * @body { fiscalNumber: string } — apenas números (11 ou 14 dígitos)
+ */
+router.post(
+  '/clientes/search-by-fiscal',
+  asyncHandler(async (req, res) => {
+    const { fiscalNumber } = req.body;
+
+    if (!fiscalNumber) {
+      return errorResponse(
+        res,
+        'O campo fiscalNumber é obrigatório',
+        400,
+        'MISSING_FISCAL',
+      );
+    }
+
+    const clean = String(fiscalNumber).replace(/\D/g, '');
+
+    if (clean.length !== 11 && clean.length !== 14) {
+      return errorResponse(
+        res,
+        'fiscalNumber deve ter 11 dígitos (CPF) ou 14 dígitos (CNPJ)',
+        400,
+        'INVALID_FISCAL',
+      );
+    }
+
+    const isCNPJ = clean.length === 14;
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      // PF: usa cpfList no filter (busca direta, sem paginação)
+      // PJ: pagina e filtra localmente pelo campo cnpj (API PJ não tem cnpjList)
+      const endpoint = isCNPJ
+        ? `${TOTVS_BASE_URL}/person/v2/legal-entities/search`
+        : `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+      console.log(
+        `🔍 Buscando ${isCNPJ ? 'PJ (paginação local)' : 'PF (cpfList)'} na TOTVS:`,
+        clean,
+      );
+
+      const doRequest = async (token, payload) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          timeout: 60000,
+        });
+
+      let found = [];
+      let currentToken = tokenData.access_token;
+
+      if (!isCNPJ) {
+        // ── PF: filtro direto por cpfList ──────────────────────────────────
+        const payload = {
+          filter: { cpfList: [clean] },
+          expand:
+            'phones,emails,addresses,contacts,classifications,observations',
+          page: 1,
+          pageSize: 10,
+        };
+
+        let response;
+        try {
+          response = await doRequest(currentToken, payload);
+        } catch (err) {
+          if (err.response?.status === 401) {
+            const newToken = await getToken(true);
+            currentToken = newToken.access_token;
+            response = await doRequest(currentToken, payload);
+          } else {
+            throw err;
+          }
+        }
+
+        found = response.data?.items || [];
+        console.log(`✅ Busca PF por cpfList: ${found.length} resultado(s)`);
+      } else {
+        // ── PJ: pagina e filtra localmente pelo campo cnpj ──────────────────
+        let currentPage = 1;
+        let hasMore = true;
+        const MAX_PAGES = 30;
+
+        while (hasMore && currentPage <= MAX_PAGES && found.length === 0) {
+          const payload = {
+            filter: {},
+            expand:
+              'phones,emails,addresses,contacts,classifications,observations',
+            page: currentPage,
+            pageSize: 500,
+            order: 'personCode',
+          };
+
+          let response;
+          try {
+            response = await doRequest(currentToken, payload);
+          } catch (err) {
+            if (err.response?.status === 401) {
+              const newToken = await getToken(true);
+              currentToken = newToken.access_token;
+              response = await doRequest(currentToken, payload);
+            } else {
+              throw err;
+            }
+          }
+
+          const pageItems = response.data?.items || [];
+          hasMore = response.data?.hasNext || false;
+
+          const matches = pageItems.filter((item) => {
+            const val = String(item.cnpj || '').replace(/\D/g, '');
+            return val === clean;
+          });
+
+          found = found.concat(matches);
+          console.log(
+            `📄 PJ Página ${currentPage}: ${pageItems.length} itens, ${matches.length} match(es)`,
+          );
+          currentPage++;
+        }
+
+        console.log(`✅ Busca PJ: ${found.length} resultado(s)`);
+      }
+
+      successResponse(
+        res,
+        { items: found, total: found.length },
+        `${found.length} cliente(s) encontrado(s)`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar por fiscal number:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message:
+            error.response.data?.message ||
+            error.response.data?.error ||
+            'Erro ao buscar cliente na TOTVS',
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      }
+
+      return errorResponse(
+        res,
+        `Erro ao buscar cliente: ${error.message}`,
+        500,
+        'FETCH_ERROR',
+      );
+    }
+  }),
+);
+
+// ==========================================
 // RANKING DE PRODUTOS MAIS VENDIDOS
 // ==========================================
 
