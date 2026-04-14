@@ -13,6 +13,7 @@ import financialRoutes from './routes/batidacarteira.routes.js';
 import catalogoRoutes from './routes/catalogo.routes.js';
 import metaRoutes from './routes/meta.routes.js';
 import evolutionRoutes from './routes/evolution.routes.js';
+import autentiqueRoutes from './routes/autentique.routes.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
 
 import {
@@ -7234,6 +7235,7 @@ app.use('/api/financial', financialRoutes); // batida-carteira upload
 app.use('/api/catalogo', catalogoRoutes); // catálogo virtual
 app.use('/api/meta', metaRoutes); // WhatsApp Official (Meta Graph API)
 app.use('/api/evolution', evolutionRoutes); // Evolution WhatsApp conversations
+app.use('/api/autentique', autentiqueRoutes); // Autentique assinatura digital (termo-credito, CRUD documentos)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
