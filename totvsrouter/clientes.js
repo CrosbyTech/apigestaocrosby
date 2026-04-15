@@ -1,1366 +1,1410 @@
+/**
+ * ============================================================
+ * AUTENTIQUE API — Integração completa (GraphQL)
+ * Endpoint: https://api.autentique.com.br/v2/graphql
+ * Docs:     https://docs.autentique.com.br/api/2
+ * ============================================================
+ *
+ * QUERIES (leitura):
+ *   GET  /api/autentique/me                          — Dados do usuário atual
+ *   GET  /api/autentique/documents                   — Listar documentos (limit, page)
+ *   GET  /api/autentique/document/:id                — Buscar documento específico
+ *   GET  /api/autentique/documents/folder/:folder_id — Documentos de uma pasta
+ *   GET  /api/autentique/organization                — Organização atual
+ *   GET  /api/autentique/organizations               — Todas as organizações
+ *   GET  /api/autentique/folders                     — Listar pastas (limit, page, type)
+ *   GET  /api/autentique/email-templates             — Listar modelos de e-mail
+ *
+ * MUTATIONS (escrita):
+ *   POST   /api/autentique/documents                       — Criar documento (multipart: file + JSON)
+ *   POST   /api/autentique/documents/:id/sign              — Assinar documento
+ *   PUT    /api/autentique/documents/:id                   — Editar documento
+ *   POST   /api/autentique/documents/:id/transfer          — Transferir documento para org/grupo
+ *   POST   /api/autentique/documents/:id/move              — Mover documento para pasta
+ *   POST   /api/autentique/documents/:id/signers           — Adicionar signatário
+ *   DELETE /api/autentique/documents/:id/signers/:pub_id   — Remover signatário
+ *   POST   /api/autentique/folders                         — Criar pasta
+ *
+ * FLUXO ESPECIAL:
+ *   POST /api/autentique/termo-credito  — Gera PDF do Termo de Crédito com dados
+ *                                          do cliente (TOTVS) e envia para assinatura
+ *                                          via WhatsApp com LIVE + MANUAL verification
+ */
+
 import express from 'express';
 import axios from 'axios';
+import multer from 'multer';
+import puppeteer from 'puppeteer';
 import {
   asyncHandler,
   successResponse,
   errorResponse,
 } from '../utils/errorHandler.js';
-import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
-import {
-  httpsAgent,
-  httpAgent,
-  TOTVS_BASE_URL,
-  TOTVS_AUTH_ENDPOINT,
-} from './totvsHelper.js';
-import {
-  syncFullPesPessoa,
-  syncIncrementalPesPessoa,
-  fetchAndMapPersons,
-  mapPersonToRow,
-  upsertBatch,
-} from '../utils/syncPesPessoa.js';
+import { getToken } from '../utils/totvsTokenManager.js';
+import { TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 import supabase from '../config/supabase.js';
+
 const router = express.Router();
 
-router.post(
-  '/legal-entity/search',
+// ─── Configuração ─────────────────────────────────────────────────────────────
+const AUTENTIQUE_API_URL = 'https://api.autentique.com.br/v2/graphql';
+const AUTENTIQUE_API_KEY =
+  process.env.AUTENTIQUE_API_KEY ||
+  '52a2018cda387ba2d3fbce56ca4f6e6d8d80997b6049cb62a7a6474ddcb63d2a';
+
+// Multer em memória para receber arquivos do frontend e repassá-los à Autentique
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
+});
+
+// ─── Helper: executa GraphQL query/mutation (sem arquivo) ─────────────────────
+const gql = async (query, variables = {}) => {
+  const response = await axios.post(
+    AUTENTIQUE_API_URL,
+    { query, variables },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${AUTENTIQUE_API_KEY}`,
+      },
+      timeout: 30000,
+    },
+  );
+
+  if (response.data.errors?.length) {
+    const msg = response.data.errors.map((e) => e.message).join(' | ');
+    const err = new Error(msg);
+    err.gqlErrors = response.data.errors;
+    throw err;
+  }
+
+  return response.data.data;
+};
+
+// ─── Helper: trata erros da Autentique e responde ─────────────────────────────
+const handleError = (res, error) => {
+  console.error('❌ Autentique API error:', error.message);
+
+  if (error.gqlErrors) {
+    return res.status(422).json({
+      success: false,
+      message: error.message,
+      errors: error.gqlErrors,
+    });
+  }
+
+  if (error.response) {
+    return res.status(error.response.status || 400).json({
+      success: false,
+      message: error.response.data?.message || error.message,
+      details: error.response.data,
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: error.message || 'Erro na integração com Autentique',
+  });
+};
+
+// =============================================================================
+// QUERIES
+// =============================================================================
+
+/**
+ * @route GET /api/autentique/me
+ * @desc  Retorna dados do usuário dono do token (nome, email, CPF, créditos, organização)
+ */
+router.get(
+  '/me',
   asyncHandler(async (req, res) => {
-    const { personCode } = req.body;
-
-    // Validação do personCode
-    if (personCode === undefined || personCode === null || personCode === '') {
-      return errorResponse(
-        res,
-        'O campo personCode é obrigatório',
-        400,
-        'MISSING_PERSON_CODE',
-      );
-    }
-
-    // Converter para número se vier como string
-    const personCodeNum =
-      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
-
-    if (isNaN(personCodeNum) || personCodeNum < 0) {
-      return errorResponse(
-        res,
-        'O campo personCode deve ser um número inteiro válido',
-        400,
-        'INVALID_PERSON_CODE',
-      );
-    }
-
     try {
-      // Obter token atual (ou gerar novo se necessário)
-      const tokenData = await getToken();
-
-      if (!tokenData || !tokenData.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      // Preparar o payload para busca por código da pessoa
-      const payload = {
-        filter: {
-          personCodeList: [personCodeNum],
-        },
-        page: 1,
-        pageSize: 10,
-      };
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-
-      console.log('🔍 Consultando pessoa jurídica na API TOTVS:', {
-        endpoint,
-        personCode: personCodeNum,
-      });
-
-      const doRequest = async (accessToken) =>
-        axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 30000,
-        });
-
-      let response;
-      try {
-        response = await doRequest(tokenData.access_token);
-      } catch (error) {
-        if (error.response?.status === 401) {
-          console.log('🔄 Token inválido. Renovando token...');
-          const newTokenData = await getToken(true);
-          response = await doRequest(newTokenData.access_token);
-        } else {
-          throw error;
-        }
-      }
-
-      console.log('✅ Dados da pessoa jurídica obtidos com sucesso');
-
-      successResponse(
-        res,
-        response.data,
-        'Dados da pessoa jurídica obtidos com sucesso',
-      );
-    } catch (error) {
-      console.error('❌ Erro ao consultar pessoa jurídica na API TOTVS:', {
-        message: error.message,
-        code: error.code,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
-
-      if (error.response) {
-        let errorMessage = 'Erro ao consultar pessoa jurídica na API TOTVS';
-
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            errorMessage = error.response.data || errorMessage;
-          } else if (typeof error.response.data === 'object') {
-            errorMessage =
-              error.response.data?.message ||
-              error.response.data?.error ||
-              error.response.data?.error_description ||
-              error.response.data?.title ||
-              (error.response.status === 404
-                ? 'Pessoa jurídica não encontrada'
-                : errorMessage);
+      const data = await gql(`
+        query {
+          me {
+            id
+            name
+            email
+            phone
+            cpf
+            cnpj
+            birthday
+            subscription {
+              has_premium_features
+              documents
+              credits
+            }
+            organization {
+              id
+              uuid
+              name
+              cnpj
+            }
           }
-        } else if (error.response.status === 404) {
-          errorMessage = 'Pessoa jurídica não encontrada';
         }
-
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message: errorMessage,
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-          payload: { personCode: personCodeNum },
-        });
-      } else if (error.request) {
-        const errorMessage =
-          error.code === 'ENOTFOUND'
-            ? 'URL da API TOTVS não encontrada. Verifique se a URL está correta.'
-            : error.code === 'ECONNREFUSED'
-              ? 'Conexão recusada pela API TOTVS. O servidor pode estar offline.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
-
-        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
-      }
-
-      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+      `);
+      successResponse(res, data.me, 'Dados do usuário obtidos com sucesso');
+    } catch (err) {
+      handleError(res, err);
     }
   }),
 );
 
 /**
- * @route POST /totvs/legal-entity/search-by-name
- * @desc Busca pessoa jurídica por nome fantasia na API TOTVS
- * @access Public
- * @body {
- *   fantasyName: string (obrigatório) - Nome fantasia para buscar
- *   page: number (opcional) - Página para buscar (default: 1)
- *   pageSize: number (opcional) - Tamanho da página (default: 100)
- * }
+ * @route GET /api/autentique/documents
+ * @query limit (default 60) — itens por página
+ * @query page  (default 1)  — número da página
+ * @desc  Lista documentos paginados do usuário
  */
-router.post(
-  '/legal-entity/search-by-name',
+router.get(
+  '/documents',
   asyncHandler(async (req, res) => {
-    const { fantasyName, maxPages = 50 } = req.body;
+    const limit = parseInt(req.query.limit) || 60;
+    const page = parseInt(req.query.page) || 1;
 
-    if (!fantasyName || fantasyName.trim().length < 2) {
+    try {
+      const data = await gql(
+        `
+        query ListDocuments($limit: Int, $page: Int) {
+          documents(limit: $limit, page: $page) {
+            total
+            data {
+              id
+              name
+              refusable
+              sortable
+              qualified
+              sandbox
+              created_at
+              deleted_at
+              files { original signed pades }
+              signatures {
+                public_id
+                name
+                email
+                created_at
+                action { name }
+                link { short_link }
+                user { id name email }
+                viewed { created_at }
+                signed { created_at }
+                rejected { created_at }
+              }
+            }
+          }
+        }
+      `,
+        { limit, page },
+      );
+      successResponse(res, data.documents, 'Documentos listados com sucesso');
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route GET /api/autentique/document/:id
+ * @desc  Busca um documento específico com status completo de todas as assinaturas
+ */
+router.get(
+  '/document/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    if (!id) {
       return errorResponse(
         res,
-        'O campo fantasyName é obrigatório e deve ter pelo menos 2 caracteres',
+        'ID do documento é obrigatório',
         400,
-        'MISSING_FANTASY_NAME',
+        'MISSING_ID',
       );
     }
 
-    const searchTerm = fantasyName.trim().toUpperCase();
-
     try {
-      // Obter token
-      const tokenData = await getToken();
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-
-      console.log('🔍 Buscando clientes por nome fantasia na API TOTVS:', {
-        endpoint,
-        searchTerm,
-        maxPages,
-      });
-
-      const doRequest = async (accessToken, page) => {
-        const payload = {
-          filter: {},
-          expand:
-            'phones,emails,addresses,contacts,classifications,observations',
-          page: page,
-          pageSize: 100, // Limite da API TOTVS
-          order: 'name',
-        };
-
-        return axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 60000,
-        });
-      };
-
-      // Buscar múltiplas páginas até encontrar resultados ou atingir limite
-      let allItems = [];
-      let currentPage = 1;
-      let hasMore = true;
-      let token = tokenData.access_token;
-
-      while (hasMore && currentPage <= maxPages) {
-        let response;
-        try {
-          response = await doRequest(token, currentPage);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            console.log('🔄 Token inválido. Renovando token...');
-            const newTokenData = await getToken(true);
-            token = newTokenData.access_token;
-            response = await doRequest(token, currentPage);
-          } else {
-            throw error;
+      const data = await gql(
+        `
+        query GetDocument($id: UUID!) {
+          document(id: $id) {
+            id
+            name
+            refusable
+            sortable
+            qualified
+            sandbox
+            created_at
+            deleted_at
+            deadline_at
+            files { original signed pades }
+            signatures {
+              public_id
+              name
+              email
+              created_at
+              action { name }
+              link { short_link }
+              user { id name email phone }
+              user_data { name email phone }
+              email_events {
+                sent
+                opened
+                delivered
+                refused
+                reason
+              }
+              viewed {
+                ip port reason created_at
+                geolocation {
+                  country countryISO state stateISO city zipcode latitude longitude
+                }
+              }
+              signed {
+                ip port reason created_at
+                geolocation {
+                  country countryISO state stateISO city zipcode latitude longitude
+                }
+              }
+              rejected {
+                ip port reason created_at
+                geolocation {
+                  country countryISO state stateISO city zipcode latitude longitude
+                }
+              }
+              signed_unapproved {
+                ip port reason created_at
+              }
+              biometric_approved {
+                ip port reason created_at
+              }
+              biometric_rejected {
+                ip port reason created_at
+              }
+            }
           }
         }
+      `,
+        { id },
+      );
+      successResponse(res, data.document, 'Documento encontrado com sucesso');
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
 
-        const pageItems = response.data?.items || [];
-        allItems = allItems.concat(pageItems);
-        hasMore = response.data?.hasNext || false;
+/**
+ * @route GET /api/autentique/documents/folder/:folder_id
+ * @query limit (default 60)
+ * @query page  (default 1)
+ * @desc  Lista documentos de uma pasta específica
+ */
+router.get(
+  '/documents/folder/:folder_id',
+  asyncHandler(async (req, res) => {
+    const { folder_id } = req.params;
+    const limit = parseInt(req.query.limit) || 60;
+    const page = parseInt(req.query.page) || 1;
 
-        console.log(
-          `📄 Página ${currentPage}: ${pageItems.length} itens (total: ${allItems.length})`,
-        );
+    try {
+      const data = await gql(
+        `
+        query DocumentsByFolder($folder_id: UUID!, $limit: Int, $page: Int) {
+          documentsByFolder(folder_id: $folder_id, limit: $limit, page: $page) {
+            has_more_pages
+            data {
+              id
+              name
+              qualified
+              sandbox
+              created_at
+              deleted_at
+            }
+          }
+        }
+      `,
+        { folder_id, limit, page },
+      );
+      successResponse(
+        res,
+        data.documentsByFolder,
+        'Documentos da pasta obtidos com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
 
-        currentPage++;
+/**
+ * @route GET /api/autentique/organization
+ * @desc  Retorna dados da organização atual do usuário
+ */
+router.get(
+  '/organization',
+  asyncHandler(async (req, res) => {
+    try {
+      const data = await gql(`
+        query {
+          organization {
+            id
+            uuid
+            name
+            cnpj
+          }
+        }
+      `);
+      successResponse(res, data.organization, 'Organização obtida com sucesso');
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route GET /api/autentique/organizations
+ * @desc  Retorna todas as organizações do usuário
+ */
+router.get(
+  '/organizations',
+  asyncHandler(async (req, res) => {
+    try {
+      const data = await gql(`
+        query {
+          organizations {
+            id
+            uuid
+            name
+            cnpj
+          }
+        }
+      `);
+      successResponse(
+        res,
+        data.organizations,
+        'Organizações obtidas com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route GET /api/autentique/folders
+ * @query limit (default 60)
+ * @query page  (default 1)
+ * @query type  (DEFAULT | GROUP | ORGANIZATION — default: DEFAULT)
+ * @desc  Lista pastas do usuário
+ */
+router.get(
+  '/folders',
+  asyncHandler(async (req, res) => {
+    const limit = parseInt(req.query.limit) || 60;
+    const page = parseInt(req.query.page) || 1;
+    const type = req.query.type || 'DEFAULT';
+
+    const VALID_TYPES = ['DEFAULT', 'GROUP', 'ORGANIZATION'];
+    if (!VALID_TYPES.includes(type)) {
+      return errorResponse(
+        res,
+        `Tipo de pasta inválido. Valores aceitos: ${VALID_TYPES.join(', ')}`,
+        400,
+        'INVALID_FOLDER_TYPE',
+      );
+    }
+
+    try {
+      const data = await gql(
+        `
+        query ListFolders($limit: Int, $page: Int, $type: FolderTypeEnum) {
+          folders(limit: $limit, page: $page, type: $type) {
+            total
+            data {
+              id
+              name
+              slug
+              context
+              path
+              children_counter
+              created_at
+              updated_at
+            }
+          }
+        }
+      `,
+        { limit, page, type },
+      );
+      successResponse(res, data.folders, 'Pastas listadas com sucesso');
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route GET /api/autentique/email-templates
+ * @query limit (default 60)
+ * @query page  (default 1)
+ * @desc  Lista modelos de e-mail personalizados da conta
+ */
+router.get(
+  '/email-templates',
+  asyncHandler(async (req, res) => {
+    const limit = parseInt(req.query.limit) || 60;
+    const page = parseInt(req.query.page) || 1;
+
+    try {
+      const data = await gql(
+        `
+        query ListEmailTemplates($limit: Int, $page: Int) {
+          emailTemplates(limit: $limit, page: $page) {
+            has_more_pages
+            data {
+              id
+              name
+              type
+              email {
+                text
+                sender
+                colors
+                template
+              }
+            }
+          }
+        }
+      `,
+        { limit, page },
+      );
+      successResponse(
+        res,
+        data.emailTemplates,
+        'Modelos de e-mail listados com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+// =============================================================================
+// MUTATIONS
+// =============================================================================
+
+/**
+ * @route POST /api/autentique/documents
+ * @desc  Cria um novo documento para assinatura
+ *
+ * Envio via multipart/form-data:
+ *   - file         (File, obrigatório) — PDF do documento
+ *   - document     (JSON string, obrigatório) — configurações do documento
+ *   - signers      (JSON string, obrigatório) — array de signatários
+ *   - organization_id (string, opcional)
+ *   - folder_id       (string, opcional)
+ *   - type            (string, opcional) — DEFAULT | WHATSAPP_FLOW
+ *
+ * Exemplo de "document" JSON:
+ * {
+ *   "name": "Contrato",
+ *   "message": "Por favor assine",
+ *   "reminder": "WEEKLY",
+ *   "sortable": false,
+ *   "refusable": true,
+ *   "qualified": false,
+ *   "deadline_at": "2026-12-31T23:59:59Z",
+ *   "ignore_cpf": false,
+ *   "new_signature_style": true,
+ *   "footer": "BOTTOM",
+ *   "cc": [{ "email": "gestor@empresa.com" }],
+ *   "configs": {
+ *     "notification_finished": true,
+ *     "notification_signed": true,
+ *     "signature_appearance": "ELETRONIC"
+ *   },
+ *   "locale": { "country": "BR", "language": "pt-BR", "timezone": "America/Sao_Paulo" }
+ * }
+ *
+ * Exemplo de "signers" JSON:
+ * [
+ *   { "email": "cliente@empresa.com", "action": "SIGN" },
+ *   { "phone": "+5511999999999", "delivery_method": "DELIVERY_METHOD_WHATSAPP", "action": "SIGN" }
+ * ]
+ *
+ * Ações disponíveis para signatários:
+ *   SIGN | APPROVE | RECOGNIZE | SIGN_AS_A_WITNESS | ACKNOWLEDGE_RECEIPT |
+ *   ENDORSE_IN_BLACK | ENDORSE_IN_WHITE
+ *
+ * Métodos de entrega:
+ *   DELIVERY_METHOD_EMAIL | DELIVERY_METHOD_WHATSAPP | DELIVERY_METHOD_SMS | DELIVERY_METHOD_LINK
+ */
+router.post(
+  '/documents',
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return errorResponse(
+        res,
+        'Arquivo PDF é obrigatório',
+        400,
+        'MISSING_FILE',
+      );
+    }
+
+    let document, signers;
+    try {
+      document =
+        typeof req.body.document === 'string'
+          ? JSON.parse(req.body.document)
+          : req.body.document;
+      signers =
+        typeof req.body.signers === 'string'
+          ? JSON.parse(req.body.signers)
+          : req.body.signers;
+    } catch {
+      return errorResponse(
+        res,
+        'Os campos "document" e "signers" devem ser JSON válidos',
+        400,
+        'INVALID_JSON',
+      );
+    }
+
+    if (!document || !signers || !Array.isArray(signers)) {
+      return errorResponse(
+        res,
+        'Os campos "document" (objeto) e "signers" (array) são obrigatórios',
+        400,
+        'MISSING_FIELDS',
+      );
+    }
+
+    const organization_id = req.body.organization_id
+      ? parseInt(req.body.organization_id)
+      : undefined;
+    const folder_id = req.body.folder_id || undefined;
+    const type = req.body.type || 'DEFAULT';
+
+    // Mutation GraphQL
+    const query = `
+      mutation CreateDocumentMutation(
+        $document: DocumentInput!,
+        $signers: [SignerInput!]!,
+        $file: Upload!
+      ) {
+        createDocument(
+          document: $document,
+          signers: $signers,
+          file: $file,
+          ${organization_id ? 'organization_id: ' + organization_id + ',' : ''}
+          ${folder_id ? 'folder_id: "' + folder_id + '",' : ''}
+          type: ${type}
+        ) {
+          id
+          name
+          refusable
+          sortable
+          created_at
+          signatures {
+            public_id
+            name
+            email
+            created_at
+            action { name }
+            link { short_link }
+            user { id name email }
+          }
+        }
       }
+    `;
 
-      // Filtrar resultados pelo nome fantasia localmente
-      const filteredItems = allItems.filter((item) => {
-        const itemFantasyName = (item.fantasyName || '').toUpperCase();
-        const itemName = (item.name || '').toUpperCase();
-        return (
-          itemFantasyName.includes(searchTerm) || itemName.includes(searchTerm)
-        );
+    // Montar multipart seguindo GraphQL multipart request spec
+    // https://github.com/jaydenseric/graphql-multipart-request-spec
+    const operations = JSON.stringify({
+      query,
+      variables: {
+        document,
+        signers,
+        file: null,
+      },
+    });
+
+    const map = JSON.stringify({ 0: ['variables.file'] });
+
+    // Usar FormData nativa do Node 18+ com File
+    const form = new FormData();
+    form.append('operations', operations);
+    form.append('map', map);
+    form.append(
+      '0',
+      new File([req.file.buffer], req.file.originalname, {
+        type: req.file.mimetype,
+      }),
+    );
+
+    try {
+      const response = await fetch(AUTENTIQUE_API_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${AUTENTIQUE_API_KEY}`,
+        },
+        body: form,
+        signal: AbortSignal.timeout(60000),
       });
 
-      console.log(
-        `✅ Busca concluída: ${filteredItems.length} de ${allItems.length} clientes encontrados em ${currentPage - 1} páginas`,
-      );
+      const json = await response.json();
+
+      if (json.errors?.length) {
+        const msg = json.errors.map((e) => e.message).join(' | ');
+        return res.status(422).json({
+          success: false,
+          message: msg,
+          errors: json.errors,
+        });
+      }
 
       successResponse(
         res,
+        json.data?.createDocument,
+        'Documento criado com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route POST /api/autentique/documents/:id/sign
+ * @desc  Assina o documento com o usuário dono do token
+ *        (só funciona se o usuário for um dos signatários)
+ */
+router.post(
+  '/documents/:id/sign',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const data = await gql(
+        `
+        mutation SignDocument($id: UUID!) {
+          signDocument(id: $id)
+        }
+      `,
+        { id },
+      );
+      successResponse(
+        res,
+        { signed: data.signDocument },
+        'Documento assinado com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route PUT /api/autentique/documents/:id
+ * @desc  Edita configurações de um documento já criado
+ * @body  Objeto com campos editáveis do documento (todos opcionais):
+ * {
+ *   name, message, reminder, sortable, footer, refusable,
+ *   new_signature_style, show_audit_page, ignore_cpf,
+ *   email_template_id, deadline_at, reply_to,
+ *   cc: [{ email }],
+ *   expiration: { days_before, notify_at },
+ *   configs: { notification_finished, notification_signed, signature_appearance }
+ * }
+ */
+router.put(
+  '/documents/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const document = req.body;
+
+    if (!id) {
+      return errorResponse(
+        res,
+        'ID do documento é obrigatório',
+        400,
+        'MISSING_ID',
+      );
+    }
+
+    try {
+      const data = await gql(
+        `
+        mutation UpdateDocument($id: UUID!, $document: UpdateDocumentInput!) {
+          updateDocument(id: $id, document: $document) {
+            id
+            name
+            message
+            reminder
+            refusable
+            sortable
+            stop_on_rejected
+            new_signature_style
+            show_audit_page
+            expiration_at
+            deadline_at
+            email_template_id
+            footer
+            cc
+            configs {
+              notification_finished
+              notification_signed
+              signature_appearance
+            }
+            created_at
+          }
+        }
+      `,
+        { id, document },
+      );
+      successResponse(
+        res,
+        data.updateDocument,
+        'Documento atualizado com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route POST /api/autentique/documents/:id/transfer
+ * @desc  Transfere documento para outra organização/grupo
+ * @body {
+ *   organization_id: number (obrigatório),
+ *   group_id: number (obrigatório),
+ *   current_group_id: number (opcional),
+ *   context: "USER" | "GROUP" | "ORGANIZATION" (opcional)
+ * }
+ */
+router.post(
+  '/documents/:id/transfer',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { organization_id, group_id, current_group_id, context } = req.body;
+
+    if (!organization_id || !group_id) {
+      return errorResponse(
+        res,
+        'Os campos organization_id e group_id são obrigatórios',
+        400,
+        'MISSING_FIELDS',
+      );
+    }
+
+    try {
+      const data = await gql(
+        `
+        mutation TransferDocument(
+          $id: UUID!,
+          $organization_id: Int!,
+          $group_id: Int!,
+          $current_group_id: Int,
+          $context: ContextEnum
+        ) {
+          transferDocument(
+            id: $id,
+            organization_id: $organization_id,
+            group_id: $group_id,
+            current_group_id: $current_group_id,
+            context: $context
+          )
+        }
+      `,
         {
-          items: filteredItems,
-          totalFiltered: filteredItems.length,
-          totalFetched: allItems.length,
-          pagesSearched: currentPage - 1,
-          hasMore: hasMore,
+          id,
+          organization_id: parseInt(organization_id),
+          group_id: parseInt(group_id),
+          current_group_id: current_group_id
+            ? parseInt(current_group_id)
+            : null,
+          context: context || null,
         },
-        `${filteredItems.length} cliente(s) encontrado(s)`,
       );
-    } catch (error) {
-      console.error('❌ Erro ao buscar clientes por nome na API TOTVS:', {
-        message: error.message,
-        code: error.code,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
-
-      if (error.response) {
-        let errorMessage = 'Erro ao buscar clientes na API TOTVS';
-
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            errorMessage = error.response.data || errorMessage;
-          } else if (typeof error.response.data === 'object') {
-            errorMessage =
-              error.response.data?.message ||
-              error.response.data?.error ||
-              error.response.data?.error_description ||
-              error.response.data?.title ||
-              errorMessage;
-          }
-        }
-
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message: errorMessage,
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-        });
-      } else if (error.request) {
-        const errorMessage =
-          error.code === 'ENOTFOUND'
-            ? 'URL da API TOTVS não encontrada.'
-            : error.code === 'ECONNREFUSED'
-              ? 'Conexão recusada pela API TOTVS.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
-
-        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
-      }
-
-      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+      successResponse(
+        res,
+        { transferred: data.transferDocument },
+        'Documento transferido com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
     }
   }),
 );
 
 /**
- * @route POST /totvs/legal-entity/search-by-phone
- * @desc Busca pessoa jurídica por número de telefone na API TOTVS
- *       A API TOTVS PJ não suporta filtro direto por telefone,
- *       então esta rota percorre as páginas e filtra localmente.
- * @access Public
- * @body {
- *   phoneNumber: string (obrigatório) - Número de telefone (apenas números, mín. 8 dígitos)
- *   maxPages: number (opcional) - Máximo de páginas a percorrer (default: 30)
- * }
+ * @route POST /api/autentique/documents/:id/move
+ * @desc  Move um documento existente para uma pasta
+ * @body  { folder_id: string (UUID da pasta) }
  */
 router.post(
-  '/legal-entity/search-by-phone',
+  '/documents/:id/move',
   asyncHandler(async (req, res) => {
-    const { phoneNumber, maxPages = 30 } = req.body;
+    const { id } = req.params;
+    const { folder_id } = req.body;
 
-    if (!phoneNumber || phoneNumber.trim().length < 8) {
+    if (!folder_id) {
       return errorResponse(
         res,
-        'O campo phoneNumber é obrigatório e deve ter pelo menos 8 dígitos',
+        'O campo folder_id é obrigatório',
         400,
-        'MISSING_PHONE_NUMBER',
-      );
-    }
-
-    // Remover caracteres não numéricos
-    const cleanPhone = phoneNumber.replace(/\D/g, '');
-
-    if (cleanPhone.length < 8) {
-      return errorResponse(
-        res,
-        'O número de telefone deve ter pelo menos 8 dígitos numéricos',
-        400,
-        'INVALID_PHONE_NUMBER',
+        'MISSING_FOLDER_ID',
       );
     }
 
     try {
-      const tokenData = await getToken();
-
-      if (!tokenData || !tokenData.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-
-      console.log('🔍 Buscando pessoa jurídica por telefone na API TOTVS:', {
-        endpoint,
-        phoneNumber: cleanPhone,
-        maxPages,
-      });
-
-      const doRequest = async (accessToken, page) => {
-        const payload = {
-          filter: {
-            isCustomer: true,
-          },
-          expand:
-            'phones,emails,addresses,contacts,classifications,observations',
-          page: page,
-          pageSize: 500,
-          order: 'personCode',
-        };
-
-        return axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 60000,
-        });
-      };
-
-      let allMatches = [];
-      let currentPage = 1;
-      let hasMore = true;
-      let token = tokenData.access_token;
-      let totalFetched = 0;
-
-      while (hasMore && currentPage <= maxPages) {
-        let response;
-        try {
-          response = await doRequest(token, currentPage);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            console.log('🔄 Token inválido. Renovando token...');
-            const newTokenData = await getToken(true);
-            token = newTokenData.access_token;
-            response = await doRequest(token, currentPage);
-          } else {
-            throw error;
-          }
+      const data = await gql(
+        `
+        mutation MoveDocumentToFolder($document_id: UUID!, $folder_id: UUID!) {
+          moveDocumentToFolder(document_id: $document_id, folder_id: $folder_id)
         }
-
-        const pageItems = response.data?.items || [];
-        totalFetched += pageItems.length;
-        hasMore = response.data?.hasNext || false;
-
-        // Filtrar por telefone localmente
-        const matches = pageItems.filter((item) => {
-          if (!item.phones || !Array.isArray(item.phones)) return false;
-          return item.phones.some((phone) => {
-            const num = (phone.number || '').replace(/\D/g, '');
-            if (num.length < 8) return false;
-            return num.includes(cleanPhone) || cleanPhone.includes(num);
-          });
-        });
-
-        if (matches.length > 0) {
-          allMatches = allMatches.concat(matches);
-        }
-
-        console.log(
-          `📄 PJ Página ${currentPage}: ${pageItems.length} itens, ${matches.length} match(es) (total matches: ${allMatches.length})`,
-        );
-
-        currentPage++;
-      }
-
-      console.log(
-        `✅ Busca PJ por telefone concluída: ${allMatches.length} de ${totalFetched} em ${currentPage - 1} páginas`,
+      `,
+        { document_id: id, folder_id },
       );
-
       successResponse(
         res,
-        {
-          items: allMatches,
-          totalFiltered: allMatches.length,
-          totalFetched: totalFetched,
-          pagesSearched: currentPage - 1,
-          hasMore: hasMore,
-        },
-        `${allMatches.length} pessoa(s) jurídica(s) encontrada(s) com o telefone informado`,
+        { moved: data.moveDocumentToFolder },
+        'Documento movido para a pasta com sucesso',
       );
-    } catch (error) {
-      console.error(
-        '❌ Erro ao buscar pessoa jurídica por telefone na API TOTVS:',
-        {
-          message: error.message,
-          code: error.code,
-          response: error.response?.data,
-          status: error.response?.status,
-        },
-      );
-
-      if (error.response) {
-        let errorMessage =
-          'Erro ao buscar pessoa jurídica por telefone na API TOTVS';
-
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            errorMessage = error.response.data || errorMessage;
-          } else if (typeof error.response.data === 'object') {
-            errorMessage =
-              error.response.data?.message ||
-              error.response.data?.error ||
-              error.response.data?.error_description ||
-              error.response.data?.title ||
-              errorMessage;
-          }
-        }
-
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message: errorMessage,
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-        });
-      } else if (error.request) {
-        const errorMessage =
-          error.code === 'ENOTFOUND'
-            ? 'URL da API TOTVS não encontrada.'
-            : error.code === 'ECONNREFUSED'
-              ? 'Conexão recusada pela API TOTVS.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
-
-        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
-      }
-
-      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    } catch (err) {
+      handleError(res, err);
     }
   }),
 );
 
 /**
- * @route POST /totvs/individual/search
- * @desc Busca dados de pessoa física (PF) na API TOTVS Moda
- * @access Public
- * @body {
- *   personCode: number (código da pessoa - obrigatório)
+ * @route POST /api/autentique/documents/:id/signers
+ * @desc  Adiciona um signatário a um documento já criado
+ * @body  Objeto SignerInput:
+ * {
+ *   email?: string,
+ *   name?: string,
+ *   phone?: string,
+ *   delivery_method?: "DELIVERY_METHOD_EMAIL" | "DELIVERY_METHOD_WHATSAPP" |
+ *                     "DELIVERY_METHOD_SMS" | "DELIVERY_METHOD_LINK",
+ *   action: "SIGN" | "APPROVE" | "RECOGNIZE" | "SIGN_AS_A_WITNESS" |
+ *           "ACKNOWLEDGE_RECEIPT" | "ENDORSE_IN_BLACK" | "ENDORSE_IN_WHITE",
+ *   configs?: { cpf?: string },
+ *   security_verifications?: [{ type: "SMS" | "MANUAL" | "UPLOAD" | "LIVE" | "PF_FACIAL", verify_phone?: string }],
+ *   positions?: [{ x: string, y: string, z: number, element: "SIGNATURE"|"NAME"|"INITIALS"|"DATE"|"CPF" }]
  * }
  */
 router.post(
-  '/individual/search',
+  '/documents/:id/signers',
   asyncHandler(async (req, res) => {
-    const { personCode } = req.body;
+    const document_id = req.params.id;
+    const signer = req.body;
 
-    // Validação do personCode
-    if (personCode === undefined || personCode === null || personCode === '') {
+    if (!signer.action) {
       return errorResponse(
         res,
-        'O campo personCode é obrigatório',
+        'O campo action é obrigatório no signatário',
         400,
-        'MISSING_PERSON_CODE',
+        'MISSING_ACTION',
       );
     }
 
-    // Converter para número se vier como string
-    const personCodeNum =
-      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
-
-    if (isNaN(personCodeNum) || personCodeNum < 0) {
+    const VALID_ACTIONS = [
+      'SIGN',
+      'APPROVE',
+      'RECOGNIZE',
+      'SIGN_AS_A_WITNESS',
+      'ACKNOWLEDGE_RECEIPT',
+      'ENDORSE_IN_BLACK',
+      'ENDORSE_IN_WHITE',
+    ];
+    if (!VALID_ACTIONS.includes(signer.action)) {
       return errorResponse(
         res,
-        'O campo personCode deve ser um número inteiro válido',
+        `Ação inválida. Valores aceitos: ${VALID_ACTIONS.join(', ')}`,
         400,
-        'INVALID_PERSON_CODE',
+        'INVALID_ACTION',
       );
     }
 
     try {
-      // Obter token atual (ou gerar novo se necessário)
-      const tokenData = await getToken();
-
-      if (!tokenData || !tokenData.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      // Preparar o payload para busca por código da pessoa
-      const payload = {
-        filter: {
-          personCodeList: [personCodeNum],
-        },
-        page: 1,
-        pageSize: 10,
-      };
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-
-      console.log('🔍 Consultando pessoa física na API TOTVS:', {
-        endpoint,
-        personCode: personCodeNum,
-      });
-
-      const doRequest = async (accessToken) =>
-        axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 30000,
-        });
-
-      let response;
-      try {
-        response = await doRequest(tokenData.access_token);
-      } catch (error) {
-        if (error.response?.status === 401) {
-          console.log('🔄 Token inválido. Renovando token...');
-          const newTokenData = await getToken(true);
-          response = await doRequest(newTokenData.access_token);
-        } else {
-          throw error;
+      const data = await gql(
+        `
+        mutation CreateSigner($document_id: UUID!, $signer: SignerInput) {
+          createSigner(document_id: $document_id, signer: $signer) {
+            public_id
+            name
+            email
+            delivery_method
+            action { name }
+            link { id short_link }
+            created_at
+          }
         }
-      }
-
-      console.log('✅ Dados da pessoa física obtidos com sucesso');
-
+      `,
+        { document_id, signer },
+      );
       successResponse(
         res,
-        response.data,
-        'Dados da pessoa física obtidos com sucesso',
+        data.createSigner,
+        'Signatário adicionado com sucesso',
       );
-    } catch (error) {
-      console.error('❌ Erro ao consultar pessoa física na API TOTVS:', {
-        message: error.message,
-        code: error.code,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
-
-      if (error.response) {
-        let errorMessage = 'Erro ao consultar pessoa física na API TOTVS';
-
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            errorMessage = error.response.data || errorMessage;
-          } else if (typeof error.response.data === 'object') {
-            errorMessage =
-              error.response.data?.message ||
-              error.response.data?.error ||
-              error.response.data?.error_description ||
-              error.response.data?.title ||
-              (error.response.status === 404
-                ? 'Pessoa física não encontrada'
-                : errorMessage);
-          }
-        } else if (error.response.status === 404) {
-          errorMessage = 'Pessoa física não encontrada';
-        }
-
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message: errorMessage,
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-          payload: { personCode: personCodeNum },
-        });
-      } else if (error.request) {
-        const errorMessage =
-          error.code === 'ENOTFOUND'
-            ? 'URL da API TOTVS não encontrada. Verifique se a URL está correta.'
-            : error.code === 'ECONNREFUSED'
-              ? 'Conexão recusada pela API TOTVS. O servidor pode estar offline.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
-
-        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
-      }
-
-      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    } catch (err) {
+      handleError(res, err);
     }
   }),
 );
 
 /**
- * @route POST /totvs/individual/search-by-name
- * @desc Busca pessoa física por nome na API TOTVS
- * @access Public
+ * @route DELETE /api/autentique/documents/:id/signers/:pub_id
+ * @desc  Remove um signatário de um documento
+ * @param id      — UUID do documento
+ * @param pub_id  — public_id do signatário (obtido ao criar/listar)
+ */
+router.delete(
+  '/documents/:id/signers/:pub_id',
+  asyncHandler(async (req, res) => {
+    const document_id = req.params.id;
+    const public_id = req.params.pub_id;
+
+    try {
+      const data = await gql(
+        `
+        mutation DeleteSigner($public_id: UUID!, $document_id: UUID!) {
+          deleteSigner(public_id: $public_id, document_id: $document_id)
+        }
+      `,
+        { public_id, document_id },
+      );
+      successResponse(
+        res,
+        { deleted: data.deleteSigner },
+        'Signatário removido com sucesso',
+      );
+    } catch (err) {
+      handleError(res, err);
+    }
+  }),
+);
+
+/**
+ * @route POST /api/autentique/folders
+ * @desc  Cria uma pasta (normal, compartilhada ou subpasta)
  * @body {
- *   name: string (obrigatório) - Nome para buscar
- *   maxPages: number (opcional) - Máximo de páginas (default: 50)
+ *   name: string (obrigatório),
+ *   type?: "DEFAULT" | "GROUP" | "ORGANIZATION" (default: DEFAULT),
+ *   parent_id?: string (UUID — se informado, cria como subpasta; máx 5 níveis)
  * }
  */
 router.post(
-  '/individual/search-by-name',
+  '/folders',
   asyncHandler(async (req, res) => {
-    const { name, maxPages = 50 } = req.body;
+    const { name, type, parent_id } = req.body;
 
-    if (!name || name.trim().length < 2) {
+    if (!name || name.trim().length < 1) {
       return errorResponse(
         res,
-        'O campo name é obrigatório e deve ter pelo menos 2 caracteres',
+        'O campo name é obrigatório',
         400,
         'MISSING_NAME',
       );
     }
 
-    const searchTerm = name.trim().toUpperCase();
+    const folderType = type || 'DEFAULT';
+    const VALID_TYPES = ['DEFAULT', 'GROUP', 'ORGANIZATION'];
+    if (!VALID_TYPES.includes(folderType)) {
+      return errorResponse(
+        res,
+        `Tipo inválido. Valores aceitos: ${VALID_TYPES.join(', ')}`,
+        400,
+        'INVALID_FOLDER_TYPE',
+      );
+    }
 
     try {
-      // Obter token
-      const tokenData = await getToken();
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-
-      console.log('🔍 Buscando pessoas físicas por nome na API TOTVS:', {
-        endpoint,
-        searchTerm,
-        maxPages,
-      });
-
-      const doRequest = async (accessToken, page) => {
-        const payload = {
-          filter: {},
-          expand:
-            'phones,emails,addresses,contacts,classifications,observations',
-          page: page,
-          pageSize: 100, // Limite da API TOTVS
-          order: 'name',
-        };
-
-        return axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 60000,
-        });
-      };
-
-      // Buscar múltiplas páginas até encontrar resultados ou atingir limite
-      let allItems = [];
-      let currentPage = 1;
-      let hasMore = true;
-      let token = tokenData.access_token;
-
-      while (hasMore && currentPage <= maxPages) {
-        let response;
-        try {
-          response = await doRequest(token, currentPage);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            console.log('🔄 Token inválido. Renovando token...');
-            const newTokenData = await getToken(true);
-            token = newTokenData.access_token;
-            response = await doRequest(token, currentPage);
-          } else {
-            throw error;
+      const data = await gql(
+        `
+        mutation CreateFolder($folder: FolderInput!, $type: FolderTypeEnum, $parent_id: UUID) {
+          createFolder(folder: $folder, type: $type, parent_id: $parent_id) {
+            id
+            name
+            slug
+            context
+            path
+            children_counter
+            created_at
+            updated_at
           }
         }
-
-        const pageItems = response.data?.items || [];
-        allItems = allItems.concat(pageItems);
-        hasMore = response.data?.hasNext || false;
-
-        console.log(
-          `📄 Página ${currentPage}: ${pageItems.length} itens (total: ${allItems.length})`,
-        );
-
-        currentPage++;
-      }
-
-      // Filtrar resultados pelo nome localmente
-      const filteredItems = allItems.filter((item) => {
-        const itemName = (item.name || '').toUpperCase();
-        const itemNickname = (item.nickname || '').toUpperCase();
-        return (
-          itemName.includes(searchTerm) || itemNickname.includes(searchTerm)
-        );
-      });
-
-      console.log(
-        `✅ Busca concluída: ${filteredItems.length} de ${allItems.length} pessoas encontradas em ${currentPage - 1} páginas`,
-      );
-
-      successResponse(
-        res,
+      `,
         {
-          items: filteredItems,
-          totalFiltered: filteredItems.length,
-          totalFetched: allItems.length,
-          pagesSearched: currentPage - 1,
-          hasMore: hasMore,
-        },
-        `${filteredItems.length} pessoa(s) encontrada(s)`,
-      );
-    } catch (error) {
-      console.error(
-        '❌ Erro ao buscar pessoas físicas por nome na API TOTVS:',
-        {
-          message: error.message,
-          code: error.code,
-          response: error.response?.data,
-          status: error.response?.status,
+          folder: { name: name.trim() },
+          type: folderType,
+          parent_id: parent_id || null,
         },
       );
-
-      if (error.response) {
-        let errorMessage = 'Erro ao buscar pessoas físicas na API TOTVS';
-
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            errorMessage = error.response.data || errorMessage;
-          } else if (typeof error.response.data === 'object') {
-            errorMessage =
-              error.response.data?.message ||
-              error.response.data?.error ||
-              error.response.data?.error_description ||
-              error.response.data?.title ||
-              errorMessage;
-          }
-        }
-
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message: errorMessage,
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-        });
-      } else if (error.request) {
-        const errorMessage =
-          error.code === 'ENOTFOUND'
-            ? 'URL da API TOTVS não encontrada.'
-            : error.code === 'ECONNREFUSED'
-              ? 'Conexão recusada pela API TOTVS.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
-
-        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
-      }
-
-      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+      successResponse(res, data.createFolder, 'Pasta criada com sucesso');
+    } catch (err) {
+      handleError(res, err);
     }
   }),
 );
 
 // =============================================================================
-// BUSCA PESSOA FÍSICA POR TELEFONE
+// TERMO DE CRÉDITO — Geração automática de PDF + envio para assinatura
 // =============================================================================
 
-/**
- * @route POST /totvs/individual/search-by-phone
- * @desc Busca pessoa física por número de telefone na API TOTVS
- *       A API TOTVS PF suporta filtro direto por phoneNumber.
- * @access Public
- * @body {
- *   phoneNumber: string (obrigatório) - Número de telefone (apenas números, mín. 8 dígitos)
- * }
- */
-router.post(
-  '/individual/search-by-phone',
-  asyncHandler(async (req, res) => {
-    const { phoneNumber } = req.body;
-
-    if (!phoneNumber || phoneNumber.trim().length < 8) {
-      return errorResponse(
-        res,
-        'O campo phoneNumber é obrigatório e deve ter pelo menos 8 dígitos',
-        400,
-        'MISSING_PHONE_NUMBER',
-      );
-    }
-
-    // Remover caracteres não numéricos
-    const cleanPhone = phoneNumber.replace(/\D/g, '');
-
-    if (cleanPhone.length < 8) {
-      return errorResponse(
-        res,
-        'O número de telefone deve ter pelo menos 8 dígitos numéricos',
-        400,
-        'INVALID_PHONE_NUMBER',
-      );
-    }
-
-    try {
-      const tokenData = await getToken();
-
-      if (!tokenData || !tokenData.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      const payload = {
-        filter: {
-          phoneNumber: cleanPhone,
-          isCustomer: true,
-        },
-        expand: 'phones,emails,addresses,classifications,observations',
-        page: 1,
-        pageSize: 500,
-      };
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-
-      console.log('🔍 Buscando pessoa física por telefone na API TOTVS:', {
-        endpoint,
-        phoneNumber: cleanPhone,
-      });
-
-      const doRequest = async (accessToken) =>
-        axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 30000,
-        });
-
-      let response;
-      try {
-        response = await doRequest(tokenData.access_token);
-      } catch (error) {
-        if (error.response?.status === 401) {
-          console.log('🔄 Token inválido. Renovando token...');
-          const newTokenData = await getToken(true);
-          response = await doRequest(newTokenData.access_token);
-        } else {
-          throw error;
-        }
-      }
-
-      const items = response.data?.items || [];
-      console.log(
-        `✅ Busca por telefone concluída: ${items.length} pessoa(s) encontrada(s)`,
-      );
-
-      successResponse(
-        res,
-        response.data,
-        `${items.length} pessoa(s) encontrada(s) com o telefone informado`,
-      );
-    } catch (error) {
-      console.error(
-        '❌ Erro ao buscar pessoa física por telefone na API TOTVS:',
-        {
-          message: error.message,
-          code: error.code,
-          response: error.response?.data,
-          status: error.response?.status,
-        },
-      );
-
-      if (error.response) {
-        let errorMessage =
-          'Erro ao buscar pessoa física por telefone na API TOTVS';
-
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            errorMessage = error.response.data || errorMessage;
-          } else if (typeof error.response.data === 'object') {
-            errorMessage =
-              error.response.data?.message ||
-              error.response.data?.error ||
-              error.response.data?.error_description ||
-              error.response.data?.title ||
-              errorMessage;
-          }
-        }
-
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message: errorMessage,
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-        });
-      } else if (error.request) {
-        const errorMessage =
-          error.code === 'ENOTFOUND'
-            ? 'URL da API TOTVS não encontrada.'
-            : error.code === 'ECONNREFUSED'
-              ? 'Conexão recusada pela API TOTVS.'
-              : `Não foi possível conectar à API TOTVS (${error.code || 'Erro desconhecido'})`;
-
-        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
-      }
-
-      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
-    }
-  }),
-);
-
-/**
- * @route GET /totvs/branches
- * @desc Busca lista de empresas/filiais da API TOTVS
- * @access Public
- * @example GET ${API_BASE_URL}/api/totvs/branches
- * @query {
- *   branchCodePool: number (opcional - código empresa base para filtro),
- *   page: number (opcional - página inicial é 1),
- *   pageSize: number (opcional - máximo 1000)
- * }
- */
-
-router.post(
-  '/persons/batch-lookup',
-  asyncHandler(async (req, res) => {
-    const { personCodes } = req.body;
-
-    if (!Array.isArray(personCodes) || personCodes.length === 0) {
-      return errorResponse(
-        res,
-        'personCodes deve ser um array não vazio',
-        400,
-        'INVALID_INPUT',
-      );
-    }
-
-    const startTime = Date.now();
-
-    // Deduplica e converte para inteiro
-    const uniqueCodes = [
-      ...new Set(
-        personCodes
-          .map((c) => parseInt(c, 10))
-          .filter((c) => !isNaN(c) && c > 0),
-      ),
-    ];
-    console.log(`👥 Batch lookup: ${uniqueCodes.length} códigos únicos`);
-
-    try {
-      const tokenData = await getToken();
-      if (!tokenData?.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      const result = {}; // { personCode: { name, fantasyName, phone, uf } }
-      const BATCH_SIZE = 50;
-
-      const doRequest = async (endpoint, payload, accessToken) =>
-        axios.post(endpoint, payload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          timeout: 30000,
-        });
-
-      // Processar em lotes de BATCH_SIZE
-      for (let i = 0; i < uniqueCodes.length; i += BATCH_SIZE) {
-        const batch = uniqueCodes.slice(i, i + BATCH_SIZE);
-        const payload = {
-          filter: { personCodeList: batch },
-          expand: 'phones',
-          page: 1,
-          pageSize: batch.length,
-        };
-
-        // Buscar PJ e PF em paralelo para cada lote
-        const [pjResult, pfResult] = await Promise.allSettled([
-          (async () => {
-            try {
-              const resp = await doRequest(
-                `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-                payload,
-                tokenData.access_token,
-              );
-              return resp.data?.items || [];
-            } catch (err) {
-              if (err.response?.status === 401) {
-                const newToken = await getToken(true);
-                const resp = await doRequest(
-                  `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-                  payload,
-                  newToken.access_token,
-                );
-                return resp.data?.items || [];
-              }
-              console.warn(
-                `⚠️ PJ batch ${i / BATCH_SIZE + 1} falhou:`,
-                err.message,
-              );
-              return [];
-            }
-          })(),
-          (async () => {
-            try {
-              const resp = await doRequest(
-                `${TOTVS_BASE_URL}/person/v2/individuals/search`,
-                payload,
-                tokenData.access_token,
-              );
-              return resp.data?.items || [];
-            } catch (err) {
-              if (err.response?.status === 401) {
-                const newToken = await getToken(true);
-                const resp = await doRequest(
-                  `${TOTVS_BASE_URL}/person/v2/individuals/search`,
-                  payload,
-                  newToken.access_token,
-                );
-                return resp.data?.items || [];
-              }
-              console.warn(
-                `⚠️ PF batch ${i / BATCH_SIZE + 1} falhou:`,
-                err.message,
-              );
-              return [];
-            }
-          })(),
-        ]);
-
-        // Extrair dados de PJ
-        const pjItems = pjResult.status === 'fulfilled' ? pjResult.value : [];
-        for (const item of pjItems) {
-          const code = item.code;
-          if (!code) continue;
-          const defaultPhone =
-            item.phones?.find((p) => p.isDefault) || item.phones?.[0];
-          result[code] = {
-            name: item.name || '',
-            fantasyName: item.fantasyName || '',
-            phone: defaultPhone?.number || '',
-            uf: item.uf || '',
-          };
-        }
-
-        // Extrair dados de PF
-        const pfItems = pfResult.status === 'fulfilled' ? pfResult.value : [];
-        for (const item of pfItems) {
-          const code = item.code;
-          if (!code || result[code]) continue; // PJ tem prioridade
-          const defaultPhone =
-            item.phones?.find((p) => p.isDefault) || item.phones?.[0];
-          result[code] = {
-            name: item.name || '',
-            fantasyName: item.fantasyName || item.name || '',
-            phone: defaultPhone?.number || '',
-            uf: item.uf || '',
-          };
-        }
-
-        console.log(
-          `👤 Batch ${i / BATCH_SIZE + 1}: PJ=${pjItems.length}, PF=${pfItems.length}`,
-        );
-      }
-
-      const totalTime = Date.now() - startTime;
-      console.log(
-        `✅ Batch lookup: ${Object.keys(result).length} pessoas encontradas em ${totalTime}ms`,
-      );
-
-      successResponse(
-        res,
-        result,
-        `${Object.keys(result).length} pessoas encontradas em ${totalTime}ms`,
-      );
-    } catch (error) {
-      console.error('❌ Erro batch lookup:', error.message);
-      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
-    }
-  }),
-);
-
-// ==========================================
-// ROTA: BUSCAR CLIENTES FRANQUIA (por classificação)
-// Cache em memória (recarrega a cada 60 min)
-// Classificação FRANQUIA:
-//   Tipo Cliente 2 / Classificação 1
-//   OU Tipo Cliente 20 / Classificação 4
-// ==========================================
-let cachedFranchiseClients = null;
-let franchiseCacheTimestamp = 0;
-const FRANCHISE_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
-
-/**
- * @route GET /totvs/franchise-clients
- * @desc Retorna lista de códigos de clientes FRANQUIA (classificação TOTVS)
- * Classificações: type 2 codeList ["1"] OU type 20 codeList ["4"]
-
-// Rotas para sincronizar pessoas (PF + PJ)
-// ==========================================
-
-// ==========================================
-// CLIENTES TOTVS v2 - Buscar + Enviar Supabase
-// Busca PF + PJ com expand de phones/emails/addresses
-// Paginação server-side (1000 por página) com cache em memória
-// ==========================================
-
-// Cache de resultado da última busca (expira em 10 min)
-let clientesCache = {
-  data: null,
-  filter: null,
-  timestamp: 0,
-  totalPF: 0,
-  totalPJ: 0,
-  duration: '',
+// ─── Helper: detecta path do Chrome para Puppeteer ───────────────────────────
+const getChromePath = () => {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH)
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  try {
+    const resolved = puppeteer.executablePath();
+    if (resolved) return resolved;
+  } catch {
+    // ignore
+  }
+  return null;
 };
-const CLIENTES_CACHE_TTL = 10 * 60 * 1000;
 
-/**
- * @route GET /totvs/clientes/fetch-all
- * @desc Busca clientes (PF + PJ) do TOTVS com paginação.
- *       1a chamada: busca tudo da API TOTVS e guarda em cache.
- *       Chamadas seguintes (mesmos filtros): retorna do cache.
- * @query startDate (YYYY-MM-DD) - Data início do cadastro
- * @query endDate (YYYY-MM-DD) - Data fim do cadastro
- * @query personCode (opcional) - Código(s) da pessoa (ex: 180 ou 180,200)
- * @query page (opcional, default 1) - Página (1-indexed)
- * @query pageSize (opcional, default 1000) - Itens por página
- */
-router.get(
-  '/clientes/fetch-all',
-  asyncHandler(async (req, res) => {
-    const startTime = Date.now();
-    const { startDate, endDate, personCode } = req.query;
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const pageSize = Math.min(
-      5000,
-      Math.max(1, parseInt(req.query.pageSize, 10) || 1000),
-    );
+// ─── Helper: formata telefone do TOTVS para E.164 (+55...) ───────────────────
+const formatPhone = (raw = '') => {
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return null;
+  // Já tem DDI
+  if (digits.startsWith('55') && digits.length >= 12) return `+${digits}`;
+  // Adiciona DDI 55 (Brasil)
+  return `+55${digits}`;
+};
 
-    // Validar token
-    const tokenData = await getToken();
-    if (!tokenData?.access_token) {
-      return errorResponse(
-        res,
-        'Não foi possível obter token de autenticação TOTVS',
-        503,
-        'TOKEN_UNAVAILABLE',
-      );
+// ─── Helper: formata endereço completo (campos do TOTVS) ─────────────────────
+const formatFullAddress = (a) => {
+  if (!a) return 'Não informado';
+  return [
+    [a.publicPlace, a.address].filter(Boolean).join(' '),
+    a.addressNumber ? `nº ${a.addressNumber}` : null,
+    a.complement || null,
+    a.neighborhood || null,
+    a.cityName && a.stateAbbreviation
+      ? `${a.cityName} - ${a.stateAbbreviation}`
+      : a.cityName || null,
+    a.cep ? `CEP ${a.cep}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+};
+
+// ─── Helper: formata CPF (12345678900 → 123.456.789-00) ──────────────────────
+const formatCpf = (cpf = '') => {
+  const d = cpf.replace(/\D/g, '');
+  if (d.length === 11)
+    return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+  if (d.length === 14)
+    return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
+  return cpf;
+};
+
+// ─── Helper: gera PDF do Termo de Crédito com Puppeteer ──────────────────────
+const gerarTermoPdf = async (cliente) => {
+  const hoje = new Date().toLocaleDateString('pt-BR', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+
+  const endPrincipal = formatFullAddress(
+    (cliente.addresses || []).find((a) => a.addressType === 'COMMERCIAL') ||
+      (cliente.addresses || [])[0],
+  );
+
+  const telefonePrimario =
+    (
+      (cliente.phones || []).find((p) => p.isDefault) ||
+      (cliente.phones || [])[0]
+    )?.number || 'Não informado';
+
+  const emailPrimario =
+    (
+      (cliente.emails || []).find((e) => e.isDefault) ||
+      (cliente.emails || [])[0]
+    )?.email || 'Não informado';
+
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Times New Roman', Times, serif;
+      font-size: 12pt;
+      color: #111;
+      background: #fff;
+      padding: 40px 60px;
+      line-height: 1.7;
     }
-
-    // Montar filtro
-    let filter = {};
-
-    if (personCode) {
-      const codes = personCode
-        .split(',')
-        .map((c) => parseInt(c.trim(), 10))
-        .filter((c) => !isNaN(c) && c > 0);
-      if (codes.length > 0) {
-        filter.personCodeList = codes;
-        console.log(`🔍 Buscando por código(s): ${codes.join(', ')}`);
-      }
-    } else if (startDate || endDate) {
-      const sd = startDate
-        ? `${startDate}T00:00:00.000Z`
-        : '2000-01-01T00:00:00.000Z';
-      const ed = endDate
-        ? `${endDate}T23:59:59.999Z`
-        : new Date().toISOString();
-      filter.startInsertDate = sd;
-      filter.endInsertDate = ed;
-      console.log(`🔍 Filtro de data de cadastro: ${sd} → ${ed}`);
-    } else {
-      console.log('🔍 Buscando TODOS os clientes (sem filtro)...');
+    .header {
+      text-align: center;
+      border-bottom: 2px solid #000;
+      padding-bottom: 16px;
+      margin-bottom: 24px;
     }
+    .header h1 {
+      font-size: 16pt;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .header h2 {
+      font-size: 13pt;
+      font-weight: normal;
+      margin-top: 4px;
+    }
+    .section {
+      margin-top: 24px;
+    }
+    .section-title {
+      font-size: 12pt;
+      font-weight: bold;
+      text-transform: uppercase;
+      border-bottom: 1px solid #555;
+      padding-bottom: 4px;
+      margin-bottom: 12px;
+    }
+    .data-row {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 8px;
+    }
+    .data-label {
+      font-weight: bold;
+      min-width: 140px;
+    }
+    .data-value {
+      flex: 1;
+    }
+    .clausulas p {
+      text-align: justify;
+      margin-bottom: 12px;
+      text-indent: 2em;
+    }
+    .clausulas .clausula-title {
+      font-weight: bold;
+      text-transform: uppercase;
+      text-indent: 0;
+    }
+    .assinatura {
+      margin-top: 60px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+    .assinatura-bloco {
+      text-align: center;
+      width: 45%;
+    }
+    .assinatura-linha {
+      border-top: 1px solid #000;
+      padding-top: 6px;
+      margin-top: 50px;
+    }
+    .rodape {
+      margin-top: 40px;
+      text-align: center;
+      font-size: 9pt;
+      color: #555;
+      border-top: 1px solid #ccc;
+      padding-top: 8px;
+    }
+  </style>
+</head>
+<body>
 
-    const filterKey = JSON.stringify(filter);
-    console.log(
-      '📤 Filtro:',
-      filterKey,
-      `| Página: ${page} | PageSize: ${pageSize}`,
-    );
+  <div class="header">
+    <h1>Crosby</h1>
+    <h2>Termo de Concessão de Crédito</h2>
+  </div>
 
-    try {
-      // Verificar se cache é válido (mesmo filtro e não expirou)
-      const now = Date.now();
-      let allRows;
-      let totalPF, totalPJ, fetchDuration;
+  <div class="section">
+    <div class="section-title">Dados do Cliente</div>
+    <div class="data-row"><span class="data-label">Nome / Razão Social:</span><span class="data-value">${cliente.name || 'Não informado'}</span></div>
+    <div class="data-row"><span class="data-label">CPF / CNPJ:</span><span class="data-value">${formatCpf(cliente.cpf || cliente.cnpj || '')}</span></div>
+    <div class="data-row"><span class="data-label">Código de cliente:</span><span class="data-value">${cliente.code || 'Não informado'}</span></div>
+    <div class="data-row"><span class="data-label">E-mail:</span><span class="data-value">${emailPrimario}</span></div>
+    <div class="data-row"><span class="data-label">Telefone:</span><span class="data-value">${telefonePrimario}</span></div>
+    <div class="data-row"><span class="data-label">Endereço:</span><span class="data-value">${endPrincipal}</span></div>
+  </div>
 
-      if (
-        clientesCache.data &&
-        clientesCache.filter === filterKey &&
-        now - clientesCache.timestamp < CLIENTES_CACHE_TTL
+  <div class="section clausulas">
+    <div class="section-title">Cláusulas e Condições</div>
+
+    <p class="clausula-title">Cláusula 1ª — Do Objeto</p>
+    <p>O presente Termo tem por objeto a concessão de limite de crédito comercial ao cliente identificado acima, para fins de aquisição de produtos e serviços junto à Crosby, nas condições e limites estabelecidos pela empresa, de acordo com a política de crédito vigente.</p>
+
+    <p class="clausula-title">Cláusula 2ª — Das Condições de Pagamento</p>
+    <p>O cliente compromete-se a efetuar o pagamento das compras realizadas dentro dos prazos e condições negociados no momento da venda, respeitando os limites de crédito aprovados e as datas de vencimento das respectivas obrigações.</p>
+
+    <p class="clausula-title">Cláusula 3ª — Da Responsabilidade</p>
+    <p>O cliente declara que as informações prestadas à Crosby são verdadeiras e completas, responsabilizando-se civil e criminalmente por quaisquer falsidades. Autoriza, ainda, a consulta a órgãos de proteção ao crédito (SPC, Serasa e similares) para fins de análise e manutenção do presente crédito.</p>
+
+    <p class="clausula-title">Cláusula 4ª — Da Vigência e Revisão</p>
+    <p>O crédito ora concedido poderá ser revisto, suspenso ou cancelado a qualquer tempo, a critério exclusivo da Crosby, mediante simples comunicação ao cliente, especialmente em caso de inadimplência, alteração negativa na capacidade de pagamento ou descumprimento das condições estabelecidas neste Termo.</p>
+
+    <p class="clausula-title">Cláusula 5ª — Da Concordância</p>
+    <p>Ao assinar o presente instrumento, o cliente declara ter lido, compreendido e concordado integralmente com todas as cláusulas e condições aqui estabelecidas, bem como com a política de crédito e cobrança da Crosby.</p>
+  </div>
+
+  <div class="section">
+    <p style="text-align:right; margin-top: 16px;">Data: ${hoje}</p>
+  </div>
+
+  <div class="assinatura">
+    <div class="assinatura-bloco">
+      <div class="assinatura-linha">
+        ${cliente.name || 'Cliente'}<br>
+        CPF: ${formatCpf(cliente.cpf || '')}<br>
+        <small>Assinatura do Cliente</small>
+      </div>
+    </div>
+    <div class="assinatura-bloco">
+      <div class="assinatura-linha">
+        Crosby<br>
+        <small>Responsável Comercial</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="rodape">
+    Documento gerado eletronicamente em ${hoje} — Crosby © ${new Date().getFullYear()}
+  </div>
+
+</body>
+</html>`;
+
+  const chromePath = getChromePath();
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+    ],
+    ...(chromePath ? { executablePath: chromePath } : {}),
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '10mm', bottom: '10mm', left: '0mm', right: '0mm' },
+    });
+    return Buffer.from(pdfBuffer);
+  } finally {
+    await browser.close();
+  }
+};
+
+// ─── Helper: faz upload para Autentique via multipart ────────────────────────
+const uploadAutentique = async (pdfBuffer, document, signers) => {
+  const query = `
+    mutation CreateDocumentMutation(
+      $document: DocumentInput!,
+      $signers: [SignerInput!]!,
+      $file: Upload!
+    ) {
+      createDocument(
+        document: $document,
+        signers: $signers,
+        file: $file
       ) {
-        console.log(`📦 Usando cache (${clientesCache.data.length} clientes)`);
-        allRows = clientesCache.data;
-        totalPF = clientesCache.totalPF;
-        totalPJ = clientesCache.totalPJ;
-        fetchDuration = clientesCache.duration;
-      } else {
-        // Buscar tudo da API TOTVS
-        const result = await fetchAndMapPersons(filter, 'FETCH');
-        allRows = result.allRows;
-        totalPF = result.pfRows.length;
-        totalPJ = result.pjRows.length;
-        fetchDuration = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
-
-        // Guardar no cache
-        clientesCache = {
-          data: allRows,
-          filter: filterKey,
-          timestamp: Date.now(),
-          totalPF,
-          totalPJ,
-          duration: fetchDuration,
-        };
-        console.log(
-          `✅ ${allRows.length} clientes buscados e cacheados em ${fetchDuration}`,
-        );
+        id
+        name
+        created_at
+        signatures {
+          public_id
+          name
+          email
+          action { name }
+          link { short_link }
+          user { id name email }
+        }
       }
-
-      // Paginar
-      const totalItems = allRows.length;
-      const totalPages = Math.ceil(totalItems / pageSize);
-      const startIdx = (page - 1) * pageSize;
-      const endIdx = startIdx + pageSize;
-      const pageData = allRows.slice(startIdx, endIdx);
-
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
-      successResponse(
-        res,
-        {
-          clientes: pageData,
-          page,
-          pageSize,
-          totalPages,
-          totalItems,
-          totalPF,
-          totalPJ,
-          hasNext: page < totalPages,
-          hasPrev: page > 1,
-          duration: `${duration}s`,
-          fetchDuration,
-        },
-        `Página ${page}/${totalPages} — ${pageData.length} de ${totalItems} clientes`,
-      );
-    } catch (error) {
-      console.error('❌ Erro ao buscar clientes:', error.message);
-      errorResponse(
-        res,
-        `Erro ao buscar clientes do TOTVS: ${error.message}`,
-        500,
-        'FETCH_CLIENTES_ERROR',
-      );
     }
-  }),
-);
+  `;
+
+  const operations = JSON.stringify({
+    query,
+    variables: { document, signers, file: null },
+  });
+  const map = JSON.stringify({ 0: ['variables.file'] });
+
+  const form = new FormData();
+  form.append('operations', operations);
+  form.append('map', map);
+  form.append(
+    '0',
+    new File([pdfBuffer], 'termo-credito.pdf', { type: 'application/pdf' }),
+  );
+
+  const response = await fetch(AUTENTIQUE_API_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${AUTENTIQUE_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(60000),
+  });
+
+  const json = await response.json();
+  if (json.errors?.length) {
+    const msg = json.errors.map((e) => e.message).join(' | ');
+    const err = new Error(msg);
+    err.gqlErrors = json.errors;
+    throw err;
+  }
+
+  return json.data?.createDocument;
+};
 
 /**
- * @route GET /totvs/clientes/fetch-batch
- * @desc Busca PF + PJ por faixa de códigos (ex: 1-500, 501-1000).
- *       Usado para carga incremental em lotes.
- * @query startCode (default 1) - Código inicial
- * @query endCode (default 500) - Código final
+ * @route POST /api/autentique/termo-credito
+ * @desc  Busca dados do cliente no TOTVS, gera PDF do Termo de Crédito
+ *        com as informações preenchidas e envia para assinatura via WhatsApp
+ *        com verificação LIVE (selfie + prova de vida + doc com foto) e
+ *        aprovação MANUAL por um funcionário.
+ *
+ * @body {
+ *   fiscalNumber: string  — CPF (11 dígitos) ou CNPJ (14 dígitos) do cliente
+ *   phone?: string        — Número WhatsApp em formato E.164 (+5511999999999).
+ *                           Se não informado, usa o telefone principal do TOTVS.
+ * }
  */
-router.get(
-  '/clientes/fetch-batch',
+router.post(
+  '/termo-credito',
   asyncHandler(async (req, res) => {
-    const startCode = Math.max(1, parseInt(req.query.startCode, 10) || 1);
-    const endCode = Math.max(
-      startCode,
-      parseInt(req.query.endCode, 10) || startCode + 499,
-    );
+    const { fiscalNumber, phone: phoneOverride } = req.body;
 
-    if (endCode - startCode + 1 > 1000) {
+    // ── 1. Validação ──────────────────────────────────────────────────────────
+    if (!fiscalNumber) {
       return errorResponse(
         res,
-        'Máximo de 1000 códigos por lote',
+        'O campo fiscalNumber é obrigatório',
         400,
-        'BATCH_TOO_LARGE',
+        'MISSING_FISCAL',
       );
     }
+    const clean = String(fiscalNumber).replace(/\D/g, '');
+    if (clean.length !== 11 && clean.length !== 14) {
+      return errorResponse(
+        res,
+        'fiscalNumber deve ter 11 dígitos (CPF) ou 14 dígitos (CNPJ)',
+        400,
+        'INVALID_FISCAL',
+      );
+    }
+    const isCNPJ = clean.length === 14;
+
+    // ── 2. Busca dados no TOTVS ───────────────────────────────────────────────
+    console.log(`🔍 [TermoCredito] Buscando cliente no TOTVS: ${clean}`);
 
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
@@ -1372,620 +1416,400 @@ router.get(
       );
     }
 
-    const codes = Array.from(
-      { length: endCode - startCode + 1 },
-      (_, i) => startCode + i,
-    );
-    const filter = { personCodeList: codes };
-    const startTime = Date.now();
+    const endpoint = isCNPJ
+      ? `${TOTVS_BASE_URL}/person/v2/legal-entities/search`
+      : `${TOTVS_BASE_URL}/person/v2/individuals/search`;
 
-    console.log(
-      `📦 Buscando lote códigos ${startCode}-${endCode} (${codes.length} códigos)...`,
-    );
+    const expand = 'phones,emails,addresses,observations';
+    let cliente = null;
 
-    try {
-      const { pfRows, pjRows, allRows } = await fetchAndMapPersons(
-        filter,
-        `BATCH-${startCode}-${endCode}`,
-      );
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
-      console.log(
-        `✅ Lote ${startCode}-${endCode}: ${allRows.length} clientes (PF:${pfRows.length} PJ:${pjRows.length}) em ${duration}s`,
-      );
-
-      successResponse(
-        res,
-        {
-          clientes: allRows,
-          totalPF: pfRows.length,
-          totalPJ: pjRows.length,
-          total: allRows.length,
-          startCode,
-          endCode,
-          duration: `${duration}s`,
-        },
-        `Lote ${startCode}-${endCode}: ${allRows.length} clientes`,
-      );
-    } catch (error) {
-      console.error(`❌ Erro no lote ${startCode}-${endCode}:`, error.message);
-      errorResponse(
-        res,
-        `Erro ao buscar lote: ${error.message}`,
-        500,
-        'FETCH_BATCH_ERROR',
-      );
-    }
-  }),
-);
-
-/**
- * @route GET /totvs/clientes/search-name
- * @desc Busca clientes na tabela pes_pessoa do Supabase por nome ou nome fantasia.
- *       Retorna código, nome, nome fantasia, CPF/CNPJ, tipo, empresa, telefone, email.
- * @query nome - Termo para buscar no campo nm_pessoa (ILIKE)
- * @query fantasia - Termo para buscar no campo fantasy_name (ILIKE)
- */
-router.get(
-  '/clientes/search-name',
-  asyncHandler(async (req, res) => {
-    const { nome, fantasia, cnpj } = req.query;
-
-    if (!nome && !fantasia && !cnpj) {
-      return errorResponse(
-        res,
-        'Informe pelo menos um dos campos: nome, fantasia ou cnpj',
-        400,
-        'MISSING_SEARCH_TERM',
-      );
-    }
-
-    try {
-      let query = supabase
-        .from('pes_pessoa')
-        .select(
-          'code, cd_empresacad, nm_pessoa, fantasy_name, cpf, tipo_pessoa, telefone, email, is_customer, customer_status, person_status',
-        )
-        .order('nm_pessoa', { ascending: true })
-        .limit(50);
-
-      if (cnpj) {
-        // Busca por CPF/CNPJ (campo cpf na tabela)
-        const cnpjLimpo = cnpj.replace(/[^\d]/g, '');
-        query = query.ilike('cpf', `%${cnpjLimpo}%`);
-      } else if (nome && fantasia) {
-        query = query.or(
-          `nm_pessoa.ilike.%${nome}%,fantasy_name.ilike.%${fantasia}%`,
-        );
-      } else if (nome) {
-        query = query.ilike('nm_pessoa', `%${nome}%`);
-      } else {
-        query = query.ilike('fantasy_name', `%${fantasia}%`);
-      }
-
-      const { data, error } = await query;
-
-      if (error) {
-        console.error('❌ Erro ao buscar clientes por nome:', error.message);
-        return errorResponse(
-          res,
-          `Erro na busca: ${error.message}`,
-          500,
-          'SUPABASE_SEARCH_ERROR',
-        );
-      }
-
-      // Deduplicar por code (pode ter mesmo cliente em várias empresas)
-      const uniqueMap = new Map();
-      for (const row of data || []) {
-        const existing = uniqueMap.get(row.code);
-        if (!existing) {
-          uniqueMap.set(row.code, row);
-        }
-      }
-      const clientes = Array.from(uniqueMap.values());
-
-      console.log(
-        `🔍 Busca por nome: "${nome || ''}" / fantasia: "${fantasia || ''}" → ${clientes.length} resultados`,
-      );
-
-      successResponse(
-        res,
-        { clientes, total: clientes.length },
-        `${clientes.length} clientes encontrados`,
-      );
-    } catch (error) {
-      console.error('❌ Erro ao buscar clientes por nome:', error.message);
-      errorResponse(
-        res,
-        `Erro ao buscar: ${error.message}`,
-        500,
-        'SEARCH_NAME_ERROR',
-      );
-    }
-  }),
-);
-
-/**
- * @route POST /totvs/clientes/save-supabase
- * @desc Recebe array de clientes e faz upsert no Supabase (tabela pes_pessoa)
- * @body { clientes: Array }
- */
-router.post(
-  '/clientes/save-supabase',
-  asyncHandler(async (req, res) => {
-    const { clientes } = req.body;
-
-    if (!Array.isArray(clientes) || clientes.length === 0) {
-      return errorResponse(
-        res,
-        'O campo clientes é obrigatório e deve ser um array não-vazio',
-        400,
-        'MISSING_CLIENTES',
-      );
-    }
-
-    const startTime = Date.now();
-    console.log(`💾 Salvando ${clientes.length} clientes no Supabase...`);
-
-    try {
-      const result = await upsertBatch(clientes);
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
-      console.log(
-        `✅ Upsert concluído: ${result.inserted} inseridos, ${result.errors} erros em ${duration}s`,
-      );
-
-      successResponse(
-        res,
-        {
-          inserted: result.inserted,
-          errors: result.errors,
-          total: clientes.length,
-          duration: `${duration}s`,
-        },
-        `${result.inserted} clientes salvos no Supabase`,
-      );
-    } catch (error) {
-      console.error('❌ Erro ao salvar no Supabase:', error.message);
-      errorResponse(
-        res,
-        `Erro ao salvar clientes no Supabase: ${error.message}`,
-        500,
-        'SAVE_SUPABASE_ERROR',
-      );
-    }
-  }),
-);
-
-/**
- * @route POST /totvs/sync/pes-pessoa/full
- * @desc Carga COMPLETA de todas as pessoas (PF + PJ) do TOTVS para o Supabase.
- *       Use apenas uma vez para popular a tabela pes_pessoa.
- *       ATENÇÃO: Pode demorar vários minutos dependendo do volume de dados.
- * @access Public
- */
-router.post(
-  '/sync/pes-pessoa/full',
-  asyncHandler(async (req, res) => {
-    console.log('🚀 Iniciando SYNC FULL pes_pessoa (manual via API)');
-
-    const result = await syncFullPesPessoa();
-
-    if (result.success) {
-      successResponse(
-        res,
-        result,
-        'Sincronização completa concluída com sucesso',
-      );
-    } else {
-      errorResponse(
-        res,
-        `Erro na sincronização: ${result.error}`,
-        500,
-        'SYNC_FULL_ERROR',
-      );
-    }
-  }),
-);
-
-/**
- * @route POST /totvs/sync/pes-pessoa/incremental
- * @desc Sincronização INCREMENTAL: busca apenas pessoas alteradas/criadas nas últimas 24h
- *       e faz upsert no Supabase. É o que roda automaticamente todo dia às 03:00.
- * @access Public
- */
-router.post(
-  '/sync/pes-pessoa/incremental',
-  asyncHandler(async (req, res) => {
-    console.log('🔄 Iniciando SYNC INCREMENTAL pes_pessoa (manual via API)');
-
-    const result = await syncIncrementalPesPessoa();
-
-    if (result.success) {
-      successResponse(res, result, 'Sincronização incremental concluída');
-    } else {
-      errorResponse(
-        res,
-        `Erro na sincronização incremental: ${result.error}`,
-        500,
-        'SYNC_INCREMENTAL_ERROR',
-      );
-    }
-  }),
-);
-
-/**
- * @route POST /totvs/person-statistics
- * @desc Busca estatísticas de um cliente na API TOTVS Moda
- * @access Public
- * @body { personCode: number }
- */
-router.post(
-  '/person-statistics',
-  asyncHandler(async (req, res) => {
-    const { personCode, branchCode } = req.body;
-
-    if (personCode === undefined || personCode === null || personCode === '') {
-      return errorResponse(
-        res,
-        'O campo personCode é obrigatório',
-        400,
-        'MISSING_PERSON_CODE',
-      );
-    }
-
-    const personCodeNum =
-      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
-
-    if (isNaN(personCodeNum) || personCodeNum < 0) {
-      return errorResponse(
-        res,
-        'O campo personCode deve ser um número inteiro válido',
-        400,
-        'INVALID_PERSON_CODE',
-      );
-    }
-
-    // BranchCode: usar o informado ou default 1
-    const branchCodeNum = branchCode ? parseInt(branchCode, 10) : 1;
-
-    try {
-      const tokenData = await getToken();
-
-      if (!tokenData || !tokenData.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token de autenticação TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics`;
-
-      // Buscar filiais válidas do TOTVS
-      const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
-      const branchesResp = await axios.get(branchesUrl, {
-        headers: {
-          Authorization: `Bearer ${tokenData.access_token}`,
-          Accept: 'application/json',
-        },
-        httpsAgent,
-        timeout: 30000,
-      });
-      const branchCodes = (branchesResp.data?.items || [])
-        .map((b) => b.code)
-        .filter((c) => c >= 1 && c <= 990);
-
-      const doRequest = async (accessToken) =>
-        axios.get(endpoint, {
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          params: { CustomerCode: personCodeNum, BranchCode: branchCodes },
-          paramsSerializer: (params) => {
-            const parts = [];
-            for (const [key, value] of Object.entries(params)) {
-              if (Array.isArray(value)) {
-                value.forEach((v) => parts.push(`${key}=${v}`));
-              } else {
-                parts.push(`${key}=${value}`);
-              }
-            }
-            return parts.join('&');
-          },
-          httpsAgent,
-          timeout: 30000,
-        });
-
+    if (!isCNPJ) {
+      // PF — filtro direto por cpfList
+      const payload = {
+        filter: { cpfList: [clean] },
+        expand,
+        page: 1,
+        pageSize: 10,
+      };
       let response;
       try {
-        response = await doRequest(tokenData.access_token);
-      } catch (error) {
-        if (error.response?.status === 401) {
-          const newTokenData = await getToken(true);
-          response = await doRequest(newTokenData.access_token);
-        } else {
-          throw error;
-        }
-      }
-
-      successResponse(
-        res,
-        response.data,
-        'Estatísticas do cliente obtidas com sucesso',
-      );
-    } catch (error) {
-      console.error('❌ Erro ao consultar person-statistics:', {
-        message: error.message,
-        status: error.response?.status,
-        responseData: error.response?.data,
-      });
-
-      errorResponse(
-        res,
-        error.response?.data?.message ||
-          `Erro ao consultar estatísticas do cliente: ${error.message}`,
-        error.response?.status || 500,
-        'PERSON_STATISTICS_ERROR',
-      );
-    }
-  }),
-);
-
-// ==========================================
-// CONSULTA CNPJ (BrasilAPI)
-// ==========================================
-
-/**
- * @route GET /totvs/cnpj/:cnpj
- * @desc Consulta dados públicos de um CNPJ via BrasilAPI
- * @param cnpj — apenas números, 14 dígitos
- */
-router.get(
-  '/cnpj/:cnpj',
-  asyncHandler(async (req, res) => {
-    const cnpj = (req.params.cnpj || '').replace(/\D/g, '');
-
-    if (cnpj.length !== 14) {
-      return errorResponse(
-        res,
-        'CNPJ deve conter exatamente 14 dígitos numéricos',
-        400,
-        'INVALID_CNPJ',
-      );
-    }
-
-    const { data } = await axios.get(
-      `https://brasilapi.com.br/api/cnpj/v1/${cnpj}`,
-      { timeout: 15000 },
-    );
-
-    successResponse(res, data, 'CNPJ consultado com sucesso');
-  }),
-);
-
-// ==========================================
-// CONSULTA CEP (BrasilAPI)
-// ==========================================
-
-/**
- * @route GET /totvs/cep/:cep
- * @desc Consulta endereço a partir de um CEP via BrasilAPI
- * @param cep — apenas números, 8 dígitos
- */
-router.get(
-  '/cep/:cep',
-  asyncHandler(async (req, res) => {
-    const cep = (req.params.cep || '').replace(/\D/g, '');
-
-    if (cep.length !== 8) {
-      return errorResponse(
-        res,
-        'CEP deve conter exatamente 8 dígitos numéricos',
-        400,
-        'INVALID_CEP',
-      );
-    }
-
-    const { data } = await axios.get(
-      `https://brasilapi.com.br/api/cep/v2/${cep}`,
-      { timeout: 15000 },
-    );
-
-    successResponse(res, data, 'CEP consultado com sucesso');
-  }),
-);
-
-// ==========================================
-// BUSCA POR CNPJ / CPF DIRETO NO TOTVS
-// ==========================================
-
-/**
- * @route POST /totvs/clientes/search-by-fiscal
- * @desc Busca cliente por CNPJ (PJ) ou CPF (PF) diretamente na API TOTVS
- * @body { fiscalNumber: string } — apenas números (11 ou 14 dígitos)
- */
-router.post(
-  '/clientes/search-by-fiscal',
-  asyncHandler(async (req, res) => {
-    const { fiscalNumber } = req.body;
-
-    if (!fiscalNumber) {
-      return errorResponse(
-        res,
-        'O campo fiscalNumber é obrigatório',
-        400,
-        'MISSING_FISCAL',
-      );
-    }
-
-    const clean = String(fiscalNumber).replace(/\D/g, '');
-
-    if (clean.length !== 11 && clean.length !== 14) {
-      return errorResponse(
-        res,
-        'fiscalNumber deve ter 11 dígitos (CPF) ou 14 dígitos (CNPJ)',
-        400,
-        'INVALID_FISCAL',
-      );
-    }
-
-    const isCNPJ = clean.length === 14;
-
-    try {
-      const tokenData = await getToken();
-      if (!tokenData?.access_token) {
-        return errorResponse(
-          res,
-          'Não foi possível obter token TOTVS',
-          503,
-          'TOKEN_UNAVAILABLE',
-        );
-      }
-
-      // PF: usa cpfList no filter (busca direta, sem paginação)
-      // PJ: pagina e filtra localmente pelo campo cnpj (API PJ não tem cnpjList)
-      const endpoint = isCNPJ
-        ? `${TOTVS_BASE_URL}/person/v2/legal-entities/search`
-        : `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-
-      console.log(
-        `🔍 Buscando ${isCNPJ ? 'PJ (paginação local)' : 'PF (cpfList)'} na TOTVS:`,
-        clean,
-      );
-
-      const doRequest = async (token, payload) =>
-        axios.post(endpoint, payload, {
+        response = await axios.post(endpoint, payload, {
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${tokenData.access_token}`,
           },
-          timeout: 60000,
+          timeout: 30000,
         });
-
-      let found = [];
-      let currentToken = tokenData.access_token;
-
-      if (!isCNPJ) {
-        // ── PF: filtro direto por cpfList ──────────────────────────────────
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const fresh = await getToken(true);
+          response = await axios.post(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${fresh.access_token}`,
+            },
+            timeout: 30000,
+          });
+        } else throw err;
+      }
+      cliente = (response.data?.items || [])[0] || null;
+    } else {
+      // PJ — paginação + filtro local por cnpj
+      let currentPage = 1;
+      let hasMore = true;
+      let token = tokenData.access_token;
+      while (hasMore && currentPage <= 30 && !cliente) {
         const payload = {
-          filter: { cpfList: [clean] },
-          expand:
-            'phones,emails,addresses,contacts,classifications,observations',
-          page: 1,
-          pageSize: 10,
+          filter: {},
+          expand,
+          page: currentPage,
+          pageSize: 500,
+          order: 'personCode',
         };
-
         let response;
         try {
-          response = await doRequest(currentToken, payload);
+          response = await axios.post(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            timeout: 60000,
+          });
         } catch (err) {
           if (err.response?.status === 401) {
-            const newToken = await getToken(true);
-            currentToken = newToken.access_token;
-            response = await doRequest(currentToken, payload);
-          } else {
-            throw err;
-          }
+            const fresh = await getToken(true);
+            token = fresh.access_token;
+            response = await axios.post(endpoint, payload, {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              timeout: 60000,
+            });
+          } else throw err;
         }
-
-        found = response.data?.items || [];
-        console.log(`✅ Busca PF por cpfList: ${found.length} resultado(s)`);
-      } else {
-        // ── PJ: pagina e filtra localmente pelo campo cnpj ──────────────────
-        let currentPage = 1;
-        let hasMore = true;
-        const MAX_PAGES = 30;
-
-        while (hasMore && currentPage <= MAX_PAGES && found.length === 0) {
-          const payload = {
-            filter: {},
-            expand:
-              'phones,emails,addresses,contacts,classifications,observations',
-            page: currentPage,
-            pageSize: 500,
-            order: 'personCode',
-          };
-
-          let response;
-          try {
-            response = await doRequest(currentToken, payload);
-          } catch (err) {
-            if (err.response?.status === 401) {
-              const newToken = await getToken(true);
-              currentToken = newToken.access_token;
-              response = await doRequest(currentToken, payload);
-            } else {
-              throw err;
-            }
-          }
-
-          const pageItems = response.data?.items || [];
-          hasMore = response.data?.hasNext || false;
-
-          const matches = pageItems.filter((item) => {
-            const val = String(item.cnpj || '').replace(/\D/g, '');
-            return val === clean;
-          });
-
-          found = found.concat(matches);
-          console.log(
-            `📄 PJ Página ${currentPage}: ${pageItems.length} itens, ${matches.length} match(es)`,
-          );
-          currentPage++;
-        }
-
-        console.log(`✅ Busca PJ: ${found.length} resultado(s)`);
+        const items = response.data?.items || [];
+        hasMore = response.data?.hasNext || false;
+        cliente =
+          items.find(
+            (item) => String(item.cnpj || '').replace(/\D/g, '') === clean,
+          ) || null;
+        currentPage++;
       }
+    }
 
-      successResponse(
-        res,
-        { items: found, total: found.length },
-        `${found.length} cliente(s) encontrado(s)`,
-      );
-    } catch (error) {
-      console.error('❌ Erro ao buscar por fiscal number:', {
-        message: error.message,
-        status: error.response?.status,
-        data: error.response?.data,
-      });
-
-      if (error.response) {
-        return res.status(error.response.status || 400).json({
-          success: false,
-          message:
-            error.response.data?.message ||
-            error.response.data?.error ||
-            'Erro ao buscar cliente na TOTVS',
-          error: 'TOTVS_API_ERROR',
-          timestamp: new Date().toISOString(),
-          details: error.response.data || null,
-          status: error.response.status,
-        });
-      }
-
+    if (!cliente) {
       return errorResponse(
         res,
-        `Erro ao buscar cliente: ${error.message}`,
-        500,
-        'FETCH_ERROR',
+        'Cliente não encontrado no TOTVS com o CPF/CNPJ informado',
+        404,
+        'CLIENT_NOT_FOUND',
       );
     }
+
+    console.log(
+      `✅ [TermoCredito] Cliente encontrado: ${cliente.name} (código ${cliente.code})`,
+    );
+
+    // ── 3. Determina telefone para WhatsApp ───────────────────────────────────
+    let whatsappPhone = phoneOverride ? formatPhone(phoneOverride) : null;
+
+    if (!whatsappPhone) {
+      const telTotvs =
+        (cliente.phones || []).find((p) => p.isDefault)?.number ||
+        (cliente.phones || [])[0]?.number;
+      whatsappPhone = telTotvs ? formatPhone(telTotvs) : null;
+    }
+
+    if (!whatsappPhone) {
+      return errorResponse(
+        res,
+        'Nenhum telefone disponível para envio via WhatsApp. Informe o campo "phone" no body.',
+        400,
+        'MISSING_PHONE',
+      );
+    }
+
+    // ── 4. Gera o PDF do Termo com Puppeteer ──────────────────────────────────
+    console.log(`📄 [TermoCredito] Gerando PDF para ${cliente.name}...`);
+    const pdfBuffer = await gerarTermoPdf(cliente);
+    console.log(`✅ [TermoCredito] PDF gerado (${pdfBuffer.length} bytes)`);
+
+    // ── 5. Envia para Autentique ──────────────────────────────────────────────
+    const documentPayload = {
+      name: `Termo de Crédito — ${cliente.name}`,
+      message: `Olá ${cliente.name.split(' ')[0]}, segue o Termo de Crédito da Crosby para sua assinatura. Por favor leia o documento e assine eletronicamente.`,
+      refusable: false,
+      new_signature_style: true,
+      ignore_cpf: false,
+      configs: {
+        notification_finished: true,
+        notification_signed: true,
+      },
+    };
+
+    const signersPayload = [
+      {
+        // Signatário 1: cliente
+        name: cliente.name,
+        phone: whatsappPhone,
+        delivery_method: 'DELIVERY_METHOD_WHATSAPP',
+        action: 'SIGN',
+        configs: {
+          cpf: clean.length === 11 ? clean : undefined,
+        },
+      },
+      {
+        // Signatário 2: representante Crosby
+        name: 'FABIO FERREIRA DE LIMA AZEVEDO',
+        phone: '+5584987820986',
+        delivery_method: 'DELIVERY_METHOD_WHATSAPP',
+        action: 'SIGN',
+        configs: {
+          cpf: '06537964474',
+        },
+      },
+    ];
+
+    console.log(
+      `📨 [TermoCredito] Enviando para Autentique → WhatsApp ${whatsappPhone}...`,
+    );
+
+    let docCriado;
+    try {
+      docCriado = await uploadAutentique(
+        pdfBuffer,
+        documentPayload,
+        signersPayload,
+      );
+    } catch (err) {
+      console.error('❌ [TermoCredito] Erro Autentique:', err.message);
+      console.error(
+        '❌ [TermoCredito] GQL Errors:',
+        JSON.stringify(err.gqlErrors, null, 2),
+      );
+      if (err.gqlErrors) {
+        return res.status(422).json({
+          success: false,
+          message: err.message,
+          errors: err.gqlErrors,
+        });
+      }
+      throw err;
+    }
+
+    console.log(
+      `✅ [TermoCredito] Documento criado na Autentique: ${docCriado?.id}`,
+    );
+
+    // ── 6. Salva no banco (bluecred_contratos) ────────────────────────────────
+    try {
+      await supabase.from('bluecred_contratos').insert({
+        autentique_doc_id: docCriado.id,
+        cliente_nome: cliente.name,
+        cliente_cpf: clean,
+        cliente_whatsapp: whatsappPhone,
+        status: 'pendente',
+        total_assinantes: 2,
+        total_assinados: 0,
+        assinaturas: [],
+      });
+    } catch (dbErr) {
+      // Não bloqueia a resposta — apenas loga
+      console.error(
+        '⚠️ [TermoCredito] Falha ao salvar no banco:',
+        dbErr.message,
+      );
+    }
+
+    successResponse(
+      res,
+      {
+        document: docCriado,
+        cliente: {
+          name: cliente.name,
+          cpf: clean,
+          whatsappPhone,
+        },
+      },
+      `Termo de Crédito enviado para ${cliente.name} via WhatsApp (${whatsappPhone})`,
+    );
   }),
 );
 
-// ==========================================
-// RANKING DE PRODUTOS MAIS VENDIDOS
-// ==========================================
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/autentique/bluecred/contratos — lista todos os contratos enviados
+// Sincroniza automaticamente com a Autentique os contratos não finalizados.
+// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * @route POST /totvs/best-selling-products
- * @desc Busca ranking de produtos mais vendidos em um período
- * @body { branchs: number[], datemin: string, datemax: string }
- */
+const STATUS_FINAIS = ['concluido', 'recusado'];
+
+const calcularStatusContrato = (signatures) => {
+  const assinaturas = (signatures || []).map((s) => ({
+    public_id: s.public_id,
+    name: s.name || s.user_data?.name || s.user?.name || null,
+    action: s.action?.name || null,
+    signed_at: s.signed?.created_at || null,
+  }));
+  const totalAssinantes = assinaturas.length || 2;
+  const totalAssinados = assinaturas.filter((s) => s.signed_at).length;
+  const totalRecusados = (signatures || []).filter(
+    (s) => s.rejected?.created_at,
+  ).length;
+
+  let status = 'pendente';
+  if (totalRecusados > 0) status = 'recusado';
+  else if (totalAssinados >= totalAssinantes) status = 'concluido';
+  else if (totalAssinados > 0) status = 'parcialmente_assinado';
+
+  return { status, assinaturas, totalAssinados, totalAssinantes };
+};
+
+const QUERY_DOC_STATUS = `
+  query GetDocument($id: UUID!) {
+    document(id: $id) {
+      id
+      signatures {
+        public_id
+        name
+        action { name }
+        user_data { name }
+        user { name }
+        signed { created_at }
+        rejected { created_at }
+      }
+    }
+  }
+`;
+
+router.get(
+  '/bluecred/contratos',
+  asyncHandler(async (_req, res) => {
+    // 1. Busca todos do banco
+    const { data: contratos, error } = await supabase
+      .from('bluecred_contratos')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw new Error(error.message);
+
+    // 2. Filtra apenas os não-finalizados para sincronizar
+    const pendentes = (contratos || []).filter(
+      (c) => !STATUS_FINAIS.includes(c.status),
+    );
+
+    if (pendentes.length > 0) {
+      await Promise.allSettled(
+        pendentes.map(async (contrato) => {
+          try {
+            const data = await gql(QUERY_DOC_STATUS, {
+              id: contrato.autentique_doc_id,
+            });
+            const sigs = data?.document?.signatures || [];
+            const { status, assinaturas, totalAssinados, totalAssinantes } =
+              calcularStatusContrato(sigs);
+
+            // Só atualiza se mudou algo
+            if (
+              status !== contrato.status ||
+              totalAssinados !== contrato.total_assinados
+            ) {
+              await supabase
+                .from('bluecred_contratos')
+                .update({
+                  status,
+                  assinaturas,
+                  total_assinados: totalAssinados,
+                  total_assinantes: totalAssinantes,
+                })
+                .eq('autentique_doc_id', contrato.autentique_doc_id);
+
+              // Atualiza localmente para retornar dado fresco
+              const idx = contratos.findIndex(
+                (c) => c.autentique_doc_id === contrato.autentique_doc_id,
+              );
+              if (idx !== -1) {
+                contratos[idx] = {
+                  ...contratos[idx],
+                  status,
+                  assinaturas,
+                  total_assinados: totalAssinados,
+                  total_assinantes: totalAssinantes,
+                };
+              }
+            }
+          } catch (syncErr) {
+            console.warn(
+              `⚠️ [Bluecred] Falha ao sincronizar doc ${contrato.autentique_doc_id}:`,
+              syncErr.message,
+            );
+          }
+        }),
+      );
+    }
+
+    successResponse(res, contratos, 'Contratos Bluecred listados com sucesso');
+  }),
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/autentique/webhook — recebe eventos da Autentique
+// Configurar URL no painel Autentique: https://<seu-dominio>/api/autentique/webhook
+// ─────────────────────────────────────────────────────────────────────────────
+router.post(
+  '/webhook',
+  asyncHandler(async (req, res) => {
+    const payload = req.body;
+    const event = payload?.event;
+    const doc = payload?.document;
+
+    console.log(`🔔 [Autentique Webhook] Evento: ${event}`, doc?.id);
+
+    if (!doc?.id) {
+      return res.status(200).json({ ok: true }); // ack sem erro
+    }
+
+    const docId = doc.id;
+    const signatures = doc.signatures || [];
+
+    // Conta quantos assinaram
+    const assinaturas = signatures.map((s) => ({
+      public_id: s.public_id,
+      name: s.name,
+      action: s.action?.name,
+      signed_at: s.signed?.created_at || null,
+    }));
+    const totalAssinados = assinaturas.filter((s) => s.signed_at).length;
+    const totalAssinantes = assinaturas.length || 2;
+
+    let status = 'pendente';
+    if (event === 'document_refused' || event === 'document.refused') {
+      status = 'recusado';
+    } else if (totalAssinados >= totalAssinantes) {
+      status = 'concluido';
+    } else if (totalAssinados > 0) {
+      status = 'parcialmente_assinado';
+    }
+
+    const { error } = await supabase
+      .from('bluecred_contratos')
+      .update({ status, total_assinados: totalAssinados, assinaturas })
+      .eq('autentique_doc_id', docId);
+
+    if (error) {
+      console.error('❌ [Webhook] Erro ao atualizar DB:', error.message);
+    } else {
+      console.log(
+        `✅ [Webhook] Contrato ${docId} atualizado → status: ${status}`,
+      );
+    }
+
+    res.status(200).json({ ok: true });
+  }),
+);
+
 export default router;
