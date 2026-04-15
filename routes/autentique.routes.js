@@ -1643,18 +1643,116 @@ router.post(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/autentique/bluecred/contratos — lista todos os contratos enviados
+// Sincroniza automaticamente com a Autentique os contratos não finalizados.
 // ─────────────────────────────────────────────────────────────────────────────
+
+const STATUS_FINAIS = ['concluido', 'recusado'];
+
+const calcularStatusContrato = (signatures) => {
+  const assinaturas = (signatures || []).map((s) => ({
+    public_id: s.public_id,
+    name: s.name || s.user_data?.name || s.user?.name || null,
+    action: s.action?.name || null,
+    signed_at: s.signed?.created_at || null,
+  }));
+  const totalAssinantes = assinaturas.length || 2;
+  const totalAssinados = assinaturas.filter((s) => s.signed_at).length;
+  const totalRecusados = (signatures || []).filter(
+    (s) => s.rejected?.created_at,
+  ).length;
+
+  let status = 'pendente';
+  if (totalRecusados > 0) status = 'recusado';
+  else if (totalAssinados >= totalAssinantes) status = 'concluido';
+  else if (totalAssinados > 0) status = 'parcialmente_assinado';
+
+  return { status, assinaturas, totalAssinados, totalAssinantes };
+};
+
+const QUERY_DOC_STATUS = `
+  query GetDocument($id: UUID!) {
+    document(id: $id) {
+      id
+      signatures {
+        public_id
+        name
+        action { name }
+        user_data { name }
+        user { name }
+        signed { created_at }
+        rejected { created_at }
+      }
+    }
+  }
+`;
+
 router.get(
   '/bluecred/contratos',
   asyncHandler(async (_req, res) => {
-    const { data, error } = await supabase
+    // 1. Busca todos do banco
+    const { data: contratos, error } = await supabase
       .from('bluecred_contratos')
       .select('*')
       .order('created_at', { ascending: false });
 
     if (error) throw new Error(error.message);
 
-    successResponse(res, data, 'Contratos Bluecred listados com sucesso');
+    // 2. Filtra apenas os não-finalizados para sincronizar
+    const pendentes = (contratos || []).filter(
+      (c) => !STATUS_FINAIS.includes(c.status),
+    );
+
+    if (pendentes.length > 0) {
+      await Promise.allSettled(
+        pendentes.map(async (contrato) => {
+          try {
+            const data = await gql(QUERY_DOC_STATUS, {
+              id: contrato.autentique_doc_id,
+            });
+            const sigs = data?.document?.signatures || [];
+            const { status, assinaturas, totalAssinados, totalAssinantes } =
+              calcularStatusContrato(sigs);
+
+            // Só atualiza se mudou algo
+            if (
+              status !== contrato.status ||
+              totalAssinados !== contrato.total_assinados
+            ) {
+              await supabase
+                .from('bluecred_contratos')
+                .update({
+                  status,
+                  assinaturas,
+                  total_assinados: totalAssinados,
+                  total_assinantes: totalAssinantes,
+                })
+                .eq('autentique_doc_id', contrato.autentique_doc_id);
+
+              // Atualiza localmente para retornar dado fresco
+              const idx = contratos.findIndex(
+                (c) => c.autentique_doc_id === contrato.autentique_doc_id,
+              );
+              if (idx !== -1) {
+                contratos[idx] = {
+                  ...contratos[idx],
+                  status,
+                  assinaturas,
+                  total_assinados: totalAssinados,
+                  total_assinantes: totalAssinantes,
+                };
+              }
+            }
+          } catch (syncErr) {
+            console.warn(
+              `⚠️ [Bluecred] Falha ao sincronizar doc ${contrato.autentique_doc_id}:`,
+              syncErr.message,
+            );
+          }
+        }),
+      );
+    }
+
+    successResponse(res, contratos, 'Contratos Bluecred listados com sucesso');
   }),
 );
 
