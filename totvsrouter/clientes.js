@@ -41,7 +41,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getToken } from '../utils/totvsTokenManager.js';
-import { TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
+import { TOTVS_BASE_URL, httpsAgent } from '../totvsrouter/totvsHelper.js';
 import supabase from '../config/supabase.js';
 
 const router = express.Router();
@@ -1809,6 +1809,349 @@ router.post(
     }
 
     res.status(200).json({ ok: true });
+  }),
+);
+
+// ==========================================
+// BATCH LOOKUP — Busca pessoas (PJ + PF) em lote
+// ==========================================
+
+/**
+ * @route POST /totvs/persons/batch-lookup
+ * @desc Busca dados de pessoas (PJ + PF) em lote via API TOTVS Moda
+ *       Retorna nome, nome fantasia e telefone para cada código de pessoa
+ * @body { personCodes: number[] }
+ */
+router.post(
+  '/persons/batch-lookup',
+  asyncHandler(async (req, res) => {
+    const { personCodes } = req.body;
+
+    if (!Array.isArray(personCodes) || personCodes.length === 0) {
+      return errorResponse(
+        res,
+        'personCodes deve ser um array não vazio',
+        400,
+        'INVALID_INPUT',
+      );
+    }
+
+    const startTime = Date.now();
+
+    // Deduplica e converte para inteiro
+    const uniqueCodes = [
+      ...new Set(
+        personCodes
+          .map((c) => parseInt(c, 10))
+          .filter((c) => !isNaN(c) && c > 0),
+      ),
+    ];
+    console.log(`👥 Batch lookup: ${uniqueCodes.length} códigos únicos`);
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const result = {}; // { personCode: { name, fantasyName, phone, uf } }
+      const BATCH_SIZE = 50;
+
+      const doRequest = async (endpoint, payload, accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      // Processar em lotes de BATCH_SIZE
+      for (let i = 0; i < uniqueCodes.length; i += BATCH_SIZE) {
+        const batch = uniqueCodes.slice(i, i + BATCH_SIZE);
+        const payload = {
+          filter: { personCodeList: batch },
+          expand: 'phones',
+          page: 1,
+          pageSize: batch.length,
+        };
+
+        // Buscar PJ e PF em paralelo para cada lote
+        const [pjResult, pfResult] = await Promise.allSettled([
+          (async () => {
+            try {
+              const resp = await doRequest(
+                `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+                payload,
+                tokenData.access_token,
+              );
+              return resp.data?.items || [];
+            } catch (err) {
+              if (err.response?.status === 401) {
+                const newToken = await getToken(true);
+                const resp = await doRequest(
+                  `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+                  payload,
+                  newToken.access_token,
+                );
+                return resp.data?.items || [];
+              }
+              console.warn(
+                `⚠️ PJ batch ${i / BATCH_SIZE + 1} falhou:`,
+                err.message,
+              );
+              return [];
+            }
+          })(),
+          (async () => {
+            try {
+              const resp = await doRequest(
+                `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+                payload,
+                tokenData.access_token,
+              );
+              return resp.data?.items || [];
+            } catch (err) {
+              if (err.response?.status === 401) {
+                const newToken = await getToken(true);
+                const resp = await doRequest(
+                  `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+                  payload,
+                  newToken.access_token,
+                );
+                return resp.data?.items || [];
+              }
+              console.warn(
+                `⚠️ PF batch ${i / BATCH_SIZE + 1} falhou:`,
+                err.message,
+              );
+              return [];
+            }
+          })(),
+        ]);
+
+        // Extrair dados de PJ
+        const pjItems = pjResult.status === 'fulfilled' ? pjResult.value : [];
+        for (const item of pjItems) {
+          const code = item.code;
+          if (!code) continue;
+          const defaultPhone =
+            item.phones?.find((p) => p.isDefault) || item.phones?.[0];
+          result[code] = {
+            name: item.name || '',
+            fantasyName: item.fantasyName || '',
+            phone: defaultPhone?.number || '',
+            uf: item.uf || '',
+          };
+        }
+
+        // Extrair dados de PF
+        const pfItems = pfResult.status === 'fulfilled' ? pfResult.value : [];
+        for (const item of pfItems) {
+          const code = item.code;
+          if (!code || result[code]) continue; // PJ tem prioridade
+          const defaultPhone =
+            item.phones?.find((p) => p.isDefault) || item.phones?.[0];
+          result[code] = {
+            name: item.name || '',
+            fantasyName: item.fantasyName || item.name || '',
+            phone: defaultPhone?.number || '',
+            uf: item.uf || '',
+          };
+        }
+
+        console.log(
+          `👤 Batch ${i / BATCH_SIZE + 1}: PJ=${pjItems.length}, PF=${pfItems.length}`,
+        );
+      }
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `✅ Batch lookup: ${Object.keys(result).length} pessoas encontradas em ${totalTime}ms`,
+      );
+
+      successResponse(
+        res,
+        result,
+        `${Object.keys(result).length} pessoas encontradas em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro batch lookup:', error.message);
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
+// ==========================================
+// PERSON STATISTICS — Estatísticas de cliente
+// ==========================================
+
+/**
+ * @route POST /totvs/person-statistics
+ * @desc Busca estatísticas de um cliente na API TOTVS Moda
+ * @access Public
+ * @body { personCode: number }
+ */
+router.post(
+  '/person-statistics',
+  asyncHandler(async (req, res) => {
+    const { personCode, branchCode } = req.body;
+
+    if (personCode === undefined || personCode === null || personCode === '') {
+      return errorResponse(
+        res,
+        'O campo personCode é obrigatório',
+        400,
+        'MISSING_PERSON_CODE',
+      );
+    }
+
+    const personCodeNum =
+      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
+
+    if (isNaN(personCodeNum) || personCodeNum < 0) {
+      return errorResponse(
+        res,
+        'O campo personCode deve ser um número inteiro válido',
+        400,
+        'INVALID_PERSON_CODE',
+      );
+    }
+
+    // BranchCode: usar o informado ou default 1
+    const branchCodeNum = branchCode ? parseInt(branchCode, 10) : 1;
+
+    try {
+      const tokenData = await getToken();
+
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics`;
+
+      // Buscar filiais válidas do TOTVS
+      const branchesUrl = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+      const branchesResp = await axios.get(branchesUrl, {
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          Accept: 'application/json',
+        },
+        httpsAgent,
+        timeout: 30000,
+      });
+      const branchCodes = (branchesResp.data?.items || [])
+        .map((b) => b.code)
+        .filter((c) => c >= 1 && c <= 990);
+
+      const doRequest = async (accessToken) =>
+        axios.get(endpoint, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          params: { CustomerCode: personCodeNum, BranchCode: branchCodes },
+          paramsSerializer: (params) => {
+            const parts = [];
+            for (const [key, value] of Object.entries(params)) {
+              if (Array.isArray(value)) {
+                value.forEach((v) => parts.push(`${key}=${v}`));
+              } else {
+                parts.push(`${key}=${value}`);
+              }
+            }
+            return parts.join('&');
+          },
+          httpsAgent,
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      successResponse(
+        res,
+        response.data,
+        'Estatísticas do cliente obtidas com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao consultar person-statistics:', {
+        message: error.message,
+        status: error.response?.status,
+        responseData: error.response?.data,
+      });
+
+      errorResponse(
+        res,
+        error.response?.data?.message ||
+          `Erro ao consultar estatísticas do cliente: ${error.message}`,
+        error.response?.status || 500,
+        'PERSON_STATISTICS_ERROR',
+      );
+    }
+  }),
+);
+
+// ==========================================
+// CONSULTAS PÚBLICAS — CNPJ e CEP
+// ==========================================
+
+/**
+ * @route GET /totvs/cnpj/:cnpj
+ * @desc Consulta dados completos de CNPJ via BrasilAPI (gratuita, sem auth)
+ */
+router.get(
+  '/cnpj/:cnpj',
+  asyncHandler(async (req, res) => {
+    const cnpj = req.params.cnpj.replace(/\D/g, '');
+    if (cnpj.length !== 14) {
+      return errorResponse(res, 'CNPJ inválido — deve conter 14 dígitos', 400);
+    }
+    const response = await axios.get(
+      `https://brasilapi.com.br/api/cnpj/v1/${cnpj}`,
+      { timeout: 15000 },
+    );
+    successResponse(res, response.data, 'CNPJ consultado com sucesso');
+  }),
+);
+
+/**
+ * @route GET /totvs/cep/:cep
+ * @desc Consulta CEP com geolocalização via BrasilAPI v2 (gratuita, sem auth)
+ */
+router.get(
+  '/cep/:cep',
+  asyncHandler(async (req, res) => {
+    const cep = req.params.cep.replace(/\D/g, '');
+    if (cep.length !== 8) {
+      return errorResponse(res, 'CEP inválido — deve conter 8 dígitos', 400);
+    }
+    const response = await axios.get(
+      `https://brasilapi.com.br/api/cep/v2/${cep}`,
+      { timeout: 15000 },
+    );
+    successResponse(res, response.data, 'CEP consultado com sucesso');
   }),
 );
 
