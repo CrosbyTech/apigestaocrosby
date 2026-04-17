@@ -5680,10 +5680,10 @@ router.post(
       }
 
       // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)
-      const mappedItems = filteredItems.map((item) => {
-        // Extrair dados de despesa e centro de custo do array expense
-        const firstExpense =
-          item.expense && item.expense.length > 0 ? item.expense[0] : null;
+      // Expandir para uma linha por entrada de despesa (expense)
+      const mappedItems = filteredItems.flatMap((item) => {
+        const expenses =
+          item.expense && item.expense.length > 0 ? item.expense : [null];
 
         // Mapear tp_situacao da API (StatusType)
         // A API pode retornar como inteiro (enum) OU como string letra
@@ -5748,7 +5748,7 @@ router.post(
           tpEstagio = stageMap[item.stageType] || String(item.stageType);
         }
 
-        return {
+        return expenses.map((exp) => ({
           cd_empresa: item.branchCode,
           cd_fornecedor: item.supplierCode,
           nr_cpfcnpj_fornecedor: item.supplierCpfCnpj || '',
@@ -5765,26 +5765,22 @@ router.post(
           tp_previsaoreal: tpPrevisaoReal,
           vl_duplicata: item.duplicateValue || 0,
           vl_juros: item.feesValue || 0,
-          vl_acrescimo: 0, // Não tem campo separado na API, está incluso em feesValue
+          vl_acrescimo: 0,
           vl_desconto: item.discountValue || 0,
           vl_pago: item.paidValue || 0,
-          vl_rateio:
-            firstExpense?.proratedValue ||
-            firstExpense?.proratedPercentage ||
-            0,
-          in_aceite: '', // Não disponível diretamente na API
-          cd_despesaitem: firstExpense?.expenseCode || '',
-          ds_despesaitem: firstExpense?.expenseName || '',
-          cd_ccusto: firstExpense?.costCenterCode || '',
-          ds_ccusto: '', // Será enriquecido pelo frontend
-          nm_fornecedor: '', // Será enriquecido pelo frontend
-          ds_observacao: '', // Não disponível no search
-          // Campos extras da API TOTVS
+          vl_rateio: exp?.proratedValue || 0,
+          perc_rateio: exp?.proratedPercentage || 0,
+          in_aceite: '',
+          cd_despesaitem: exp?.expenseCode || '',
+          ds_despesaitem: exp?.expenseName || '',
+          cd_ccusto: exp?.costCenterCode || '',
+          ds_ccusto: '',
+          nm_fornecedor: '',
+          ds_observacao: '',
           tp_inclusao: item.inclusionType,
           nm_usuario_inclusao: item.userInclusionName || '',
-          // Se houver múltiplas despesas, incluir todas
           despesas: item.expense || [],
-        };
+        }));
       });
 
       // PASSO 5: Enriquecer com nomes de fornecedores via API TOTVS Person
