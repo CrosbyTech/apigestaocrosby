@@ -1067,6 +1067,9 @@ router.post(
         supplierCodeList,
         duplicateCodeList,
         documentTypeList,
+        filtroPagamento = 'TODOS',
+        valorInicial,
+        valorFinal,
       } = req.body;
 
       if (!dt_inicio || !dt_fim) {
@@ -1181,6 +1184,24 @@ router.post(
           .filter((d) => !isNaN(d));
       }
 
+      // Filtro de valor (enviado à API TOTVS se suportado)
+      if (
+        valorInicial !== undefined &&
+        valorInicial !== null &&
+        valorInicial !== ''
+      ) {
+        const vi = parseFloat(valorInicial);
+        if (!isNaN(vi)) filter.startDuplicateValue = vi;
+      }
+      if (
+        valorFinal !== undefined &&
+        valorFinal !== null &&
+        valorFinal !== ''
+      ) {
+        const vf = parseFloat(valorFinal);
+        if (!isNaN(vf)) filter.endDuplicateValue = vf;
+      }
+
       const endpoint = `${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`;
       const PAGE_SIZE = 100;
       const PARALLEL_BATCH = 10; // 10 páginas em paralelo por vez
@@ -1283,6 +1304,53 @@ router.post(
       let filteredItems = allItems;
 
       // Situação já filtrada via API (filter.status com enum string)
+
+      // Filtro de pagamento (ABERTO = sem liquidação, PAGO = liquidado)
+      if (filtroPagamento && filtroPagamento !== 'TODOS') {
+        if (filtroPagamento === 'ABERTO') {
+          filteredItems = filteredItems.filter(
+            (item) =>
+              (!item.settlementDate || item.settlementDate === '') &&
+              (item.paidValue === 0 ||
+                item.paidValue === null ||
+                item.paidValue === undefined),
+          );
+        } else if (filtroPagamento === 'PAGO') {
+          filteredItems = filteredItems.filter(
+            (item) =>
+              (item.settlementDate && item.settlementDate !== '') ||
+              (item.paidValue !== null &&
+                item.paidValue !== undefined &&
+                item.paidValue > 0),
+          );
+        }
+      }
+
+      // Filtro de valor (backup server-side, caso a API TOTVS não suporte os campos)
+      if (
+        valorInicial !== undefined &&
+        valorInicial !== null &&
+        valorInicial !== ''
+      ) {
+        const vi = parseFloat(valorInicial);
+        if (!isNaN(vi)) {
+          filteredItems = filteredItems.filter(
+            (item) => (item.duplicateValue || 0) >= vi,
+          );
+        }
+      }
+      if (
+        valorFinal !== undefined &&
+        valorFinal !== null &&
+        valorFinal !== ''
+      ) {
+        const vf = parseFloat(valorFinal);
+        if (!isNaN(vf)) {
+          filteredItems = filteredItems.filter(
+            (item) => (item.duplicateValue || 0) <= vf,
+          );
+        }
+      }
 
       // Filtro local de previsão (PrevisionType: 1=Forecast, 2=Real, 3=Consignment)
       if (previsao && previsao !== 'TODOS') {
