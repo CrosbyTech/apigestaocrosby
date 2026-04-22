@@ -5442,6 +5442,9 @@ router.post(
         modo = 'vencimento',
         situacao = 'N',
         previsao = 'TODOS',
+        filtroPagamento = 'TODOS',
+        valorInicial,
+        valorFinal,
         supplierCodeList,
         duplicateCodeList,
         documentTypeList,
@@ -5938,8 +5941,43 @@ router.post(
         `✅ Contas a Pagar - ${mappedItems.length} itens mapeados em ${totalTime}ms (${totalPages} páginas)`,
       );
 
+      // ── Filtros pós-mapeamento (pagamento + range de valor) ──
+      let itensFiltrados = mappedItems;
+
+      if (filtroPagamento === 'PAGO') {
+        itensFiltrados = itensFiltrados.filter(
+          (item) => item.dt_liq && String(item.dt_liq).trim() !== '',
+        );
+      } else if (filtroPagamento === 'ABERTO') {
+        itensFiltrados = itensFiltrados.filter(
+          (item) => !item.dt_liq || String(item.dt_liq).trim() === '',
+        );
+      }
+
+      const minVal =
+        valorInicial != null && valorInicial !== ''
+          ? parseFloat(valorInicial)
+          : null;
+      const maxVal =
+        valorFinal != null && valorFinal !== '' ? parseFloat(valorFinal) : null;
+
+      if (minVal !== null && !isNaN(minVal)) {
+        itensFiltrados = itensFiltrados.filter(
+          (item) => parseFloat(item.vl_duplicata || 0) >= minVal,
+        );
+      }
+      if (maxVal !== null && !isNaN(maxVal)) {
+        itensFiltrados = itensFiltrados.filter(
+          (item) => parseFloat(item.vl_duplicata || 0) <= maxVal,
+        );
+      }
+
+      console.log(
+        `🔎 Filtros pós-map: pagamento=${filtroPagamento}, min=${minVal}, max=${maxVal} → ${itensFiltrados.length}/${mappedItems.length}`,
+      );
+
       // Calcular totais
-      const totals = mappedItems.reduce(
+      const totals = itensFiltrados.reduce(
         (acc, row) => {
           acc.totalDuplicata += parseFloat(row.vl_duplicata || 0);
           acc.totalPago += parseFloat(row.vl_pago || 0);
@@ -5956,7 +5994,7 @@ router.post(
           periodo: { dt_inicio, dt_fim },
           empresas: branchCodeList,
           totals,
-          count: mappedItems.length,
+          count: itensFiltrados.length,
           totalCount,
           pagesSearched: totalPages,
           timeMs: totalTime,
@@ -5967,7 +6005,7 @@ router.post(
             supplierCodeList: supplierCodeList || null,
             duplicateCodeList: duplicateCodeList || null,
           },
-          data: mappedItems,
+          data: itensFiltrados,
         },
         `${mappedItems.length} duplicata(s) de contas a pagar encontrada(s) em ${totalTime}ms`,
       );
