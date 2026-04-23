@@ -7282,10 +7282,17 @@ app.use((err, req, res, next) => {
 });
 
 // Iniciar servidor
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   initializeWhatsApp();
+  try {
+    const { startPesPessoaScheduler } =
+      await import('./utils/syncPesPessoa.js');
+    startPesPessoaScheduler();
+  } catch (err) {
+    console.error('❌ Falha ao iniciar scheduler pes_pessoa:', err.message);
+  }
 });
 
 export default app;
