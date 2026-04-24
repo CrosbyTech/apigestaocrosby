@@ -3,7 +3,7 @@ import axios from 'axios';
 import https from 'https';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
-import { logger } from './errorHandler.js';
+import { logger } from '../utils/errorHandler.js';
 
 // ==========================================
 // SYNC PES_PESSOA v2 - TOTVS → Supabase
