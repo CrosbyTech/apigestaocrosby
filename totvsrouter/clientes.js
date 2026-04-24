@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import axios from 'axios';
 import https from 'https';
 import supabase from '../config/supabase.js';
-import { getToken } from './totvsTokenManager.js';
+import { getToken } from '../utils/totvsTokenManager.js';
 import { logger } from './errorHandler.js';
 
 // ==========================================
