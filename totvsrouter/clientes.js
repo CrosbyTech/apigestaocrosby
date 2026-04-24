@@ -1,3 +1,4 @@
+import express from 'express';
 import cron from 'node-cron';
 import axios from 'axios';
 import https from 'https';
@@ -599,3 +600,41 @@ export function stopPesPessoaScheduler() {
     logger.info('🛑 Scheduler pes_pessoa parado');
   }
 }
+
+// ==========================================
+// ROUTER
+// ==========================================
+
+const router = express.Router();
+
+router.post('/sync/pes-pessoa/full', async (req, res) => {
+  try {
+    logger.info('🚀 Iniciando SYNC FULL pes_pessoa (manual via API)');
+    const result = await syncFullPesPessoa();
+    if (result.success) {
+      res.json({ success: true, data: result });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch (err) {
+    logger.error(`❌ Erro no sync full: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/sync/pes-pessoa/incremental', async (req, res) => {
+  try {
+    logger.info('🔄 Iniciando SYNC INCREMENTAL pes_pessoa (manual via API)');
+    const result = await syncIncrementalPesPessoa();
+    if (result.success) {
+      res.json({ success: true, data: result });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch (err) {
+    logger.error(`❌ Erro no sync incremental: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+export default router;
