@@ -1,0 +1,17 @@
+{"level":"INFO","message":"Chrome via puppeteer.executablePath(): C:\\Users\\teccr\\.cache\\puppeteer\\chrome\\win64-146.0.7680.153\\chrome-win64\\chrome.exe","data":{},"timestamp":"2026-04-08T21:40:58.426Z"}
+✅ Server running on port 4001
+🌍 Environment: development
+🔵 [1775684487170-p43fogosz] GET /vouchers/search - Iniciado
+{"level":"INFO","message":"🔐 Gerando novo token TOTVS...","data":{},"timestamp":"2026-04-08T21:41:27.176Z"}
+{"level":"INFO","message":"✅ Token TOTVS gerado com sucesso","data":{},"timestamp":"2026-04-08T21:41:27.662Z"}
+{"level":"INFO","message":"   Token expira em: 09/04/2026, 00:41:27","data":{},"timestamp":"2026-04-08T21:41:27.770Z"}
+::1 - - [08/Apr/2026:21:42:01 +0000] "GET /api/totvs/vouchers/search?startDateInitial=2026-03-01&startDateFinal=2026-04-30&enrich=true&page=1&pageSize=50&branchCode=6000 HTTP/1.1" 200 - "http://localhost:3000/voucher-usage" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+🔵 [1775684712625-p89xjhnk1] GET /branches - Iniciado
+{"level":"INFO","message":"🔑 Usando token TOTVS existente (ainda válido)","data":{},"timestamp":"2026-04-08T21:45:12.768Z"}
+🏢 Buscando empresas TOTVS: https://www30.bhan.com.br:9443/api/totvsmoda/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000
+✅ Total de empresas encontradas: 286
+::1 - - [08/Apr/2026:21:45:15 +0000] "GET /api/totvs/branches HTTP/1.1" 200 - "http://localhost:3000/voucher-usage" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+🔵 [1775684791669-n2upt7jri] GET /vouchers/search - Iniciado
+{"level":"INFO","message":"🔑 Usando token TOTVS existente (ainda válido)","data":{},"timestamp":"2026-04-08T21:46:31.677Z"}
+::1 - - [08/Apr/2026:21:46:50 +0000] "GET /api/totvs/vouchers/search?startDateInitial=2026-03-01&startDateFinal=2026-04-30&enrich=true&page=1&pageSize=50&branchCode=6000 HTTP/1.1" 200 - "http://localhost:3000/voucher-usage" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+::1 - - [08/Apr/2026:21:46:51 +0000] "POST /api/totvs/vouchers/customers/phones HTTP/1.1" 404 175 "http://localhost:3000/voucher-usage" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"

@@ -36,7 +36,9 @@ const getChromePath = () => {
   }
 
   // 3. Buscar no cache dir do Puppeteer (consistente com .puppeteerrc.cjs)
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || path.join(__dirname, '..', '.cache', 'puppeteer');
+  const cacheDir =
+    process.env.PUPPETEER_CACHE_DIR ||
+    path.join(__dirname, '..', '.cache', 'puppeteer');
   try {
     if (fs.existsSync(cacheDir)) {
       const findChrome = (dir) => {

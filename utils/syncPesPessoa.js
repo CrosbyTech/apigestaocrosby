@@ -210,7 +210,15 @@ export async function fetchAllPages(
         token = newTokenData.access_token;
         response = await makeRequest(token, currentPage);
       } else {
-        throw error;
+        // Erro HTTP da API TOTVS (ex: 400, 404, 500) — relança com contexto
+        const status = error.response?.status;
+        const detail =
+          error.response?.data?.message ||
+          error.response?.data?.error ||
+          error.message;
+        throw new Error(
+          `[${type}] HTTP ${status ?? 'sem resposta'} na página ${currentPage}: ${detail}`,
+        );
       }
     }
 
@@ -248,23 +256,39 @@ export async function fetchAllPages(
  * @returns {Promise<{pfRows: Array, pjRows: Array, allRows: Array}>}
  */
 export async function fetchAndMapPersons(filter = {}, label = '') {
-  logger.info(`👤 [${label}] Buscando PF com expand: ${EXPAND_FIELDS}...`);
-  const pfItems = await fetchAllPages(
-    PF_ENDPOINT,
-    filter,
-    `${label}-PF`,
-    EXPAND_FIELDS,
-  );
-  const pfRows = pfItems.map((item) => mapPersonToRow(item, 'PF'));
+  // Busca PF — erros não interrompem a busca PJ
+  let pfRows = [];
+  try {
+    logger.info(`👤 [${label}] Buscando PF com expand: ${EXPAND_FIELDS}...`);
+    const pfItems = await fetchAllPages(
+      PF_ENDPOINT,
+      filter,
+      `${label}-PF`,
+      EXPAND_FIELDS,
+    );
+    pfRows = pfItems.map((item) => mapPersonToRow(item, 'PF'));
+  } catch (err) {
+    logger.warn(
+      `⚠️ [${label}] Falha ao buscar PF (continuando com PJ): ${err.response?.status ?? ''} ${err.message}`,
+    );
+  }
 
-  logger.info(`🏢 [${label}] Buscando PJ com expand: ${EXPAND_FIELDS}...`);
-  const pjItems = await fetchAllPages(
-    PJ_ENDPOINT,
-    filter,
-    `${label}-PJ`,
-    EXPAND_FIELDS,
-  );
-  const pjRows = pjItems.map((item) => mapPersonToRow(item, 'PJ'));
+  // Busca PJ — erros não interrompem o retorno
+  let pjRows = [];
+  try {
+    logger.info(`🏢 [${label}] Buscando PJ com expand: ${EXPAND_FIELDS}...`);
+    const pjItems = await fetchAllPages(
+      PJ_ENDPOINT,
+      filter,
+      `${label}-PJ`,
+      EXPAND_FIELDS,
+    );
+    pjRows = pjItems.map((item) => mapPersonToRow(item, 'PJ'));
+  } catch (err) {
+    logger.warn(
+      `⚠️ [${label}] Falha ao buscar PJ: ${err.response?.status ?? ''} ${err.message}`,
+    );
+  }
 
   const allRows = [...pfRows, ...pjRows];
   logger.info(
@@ -426,7 +450,123 @@ export async function syncIncrementalPesPessoa() {
 }
 
 // ==========================================
-// CRON DIÁRIO - 03:00 da manhã
+// INSERT SKIP EXISTING
+// - Verifica quais já existem no Supabase antes de inserir
+// - Retorna listas de inseridos, ignorados (já existem) e erros
+// ==========================================
+
+export async function insertSkipExisting(rows) {
+  // Deduplicar entrada
+  const uniqueMap = new Map();
+  for (const row of rows) {
+    const key = `${row.cd_empresacad}_${row.code}`;
+    uniqueMap.set(key, row);
+  }
+  const unique = Array.from(uniqueMap.values());
+
+  const skipped = [];
+  const errors = [];
+  let inserted = 0;
+
+  if (unique.length === 0) {
+    return { inserted, skipped, errors, total: 0 };
+  }
+
+  // Buscar existentes (lookup por code + cd_empresacad)
+  const codes = [...new Set(unique.map((r) => r.code))];
+  const CHUNK = 500;
+  const existingSet = new Set();
+
+  for (let i = 0; i < codes.length; i += CHUNK) {
+    const slice = codes.slice(i, i + CHUNK);
+    const { data, error } = await supabase
+      .from('pes_pessoa')
+      .select('code, cd_empresacad')
+      .in('code', slice);
+
+    if (error) {
+      logger.warn(`⚠️ Erro ao checar existentes: ${error.message}`);
+      continue;
+    }
+    for (const row of data || []) {
+      existingSet.add(`${row.cd_empresacad}_${row.code}`);
+    }
+  }
+
+  const newRows = [];
+  for (const row of unique) {
+    const key = `${row.cd_empresacad}_${row.code}`;
+    if (existingSet.has(key)) {
+      skipped.push({
+        code: row.code,
+        cd_empresacad: row.cd_empresacad,
+        nm_pessoa: row.nm_pessoa,
+        tipo_pessoa: row.tipo_pessoa,
+        reason: 'já existe no Supabase',
+      });
+    } else {
+      newRows.push(row);
+    }
+  }
+
+  // Inserir novos em batches; fallback por linha se batch falhar
+  const BATCH_SIZE = 500;
+  for (let i = 0; i < newRows.length; i += BATCH_SIZE) {
+    const batch = newRows.slice(i, i + BATCH_SIZE);
+
+    const { error } = await supabase.from('pes_pessoa').insert(batch);
+
+    if (error) {
+      // Fallback: inserir um a um para capturar duplicatas
+      for (const row of batch) {
+        try {
+          const { error: e2 } = await supabase.from('pes_pessoa').insert(row);
+          if (e2) {
+            const msg = e2.message || '';
+            if (
+              e2.code === '23505' ||
+              msg.toLowerCase().includes('duplicate key')
+            ) {
+              skipped.push({
+                code: row.code,
+                cd_empresacad: row.cd_empresacad,
+                nm_pessoa: row.nm_pessoa,
+                tipo_pessoa: row.tipo_pessoa,
+                reason: 'já existe no Supabase',
+              });
+            } else {
+              errors.push({
+                code: row.code,
+                cd_empresacad: row.cd_empresacad,
+                nm_pessoa: row.nm_pessoa,
+                tipo_pessoa: row.tipo_pessoa,
+                error: msg,
+              });
+            }
+          } else {
+            inserted++;
+          }
+        } catch (err) {
+          errors.push({
+            code: row.code,
+            cd_empresacad: row.cd_empresacad,
+            nm_pessoa: row.nm_pessoa,
+            tipo_pessoa: row.tipo_pessoa,
+            error: err.message,
+          });
+        }
+      }
+    } else {
+      inserted += batch.length;
+    }
+  }
+
+  return { inserted, skipped, errors, total: unique.length };
+}
+
+// ==========================================
+// CRON DIÁRIO - 02:00 da manhã
+// Busca pessoas alteradas/criadas nas últimas 24h
 // ==========================================
 
 let syncCronJob = null;
@@ -436,11 +576,20 @@ export function startPesPessoaScheduler() {
     logger.info('⚠️ Scheduler pes_pessoa já está rodando');
     return;
   }
-  syncCronJob = cron.schedule('0 3 * * *', async () => {
-    logger.info('⏰ Cron pes_pessoa disparado (03:00)');
-    await syncIncrementalPesPessoa();
-  });
-  logger.info('✅ Scheduler pes_pessoa agendado: todo dia às 03:00');
+  syncCronJob = cron.schedule(
+    '0 2 * * *',
+    async () => {
+      logger.info('⏰ Cron pes_pessoa disparado (02:00) - sync incremental');
+      try {
+        const result = await syncIncrementalPesPessoa();
+        logger.info(`✅ Cron pes_pessoa finalizado: ${JSON.stringify(result)}`);
+      } catch (err) {
+        logger.error(`❌ Cron pes_pessoa falhou: ${err.message}`);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' },
+  );
+  logger.info('✅ Scheduler pes_pessoa agendado: todo dia às 02:00 (BRT)');
 }
 
 export function stopPesPessoaScheduler() {
