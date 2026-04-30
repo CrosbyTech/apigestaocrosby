@@ -3,4 +3,6 @@ node_modules/
 
 # Variáveis de ambiente
 .env
+# Cache do Puppeteer e outros arquivos grandes
+.cache/
 # ... outras regras existentes ...
