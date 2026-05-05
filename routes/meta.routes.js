@@ -51,11 +51,18 @@ async function graphRequest(path, accessToken, options = {}) {
 router.get(
   '/accounts',
   asyncHandler(async (req, res) => {
-    const { data, error } = await supabase
+    const { canal } = req.query;
+
+    let query = supabase
       .from('whatsapp_accounts')
-      .select('id, name, waba_id, phone_id, nr_telefone, created_at')
+      .select(
+        'id, name, waba_id, phone_id, nr_telefone, canal_venda, created_at',
+      )
       .order('name');
 
+    if (canal) query = query.eq('canal_venda', canal);
+
+    const { data, error } = await query;
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
     successResponse(res, data, `${data.length} contas encontradas`);
   }),
@@ -67,7 +74,9 @@ router.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase
       .from('whatsapp_accounts')
-      .select('id, name, waba_id, phone_id, nr_telefone, created_at')
+      .select(
+        'id, name, waba_id, phone_id, nr_telefone, canal_venda, created_at',
+      )
       .eq('id', req.params.id)
       .single();
 
@@ -80,15 +89,26 @@ router.get(
 router.post(
   '/accounts',
   asyncHandler(async (req, res) => {
-    const { name, waba_id, phone_id, access_token } = req.body;
+    const { name, waba_id, phone_id, access_token, canal_venda } = req.body;
     if (!name || !waba_id || !phone_id || !access_token) {
-      return errorResponse(res, 'name, waba_id, phone_id e access_token são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'name, waba_id, phone_id e access_token são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     const { data, error } = await supabase
       .from('whatsapp_accounts')
-      .insert({ name, waba_id, phone_id, access_token })
-      .select('id, name, waba_id, phone_id')
+      .insert({
+        name,
+        waba_id,
+        phone_id,
+        access_token,
+        canal_venda: canal_venda || null,
+      })
+      .select('id, name, waba_id, phone_id, canal_venda')
       .single();
 
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
@@ -100,22 +120,28 @@ router.post(
 router.put(
   '/accounts/:id',
   asyncHandler(async (req, res) => {
-    const { name, waba_id, phone_id, access_token } = req.body;
+    const { name, waba_id, phone_id, access_token, canal_venda } = req.body;
     const update = {};
     if (name !== undefined) update.name = name;
     if (waba_id !== undefined) update.waba_id = waba_id;
     if (phone_id !== undefined) update.phone_id = phone_id;
     if (access_token !== undefined) update.access_token = access_token;
+    if (canal_venda !== undefined) update.canal_venda = canal_venda;
 
     if (Object.keys(update).length === 0) {
-      return errorResponse(res, 'Nenhum campo para atualizar', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'Nenhum campo para atualizar',
+        400,
+        'VALIDATION',
+      );
     }
 
     const { data, error } = await supabase
       .from('whatsapp_accounts')
       .update(update)
       .eq('id', req.params.id)
-      .select('id, name, waba_id, phone_id')
+      .select('id, name, waba_id, phone_id, canal_venda')
       .single();
 
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
@@ -142,15 +168,19 @@ router.delete(
 // =============================================
 
 // GET /api/meta/template-analytics/:accountId
-// Fonte primária: message_queue (nomes exatos de template + contagem real)
-// Custo: distribuído proporcionalmente a partir do pricing_analytics da Meta por categoria
-// Fallback: categoria quando não há dados na fila
+// Fonte primária: Meta template_analytics API (sent, delivered, read, cost por template_id)
+// Fallback: pricing_analytics por PRICING_CATEGORY
 router.get(
   '/template-analytics/:accountId',
   asyncHandler(async (req, res) => {
     const { startDate, endDate } = req.query;
     if (!startDate || !endDate) {
-      return errorResponse(res, 'startDate e endDate são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'startDate e endDate são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     const { data: account, error: accErr } = await supabase
@@ -158,93 +188,146 @@ router.get(
       .select('*')
       .eq('id', req.params.accountId)
       .single();
-    if (accErr || !account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (accErr || !account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
-    // 1) Buscar mensagens enviadas do message_queue no período (nomes exatos de template)
-    const startISO = new Date(startDate).toISOString();
-    const endISO = new Date(endDate + 'T23:59:59').toISOString();
-
-    const { data: mqRows } = await supabase
-      .from('message_queue')
-      .select('template_name, template_category, delivered_at, read_at, estimated_cost, real_cost')
-      .eq('account_id', req.params.accountId)
-      .not('sent_at', 'is', null)
-      .gte('sent_at', startISO)
-      .lte('sent_at', endISO);
-
-    // 2) Buscar custo real por PRICING_CATEGORY da Meta API (billing oficial)
     const start = Math.floor(new Date(startDate).getTime() / 1000);
-    const end = Math.floor(new Date(endDate).getTime() / 1000);
+    const end = Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000);
 
-    const costByCategory = {};
+    // template_analytics tem janela máxima de 90 dias
+    const now = Math.floor(Date.now() / 1000);
+    const maxLookback = 90 * 24 * 60 * 60;
+    const effectiveStart = Math.max(start, now - maxLookback);
+
+    // 1) Buscar lista de templates aprovados para obter IDs, nomes e categorias
+    let templateList = [];
     try {
-      const pricingFields = `pricing_analytics.start(${start}).end(${end}).granularity(MONTHLY).dimensions(["PRICING_CATEGORY"])`;
-      const pricingResult = await graphRequest(
-        `/${account.waba_id}?fields=${pricingFields}`,
+      let url = `/${account.waba_id}/message_templates?limit=200&fields=id,name,category,status`;
+      while (url) {
+        const result = await graphRequest(url, account.access_token);
+        const items = result?.data || [];
+        templateList.push(...items);
+        // Paginação
+        const nextUrl = result?.paging?.next;
+        if (nextUrl) {
+          // Extrair path relativo da URL completa
+          const parsed = new URL(nextUrl);
+          url = parsed.pathname.replace(/^\/v[\d.]+/, '') + parsed.search;
+        } else {
+          url = null;
+        }
+      }
+    } catch (err) {
+      logger.error(`Erro ao buscar lista de templates: ${err.message}`);
+    }
+
+    const approvedTemplates = templateList.filter(
+      (t) => t.status === 'APPROVED',
+    );
+    const idToInfo = {};
+    for (const t of approvedTemplates) {
+      idToInfo[t.id] = {
+        name: t.name,
+        category: (t.category || 'UTILITY').toUpperCase(),
+      };
+    }
+
+    // 2) Chamar template_analytics em lotes de 10 (limite da API Meta)
+    const templateIds = approvedTemplates.map((t) => t.id);
+    const allDataPoints = [];
+
+    if (templateIds.length > 0) {
+      const batchSize = 10;
+      for (let i = 0; i < templateIds.length; i += batchSize) {
+        const batch = templateIds.slice(i, i + batchSize);
+        try {
+          const idsParam = encodeURIComponent(JSON.stringify(batch));
+          const tplAnalyticsUrl = `/${account.waba_id}/template_analytics?start=${effectiveStart}&end=${end}&granularity=DAILY&template_ids=${idsParam}&metric_types=${encodeURIComponent('cost,sent,delivered,read')}`;
+          const result = await graphRequest(
+            tplAnalyticsUrl,
+            account.access_token,
+          );
+          const points = result?.data?.[0]?.data_points || [];
+          allDataPoints.push(...points);
+        } catch (err) {
+          logger.error(`Erro template_analytics batch ${i}: ${err.message}`);
+        }
+      }
+    }
+
+    // 3) Se temos dados do template_analytics, agrupar por template_id
+    if (allDataPoints.length > 0) {
+      const byTemplate = {};
+      for (const p of allDataPoints) {
+        const tplId = p.template_id;
+        const info = idToInfo[tplId] || { name: tplId, category: 'UTILITY' };
+        const key = tplId;
+        if (!byTemplate[key]) {
+          byTemplate[key] = {
+            templateName: info.name,
+            category: info.category,
+            sent: 0,
+            delivered: 0,
+            read: 0,
+            cost: 0,
+          };
+        }
+        byTemplate[key].sent += Number(p.sent || 0);
+        byTemplate[key].delivered += Number(p.delivered || 0);
+        byTemplate[key].read += Number(p.read || 0);
+
+        // cost é array de objetos [{type: "amount_spent", value: X}, ...]
+        const costArr = Array.isArray(p.cost) ? p.cost : [];
+        const amountSpent = costArr.find((c) => c.type === 'amount_spent');
+        if (amountSpent) {
+          byTemplate[key].cost += Number(amountSpent.value || 0);
+        }
+      }
+
+      const templates = Object.values(byTemplate)
+        .filter((t) => t.sent > 0)
+        .map((t) => ({ ...t, volume: t.sent }))
+        .sort((a, b) => b.sent - a.sent);
+
+      return successResponse(res, { templates, source: 'template_analytics' });
+    }
+
+    // 4) Fallback: pricing_analytics por PRICING_CATEGORY (dados agregados, sem nome de template)
+    try {
+      const catFields = `pricing_analytics.start(${start}).end(${end}).granularity(DAILY).dimensions(["PRICING_CATEGORY"])`;
+      const catResult = await graphRequest(
+        `/${account.waba_id}?fields=${catFields}`,
         account.access_token,
       );
-      const pricingPoints = (pricingResult?.pricing_analytics?.data || []).flatMap(d => d.data_points || []);
-      for (const p of pricingPoints) {
+      const catPoints = (catResult?.pricing_analytics?.data || []).flatMap(
+        (d) => d.data_points || [],
+      );
+      const costByCategory = {};
+      for (const p of catPoints) {
         const cat = (p.pricing_category || 'UNKNOWN').toUpperCase();
         if (!costByCategory[cat]) costByCategory[cat] = { volume: 0, cost: 0 };
         costByCategory[cat].volume += Number(p.volume || 0);
         costByCategory[cat].cost += Number(p.cost || 0);
       }
+
+      const templates = Object.entries(costByCategory)
+        .map(([cat, v]) => ({
+          templateName: cat,
+          category: cat,
+          sent: v.volume,
+          volume: v.volume,
+          cost: v.cost,
+        }))
+        .sort((a, b) => b.volume - a.volume);
+
+      return successResponse(res, { templates, source: 'category' });
     } catch (err) {
-      logger.error(`Erro pricing_analytics: ${err.message}`);
+      logger.error(
+        `Erro pricing_analytics (category fallback): ${err.message}`,
+      );
     }
 
-    // 3) Se há dados no message_queue → retornar por template com sent/delivered/read e custo
-    if (mqRows && mqRows.length > 0) {
-      const byTemplate = {};
-      for (const row of mqRows) {
-        const name = row.template_name || 'Desconhecido';
-        const cat = (row.template_category || 'MARKETING').toUpperCase();
-        if (!byTemplate[name]) {
-          byTemplate[name] = { templateName: name, category: cat, sent: 0, delivered: 0, read: 0, realCostSum: 0, estimatedCostSum: 0 };
-        }
-        byTemplate[name].sent++;
-        if (row.delivered_at) byTemplate[name].delivered++;
-        if (row.read_at) byTemplate[name].read++;
-        byTemplate[name].realCostSum += Number(row.real_cost || 0);
-        byTemplate[name].estimatedCostSum += Number(row.estimated_cost || 0);
-      }
-
-      // Calcular volume por categoria para distribuição proporcional do custo da Meta
-      const volByCat = {};
-      for (const t of Object.values(byTemplate)) {
-        volByCat[t.category] = (volByCat[t.category] || 0) + t.sent;
-      }
-
-      // Atribuir custo: preferência real_cost > estimated_cost > distribuição da Meta
-      for (const t of Object.values(byTemplate)) {
-        if (t.realCostSum > 0) {
-          t.cost = t.realCostSum;
-        } else if (t.estimatedCostSum > 0) {
-          t.cost = t.estimatedCostSum;
-        } else {
-          const catCost = costByCategory[t.category]?.cost || 0;
-          const catTotal = volByCat[t.category] || 1;
-          t.cost = (t.sent / catTotal) * catCost;
-        }
-        t.volume = t.sent; // compatibilidade com frontend legado
-        delete t.realCostSum;
-        delete t.estimatedCostSum;
-      }
-
-      const templates = Object.values(byTemplate).sort((a, b) => b.sent - a.sent);
-      return successResponse(res, { templates, source: 'template' });
-    }
-
-    // 4) Fallback: retornar por categoria quando não há dados na fila
-    const pricingByCategory = Object.entries(costByCategory).map(([cat, v]) => ({
-      templateName: cat,
-      category: cat,
-      volume: v.volume,
-      cost: v.cost,
-    })).sort((a, b) => b.volume - a.volume);
-
-    successResponse(res, { templates: pricingByCategory, source: 'category' });
+    successResponse(res, { templates: [], source: 'empty' });
   }),
 );
 
@@ -255,7 +338,12 @@ router.get(
     const { startDate, endDate } = req.query;
 
     if (!startDate || !endDate) {
-      return errorResponse(res, 'startDate e endDate são obrigatórios (YYYY-MM-DD)', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'startDate e endDate são obrigatórios (YYYY-MM-DD)',
+        400,
+        'VALIDATION',
+      );
     }
 
     // Buscar conta com access_token
@@ -265,7 +353,8 @@ router.get(
       .eq('id', req.params.accountId)
       .single();
 
-    if (accErr || !account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (accErr || !account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
     const start = Math.floor(new Date(startDate).getTime() / 1000);
     const end = Math.floor(new Date(endDate).getTime() / 1000);
@@ -285,10 +374,15 @@ router.get(
     // Message analytics: sent/delivered
     const msgPoints = result?.analytics?.data_points || [];
     const totalSent = msgPoints.reduce((s, p) => s + (p.sent || 0), 0);
-    const totalDelivered = msgPoints.reduce((s, p) => s + (p.delivered || 0), 0);
+    const totalDelivered = msgPoints.reduce(
+      (s, p) => s + (p.delivered || 0),
+      0,
+    );
 
     // Pricing analytics: volume/cost por categoria
-    const pricingPoints = (result?.pricing_analytics?.data || []).flatMap(d => d.data_points || []);
+    const pricingPoints = (result?.pricing_analytics?.data || []).flatMap(
+      (d) => d.data_points || [],
+    );
     const summary = {
       sent: totalSent,
       delivered: totalDelivered,
@@ -315,7 +409,11 @@ router.get(
     }
 
     successResponse(res, {
-      analytics: { dataPoints: msgPoints, sent: totalSent, delivered: totalDelivered },
+      analytics: {
+        dataPoints: msgPoints,
+        sent: totalSent,
+        delivered: totalDelivered,
+      },
       pricing: { dataPoints: pricingPoints },
       summary,
     });
@@ -338,7 +436,8 @@ router.get(
       .eq('id', req.params.accountId)
       .single();
 
-    if (accErr || !account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (accErr || !account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
     const params = new URLSearchParams({ limit: String(limit || 200) });
     if (status) params.set('status', status);
@@ -349,7 +448,11 @@ router.get(
       account.access_token,
     );
 
-    successResponse(res, result.data || [], `${(result.data || []).length} templates`);
+    successResponse(
+      res,
+      result.data || [],
+      `${(result.data || []).length} templates`,
+    );
   }),
 );
 
@@ -363,11 +466,18 @@ router.post(
       .eq('id', req.params.accountId)
       .single();
 
-    if (accErr || !account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (accErr || !account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
-    const { name, category, language, components, allow_category_change } = req.body;
+    const { name, category, language, components, allow_category_change } =
+      req.body;
     if (!name || !category || !language || !components) {
-      return errorResponse(res, 'name, category, language e components são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'name, category, language e components são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     const payload = { name, category, language, components };
@@ -382,7 +492,12 @@ router.post(
       },
     );
 
-    successResponse(res, result, 'Template criado / enviado para aprovação', 201);
+    successResponse(
+      res,
+      result,
+      'Template criado / enviado para aprovação',
+      201,
+    );
   }),
 );
 
@@ -396,7 +511,8 @@ router.delete(
       .eq('id', req.params.accountId)
       .single();
 
-    if (accErr || !account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (accErr || !account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
     const result = await graphRequest(
       `/${account.waba_id}/message_templates?name=${encodeURIComponent(req.params.templateName)}`,
@@ -422,11 +538,17 @@ router.post(
       .eq('id', req.params.accountId)
       .single();
 
-    if (accErr || !account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (accErr || !account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
     const { to, templateName, languageCode, components } = req.body;
     if (!to || !templateName) {
-      return errorResponse(res, 'to e templateName são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'to e templateName são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     const result = await graphRequest(
@@ -466,14 +588,19 @@ router.post(
       templateLanguage,
       templateCategory,
       templatePayload,
-      contacts,       // [{ phone, name?, externalId?, variables? }]
+      contacts, // [{ phone, name?, externalId?, variables? }]
       scheduledAt,
       priority,
       dailyTierLimit,
     } = req.body;
 
     if (!accountId || !templateName || !contacts?.length) {
-      return errorResponse(res, 'accountId, templateName e contacts são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'accountId, templateName e contacts são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     // Gerar campaign_id único para agrupar
@@ -482,7 +609,8 @@ router.post(
     const rows = contacts.map((c) => ({
       account_id: accountId,
       campaign_id: campaignId,
-      campaign_name: campaignName || `Campanha ${new Date().toLocaleDateString('pt-BR')}`,
+      campaign_name:
+        campaignName || `Campanha ${new Date().toLocaleDateString('pt-BR')}`,
       phone_number: String(c.phone).replace(/\D/g, ''),
       contact_name: c.name || null,
       contact_external_id: c.externalId || null,
@@ -505,18 +633,30 @@ router.post(
       const batch = rows.slice(i, i + batchSize);
       const { error } = await supabase.from('message_queue').insert(batch);
       if (error) {
-        logger.error(`Erro ao inserir lote ${i / batchSize + 1}: ${error.message}`);
-        return errorResponse(res, `Erro ao enfileirar: ${error.message}`, 500, 'DB_ERROR');
+        logger.error(
+          `Erro ao inserir lote ${i / batchSize + 1}: ${error.message}`,
+        );
+        return errorResponse(
+          res,
+          `Erro ao enfileirar: ${error.message}`,
+          500,
+          'DB_ERROR',
+        );
       }
       inserted += batch.length;
     }
 
-    successResponse(res, {
-      campaignId,
-      campaignName: rows[0].campaign_name,
-      totalQueued: inserted,
-      scheduledAt: rows[0].scheduled_at,
-    }, `${inserted} mensagens enfileiradas`, 201);
+    successResponse(
+      res,
+      {
+        campaignId,
+        campaignName: rows[0].campaign_name,
+        totalQueued: inserted,
+        scheduledAt: rows[0].scheduled_at,
+      },
+      `${inserted} mensagens enfileiradas`,
+      201,
+    );
   }),
 );
 
@@ -528,7 +668,9 @@ router.get(
 
     let query = supabase
       .from('message_queue')
-      .select('campaign_id, campaign_name, account_id, template_name, template_category, scheduled_at, status')
+      .select(
+        'campaign_id, campaign_name, account_id, template_name, template_category, scheduled_at, status',
+      )
       .order('scheduled_at', { ascending: false });
 
     if (accountId) query = query.eq('account_id', accountId);
@@ -562,7 +704,13 @@ router.get(
       const c = campaigns[row.campaign_id];
       c.total++;
       const s = row.status;
-      if (s === 'pending' || s === 'retrying' || s === 'processing' || s === 'paused') c.pending++;
+      if (
+        s === 'pending' ||
+        s === 'retrying' ||
+        s === 'processing' ||
+        s === 'paused'
+      )
+        c.pending++;
       else if (s === 'sent') c.sent++;
       else if (s === 'delivered') c.delivered++;
       else if (s === 'read') c.read++;
@@ -587,13 +735,31 @@ router.get(
       .order('created_at', { ascending: true });
 
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
-    if (!data.length) return errorResponse(res, 'Campanha não encontrada', 404, 'NOT_FOUND');
+    if (!data.length)
+      return errorResponse(res, 'Campanha não encontrada', 404, 'NOT_FOUND');
 
     // Resumo
-    const summary = { total: data.length, pending: 0, sent: 0, delivered: 0, read: 0, replied: 0, failed: 0, canceled: 0, estimatedCost: 0, realCost: 0 };
+    const summary = {
+      total: data.length,
+      pending: 0,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      replied: 0,
+      failed: 0,
+      canceled: 0,
+      estimatedCost: 0,
+      realCost: 0,
+    };
     for (const row of data) {
       const s = row.status;
-      if (s === 'pending' || s === 'retrying' || s === 'processing' || s === 'paused') summary.pending++;
+      if (
+        s === 'pending' ||
+        s === 'retrying' ||
+        s === 'processing' ||
+        s === 'paused'
+      )
+        summary.pending++;
       else if (s === 'sent') summary.sent++;
       else if (s === 'delivered') summary.delivered++;
       else if (s === 'read') summary.read++;
@@ -625,7 +791,11 @@ router.post(
       .select('id');
 
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
-    successResponse(res, { canceled: data.length }, `${data.length} mensagens canceladas`);
+    successResponse(
+      res,
+      { canceled: data.length },
+      `${data.length} mensagens canceladas`,
+    );
   }),
 );
 
@@ -639,16 +809,26 @@ router.get(
   asyncHandler(async (req, res) => {
     const { accountId } = req.query;
 
-    let query = supabase
-      .from('message_queue')
-      .select('status, account_id');
+    let query = supabase.from('message_queue').select('status, account_id');
 
     if (accountId) query = query.eq('account_id', accountId);
 
     const { data, error } = await query;
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
 
-    const counts = { pending: 0, processing: 0, sent: 0, delivered: 0, read: 0, replied: 0, failed: 0, canceled: 0, paused: 0, retrying: 0, total: data.length };
+    const counts = {
+      pending: 0,
+      processing: 0,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      replied: 0,
+      failed: 0,
+      canceled: 0,
+      paused: 0,
+      retrying: 0,
+      total: data.length,
+    };
     for (const row of data) {
       if (counts[row.status] !== undefined) counts[row.status]++;
     }
@@ -680,7 +860,12 @@ router.get(
   asyncHandler(async (req, res) => {
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+      return errorResponse(
+        res,
+        'Não foi possível obter token TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
     }
     const branches = await getBranchesWithNames(tokenData.access_token);
     const formatted = (branches || [])
@@ -698,12 +883,22 @@ router.post(
     const { operacao, data_inicio, data_fim, empresas } = req.body;
 
     if (!operacao || !data_inicio || !data_fim) {
-      return errorResponse(res, 'operacao, data_inicio e data_fim são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'operacao, data_inicio e data_fim são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      return errorResponse(res, 'Não foi possível obter token TOTVS', 503, 'TOKEN_UNAVAILABLE');
+      return errorResponse(
+        res,
+        'Não foi possível obter token TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
     }
     const token = tokenData.access_token;
 
@@ -761,7 +956,9 @@ router.post(
           hasNext = resp.data?.hasNext || false;
           page++;
         } else {
-          logger.error(`Erro ao buscar invoices TOTVS page ${page}: ${err.message}`);
+          logger.error(
+            `Erro ao buscar invoices TOTVS page ${page}: ${err.message}`,
+          );
           break;
         }
       }
@@ -793,13 +990,18 @@ router.post(
         const num = (p.number || '').replace(/\D/g, '');
         if (num.length >= 10) {
           phone = num.startsWith('55') ? num : `55${num}`;
-          if (p.typeDescription?.toLowerCase().includes('celular') || num.length === 11 || (num.length === 13 && num.startsWith('55'))) {
+          if (
+            p.typeDescription?.toLowerCase().includes('celular') ||
+            num.length === 11 ||
+            (num.length === 13 && num.startsWith('55'))
+          ) {
             break; // celular encontrado
           }
         }
       }
 
-      const name = person.fantasyName || person.corporateName || person.name || '';
+      const name =
+        person.fantasyName || person.corporateName || person.name || '';
       const cpfCnpj = person.cpfCnpj || person.federalTaxNumber || '';
 
       contactsMap[personCode] = {
@@ -815,7 +1017,11 @@ router.post(
     const contacts = Object.values(contactsMap).filter((c) => c.nr_telefone);
     const ticketMedio = contacts.length > 0 ? totalValue / contacts.length : 0;
 
-    successResponse(res, { data: contacts, ticketMedio }, `${contacts.length} contatos encontrados`);
+    successResponse(
+      res,
+      { data: contacts, ticketMedio },
+      `${contacts.length} contatos encontrados`,
+    );
   }),
 );
 
@@ -830,12 +1036,18 @@ router.post(
     const { waba_id, template_name, language, contacts_csv, origem } = req.body;
 
     if (!waba_id || !template_name) {
-      return errorResponse(res, 'waba_id e template_name são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'waba_id e template_name são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     // Buscar conta pelo waba_id
     const account = await getAccountByWabaId(waba_id);
-    if (!account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (!account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
     // Normalizar contatos
     let contacts = [];
@@ -843,13 +1055,20 @@ router.post(
     if (Array.isArray(contacts_csv)) {
       if (typeof contacts_csv[0] === 'string') {
         // CSV rows: primeira linha é header
-        const header = contacts_csv[0].split(',').map((h) => h.trim().toLowerCase());
-        const phoneIdx = header.findIndex((h) => h === 'telefone' || h === 'phone');
+        const header = contacts_csv[0]
+          .split(',')
+          .map((h) => h.trim().toLowerCase());
+        const phoneIdx = header.findIndex(
+          (h) => h === 'telefone' || h === 'phone',
+        );
         const nameIdx = header.findIndex((h) => h === 'nome' || h === 'name');
 
         for (let i = 1; i < contacts_csv.length; i++) {
           const cols = contacts_csv[i].split(',').map((c) => c.trim());
-          const phone = (cols[phoneIdx >= 0 ? phoneIdx : 0] || '').replace(/\D/g, '');
+          const phone = (cols[phoneIdx >= 0 ? phoneIdx : 0] || '').replace(
+            /\D/g,
+            '',
+          );
           if (!phone || phone.length < 10) continue;
 
           const variables = {};
@@ -867,19 +1086,29 @@ router.post(
         }
       } else {
         // Array de objetos (TOTVS contacts)
-        contacts = contacts_csv.map((c) => {
-          const phone = (c.nr_telefone || c.phones || c.phone || '').replace(/\D/g, '');
-          return {
-            phone: phone.startsWith('55') ? phone : `55${phone}`,
-            name: c.name || c.nome || '',
-            variables: c.variables || {},
-          };
-        }).filter((c) => c.phone.length >= 12);
+        contacts = contacts_csv
+          .map((c) => {
+            const phone = (c.nr_telefone || c.phones || c.phone || '').replace(
+              /\D/g,
+              '',
+            );
+            return {
+              phone: phone.startsWith('55') ? phone : `55${phone}`,
+              name: c.name || c.nome || '',
+              variables: c.variables || {},
+            };
+          })
+          .filter((c) => c.phone.length >= 12);
       }
     }
 
     if (contacts.length === 0) {
-      return errorResponse(res, 'Nenhum contato válido para enviar', 400, 'NO_CONTACTS');
+      return errorResponse(
+        res,
+        'Nenhum contato válido para enviar',
+        400,
+        'NO_CONTACTS',
+      );
     }
 
     // Gerar campaign_id
@@ -910,21 +1139,33 @@ router.post(
       const batch = rows.slice(i, i + batchSize);
       const { error } = await supabase.from('message_queue').insert(batch);
       if (error) {
-        return errorResponse(res, `Erro ao enfileirar: ${error.message}`, 500, 'DB_ERROR');
+        return errorResponse(
+          res,
+          `Erro ao enfileirar: ${error.message}`,
+          500,
+          'DB_ERROR',
+        );
       }
       inserted += batch.length;
     }
 
     // Processar fila em background (enviar mensagens)
     processCampaignQueue(campaignId, account).catch((err) =>
-      logger.error(`Erro ao processar fila da campanha ${campaignId}: ${err.message}`)
+      logger.error(
+        `Erro ao processar fila da campanha ${campaignId}: ${err.message}`,
+      ),
     );
 
-    successResponse(res, {
-      campaignId,
-      campaignName,
-      totalQueued: inserted,
-    }, `${inserted} mensagens enfileiradas e envio iniciado`, 201);
+    successResponse(
+      res,
+      {
+        campaignId,
+        campaignName,
+        totalQueued: inserted,
+      },
+      `${inserted} mensagens enfileiradas e envio iniciado`,
+      201,
+    );
   }),
 );
 
@@ -949,7 +1190,10 @@ async function processCampaignQueue(campaignId, account) {
 
     // Marcar como processing
     const ids = pending.map((p) => p.id);
-    await supabase.from('message_queue').update({ status: 'processing' }).in('id', ids);
+    await supabase
+      .from('message_queue')
+      .update({ status: 'processing' })
+      .in('id', ids);
 
     for (const msg of pending) {
       try {
@@ -1019,11 +1263,17 @@ router.post(
     const { waba_id, template_name, start, end } = req.body;
 
     if (!waba_id || !template_name || !start || !end) {
-      return errorResponse(res, 'waba_id, template_name, start e end são obrigatórios', 400, 'VALIDATION');
+      return errorResponse(
+        res,
+        'waba_id, template_name, start e end são obrigatórios',
+        400,
+        'VALIDATION',
+      );
     }
 
     const account = await getAccountByWabaId(waba_id);
-    if (!account) return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
+    if (!account)
+      return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
     const COTACAO_DOLAR = 5.8;
 
@@ -1059,11 +1309,14 @@ router.post(
 
     // Calcular totais (os msg analytics são globais, não por template)
     // Para dados por template, usar pricing_analytics
-    const pricingPoints = (pricingResult?.pricing_analytics?.data || []).flatMap(d => d.data_points || []);
+    const pricingPoints = (
+      pricingResult?.pricing_analytics?.data || []
+    ).flatMap((d) => d.data_points || []);
 
     // Filtrar points do template específico
     const templatePricing = pricingPoints.filter(
-      (p) => (p.template_name || '').toLowerCase() === template_name.toLowerCase()
+      (p) =>
+        (p.template_name || '').toLowerCase() === template_name.toLowerCase(),
     );
 
     let totalVolume = 0;
@@ -1077,7 +1330,9 @@ router.post(
       totalCostUSD += cost;
 
       // Agrupar por dia
-      const ts = p.start ? new Date(p.start * 1000).toISOString().slice(0, 10) : 'unknown';
+      const ts = p.start
+        ? new Date(p.start * 1000).toISOString().slice(0, 10)
+        : 'unknown';
       if (!dailyMap[ts]) dailyMap[ts] = { enviadas: 0, entregues: 0, lidas: 0 };
       dailyMap[ts].enviadas += vol;
     }
@@ -1097,7 +1352,8 @@ router.post(
     // Se temos dados de pricing para o template, usar volume como "enviadas"
     // Para "entregues" e "lidas", calcular proporção global e aplicar
     const deliveryRate = totalSent > 0 ? totalDelivered / totalSent : 0.95;
-    const readRate = totalSent > 0 ? (totalRead || totalDelivered * 0.6) / totalSent : 0.5;
+    const readRate =
+      totalSent > 0 ? (totalRead || totalDelivered * 0.6) / totalSent : 0.5;
 
     const enviadas = totalVolume || 0;
     const entregues = Math.round(enviadas * deliveryRate);
@@ -1109,7 +1365,10 @@ router.post(
       .map(([date, vals]) => {
         const d = new Date(date + 'T12:00:00');
         return {
-          label: d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }),
+          label: d.toLocaleDateString('pt-BR', {
+            day: '2-digit',
+            month: '2-digit',
+          }),
           enviadas: vals.enviadas,
           entregues: Math.round(vals.enviadas * deliveryRate),
           lidas: Math.round(vals.enviadas * readRate),
@@ -1126,6 +1385,572 @@ router.post(
       totalUSD: totalCostUSD,
       totalBRL,
       grafico,
+    });
+  }),
+);
+
+// =============================================
+// META ADS  –  Contas e gasto com tráfego pago
+// =============================================
+
+// GET /api/meta/ad-accounts
+router.get(
+  '/ad-accounts',
+  asyncHandler(async (req, res) => {
+    const { canal } = req.query;
+    let query = supabase
+      .from('meta_ad_accounts')
+      .select('id, name, ad_account_id, canal_venda, created_at')
+      .order('name');
+    if (canal) query = query.eq('canal_venda', canal);
+    const { data, error } = await query;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    successResponse(res, data, `${data.length} contas de anúncio`);
+  }),
+);
+
+// POST /api/meta/ad-accounts
+router.post(
+  '/ad-accounts',
+  asyncHandler(async (req, res) => {
+    const { name, ad_account_id, access_token, canal_venda } = req.body;
+    if (!name || !ad_account_id || !access_token) {
+      return errorResponse(
+        res,
+        'name, ad_account_id e access_token são obrigatórios',
+        400,
+        'VALIDATION',
+      );
+    }
+    const accountId = ad_account_id.startsWith('act_')
+      ? ad_account_id
+      : `act_${ad_account_id}`;
+    const { data, error } = await supabase
+      .from('meta_ad_accounts')
+      .insert({
+        name,
+        ad_account_id: accountId,
+        access_token,
+        canal_venda: canal_venda || null,
+      })
+      .select('id, name, ad_account_id, canal_venda')
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    successResponse(res, data, 'Conta de anúncio criada', 201);
+  }),
+);
+
+// PUT /api/meta/ad-accounts/:id
+router.put(
+  '/ad-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const { name, ad_account_id, access_token, canal_venda } = req.body;
+    const update = {};
+    if (name !== undefined) update.name = name;
+    if (ad_account_id !== undefined)
+      update.ad_account_id = ad_account_id.startsWith('act_')
+        ? ad_account_id
+        : `act_${ad_account_id}`;
+    if (access_token !== undefined) update.access_token = access_token;
+    if (canal_venda !== undefined) update.canal_venda = canal_venda;
+    if (Object.keys(update).length === 0) {
+      return errorResponse(
+        res,
+        'Nenhum campo para atualizar',
+        400,
+        'VALIDATION',
+      );
+    }
+    const { data, error } = await supabase
+      .from('meta_ad_accounts')
+      .update(update)
+      .eq('id', req.params.id)
+      .select('id, name, ad_account_id, canal_venda')
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    successResponse(res, data, 'Conta de anúncio atualizada');
+  }),
+);
+
+// DELETE /api/meta/ad-accounts/:id
+router.delete(
+  '/ad-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const { error } = await supabase
+      .from('meta_ad_accounts')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    successResponse(res, null, 'Conta de anúncio removida');
+  }),
+);
+
+// POST /api/meta/ads-spend
+// Body: { startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD", canal?: string }
+// Busca todas as contas de anúncio e retorna gasto total com tráfego pago (Meta Ads)
+router.post(
+  '/ads-spend',
+  asyncHandler(async (req, res) => {
+    const { startDate, endDate, canal } = req.body;
+    if (!startDate || !endDate) {
+      return errorResponse(
+        res,
+        'startDate e endDate são obrigatórios (YYYY-MM-DD)',
+        400,
+        'VALIDATION',
+      );
+    }
+
+    let accountsQuery = supabase
+      .from('meta_ad_accounts')
+      .select('id, name, ad_account_id, canal_venda, access_token')
+      .order('name');
+    if (canal) accountsQuery = accountsQuery.eq('canal_venda', canal);
+
+    const { data: accounts, error: accErr } = await accountsQuery;
+    if (accErr) {
+      logger.error(
+        `[ads-spend] Erro ao buscar contas de anúncio: ${accErr.message}`,
+      );
+      return errorResponse(res, accErr.message, 500, 'DB_ERROR');
+    }
+    if (!accounts || accounts.length === 0) {
+      logger.warn(
+        '[ads-spend] Nenhuma conta de anúncio cadastrada no Supabase.',
+      );
+      return successResponse(
+        res,
+        { accounts: [], totals: { spend: 0, impressions: 0, clicks: 0 } },
+        'Nenhuma conta de anúncio cadastrada',
+      );
+    }
+
+    const allResults = [];
+
+    for (const acc of accounts) {
+      const timeRange = encodeURIComponent(
+        JSON.stringify({ since: startDate, until: endDate }),
+      );
+      const fields = 'spend,impressions,clicks,reach';
+      const url = `${META_GRAPH_BASE}/${acc.ad_account_id}/insights?fields=${fields}&time_range=${timeRange}&level=account`;
+
+      try {
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${acc.access_token}` },
+        });
+        const json = await resp.json();
+
+        if (!resp.ok || json.error) {
+          logger.error(
+            `[ads-spend] Erro na conta ${acc.ad_account_id} (${acc.name}): ${json.error?.message || `HTTP ${resp.status}`}`,
+          );
+          allResults.push({
+            accountId: acc.id,
+            name: acc.name,
+            ad_account_id: acc.ad_account_id,
+            canal_venda: acc.canal_venda || null,
+            error: json.error?.message || `HTTP ${resp.status}`,
+            spend: 0,
+            impressions: 0,
+            clicks: 0,
+          });
+          continue;
+        }
+
+        const dataArr = json.data || [];
+        const spend = dataArr.reduce((s, d) => s + parseFloat(d.spend || 0), 0);
+        const impressions = dataArr.reduce(
+          (s, d) => s + parseInt(d.impressions || 0, 10),
+          0,
+        );
+        const clicks = dataArr.reduce(
+          (s, d) => s + parseInt(d.clicks || 0, 10),
+          0,
+        );
+        // Pega a moeda da primeira linha (todas devem ser iguais para a conta)
+        const currency = dataArr[0]?.account_currency || 'BRL';
+
+        allResults.push({
+          accountId: acc.id,
+          name: acc.name,
+          ad_account_id: acc.ad_account_id,
+          canal_venda: acc.canal_venda || null,
+          spend,
+          impressions,
+          clicks,
+          currency,
+        });
+      } catch (err) {
+        logger.error(
+          `[ads-spend] Erro inesperado na conta ${acc.ad_account_id} (${acc.name}): ${err.message}`,
+        );
+        allResults.push({
+          accountId: acc.id,
+          name: acc.name,
+          ad_account_id: acc.ad_account_id,
+          canal_venda: acc.canal_venda || null,
+          error: err.message,
+          spend: 0,
+          impressions: 0,
+          clicks: 0,
+        });
+      }
+    }
+
+    const totalSpend = allResults.reduce((s, r) => s + (r.spend || 0), 0);
+    const totalImpressions = allResults.reduce(
+      (s, r) => s + (r.impressions || 0),
+      0,
+    );
+    const totalClicks = allResults.reduce((s, r) => s + (r.clicks || 0), 0);
+    // Usa a moeda da primeira conta (assumindo todas iguais)
+    const totalsCurrency = allResults[0]?.currency || 'BRL';
+
+    successResponse(res, {
+      startDate,
+      endDate,
+      accounts: allResults,
+      totals: {
+        spend: totalSpend,
+        impressions: totalImpressions,
+        clicks: totalClicks,
+        currency: totalsCurrency,
+      },
+    });
+  }),
+);
+
+// =============================================
+// CUSTOS DE CONVERSAS  –  conversation_analytics por número
+// =============================================
+
+// POST /api/meta/conversation-costs
+// Body: { startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD", canal?: string }
+// Busca todos os números da tabela whatsapp_accounts e faz batch request à Graph API
+router.post(
+  '/conversation-costs',
+  asyncHandler(async (req, res) => {
+    const { startDate, endDate, canal } = req.body;
+    if (!startDate || !endDate) {
+      return errorResponse(
+        res,
+        'startDate e endDate são obrigatórios (YYYY-MM-DD)',
+        400,
+        'VALIDATION',
+      );
+    }
+
+    const start = Math.floor(new Date(startDate).getTime() / 1000);
+    const end = Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000);
+
+    // Buscar contas do Supabase, filtrando por canal se informado
+    let accountsQuery = supabase
+      .from('whatsapp_accounts')
+      .select('id, name, waba_id, phone_id, nr_telefone, access_token')
+      .order('name');
+    // canal_venda ainda não existe na tabela — filtro desativado até migração
+
+    const { data: accounts, error: accErr } = await accountsQuery;
+
+    if (accErr) return errorResponse(res, accErr.message, 500, 'DB_ERROR');
+    if (!accounts || accounts.length === 0) {
+      return successResponse(
+        res,
+        { accounts: [], totals: { conversations: 0, cost: 0 } },
+        'Nenhuma conta encontrada para este canal',
+      );
+    }
+
+    // Agrupar contas por access_token para fazer uma única batch request por token
+    const tokenGroups = {};
+    for (const acc of accounts) {
+      if (!acc.access_token || !acc.phone_id) continue;
+      const token = acc.access_token;
+      if (!tokenGroups[token]) tokenGroups[token] = [];
+      tokenGroups[token].push(acc);
+    }
+
+    const dimensions = encodeURIComponent(
+      JSON.stringify([
+        'PHONE',
+        'CONVERSATION_CATEGORY',
+        'CONVERSATION_TYPE',
+        'COUNTRY',
+      ]),
+    );
+    const analyticsPath = (phoneId) =>
+      `${phoneId}/conversation_analytics?start=${start}&end=${end}&granularity=DAILY&dimensions=${dimensions}`;
+
+    const allResults = [];
+
+    // Para cada grupo de token, montar batch request (máx 50 por lote)
+    for (const [token, accs] of Object.entries(tokenGroups)) {
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < accs.length; i += BATCH_SIZE) {
+        const chunk = accs.slice(i, i + BATCH_SIZE);
+
+        const batchPayload = {
+          access_token: token,
+          batch: chunk.map((acc) => ({
+            method: 'GET',
+            relative_url: analyticsPath(acc.phone_id),
+          })),
+        };
+
+        let batchResponse;
+        try {
+          const resp = await fetch('https://graph.facebook.com/v19.0/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(batchPayload),
+          });
+          batchResponse = await resp.json();
+        } catch (err) {
+          logger.error(`Erro batch conversation_analytics: ${err.message}`);
+          continue;
+        }
+
+        if (!Array.isArray(batchResponse)) continue;
+
+        for (let j = 0; j < batchResponse.length; j++) {
+          const acc = chunk[j];
+          const item = batchResponse[j];
+
+          if (!item || item.code !== 200) {
+            const errBody = item?.body ? JSON.parse(item.body) : {};
+            allResults.push({
+              accountId: acc.id,
+              name: acc.name,
+              phone_id: acc.phone_id,
+              nr_telefone: acc.nr_telefone,
+              canal_venda: acc.canal_venda || null,
+              error: errBody?.error?.message || `HTTP ${item?.code}`,
+              data_points: [],
+            });
+            continue;
+          }
+
+          const body = JSON.parse(item.body);
+          const dataPoints = body?.data?.[0]?.data_points || [];
+
+          // Agregar totais por conta
+          let totalConversations = 0;
+          let totalCost = 0;
+          const byCategory = {};
+
+          for (const point of dataPoints) {
+            const vol = Number(point.conversation || 0);
+            const cost = Number(point.cost || 0);
+            const cat = (
+              point.conversation_category || 'UNKNOWN'
+            ).toUpperCase();
+
+            totalConversations += vol;
+            totalCost += cost;
+
+            if (!byCategory[cat])
+              byCategory[cat] = { conversations: 0, cost: 0 };
+            byCategory[cat].conversations += vol;
+            byCategory[cat].cost += cost;
+          }
+
+          allResults.push({
+            accountId: acc.id,
+            name: acc.name,
+            phone_id: acc.phone_id,
+            nr_telefone: acc.nr_telefone,
+            canal_venda: acc.canal_venda || null,
+            totalConversations,
+            totalCost,
+            byCategory,
+            data_points: dataPoints,
+          });
+        }
+      }
+    }
+
+    const grandTotalCost = allResults.reduce(
+      (s, r) => s + (r.totalCost || 0),
+      0,
+    );
+    const grandTotalConversations = allResults.reduce(
+      (s, r) => s + (r.totalConversations || 0),
+      0,
+    );
+
+    const COTACAO_DOLAR = 5.8;
+
+    successResponse(res, {
+      startDate,
+      endDate,
+      accounts: allResults,
+      totals: {
+        conversations: grandTotalConversations,
+        cost: grandTotalCost,
+        costBRL: grandTotalCost * COTACAO_DOLAR,
+      },
+    });
+  }),
+);
+
+// =============================================
+// CAMPANHAS DE TRÁFEGO  –  Meta Ads API
+// =============================================
+
+/**
+ * GET /api/meta/ads/campaigns?adAccountId=act_xxx
+ *
+ * Lista campanhas de uma conta de anúncio.
+ * O access_token é buscado na tabela meta_ad_accounts pelo adAccountId.
+ *
+ * Query params:
+ *   adAccountId  (obrigatório) ex: act_100855593689813
+ *   fields       (opcional, default: id,name,status,effective_status,objective)
+ */
+router.get(
+  '/ads/campaigns',
+  asyncHandler(async (req, res) => {
+    const {
+      adAccountId,
+      fields = 'id,name,status,effective_status,objective',
+    } = req.query;
+
+    if (!adAccountId) {
+      return errorResponse(
+        res,
+        'adAccountId é obrigatório (ex: act_100855593689813)',
+        400,
+        'MISSING_PARAM',
+      );
+    }
+
+    // Normaliza: garante prefixo act_
+    const normalizedId = adAccountId.startsWith('act_')
+      ? adAccountId
+      : `act_${adAccountId}`;
+
+    // Busca token no banco
+    const { data: acc, error: dbErr } = await supabase
+      .from('meta_ad_accounts')
+      .select('access_token, name, canal_venda')
+      .eq('ad_account_id', normalizedId)
+      .maybeSingle();
+
+    if (dbErr) return errorResponse(res, dbErr.message, 500, 'DB_ERROR');
+    if (!acc)
+      return errorResponse(
+        res,
+        `Conta ${normalizedId} não encontrada em meta_ad_accounts`,
+        404,
+        'NOT_FOUND',
+      );
+
+    // Busca campanhas na Graph API (paginação automática com limit 500)
+    const path = `/${normalizedId}/campaigns?fields=${encodeURIComponent(fields)}&limit=500`;
+    const graphData = await graphRequest(path, acc.access_token);
+
+    successResponse(res, {
+      adAccountId: normalizedId,
+      name: acc.name,
+      canal_venda: acc.canal_venda,
+      campaigns: graphData.data || [],
+      paging: graphData.paging || null,
+    });
+  }),
+);
+
+/**
+ * GET /api/meta/ads/campaign-insights?campaignId=xxx
+ *
+ * Busca insights de uma campanha específica pelo ID.
+ * O access_token é buscado na tabela meta_ad_accounts via adAccountId.
+ *
+ * Query params:
+ *   campaignId   (obrigatório) ex: 6968664906191
+ *   adAccountId  (obrigatório) ex: act_100855593689813  — usado para buscar o token no DB
+ *   datePreset   (opcional, default: yesterday)  ex: last_7d, last_30d, this_month
+ *   startDate    (opcional) ex: 2025-04-01   — se informado junto com endDate, ignora datePreset
+ *   endDate      (opcional) ex: 2025-04-26
+ *   fields       (opcional, default: impressions,clicks,spend,campaign_id,campaign_name,date_start,date_stop,results)
+ */
+router.get(
+  '/ads/campaign-insights',
+  asyncHandler(async (req, res) => {
+    const {
+      campaignId,
+      adAccountId,
+      datePreset = 'yesterday',
+      startDate,
+      endDate,
+      fields = 'impressions,clicks,spend,campaign_id,campaign_name,date_start,date_stop,results',
+    } = req.query;
+
+    if (!campaignId)
+      return errorResponse(
+        res,
+        'campaignId é obrigatório',
+        400,
+        'MISSING_PARAM',
+      );
+    if (!adAccountId)
+      return errorResponse(
+        res,
+        'adAccountId é obrigatório',
+        400,
+        'MISSING_PARAM',
+      );
+
+    const normalizedId = adAccountId.startsWith('act_')
+      ? adAccountId
+      : `act_${adAccountId}`;
+
+    // Busca token no banco
+    const { data: acc, error: dbErr } = await supabase
+      .from('meta_ad_accounts')
+      .select('access_token, name, canal_venda')
+      .eq('ad_account_id', normalizedId)
+      .maybeSingle();
+
+    if (dbErr) return errorResponse(res, dbErr.message, 500, 'DB_ERROR');
+    if (!acc)
+      return errorResponse(
+        res,
+        `Conta ${normalizedId} não encontrada em meta_ad_accounts`,
+        404,
+        'NOT_FOUND',
+      );
+
+    // Monta parâmetros de data
+    let timePart;
+    if (startDate && endDate) {
+      timePart = `time_range=${encodeURIComponent(JSON.stringify({ since: startDate, until: endDate }))}`;
+    } else {
+      timePart = `date_preset=${encodeURIComponent(datePreset)}`;
+    }
+
+    const path = `/${campaignId}/insights?${timePart}&time_increment=1&fields=${encodeURIComponent(fields)}`;
+    const graphData = await graphRequest(path, acc.access_token);
+
+    const insights = graphData.data || [];
+
+    // Totais agregados do período
+    const totals = insights.reduce(
+      (acc, row) => {
+        acc.impressions += Number(row.impressions || 0);
+        acc.clicks += Number(row.clicks || 0);
+        acc.spend += parseFloat(row.spend || 0);
+        return acc;
+      },
+      { impressions: 0, clicks: 0, spend: 0 },
+    );
+
+    successResponse(res, {
+      campaignId,
+      adAccountId: normalizedId,
+      canal_venda: acc.canal_venda,
+      insights,
+      totals,
+      paging: graphData.paging || null,
     });
   }),
 );

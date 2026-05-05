@@ -1,8 +1,10 @@
 # Dependências
 node_modules/
 
+# Cache do Puppeteer/Chrome (binários grandes)
+.cache/
+
 # Variáveis de ambiente
 .env
-# Cache do Puppeteer e outros arquivos grandes
-.cache/
 # ... outras regras existentes ...
+.ww

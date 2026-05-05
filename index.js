@@ -14,6 +14,7 @@ import catalogoRoutes from './routes/catalogo.routes.js';
 import metaRoutes from './routes/meta.routes.js';
 import evolutionRoutes from './routes/evolution.routes.js';
 import autentiqueRoutes from './routes/autentique.routes.js';
+import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
 
 import {
@@ -50,7 +51,7 @@ const router = express.Router();
 const API_BASE_URL =
   process.env.API_BASE_URL ||
   process.env.RENDER_EXTERNAL_URL ||
-  'http://localhost:4001';
+  'http://localhost:4100';
 
 /**
  * @route GET /totvs/token
@@ -7231,13 +7232,15 @@ import financeiroRouter from './totvsrouter/financeiro.js';
 import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
+import crmVendasRouter from './totvsrouter/crmVendas.js';
+import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
 
 // =============================================================================
 // SERVER SETUP
 // =============================================================================
 
 const app = express();
-const PORT = process.env.PORT || 4001;
+const PORT = process.env.PORT || 4100;
 
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -7252,6 +7255,71 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Diagnóstico temporário de Supabase
+app.get(
+  '/debug/supabase',
+  asyncHandler(async (req, res) => {
+    const { createClient } = await import('@supabase/supabase-js');
+    const results = {};
+
+    const mainUrl =
+      process.env.SUPABASE_URL || 'https://dorztqiunewggydvkjnf.supabase.co';
+    const mainKey = process.env.SUPABASE_SERVICE_KEY;
+    const fiscalUrl = process.env.SUPABASE_FISCAL_URL;
+    const fiscalKey = process.env.SUPABASE_FISCAL_KEY;
+
+    results.env = {
+      SUPABASE_URL: mainUrl,
+      SUPABASE_SERVICE_KEY: mainKey
+        ? mainKey.substring(0, 20) + '...'
+        : 'MISSING',
+      SUPABASE_FISCAL_URL: fiscalUrl || 'MISSING',
+      SUPABASE_FISCAL_KEY: fiscalKey
+        ? fiscalKey.substring(0, 20) + '...'
+        : 'MISSING',
+    };
+
+    try {
+      const sb = createClient(mainUrl, mainKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const { data, error } = await sb
+        .from('meta_ad_accounts')
+        .select('id')
+        .limit(1);
+      results.meta_ad_accounts = error
+        ? { error: error.message, code: error.code }
+        : { ok: true, count: data.length };
+      const { data: d2, error: e2 } = await sb
+        .from('whatsapp_accounts')
+        .select('id')
+        .limit(1);
+      results.whatsapp_accounts = e2
+        ? { error: e2.message, code: e2.code }
+        : { ok: true, count: d2.length };
+    } catch (e) {
+      results.main_supabase = { exception: e.message };
+    }
+
+    try {
+      const sbf = createClient(fiscalUrl, fiscalKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const { data, error } = await sbf
+        .from('notas_fiscais')
+        .select('id')
+        .limit(1);
+      results.notas_fiscais = error
+        ? { error: error.message, code: error.code }
+        : { ok: true, count: data.length };
+    } catch (e) {
+      results.fiscal_supabase = { exception: e.message };
+    }
+
+    res.json(results);
+  }),
+);
+
 // ─── Montar rotas TOTVS (/api/totvs/*) ───────────────────────────────────────────────────────────────────
 app.use('/api/totvs', authRouter); // GET /token, POST /auth
 app.use('/api/totvs', fiscalRouter); // boleto, DANFE, XML, NFs, movimentos fiscais
@@ -7261,6 +7329,7 @@ app.use('/api/totvs', financeiroRouter); // accounts-receivable, accounts-payabl
 app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
 app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
 app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
+app.use('/api/totvs', crmVendasRouter); // crm-vendas/*
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
@@ -7270,6 +7339,7 @@ app.use('/api/catalogo', catalogoRoutes); // catálogo virtual
 app.use('/api/meta', metaRoutes); // WhatsApp Official (Meta Graph API)
 app.use('/api/evolution', evolutionRoutes); // Evolution WhatsApp conversations
 app.use('/api/autentique', autentiqueRoutes); // Autentique assinatura digital (termo-credito, CRUD documentos)
+app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, roubos, IA
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -7293,6 +7363,8 @@ app.listen(PORT, async () => {
   } catch (err) {
     console.error('❌ Falha ao iniciar scheduler pes_pessoa:', err.message);
   }
+  iniciarJobFaturamentoDiario();
+  iniciarCronSyncLeadsCompras();
 });
 
 export default app;

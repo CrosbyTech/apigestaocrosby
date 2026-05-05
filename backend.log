@@ -1,0 +1,50 @@
+{"level":"INFO","message":"Chrome via puppeteer.executablePath(): C:\\Users\\teccr\\gestaocrosby\\backend\\.cache\\puppeteer\\chrome\\win64-146.0.7680.153\\chrome-win64\\chrome.exe","data":{},"timestamp":"2026-05-04T11:22:01.909Z"}
+💾 [erp-cache] Cache em disco expirado, ignorando.
+✅ Server running on port 4001
+🌍 Environment: development
+{"level":"INFO","message":"🚀 Inicializando WhatsApp client...","data":{},"timestamp":"2026-05-04T11:22:02.829Z"}
+{"level":"INFO","message":"Chrome via puppeteer.executablePath(): C:\\Users\\teccr\\gestaocrosby\\backend\\.cache\\puppeteer\\chrome\\win64-146.0.7680.153\\chrome-win64\\chrome.exe","data":{},"timestamp":"2026-05-04T11:22:02.832Z"}
+{"level":"INFO","message":"Chromium path: C:\\Users\\teccr\\gestaocrosby\\backend\\.cache\\puppeteer\\chrome\\win64-146.0.7680.153\\chrome-win64\\chrome.exe","data":{},"timestamp":"2026-05-04T11:22:02.834Z"}
+⏰ [faturamento-diario] Job agendado para 01:30 (America/Sao_Paulo) todos os dias
+⏰ [sync-leads-compras] Cron agendado: todo dia às 09:24 (America/Sao_Paulo)
+🔄 [erp-cache] Nenhum cache em disco — iniciando pré-carga automática...
+{"level":"INFO","message":"🔐 Gerando novo token TOTVS...","data":{},"timestamp":"2026-05-04T11:22:10.839Z"}
+{"level":"INFO","message":"✅ Token TOTVS gerado com sucesso","data":{},"timestamp":"2026-05-04T11:22:11.395Z"}
+{"level":"INFO","message":"   Token expira em: 04/05/2026, 14:22:11","data":{},"timestamp":"2026-05-04T11:22:11.398Z"}
+🚀 [erp-data] Buscando clientes + branches em paralelo...
+✅ [erp-data] 1000 clientes carregados do Supabase
+🏢 [erp-bg] 286 filiais carregadas (pool 1)
+✅ [erp-data] 558 vendedores mapeados (286 filiais)
+📊 [erp-data] Buscando movimento fiscal 2025-06-01 → 2026-05-04 (286 filiais)...
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+█ ▄▄▄▄▄ █▄█  █▀▀ ▄▄▄▀▄▄▄▀ ▀ ▀▄ ▄ ▄█▄██▀▄ ▄█ ▄▀ ▄ ██ ▄▄▄▄▄ █
+█ █   █ ███▄ █▀▀ ▀▀ █▀▄▀▀▀ ▀▀▀▀ ▀ ▀ ▄▀▀▄ ▀█▀▀▀▄▄ ██ █   █ █
+█ █▄▄▄█ ██▄▀▀▄ █ ▀▄▀▄▀█ ▄ █ ▄▄▄ ▀▄▀▀█▄▄ ▀█▄▄▄▄█▀▄██ █▄▄▄█ █
+█▄▄▄▄▄▄▄█ █ █▄▀ █▄█▄█▄▀▄█ ▀ █▄█ █ ▀ ▀▄▀▄▀ █▄█▄▀▄▀▄█▄▄▄▄▄▄▄█
+█▄ █ ▄▀▄▀▀▀▄█▄▀▀   ▄█ █▄  █▄     ▀█ ▀ ▀▀█ ▀ ▄█▀   ▀ ▀██▀█▄█
+█▄▀█▀█▄▄██▄▀▄▄▄▀▄ ▄ ▀ █▄▄█▀█▀ █▄▀   ▀▀  █▀█▀█▄▀▀▄▀▄█▀▀▄▀ ▄█
+█▀ ██▄▄▄ ▄█▄▀ ▀▀▀▄  █▀██  ▀██▄ █▄▄ ▄█▄▄ ▀ ▄▀▀  ▄ ▀▄ ▀   █▄█
+█▀█ ▀▀▄▄▀ ▀█▀▀▄▀█▀   ▀▄█ █  █ █  ████ ▄ █▀▀█▄▀█▀▄▄▄ ▄▄  ▄██
+████▄▀ ▄█▄█▀▀▀▄▄▀ ▄▄▄█▀█▀▀▄▀█▄█  ▄█▀▀  █▀█ ▀▄ ▀ ▀▀ ▄▀▀█ ▀▄█
+█▀█ ▄▀▀▄▄▄▀ ▀█▄  ▀ ▄██▄█▄▄█▀█▀▀▀▄▄▀██▄▄████▀▄█  ▄ ▄▀▀▄█▀█ █
+██  █ ▀▄▄ ████ ▀ ▄▀▄█▀█▄▀▄▀▄█  ▀▄▀ ▀▄▄▀ █▄▀▀▄█  ▄▀▀▀▀ ▄█▀▄█
+██▄▀▀▀ ▄▀ ▀███▀█ ▄▄▄▄▄ █▄█▀▀▄▀  ▄█▀█ ▀▄ ▀ ▄▀█▄▄▄ ▄▀▄▀██ ▀ █
+█▀▄█  █▄ █  ▄ ▀▄▀▄ ▄ ▀▄  ▀ ▄▀ ▀ ▀█▄▄▀  ▀█▄▀ █▄▄▄▀  ▀▄ ▄▀▀██
+█▀ █  ▄▄▄ ██▀ ██ ▀▄█▀█  █▄█ ▄▄▄ █▄▀▀██  ▄ █▄ ▄█▀▄ ▄▄▄ ▀ ▀██
+█ █▀▀ █▄█ ▄ ▀▄▀▄  ▀▀ █ ▀ ▀▀ █▄█  ▄ ▀▀ ▀█▀██▀█▄▀ ▄ █▄█ ▀▀▀ █
+██▄▀   ▄ ▄▄▄▀█▀██▀ ▄▀▄█ █   ▄▄ ▄▀█▀  ███▄▀▀▀▄▄ ▄▀ ▄▄  ▀ ▀▄█
+█▀█▄██▄▄▄▄ ▄▀  ▀  ▄   ▀▄▀ ▄█▀▀▀ ▀▀█ ▀ ▀ ▄▄  █▀  █▀ ▀  █ ▄██
+█   ▀ ▄▄ ▄▀█▄ ▄▀  ▀▄▄█ █ █▄▀██▄ █▀  █▄▄█▄▄ ▄ ▄ ▀▄▀▀ ▄▄▄▀▄▄█
+█  █▀▀▄▄▀   ▄█▄██▄ ▄▄▄  █ ▀██▄ ▄█▄ █▀ ▄ █▄  █  ▄ ▀██▀█ █ ██
+█ ▄▄▀  ▄▄███▀█▀ █ ▀▄ ▄▀█▄ ▄ █ ▀▄▀▀▄ ▀▄▀▄ ██▀▄ ▄▀ ▀█▀▀ ▀▀█ █
+█▄▀▄▀ █▄ ▀▄ ▄  ▄█ █ ▄█ █▄ █ ▀  ▀▀▄█▀ ▄ █▄▀█▀▄▄▀ ▄▄▄▄█ ▄ █ █
+█▄ ▄▄▀▀▄█▀▄█▀█▀▀ ▀  ▀▄█▀█ ▄▄▀██   ▄ █▀▄▀▄▀▀ ▄▀▀ ▄█ ▄█▄  ▀▄█
+█▀▀▄▄ █▄  ▀ ▄ ▄█ ▀▀ ▀ █▀ ▀█▀▀   ▀▀▀  ▄▄ ▄ ▀ █▀▀ ▀▀▀▀ ▀▀█ ▄█
+█ ▀ ▀▀▄▄▄█ ▄█▀██▄▄▀▀▄█ █ ▄▄▀▄ ▄▄▄▄ ▄▀ ██ ▄▄▀▄ ▄▀▀█▄▄▀█▄ █▄█
+███████▄█ ▀▄ ▀▀▄ █▀▄█▀▀▄ ▀  ▄▄▄ █  ▄█▄▄▀▀ █ █▄▀█  ▄▄▄  ▀▄ █
+█ ▄▄▄▄▄ ██  ▄▄██▀▀  ▀▀▄▀███ █▄█  ▄ █ ▄ ▀▄▄▄▀▄█▀▀▄ █▄█   █▀█
+█ █   █ █   █▀▀  █▀ ▄▄ █▄▄▄▄ ▄▄▄ ▄▀▀█▄ █▀▀▄▀ ▄  ▀▄ ▄▄   ███
+█ █▄▄▄█ █▀▄  █▄▀ ▀  ▀ ▄  █▄██  █▀▀▀▀██▄▀▀█▀▀█ ▄▄ ▄█▀▀  ▀  █
+█▄▄▄▄▄▄▄█▄██████▄▄▄▄▄██▄▄█▄█▄▄█▄█▄▄█▄▄█▄█▄▄▄███▄█▄▄██▄█████
+
+{"level":"INFO","message":"📱 QR Code gerado — escaneie com o WhatsApp","data":{},"timestamp":"2026-05-04T11:22:18.261Z"}

@@ -12,6 +12,7 @@ import {
   TOTVS_BASE_URL,
   getBranchCodes,
   getBranchesWithNames,
+  fetchBranchTotalsFromTotvs,
 } from './totvsHelper.js';
 
 const router = express.Router();
@@ -134,7 +135,7 @@ router.post(
       );
     }
 
-    let token = tokenData.access_token;
+    const token = tokenData.access_token;
 
     let resolvedBranchs;
     if (Array.isArray(branchs) && branchs.length > 0) {
@@ -145,122 +146,183 @@ router.post(
       resolvedBranchs = await getBranchCodes(token);
     }
 
-    // Filiais que recebem filtro de operações específico
-    const SPECIAL_BRANCH_CODES = [
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 31, 41, 45, 50, 55,
-      65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
-      105, 106, 107, 108, 109, 111, 200, 300, 311, 351, 400, 411, 450, 500, 550,
-      551, 600, 650, 700, 750, 800, 850, 870, 880, 890, 891, 900, 910, 920, 930,
-      940, 950, 960, 970, 980, 990,
-    ]; // CASCAVEL, JOAO PESSOA, BREJINHO, TACARUNA
-    const SPECIAL_OPERATIONS = [
-      1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
-      9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
-      1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067,
-    ];
-
-    const specialBranchs = resolvedBranchs.filter((b) =>
-      SPECIAL_BRANCH_CODES.includes(b),
-    );
-    const otherBranchs = resolvedBranchs.filter(
-      (b) => !SPECIAL_BRANCH_CODES.includes(b),
-    );
-
-    const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/totals-branch/search`;
-
-    console.log(
-      `🏆 [RankingFaturamento] ${endpoint}`,
-      JSON.stringify({
-        datemin,
-        datemax,
-        specialBranchs: specialBranchs.length,
-        otherBranchs: otherBranchs.length,
-      }),
-    );
-
-    const callTotvs = async (accessToken, body) =>
-      axios.post(endpoint, body, {
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-        },
-        httpsAgent,
-        httpAgent,
-        timeout: 60000,
-      });
-
-    const safeCall = async (body) => {
-      try {
-        return await callTotvs(token, body);
-      } catch (error) {
-        if (error.response?.status === 401) {
-          console.log('🔄 [RankingFaturamento] Token expirado, renovando...');
-          const newTokenData = await getToken(true);
-          token = newTokenData.access_token;
-          return callTotvs(token, body);
-        }
-        throw error;
-      }
-    };
-
-    // Executa as chamadas (em paralelo quando há dois grupos)
-    const callPromises = [];
-    if (specialBranchs.length > 0) {
-      callPromises.push(
-        safeCall({
-          branchs: specialBranchs,
-          datemin,
-          datemax,
-          operations: SPECIAL_OPERATIONS,
-        }),
-      );
-    }
-    if (otherBranchs.length > 0) {
-      callPromises.push(safeCall({ branchs: otherBranchs, datemin, datemax }));
-    }
-
-    const responses = await Promise.all(callPromises);
-    const datasets = responses.map((r) => r.data);
-
-    // Mescla dataRow e dataRowLastYear das duas respostas
-    const mergedDataRow = datasets.flatMap((d) => d.dataRow || []);
-    const mergedDataRowLastYear = datasets.flatMap(
-      (d) => d.dataRowLastYear || [],
-    );
-
-    // Soma os totais e recalcula TM e PA
-    const sumTotals = (totalsArr) => {
-      const valid = totalsArr.filter(Boolean);
-      if (valid.length === 0) return null;
-      const summed = valid.reduce(
-        (acc, t) => ({
-          invoice_qty: acc.invoice_qty + (t.invoice_qty || 0),
-          invoice_value: acc.invoice_value + (t.invoice_value || 0),
-          itens_qty: acc.itens_qty + (t.itens_qty || 0),
-        }),
-        { invoice_qty: 0, invoice_value: 0, itens_qty: 0 },
-      );
-      summed.tm =
-        summed.invoice_qty > 0 ? summed.invoice_value / summed.invoice_qty : 0;
-      summed.pa =
-        summed.invoice_qty > 0 ? summed.itens_qty / summed.invoice_qty : 0;
-      summed.pmpv =
-        summed.itens_qty > 0 ? summed.invoice_value / summed.itens_qty : 0;
-      return summed;
-    };
-
-    const mergedData = {
-      dataRow: mergedDataRow,
-      dataRowLastYear: mergedDataRowLastYear,
-      total: sumTotals(datasets.map((d) => d.total)),
-      totalLastYear: sumTotals(datasets.map((d) => d.totalLastYear)),
-    };
+    const mergedData = await fetchBranchTotalsFromTotvs({
+      initialToken: token,
+      branchs: resolvedBranchs,
+      datemin,
+      datemax,
+      refreshToken: async () => {
+        const data = await getToken(true);
+        return data.access_token;
+      },
+      logTag: 'RankingFaturamento',
+    });
 
     return successResponse(
       res,
       mergedData,
       'Ranking de faturamento por filial obtido com sucesso',
+    );
+  }),
+);
+
+// =============================================================================
+// FATURAMENTO POR CANAL — via TOTVS (sem Supabase)
+// POST /api/totvs/sale-panel/faturamento-por-canal
+// Body: { datemin, datemax }
+// Retorna: { segmentos, segmentosQty, segmentosItens, total }
+// Critério por canal:
+//   varejo      → branches [2,5,55,65,87,88,90,93,94,95,97] s/ ops override (SPECIAL_OPERATIONS)
+//   revenda     → branch [99] s/ ops override (SPECIAL_OPERATIONS)
+//   franquia    → todas as branches + ops franquia
+//   multimarcas → todas as branches + ops multimarcas
+//   bazar       → todas as branches + op bazar
+//   showroom    → todas as branches + ops showroom
+//   novidades   → todas as branches + op novidadesfranquia
+//   business    → todas as branches + ops business
+//   ricardoeletro → branches [11,111] s/ ops override
+// =============================================================================
+const CANAL_OP_CODES_FC = {
+  franquia: [7234, 7240, 7802, 9124, 7259],
+  multimarcas: [7235, 7241],
+  bazar: [887],
+  showroom: [7254, 7007],
+  novidadesfranquia: [7255],
+  business: [7237, 7269, 7279, 7277],
+};
+// Operações B2B/revenda que a filial 99 usa — inclui todas as ops de revenda
+// mapeadas em crm.routes.js (OPERACOES_REVENDA). Não inclui ops de varejo.
+const REVENDA_OP_CODES_FC = [
+  5102, 5202, 1407, 9120, 9121, 9122, 9113, 9111, 9001, 9009, 9061, 9067, 9400,
+  9401, 9420, 9404, 7806, 7809, 7236, 7242, 512,
+];
+const VAREJO_BRANCHES_FC = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97];
+const REVENDA_BRANCHES_FC = [99];
+const RE_BRANCHES_FC = [11, 111];
+
+router.post(
+  '/sale-panel/faturamento-por-canal',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax } = req.body;
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'datemin e datemax são obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(
+        res,
+        'Token TOTVS indisponível',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
+    }
+    const token = tokenData.access_token;
+    const allBranchs = await getBranchCodes(token);
+    const refreshToken = async () => {
+      const d = await getToken(true);
+      return d.access_token;
+    };
+
+    const callCanal = async (branchs, operations, tag) => {
+      if (!branchs || branchs.length === 0) {
+        return { invoice_value: 0, invoice_qty: 0, itens_qty: 0 };
+      }
+      try {
+        const data = await fetchBranchTotalsFromTotvs({
+          initialToken: token,
+          branchs,
+          datemin,
+          datemax,
+          refreshToken,
+          operations, // undefined = usa SPECIAL_OPERATIONS para branches especiais
+          logTag: `FC-${tag}`,
+        });
+        const t = data.total ?? {};
+        return {
+          invoice_value: Number(t.invoice_value ?? 0),
+          invoice_qty: Number(t.invoice_qty ?? 0),
+          itens_qty: Number(t.itens_qty ?? 0),
+        };
+      } catch (err) {
+        console.error(`[FC-${tag}] Erro:`, err.message);
+        return { invoice_value: 0, invoice_qty: 0, itens_qty: 0 };
+      }
+    };
+
+    // Chamadas paralelas por canal
+    const [
+      varejR,
+      revendaR,
+      franqR,
+      multiR,
+      bazarR,
+      showroomR,
+      novidadesR,
+      businessR,
+      reR,
+    ] = await Promise.all([
+      callCanal(VAREJO_BRANCHES_FC, undefined, 'varejo'),
+      callCanal(REVENDA_BRANCHES_FC, REVENDA_OP_CODES_FC, 'revenda'),
+      callCanal(allBranchs, CANAL_OP_CODES_FC.franquia, 'franquia'),
+      callCanal(allBranchs, CANAL_OP_CODES_FC.multimarcas, 'multimarcas'),
+      callCanal(allBranchs, CANAL_OP_CODES_FC.bazar, 'bazar'),
+      callCanal(allBranchs, CANAL_OP_CODES_FC.showroom, 'showroom'),
+      callCanal(
+        allBranchs,
+        CANAL_OP_CODES_FC.novidadesfranquia,
+        'novidadesfranquia',
+      ),
+      callCanal(allBranchs, CANAL_OP_CODES_FC.business, 'business'),
+      callCanal(RE_BRANCHES_FC, undefined, 'ricardoeletro'),
+    ]);
+
+    const segmentos = {
+      varejo: varejR.invoice_value,
+      revenda: revendaR.invoice_value,
+      franquia: franqR.invoice_value,
+      multimarcas: multiR.invoice_value,
+      bazar: bazarR.invoice_value,
+      showroom: showroomR.invoice_value,
+      novidadesfranquia: novidadesR.invoice_value,
+      business: businessR.invoice_value,
+      ricardoeletro: reR.invoice_value,
+    };
+    const segmentosQty = {
+      varejo: varejR.invoice_qty,
+      revenda: revendaR.invoice_qty,
+      franquia: franqR.invoice_qty,
+      multimarcas: multiR.invoice_qty,
+      bazar: bazarR.invoice_qty,
+      showroom: showroomR.invoice_qty,
+      novidadesfranquia: novidadesR.invoice_qty,
+      business: businessR.invoice_qty,
+      ricardoeletro: reR.invoice_qty,
+    };
+    const segmentosItens = {
+      varejo: varejR.itens_qty,
+      revenda: revendaR.itens_qty,
+      franquia: franqR.itens_qty,
+      multimarcas: multiR.itens_qty,
+      bazar: bazarR.itens_qty,
+      showroom: showroomR.itens_qty,
+      novidadesfranquia: novidadesR.itens_qty,
+      business: businessR.itens_qty,
+      ricardoeletro: reR.itens_qty,
+    };
+    const total = Object.values(segmentos).reduce((s, v) => s + v, 0);
+
+    console.log(`✅ [FaturamentoPorCanal] Total: R$ ${total.toFixed(2)}`);
+
+    return successResponse(
+      res,
+      { segmentos, segmentosQty, segmentosItens, total },
+      'Faturamento por canal obtido com sucesso',
     );
   }),
 );

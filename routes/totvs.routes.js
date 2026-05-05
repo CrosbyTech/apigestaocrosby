@@ -16,6 +16,7 @@ import {
   upsertBatch,
 } from '../utils/syncPesPessoa.js';
 import supabase from '../config/supabase.js';
+import supabaseFiscal from '../config/supabaseFiscal.js';
 
 // ==========================================
 // AGENTS keep-alive para reutilizar conexões TCP/TLS
@@ -44,7 +45,7 @@ const router = express.Router();
 const API_BASE_URL =
   process.env.API_BASE_URL ||
   process.env.RENDER_EXTERNAL_URL ||
-  'http://localhost:4001';
+  'http://localhost:4100';
 
 /**
  * @route GET /totvs/token
@@ -7381,6 +7382,382 @@ router.get(
       { timeout: 15000 },
     );
     successResponse(res, response.data, 'CEP consultado com sucesso');
+  }),
+);
+
+/**
+ * @route POST /totvs/fiscal-nf-search
+ * @desc Busca notas fiscais (todas as operações/empresas) com filtro completo.
+ *       Suporta paginação automática (fetchAll=true) ou manual (page + pageSize).
+ * @body {object}   [change]                    — filtro por data de alteração { startDate, endDate }
+ * @body {number[]} [branchCodeList]             — lista de códigos de filial
+ * @body {number[]} [invoiceSequenceList]        — lista de sequências de NF
+ * @body {number[]} [invoiceCodeList]            — lista de códigos de NF
+ * @body {string}   [operationType]              — tipo de operação ("All", "Input", "Output")
+ * @body {string}   [origin]                     — origem ("All", etc.)
+ * @body {string[]} [invoiceStatusList]          — status da NF ("Canceled", "Normal", etc.)
+ * @body {number[]} [personCodeList]             — lista de códigos de pessoa
+ * @body {number[]} [operationCodeList]          — lista de códigos de operação
+ * @body {number[]} [documentTypeCodeList]       — lista de códigos de tipo de documento
+ * @body {string[]} [personCpfCnpjList]          — lista de CPF/CNPJ de pessoa
+ * @body {number}   [startInvoiceCode]           — código inicial de NF
+ * @body {number}   [endInvoiceCode]             — código final de NF
+ * @body {string}   [startIssueDate]             — data de emissão inicial (ex: "2025-07-01T00:00:00")
+ * @body {string}   [endIssueDate]               — data de emissão final (ex: "2025-12-31T23:59:59")
+ * @body {string[]} [serialCodeList]             — lista de códigos de série
+ * @body {string[]} [eletronicInvoiceStatusList] — status da NF-e ("Authorized", etc.)
+ * @body {number[]} [shippingCompanyCodeList]    — lista de códigos de transportadora
+ * @body {string[]} [shippingCompanyCpfCnpjList] — lista de CPF/CNPJ de transportadora
+ * @body {number}   [amountLastDays]             — quantidade de dias anteriores
+ * @body {number}   [transactionBranchCode]      — código da filial da transação
+ * @body {number}   [transactionCode]            — código da transação
+ * @body {string}   [transactionDate]            — data da transação
+ * @body {string}   [expand]                     — padrão "items"
+ * @body {number}   [page]                       — padrão 1 (ignorado se fetchAll=true)
+ * @body {number}   [pageSize]                   — padrão 100
+ * @body {string}   [order]                      — ex: "issueDate:desc"
+ * @body {boolean}  [fetchAll]                   — se true, busca todas as páginas e retorna tudo
+ */
+router.post(
+  '/fiscal-nf-search',
+  asyncHandler(async (req, res) => {
+    const {
+      // Campos de filtro
+      change,
+      branchCodeList,
+      invoiceSequenceList,
+      invoiceCodeList,
+      operationType,
+      origin,
+      invoiceStatusList,
+      personCodeList,
+      operationCodeList,
+      documentTypeCodeList,
+      personCpfCnpjList,
+      startInvoiceCode,
+      endInvoiceCode,
+      startIssueDate,
+      endIssueDate,
+      serialCodeList,
+      eletronicInvoiceStatusList,
+      shippingCompanyCodeList,
+      shippingCompanyCpfCnpjList,
+      amountLastDays,
+      transactionBranchCode,
+      transactionCode,
+      transactionDate,
+      // Campos de paginação/controle
+      expand = 'items',
+      page = 1,
+      pageSize = 100,
+      order = 'issueDate:desc',
+      fetchAll = false,
+    } = req.body || {};
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(
+        res,
+        'Não foi possível obter token de autenticação TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
+    }
+
+    const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+
+    // Monta o objeto filter apenas com campos definidos
+    const buildFilter = () => {
+      const filter = {};
+      if (change) filter.change = change;
+      if (branchCodeList?.length) filter.branchCodeList = branchCodeList;
+      if (invoiceSequenceList?.length)
+        filter.invoiceSequenceList = invoiceSequenceList;
+      if (invoiceCodeList?.length) filter.invoiceCodeList = invoiceCodeList;
+      if (operationType) filter.operationType = operationType;
+      if (origin) filter.origin = origin;
+      if (invoiceStatusList?.length)
+        filter.invoiceStatusList = invoiceStatusList;
+      if (personCodeList?.length) filter.personCodeList = personCodeList;
+      if (operationCodeList?.length)
+        filter.operationCodeList = operationCodeList;
+      if (documentTypeCodeList?.length)
+        filter.documentTypeCodeList = documentTypeCodeList;
+      if (personCpfCnpjList?.length)
+        filter.personCpfCnpjList = personCpfCnpjList;
+      if (startInvoiceCode != null) filter.startInvoiceCode = startInvoiceCode;
+      if (endInvoiceCode != null) filter.endInvoiceCode = endInvoiceCode;
+      if (startIssueDate) filter.startIssueDate = startIssueDate;
+      if (endIssueDate) filter.endIssueDate = endIssueDate;
+      if (serialCodeList?.length) filter.serialCodeList = serialCodeList;
+      if (eletronicInvoiceStatusList?.length)
+        filter.eletronicInvoiceStatusList = eletronicInvoiceStatusList;
+      if (shippingCompanyCodeList?.length)
+        filter.shippingCompanyCodeList = shippingCompanyCodeList;
+      if (shippingCompanyCpfCnpjList?.length)
+        filter.shippingCompanyCpfCnpjList = shippingCompanyCpfCnpjList;
+      if (amountLastDays != null) filter.amountLastDays = amountLastDays;
+      if (transactionBranchCode != null)
+        filter.transactionBranchCode = transactionBranchCode;
+      if (transactionCode != null) filter.transactionCode = transactionCode;
+      if (transactionDate) filter.transactionDate = transactionDate;
+      return filter;
+    };
+
+    const buildPayload = (currentPage) => ({
+      filter: buildFilter(),
+      expand,
+      page: currentPage,
+      pageSize,
+      order,
+    });
+
+    const doRequest = async (payload, accessToken) =>
+      axios.post(endpoint, payload, {
+        httpsAgent,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        timeout: 120000,
+      });
+
+    const fetchPage = async (currentPage) => {
+      const payload = buildPayload(currentPage);
+      let response;
+      try {
+        response = await doRequest(payload, tokenData.access_token);
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const newToken = await getToken(true);
+          response = await doRequest(payload, newToken.access_token);
+        } else {
+          console.error(`❌ TOTVS API error (page ${currentPage}):`, {
+            status: err.response?.status,
+            statusText: err.response?.statusText,
+            data: JSON.stringify(err.response?.data),
+            payload: JSON.stringify(payload),
+          });
+          throw err;
+        }
+      }
+      return response.data;
+    };
+
+    if (!fetchAll) {
+      const data = await fetchPage(page);
+      return successResponse(res, data, 'Notas fiscais obtidas com sucesso');
+    }
+
+    // Busca todas as páginas automaticamente (com paralelismo)
+    const firstPage = await fetchPage(1);
+    const totalRecords = firstPage?.totalRecords ?? firstPage?.total ?? 0;
+    const totalPages =
+      totalRecords > 0 ? Math.ceil(totalRecords / pageSize) : 1;
+
+    const allItems = [...(firstPage?.items || firstPage?.data || [])];
+
+    if (totalPages > 1) {
+      const CONCURRENCY = 10;
+      const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+
+      for (let i = 0; i < remaining.length; i += CONCURRENCY) {
+        const batch = remaining.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(batch.map((p) => fetchPage(p)));
+        for (const pageData of results) {
+          const items = pageData?.items || pageData?.data || [];
+          allItems.push(...items);
+        }
+      }
+    }
+
+    successResponse(
+      res,
+      { totalRecords, totalPages, pageSize, items: allItems },
+      `${allItems.length} notas fiscais obtidas com sucesso`,
+    );
+  }),
+);
+
+/**
+ * @route POST /totvs/fiscal-nf-save
+ * @desc Recebe um array de notas fiscais (vindas da rota fiscal-nf-search) e faz
+ *       upsert na tabela notas_fiscais do Supabase.
+ *       Chave de upsert: branch_code + transaction_code
+ * @body {object[]} items — array de NFs retornado pela API TOTVS
+ */
+router.post(
+  '/fiscal-nf-save',
+  asyncHandler(async (req, res) => {
+    const { items } = req.body || {};
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return errorResponse(
+        res,
+        'items deve ser um array não vazio',
+        400,
+        'VALIDATION',
+      );
+    }
+
+    // Mapear campos da API TOTVS para colunas da tabela
+    const parseDate = (v) => (v ? v.split('T')[0] : null);
+    const parseIntOrNull = (v) => {
+      const n = parseInt(v);
+      return isNaN(n) ? null : n;
+    };
+    const parseFloatOrNull = (v) => {
+      const n = parseFloat(v);
+      return isNaN(n) ? null : n;
+    };
+
+    const rows = items
+      .map((nf) => ({
+        // --- Identificação ---
+        branch_code: parseIntOrNull(nf.branchCode),
+        branch_cnpj: nf.branchCnpj ?? null,
+        transaction_code: parseIntOrNull(nf.transactionCode),
+        transaction_branch_code: parseIntOrNull(nf.transactionBranchCode),
+        transaction_date: parseDate(nf.transactionDate),
+        invoice_code: nf.invoiceCode ?? null,
+        invoice_sequence: parseIntOrNull(nf.invoiceSequence),
+        serial_code: nf.serialCode ?? null,
+        invoice_status: nf.invoiceStatus ?? null,
+        issue_date: parseDate(nf.issueDate) || parseDate(nf.invoiceDate),
+        invoice_date: parseDate(nf.invoiceDate),
+        release_date: parseDate(nf.releaseDate),
+        exit_time: nf.exitTime ?? null,
+        last_change_date: nf.lastchangeDate ?? null,
+        max_change_filter_date: nf.maxChangeFilterDate ?? null,
+
+        // --- Pessoa ---
+        person_code: parseIntOrNull(nf.personCode),
+        person_name: nf.personName ?? null,
+        person_cpf_cnpj: nf.person?.personCpfCnpj ?? nf.personCpfCnpj ?? null,
+        person: nf.person ?? null,
+
+        // --- Operação ---
+        origin: nf.origin ?? null,
+        document_type_code: parseIntOrNull(nf.documentType),
+        operation_type: nf.operationType ?? null,
+        operation_code: parseIntOrNull(nf.operationCode),
+        operation_name: nf.operatioName ?? nf.operationName ?? null,
+
+        // --- PDV ---
+        inclusion_component_code: nf.inclusionComponentCode ?? null,
+        peripheral_pdv_code: nf.peripheralPdvCode ?? null,
+        version_pdv: nf.versionPdv ?? null,
+        mobile_version: nf.mobileVersion ?? null,
+        id_document_pdv: nf.idDocumentPDV ?? null,
+        user_code: parseIntOrNull(nf.userCode),
+        terminal_code: parseIntOrNull(nf.terminalCode),
+
+        // --- Condição de pagamento ---
+        payment_condition_code: parseIntOrNull(nf.paymentConditionCode),
+        payment_condition_name: nf.paymentConditionName ?? null,
+
+        // --- Valores financeiros ---
+        quantity: parseFloatOrNull(nf.quantity),
+        product_value: parseFloatOrNull(nf.productValue),
+        additional_value: parseFloatOrNull(nf.additionalValue),
+        discount_value: parseFloatOrNull(nf.discountValue),
+        discount_percentage: parseFloatOrNull(nf.discountPercentage),
+        shipping_value: parseFloatOrNull(nf.shippingValue),
+        freight_value: parseFloatOrNull(
+          nf.shippingCompany?.freightValue ?? nf.freightValue,
+        ),
+        insurance_value: parseFloatOrNull(nf.insuranceValue),
+        other_expenses: parseFloatOrNull(nf.otherExpenses),
+        ipi_value: parseFloatOrNull(nf.ipiValue),
+        base_icms_value: parseFloatOrNull(nf.baseIcmsValue),
+        icms_value: parseFloatOrNull(nf.icmsValue),
+        icms_st_value: parseFloatOrNull(nf.icmsStValue),
+        icms_sub_st_value: parseFloatOrNull(nf.icmsSubStValue),
+        pis_value: parseFloatOrNull(nf.pisValue),
+        cofins_value: parseFloatOrNull(nf.cofinsValue),
+        total_value: parseFloatOrNull(nf.totalValue),
+        seller_cpf: nf.sellerCpf ?? null,
+
+        // --- NF-e (eletrônica) ---
+        eletronic_invoice_status:
+          nf.eletronic?.electronicInvoiceStatus ??
+          nf.eletronicInvoiceStatus ??
+          null,
+        eletronic: nf.eletronic ?? null,
+
+        // --- Transportadora ---
+        shipping_company_code: parseIntOrNull(
+          nf.shippingCompany?.shippingCompanyCode ?? nf.shippingCompanyCode,
+        ),
+        shipping_company_cpf_cnpj:
+          nf.shippingCompany?.cpfCnpj ?? nf.shippingCompanyCpfCnpj ?? null,
+        shipping_company: nf.shippingCompany ?? null,
+
+        // --- ECF / SAT ---
+        ecf: nf.ecf ?? null,
+        sat: nf.sat ?? null,
+
+        // --- Pedidos / Produção ---
+        production_order: nf.productionOrder ?? null,
+        sales_order: nf.salesOrder ?? null,
+
+        // --- Pagamentos ---
+        payments: nf.payments ?? null,
+
+        // --- Observações ---
+        observation_nf: nf.observationNF ?? null,
+        observation_nfe: nf.observationNFE ?? null,
+
+        // --- Referências ---
+        referenced_tax_invoice: nf.referencedTaxInvoice ?? null,
+
+        // --- Itens e dados brutos ---
+        items: nf.items ?? [],
+        raw_data: nf,
+        synced_at: new Date().toISOString(),
+      }))
+      .filter((r) => r.branch_code && r.transaction_code); // descartar linhas sem chave
+
+    if (rows.length === 0) {
+      return errorResponse(
+        res,
+        'Nenhum registro válido (branch_code e transaction_code obrigatórios)',
+        400,
+        'VALIDATION',
+      );
+    }
+
+    // Upsert em lotes de 200 para evitar payload muito grande
+    const BATCH_SIZE = 200;
+    let totalUpserted = 0;
+
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+      const batch = rows.slice(i, i + BATCH_SIZE);
+
+      const { error, count } = await supabaseFiscal
+        .from('notas_fiscais')
+        .upsert(batch, {
+          onConflict:
+            'branch_code,transaction_code,invoice_code,issue_date,total_value',
+          count: 'exact',
+        });
+
+      if (error) {
+        logger.error(
+          `Erro no upsert de NFs (lote ${i / BATCH_SIZE + 1}): ${error.message}`,
+        );
+        return errorResponse(res, error.message, 500, 'DB_ERROR');
+      }
+
+      totalUpserted += count ?? batch.length;
+    }
+
+    successResponse(
+      res,
+      { saved: totalUpserted, total: rows.length },
+      `${totalUpserted} nota(s) fiscal(is) salva(s) com sucesso`,
+    );
   }),
 );
 

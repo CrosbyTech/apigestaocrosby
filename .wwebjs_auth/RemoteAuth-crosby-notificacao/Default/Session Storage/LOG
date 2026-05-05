@@ -1,2 +1,7 @@
-2026/04/30-12:39:14.741 3b44 Creating DB C:\Users\yagom\apigestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage since it was missing.
-2026/04/30-12:39:14.757 3b44 Reusing MANIFEST C:\Users\yagom\apigestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage/MANIFEST-000001
+<<<<<<< Updated upstream
+2026/04/30-12:26:15.933 5208 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage since it was missing.
+2026/04/30-12:26:15.951 5208 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage/MANIFEST-000001
+=======
+2026/05/05-11:17:59.544 4cbc Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage since it was missing.
+2026/05/05-11:17:59.579 4cbc Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage/MANIFEST-000001
+>>>>>>> Stashed changes

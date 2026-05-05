@@ -9,9 +9,9 @@
     "npm": ">=8.0.0"
   },
   "scripts": {
-    "start": "bash start.sh",
+    "start": "cross-env NODE_OPTIONS=--max-old-space-size=4096 bash start.sh",
     "postinstall": "npx puppeteer browsers install chrome",
-    "dev": "cross-env NODE_ENV=development nodemon index.js",
+    "dev": "cross-env NODE_ENV=development NODE_OPTIONS=--max-old-space-size=4096 nodemon index.js",
     "test": "cross-env NODE_ENV=test jest",
     "lint": "eslint . --ext .js",
     "lint:fix": "eslint . --ext .js --fix",
