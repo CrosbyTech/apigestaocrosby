@@ -28,7 +28,7 @@ try {
   if (error) {
     console.error('❌ Main Supabase (whatsapp_accounts):', error.message, error.code);
   } else {
-    console.log('✅ Main Supabase (whatsapp_accounts): OK -', data.length, 'registros');
+    console.log('✅ Main Supabas (whatsapp_accounts): OK -', data.length, 'registros');
   }
 
   const { data: d2, error: e2 } = await sb.from('meta_ad_accounts').select('id, name').limit(2);
