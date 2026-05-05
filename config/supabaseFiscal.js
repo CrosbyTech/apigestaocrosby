@@ -15,6 +15,7 @@ if (!supabaseUrl || !supabaseKey) {
   console.error(
     'Erro: SUPABASE_FISCAL_URL ou SUPABASE_FISCAL_KEY não estão definidos',
   );
+  throw new Error('SUPABASE_FISCAL_KEY é obrigatória. Configure a variável de ambiente.');
 }
 
 // Cliente para o banco fiscal (segundo projeto Supabase)
