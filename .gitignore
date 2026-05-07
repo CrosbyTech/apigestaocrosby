@@ -19,3 +19,4 @@ backend/.wwebjs_cache/
 dist/
 # ... outras regras existentes ...
 backend/.cache/
+.cache/
