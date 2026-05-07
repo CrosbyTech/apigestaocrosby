@@ -1,7 +1,2 @@
-<<<<<<< Updated upstream
-2026/04/30-12:26:15.867 5208 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules since it was missing.
-2026/04/30-12:26:15.879 5208 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules/MANIFEST-000001
-=======
-2026/05/05-11:17:59.468 44a8 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules since it was missing.
-2026/05/05-11:17:59.493 44a8 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules/MANIFEST-000001
->>>>>>> Stashed changes
+2026/05/05-18:15:48.669 38f8 Creating DB C:\Users\teccr\gestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules since it was missing.
+2026/05/05-18:15:48.689 38f8 Reusing MANIFEST C:\Users\teccr\gestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules/MANIFEST-000001

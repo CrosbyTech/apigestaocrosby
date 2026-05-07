@@ -1,83 +1,63 @@
-# Backend - Instruções de Deploy na DigitalOcean
+# React Vite Tailwind Login
 
-## Pré-requisitos
-- Conta na DigitalOcean
-- Droplet (servidor) com Node.js instalado
-- Git instalado no servidor
+Este projeto é uma aplicação simples de login construída com React, Vite e Tailwind CSS. A aplicação possui uma tela de login com campos para nome de usuário e senha.
 
-## Passos para Deploy
+## Estrutura do Projeto
 
-1. **Acesse seu servidor via SSH:**
-   ```sh
-   ssh usuario@ip_do_servidor
+```
+react-vite-tailwind-login
+├── src
+│   ├── components
+│   │   └── LoginForm.jsx
+│   ├── App.jsx
+│   ├── main.jsx
+│   ├── index.css
+│   └── assets
+├── public
+│   └── vite.svg
+├── package.json
+├── tailwind.config.js
+├── postcss.config.js
+├── vite.config.js
+└── README.md
+```
+
+## Tecnologias Utilizadas
+
+- **React**: Biblioteca para construção de interfaces de usuário.
+- **Vite**: Ferramenta de build rápida e leve para projetos em JavaScript.
+- **Tailwind CSS**: Framework CSS utilitário para estilização rápida e responsiva.
+
+## Instalação
+
+1. Clone o repositório:
+   ```
+   git clone <URL_DO_REPOSITORIO>
    ```
 
-2. **Clone o repositório:**
-   ```sh
-   git clone <url-do-seu-repositorio>
-   cd backend
+2. Navegue até o diretório do projeto:
+   ```
+   cd react-vite-tailwind-login
    ```
 
-3. **Instale as dependências:**
-   ```sh
+3. Instale as dependências:
+   ```
    npm install
    ```
 
-4. **Configure as variáveis de ambiente:**
-   - Copie o arquivo `.env.example` para `.env` e preencha com seus dados.
+## Uso
 
-5. **(Opcional) Instale o PM2 para gerenciar o processo:**
-   ```sh
-   npm install -g pm2
-   pm2 start ecosystem.config.js
-   pm2 save
-   pm2 startup
-   ```
+Para iniciar a aplicação, execute o seguinte comando:
+```
+npm run dev
+```
 
-6. **Acesse sua aplicação:**
-   - Certifique-se de liberar a porta no firewall do servidor.
-   - Acesse via http://ip_do_servidor:3000
+A aplicação estará disponível em `http://localhost:3000`.
 
----
+## Contribuição
 
-## ⏰ Sistema de Atualização Automática de Views Materializadas
+Sinta-se à vontade para contribuir com melhorias ou correções. Faça um fork do repositório e envie um pull request com suas alterações.
 
-Este projeto inclui um sistema automático que atualiza views materializadas do PostgreSQL a cada hora, sempre aos **5 minutos** (00:05, 01:05, 02:05, etc.).
+## Licença
 
-### Views Gerenciadas
-
-- `public.fatbazar`
-- `public.fatvarejo`
-- `public.fatrevenda`
-- `public.fatfranquias`
-- `public.fatmtm`
-- `public.fatsellect`
-- `public.cmv_varejo`
-- `public.cmv_revenda`
-- `public.cmv_mtm`
-- `public.cmv_franquias`
-
-### Recursos
-
-✅ **Atualização automática** a cada hora  
-✅ **Logs detalhados** de cada atualização  
-✅ **API para atualização manual**: `POST /api/utils/refresh-materialized-views`  
-✅ **Graceful shutdown** ao encerrar o servidor  
-✅ **Timezone configurável** (padrão: America/Sao_Paulo)
-
-### Documentação Completa
-
-Consulte [MATERIALIZED_VIEWS_REFRESH.md](./MATERIALIZED_VIEWS_REFRESH.md) para detalhes completos sobre:
-- Como funciona o sistema
-- Horários de execução
-- API de atualização manual
-- Configuração e personalização
-- Monitoramento e solução de problemas
-
-### Teste Rápido
-
-Abra o arquivo `test-refresh-views.html` no navegador para testar a atualização manual das views.
-
----
-
-Se precisar de deploy automatizado, integração com banco de dados ou outras configurações, personalize conforme sua necessidade. # apigestaocrosby
+Este projeto é de uso livre.# gestaocrosby

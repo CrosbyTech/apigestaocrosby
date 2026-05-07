@@ -1,7 +1,2 @@
-<<<<<<< Updated upstream
-2026/04/30-12:26:15.932 4a84 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db since it was missing.
-2026/04/30-12:26:15.948 4a84 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db/MANIFEST-000001
-=======
-2026/05/05-11:17:59.558 6054 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db since it was missing.
-2026/05/05-11:17:59.581 6054 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db/MANIFEST-000001
->>>>>>> Stashed changes
+2026/05/05-18:15:48.725 71d8 Creating DB C:\Users\teccr\gestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db since it was missing.
+2026/05/05-18:15:48.746 71d8 Reusing MANIFEST C:\Users\teccr\gestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db/MANIFEST-000001
