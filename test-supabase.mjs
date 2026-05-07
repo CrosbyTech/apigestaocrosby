@@ -11,7 +11,7 @@ console.log('--- Diagnóstico Supabase ---\n');
 
 // Main Supabase
 const mainUrl = process.env.SUPABASE_URL || 'https://dorztqiunewggydvkjnf.supabase.co';
-const mainKey = process.env.SUPABASE_SERVICE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRvcnp0cWl1bmV3Z2d5ZHZram5mIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NzA3MTI4OCwiZXhwIjoyMDYyNjQ3Mjg4fQ.sk6z1v-MKAjiQK-IfIvPvxI-GdRyH_Biaj5a-8_Ksy8';
+const mainKey = process.env.SUPABASE_SERVICE_KEY;
 const fiscalUrl = process.env.SUPABASE_FISCAL_URL;
 const fiscalKey = process.env.SUPABASE_FISCAL_KEY;
 
