@@ -1,11 +1,13 @@
 {
   "name": "react-vite-tailwind-login",
   "version": "1.0.0",
+  "type": "module",
   "private": true,
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "serve": "vite preview"
+    "serve": "vite preview",
+    "postinstall": "npm install --prefix backend"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
