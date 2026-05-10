@@ -1715,4 +1715,367 @@ router.post(
 
 // ==========================================
 // SYNC PES_PESSOA - TOTVS → Supabase
+
+/**
+ * @route POST /totvs/accounts-payable/duplicates/create
+ * @desc Cria uma duplicata na API TOTVS (POST /accounts-payable/v2/duplicates)
+ * @access Public (chamado pelo backend após aprovação financeira)
+ * @body Payload completo no formato CreatedDuplicateCommand da TOTVS
+ *       { branchCnpj, supplierCpfCnpj, duplicateCode, installments: [...] }
+ */
+router.post(
+  '/accounts-payable/duplicates/create',
+  asyncHandler(async (req, res) => {
+    try {
+      const tokenData = await getToken();
+      if (!tokenData || !tokenData.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const payload = req.body || {};
+
+      // Mapeamento de enums string → inteiro exigido pela API TOTVS (1-based, conforme schema oficial)
+      const DOCUMENT_TYPE_MAP = {
+        Duplicate: 1,
+        InvoicePrint: 2,
+        Commission: 3,
+        Guide: 4,
+        Financing: 5,
+        Voucher: 6,
+        Invoice: 7,
+        AccountDiscountNote: 8,
+        AdministrationFee: 9,
+        InterestWithoutFinancing: 10,
+        Bonus: 11,
+        BankDeposit: 12,
+        Compror: 13,
+        Vendor: 14,
+        Receipt: 15,
+        TedDoc: 16,
+        Loan: 17,
+        FreightKnowledge: 18,
+        ProLabore: 19,
+        AdvanceMoney: 20,
+        OutherTitle: 50,
+      };
+      const PREVISION_TYPE_MAP = { Forecast: 1, Real: 2, Consignment: 3 };
+      const STAGE_TYPE_MAP = {
+        InvoiceNotConfered: 1,
+        ReleasedForPayment: 2,
+        AuthorizedCheck: 3,
+        CheckIssued: 4,
+        InvoiceAccept: 5,
+        Endossado: 10,
+        PaymentInBank: 20,
+        Reserved: 30,
+        PaymentAutomatic: 40,
+        Finished: 90,
+      };
+
+      const resolveEnum = (map, val) => {
+        if (val === undefined || val === null) return undefined;
+        if (typeof val === 'number') return val;
+        return map[val] ?? val;
+      };
+
+      // Normalizar datas para ISO 8601 com Z.
+      // TOTVS aceita APENAS o horário T15:00:00.000Z — qualquer outro é rejeitado.
+      const normalizeDate = (d) => {
+        if (!d) return d;
+        let datePart;
+        if (typeof d === 'string') {
+          datePart = d.slice(0, 10);
+        } else if (d instanceof Date) {
+          datePart = d.toISOString().slice(0, 10);
+        } else {
+          return d;
+        }
+        return `${datePart}T15:00:00.000Z`;
+      };
+
+      // issueDate/arrivalDate devem estar no passado (TOTVS rejeita quando = hoje).
+      // Se a data recebida for hoje ou futura, recua para ontem.
+      const todayUTC = new Date().toISOString().slice(0, 10);
+      const normalizePastDate = (d) => {
+        let datePart;
+        if (!d) {
+          datePart = todayUTC;
+        } else if (typeof d === 'string') {
+          datePart = d.slice(0, 10);
+        } else if (d instanceof Date) {
+          datePart = d.toISOString().slice(0, 10);
+        } else {
+          return d;
+        }
+        if (datePart >= todayUTC) {
+          // recua 1 dia
+          const dt = new Date(`${todayUTC}T00:00:00.000Z`);
+          dt.setUTCDate(dt.getUTCDate() - 1);
+          datePart = dt.toISOString().slice(0, 10);
+        }
+        return `${datePart}T15:00:00.000Z`;
+      };
+
+      // Normalizar installments — converter enums e datas
+      if (Array.isArray(payload.installments)) {
+        payload.installments = payload.installments.map((inst) => ({
+          ...inst,
+          document: resolveEnum(DOCUMENT_TYPE_MAP, inst.document),
+          prevision: resolveEnum(PREVISION_TYPE_MAP, inst.prevision),
+          stage: resolveEnum(STAGE_TYPE_MAP, inst.stage),
+          dueDate: normalizeDate(inst.dueDate),
+          issueDate: normalizePastDate(inst.issueDate),
+          arrivalDate: normalizePastDate(inst.arrivalDate),
+        }));
+      }
+
+      // Validações mínimas exigidas pela API TOTVS
+      if (!payload.branchCnpj) {
+        return errorResponse(
+          res,
+          'branchCnpj é obrigatório',
+          400,
+          'VALIDATION',
+        );
+      }
+      if (!payload.supplierCpfCnpj) {
+        return errorResponse(
+          res,
+          'supplierCpfCnpj é obrigatório',
+          400,
+          'VALIDATION',
+        );
+      }
+      if (
+        payload.duplicateCode === undefined ||
+        payload.duplicateCode === null
+      ) {
+        return errorResponse(
+          res,
+          'duplicateCode é obrigatório',
+          400,
+          'VALIDATION',
+        );
+      }
+      if (
+        !Array.isArray(payload.installments) ||
+        payload.installments.length === 0
+      ) {
+        return errorResponse(
+          res,
+          'É necessário informar pelo menos uma parcela em installments[]',
+          400,
+          'VALIDATION',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/accounts-payable/v2/duplicates`;
+      let token = tokenData.access_token;
+
+      console.log('🧾 Criando duplicata na API TOTVS:', {
+        endpoint,
+        branchCnpj: payload.branchCnpj,
+        supplierCpfCnpj: payload.supplierCpfCnpj,
+        duplicateCode: payload.duplicateCode,
+        installmentsCount: payload.installments.length,
+      });
+      console.log(
+        '📦 Payload completo enviado ao TOTVS:',
+        JSON.stringify(payload, null, 2),
+      );
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          httpsAgent,
+          httpAgent,
+          timeout: 60000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Token inválido. Renovando...');
+          const newTokenData = await getToken(true);
+          token = newTokenData.access_token;
+          response = await doRequest(token);
+        } else {
+          throw error;
+        }
+      }
+
+      console.log('✅ Duplicata criada com sucesso na TOTVS');
+
+      return successResponse(
+        res,
+        {
+          totvsResponse: response.data ?? null,
+          totvsStatus: response.status,
+        },
+        'Duplicata criada com sucesso na TOTVS',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao criar duplicata na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        status: error.response?.status,
+        response: error.response?.data,
+      });
+      console.error(
+        '❌ Resposta TOTVS completa:',
+        JSON.stringify(error.response?.data, null, 2),
+      );
+
+      if (error.response) {
+        let errorMessage = 'Erro ao criar duplicata na API TOTVS';
+        const data = error.response.data;
+        if (data) {
+          if (typeof data === 'string') {
+            errorMessage = data || errorMessage;
+          } else if (typeof data === 'object') {
+            errorMessage =
+              data?.message ||
+              data?.error_description ||
+              data?.error ||
+              data?.title ||
+              errorMessage;
+          }
+        }
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          status: error.response.status,
+          details: error.response.data || null,
+          timestamp: new Date().toISOString(),
+        });
+      } else if (error.request) {
+        const errorMessage =
+          error.code === 'ENOTFOUND'
+            ? 'URL da API TOTVS não encontrada.'
+            : error.code === 'ECONNREFUSED'
+              ? 'Conexão recusada pela API TOTVS.'
+              : `Não foi possível conectar à API TOTVS (${error.code || 'erro desconhecido'})`;
+        return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+      }
+
+      throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+    }
+  }),
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/totvs/supplier/search?cpfCnpj=00000000000000
+// Busca fornecedor pelo CPF (11 dígitos) ou CNPJ (14 dígitos) na API TOTVS
+// ─────────────────────────────────────────────────────────────────────────────
+router.get(
+  '/supplier/search',
+  asyncHandler(async (req, res) => {
+    const raw = String(req.query.cpfCnpj || '').replace(/\D/g, '');
+    if (raw.length !== 11 && raw.length !== 14) {
+      return errorResponse(
+        res,
+        'Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido.',
+        400,
+        'INVALID_CPF_CNPJ',
+      );
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(
+        res,
+        'Token TOTVS indisponível.',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
+    }
+
+    const headers = (token) => ({
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+    });
+
+    const doPost = async (url, payload, token) => {
+      try {
+        return await axios.post(url, payload, {
+          headers: headers(token),
+          httpsAgent,
+          httpAgent,
+          timeout: 30000,
+        });
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const fresh = await getToken(true);
+          return axios.post(url, payload, {
+            headers: headers(fresh.access_token),
+            httpsAgent,
+            httpAgent,
+            timeout: 30000,
+          });
+        }
+        throw err;
+      }
+    };
+
+    let found = null;
+
+    if (raw.length === 11) {
+      // CPF — PF
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+      const resp = await doPost(
+        endpoint,
+        { filter: { cpfList: [raw] }, page: 1, pageSize: 10 },
+        tokenData.access_token,
+      );
+      found = (resp.data?.items || [])[0] || null;
+    } else {
+      // CNPJ — PJ (pagina até encontrar)
+      const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+      let page = 1;
+      let hasMore = true;
+      let token = tokenData.access_token;
+      while (hasMore && page <= 40 && !found) {
+        const resp = await doPost(
+          endpoint,
+          { filter: {}, page, pageSize: 500, order: 'personCode' },
+          token,
+        );
+        const items = resp.data?.items || [];
+        hasMore = resp.data?.hasNext || false;
+        found =
+          items.find(
+            (item) => String(item.cnpj || '').replace(/\D/g, '') === raw,
+          ) || null;
+        page++;
+      }
+    }
+
+    if (!found) {
+      return res.status(404).json({
+        success: false,
+        message: 'FORNECEDOR_NAO_ENCONTRADO',
+      });
+    }
+
+    return successResponse(res, {
+      name: found.name || found.companyName || found.fantasyName || '',
+      code: found.code || found.personCode || null,
+      cpfCnpj: raw,
+    });
+  }),
+);
+
 export default router;
