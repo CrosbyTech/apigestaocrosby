@@ -15,18 +15,19 @@ if (!supabaseUrl || !supabaseKey) {
   console.error(
     'Erro: SUPABASE_FISCAL_URL ou SUPABASE_FISCAL_KEY não estão definidos',
   );
-  throw new Error('SUPABASE_FISCAL_KEY é obrigatória. Configure a variável de ambiente.');
 }
 
 // Cliente para o banco fiscal (segundo projeto Supabase)
-const supabaseFiscal = createClient(supabaseUrl, supabaseKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false,
-  },
-  db: {
-    schema: 'public',
-  },
-});
+const supabaseFiscal = supabaseKey
+  ? createClient(supabaseUrl, supabaseKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+      db: {
+        schema: 'public',
+      },
+    })
+  : null;
 
 export default supabaseFiscal;

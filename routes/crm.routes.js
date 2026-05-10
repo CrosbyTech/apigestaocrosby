@@ -562,7 +562,8 @@ async function loadClickupLeads({
               }),
         },
         headers: { Authorization: CLICKUP_API_KEY },
-        timeout: 30000,
+        // 90s — ClickUp pode ser lento em listas grandes (5k+ tarefas)
+        timeout: 90000,
       },
     );
     return data.tasks || [];
@@ -649,6 +650,15 @@ async function loadClickupLeads({
         getClickupField(task, 'qualidade') ||
         '',
       etiqueta: getClickupField(task, 'ETIQUETA') || '',
+      // Loja (varejo): campo "Enviar Contato" carrega o nome da loja pra
+      // qual o lead foi encaminhado. Tenta variações de nome do campo.
+      enviarContato:
+        getClickupField(task, 'Enviar Contato') ||
+        getClickupField(task, 'ENVIAR CONTATO') ||
+        getClickupField(task, 'Enviar contato') ||
+        getClickupField(task, 'enviar_contato') ||
+        getClickupField(task, 'Loja') ||
+        '',
       cidade: getClickupField(task, 'CIDADE') || '',
       estado:
         getClickupField(task, 'ESTADO') ||
@@ -815,16 +825,36 @@ const OPERACOES_REVENDA = [
   5102, 5202, 1407, 9120, 9121, 9122, 9113, 9111, 9001, 9009, 9061, 9067, 9400,
   9401, 9420, 9404, 7806, 7809, 7236, 7242, 512,
 ];
+// Multimarcas: operações específicas (B2M/SME) — não compartilha com revenda.
+// Inclui também ops genéricas (9001/9009) pra cobrir vendas alternativas
+// e op 200 (legada usada até 2025) para captura de histórico LY/12 meses.
+const OPERACOES_MULTIMARCAS = [
+  7235, 7241, 9127, 200, 9001, 9009, 9111, 9113, 9120, 9121, 9400, 9401, 9420,
+  9404,
+];
+const OPERACOES_FRANQUIA = [
+  7234, 7240, 7802, 9001, 9009, 9111, 9113, 9120, 9121, 9400, 9401, 9420, 9404,
+];
+const OPERACOES_BUSINESS = [
+  7237, 7269, 7279, 7277, 9001, 9009, 9111, 9113, 9120, 9121, 9400, 9401, 9420,
+  9404,
+];
 
 // Operações por módulo: usadas para FILTRAR transações ao classificar cliente.
 const OPERACOES_POR_MODULO = {
   varejo: OPERACOES_VAREJO,
   revenda: OPERACOES_REVENDA,
-  multimarcas: OPERACOES_REVENDA, // multimarcas usa as mesmas de revenda
-  business: OPERACOES_REVENDA, // business idem
-  franquia: OPERACOES_REVENDA, // franquia idem
+  multimarcas: OPERACOES_MULTIMARCAS,
+  business: OPERACOES_BUSINESS,
+  franquia: OPERACOES_FRANQUIA,
 };
-const OPERACOES_VALIDAS = new Set([...OPERACOES_VAREJO, ...OPERACOES_REVENDA]);
+const OPERACOES_VALIDAS = new Set([
+  ...OPERACOES_VAREJO,
+  ...OPERACOES_REVENDA,
+  ...OPERACOES_MULTIMARCAS,
+  ...OPERACOES_FRANQUIA,
+  ...OPERACOES_BUSINESS,
+]);
 
 // ---------------------------------------------------------------------------
 // 0. GET /api/crm/instances
@@ -1405,6 +1435,364 @@ router.post(
 //     Retorna clientes (is_customer=true) com aniversário no dia.
 //     Query opcional: ?date=YYYY-MM-DD (default: hoje em America/Sao_Paulo).
 // ---------------------------------------------------------------------------
+// ───────────────────────────────────────────────────────────────────────────
+// LEAD GENERATION
+// Endpoints de prospecção/ligação:
+//   POST /api/crm/lead-generation/call           — registrar ligação
+//   GET  /api/crm/lead-generation/calls          — histórico (filtros)
+//   GET  /api/crm/lead-generation/top-clientes   — ranking por vendedor
+// ───────────────────────────────────────────────────────────────────────────
+router.post(
+  '/lead-generation/call',
+  asyncHandler(async (req, res) => {
+    const {
+      vendedor_code,
+      vendedor_nome,
+      modulo,
+      person_code,
+      person_nome,
+      person_telefone,
+      person_cidade,
+      person_uf,
+      categoria,
+      atendida,
+      observacao,
+      data_contato,
+      user_login,
+    } = req.body || {};
+
+    if (!vendedor_code || !modulo || !person_code || !categoria || atendida === undefined) {
+      return errorResponse(
+        res,
+        'Campos obrigatórios: vendedor_code, modulo, person_code, categoria, atendida',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+
+    const row = {
+      vendedor_code: Number(vendedor_code),
+      vendedor_nome: vendedor_nome || null,
+      modulo: String(modulo).toLowerCase(),
+      person_code: Number(person_code),
+      person_nome: person_nome || null,
+      person_telefone: person_telefone || null,
+      person_cidade: person_cidade || null,
+      person_uf: person_uf || null,
+      categoria: String(categoria).toLowerCase(),
+      atendida: !!atendida,
+      observacao: observacao || null,
+      data_contato: data_contato || new Date().toISOString(),
+      user_login: user_login || null,
+    };
+
+    const { data, error } = await supabase
+      .from('crm_lead_generation_calls')
+      .insert(row)
+      .select()
+      .single();
+
+    if (error) {
+      return errorResponse(res, error.message, 500, 'DB_ERROR');
+    }
+    return successResponse(res, data, 'Ligação registrada');
+  }),
+);
+
+router.get(
+  '/lead-generation/calls',
+  asyncHandler(async (req, res) => {
+    const {
+      person_code,
+      vendedor_code,
+      modulo,
+      categoria,
+      atendida,
+      start_date,
+      end_date,
+      limit,
+    } = req.query;
+
+    let q = supabase
+      .from('crm_lead_generation_calls')
+      .select('*')
+      .order('data_contato', { ascending: false })
+      .limit(Math.min(parseInt(limit) || 200, 1000));
+
+    if (person_code) q = q.eq('person_code', Number(person_code));
+    if (vendedor_code) q = q.eq('vendedor_code', Number(vendedor_code));
+    if (modulo) q = q.eq('modulo', String(modulo).toLowerCase());
+    if (categoria) q = q.eq('categoria', String(categoria).toLowerCase());
+    if (atendida !== undefined && atendida !== '')
+      q = q.eq('atendida', atendida === 'true' || atendida === true);
+    if (start_date) q = q.gte('data_contato', start_date);
+    if (end_date) q = q.lte('data_contato', end_date + 'T23:59:59');
+
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { calls: data || [], total: (data || []).length });
+  }),
+);
+
+// Top clientes por vendedor (LTV) — útil pra priorizar quem ligar
+router.get(
+  '/lead-generation/top-clientes',
+  asyncHandler(async (req, res) => {
+    const vendedor_code = req.query.vendedor_code
+      ? Number(req.query.vendedor_code)
+      : null;
+    const modulo = String(req.query.modulo || '').toLowerCase();
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    // Janela de tempo: default 12 meses
+    const months = Math.min(Math.max(parseInt(req.query.months) || 12, 1), 36);
+
+    // Pre-filtro por módulo (operações TOTVS)
+    let opCodes = null;
+    if (modulo === 'multimarcas') opCodes = [7235, 7241, 9127];
+    else if (modulo === 'revenda')
+      opCodes = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512];
+    else if (modulo === 'business') opCodes = [7237, 7269, 7279, 7277];
+    else if (modulo === 'franquia') opCodes = [7234, 7240, 7802];
+
+    const dataLimite = new Date();
+    dataLimite.setMonth(dataLimite.getMonth() - months);
+    const inicio = dataLimite.toISOString().slice(0, 10);
+
+    const PAGE = 1000;
+    const MAX_NFS = 50000; // hard stop pra evitar query infinita
+    const persons = new Map(); // pc → { ltv, qty, last_purchase, name }
+    let off = 0;
+    let totalLidos = 0;
+    while (totalLidos < MAX_NFS) {
+      let q = supabaseFiscal
+        .from('notas_fiscais')
+        .select('person_code, person_name, total_value, issue_date, dealer_code, items')
+        .eq('operation_type', 'Output')
+        .not('invoice_status', 'eq', 'Canceled')
+        .not('invoice_status', 'eq', 'Deleted')
+        .gte('issue_date', inicio)
+        .gt('total_value', 0)
+        .lt('person_code', 100000000)
+        .order('issue_date', { ascending: false })
+        .range(off, off + PAGE - 1);
+      if (opCodes) q = q.in('operation_code', opCodes);
+      // FILTRO CHAVE: filtra dealer_code direto no SQL (drasticamente reduz dados)
+      if (vendedor_code) q = q.eq('dealer_code', vendedor_code);
+
+      const { data, error } = await q;
+      if (error) {
+        console.error('[top-clientes] erro:', error.message);
+        return errorResponse(res, error.message, 500, 'DB_ERROR');
+      }
+      if (!data || data.length === 0) break;
+      totalLidos += data.length;
+
+      for (const nf of data) {
+        // Validação extra: confere se items tem dealer dominante diferente
+        // (caso a NF do dealer X seja na verdade dominada por outro vendedor)
+        let dealerDominante = parseInt(nf.dealer_code) || null;
+        if (Array.isArray(nf.items) && nf.items.length > 0) {
+          const netByDealer = {};
+          for (const it of nf.items) {
+            const prods = Array.isArray(it.products) ? it.products : [];
+            for (const p of prods) {
+              const dc = parseInt(p.dealerCode);
+              if (!isNaN(dc)) {
+                netByDealer[dc] =
+                  (netByDealer[dc] || 0) + (parseFloat(p.netValue) || 0);
+              }
+            }
+          }
+          const top = Object.entries(netByDealer).sort(
+            (a, b) => b[1] - a[1],
+          )[0];
+          if (top) dealerDominante = Number(top[0]);
+        }
+        // Mesmo com dealer_code filtrado no SQL, exige dominância correta
+        if (vendedor_code && dealerDominante !== vendedor_code) continue;
+
+        const pc = nf.person_code;
+        if (!persons.has(pc)) {
+          persons.set(pc, {
+            person_code: pc,
+            person_nome: nf.person_name,
+            ltv: 0,
+            qty: 0,
+            last_purchase: null,
+            vendedor_code: dealerDominante,
+          });
+        }
+        const ex = persons.get(pc);
+        ex.ltv += parseFloat(nf.total_value) || 0;
+        ex.qty += 1;
+        if (!ex.last_purchase || nf.issue_date > ex.last_purchase) {
+          ex.last_purchase = nf.issue_date;
+        }
+      }
+      if (data.length < PAGE) break;
+      off += PAGE;
+    }
+
+    // Enriquece com telefone/cidade/uf
+    const codes = [...persons.keys()];
+    if (codes.length > 0) {
+      for (let i = 0; i < codes.length; i += 500) {
+        const chunk = codes.slice(i, i + 500);
+        const { data: peps } = await supabase
+          .from('pes_pessoa')
+          .select('code, telefone, cidade, uf, fantasy_name, nm_pessoa')
+          .in('code', chunk);
+        for (const p of peps || []) {
+          const ex = persons.get(Number(p.code));
+          if (ex) {
+            ex.person_telefone = p.telefone || '';
+            ex.person_cidade = p.cidade || '';
+            ex.person_uf = p.uf || '';
+            if (!ex.person_nome) ex.person_nome = p.fantasy_name || p.nm_pessoa;
+          }
+        }
+      }
+    }
+
+    const arr = [...persons.values()]
+      .sort((a, b) => b.ltv - a.ltv)
+      .slice(0, limit);
+
+    console.log(
+      `[top-clientes] modulo=${modulo} vendedor=${vendedor_code} ` +
+        `nfs_lidas=${totalLidos} clientes_unicos=${persons.size} retornando=${arr.length}`,
+    );
+
+    return successResponse(res, {
+      vendedor_code,
+      modulo,
+      total: arr.length,
+      clientes: arr,
+    });
+  }),
+);
+
+// ───────────────────────────────────────────────────────────────────────────
+// GET /api/crm/lead-generation/ultima-compra
+// Retorna detalhes da última compra de um cliente (NF mais recente)
+// Query: person_code, modulo (opcional p/ filtrar por ops do canal)
+// ───────────────────────────────────────────────────────────────────────────
+router.get(
+  '/lead-generation/ultima-compra',
+  asyncHandler(async (req, res) => {
+    const personCode = Number(req.query.person_code);
+    const modulo = String(req.query.modulo || '').toLowerCase();
+    if (!personCode) {
+      return errorResponse(res, 'person_code obrigatório', 400, 'MISSING_PARAM');
+    }
+
+    // Operações TOTVS por módulo (filtra só vendas do canal correto)
+    let opCodes = null;
+    if (modulo === 'multimarcas' || modulo === 'inbound_david' || modulo === 'inbound_rafael')
+      opCodes = [7235, 7241, 9127];
+    else if (modulo === 'revenda')
+      opCodes = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512];
+    else if (modulo === 'business') opCodes = [7237, 7269, 7279, 7277];
+    else if (modulo === 'franquia') opCodes = [7234, 7240, 7802];
+    else if (modulo === 'varejo') opCodes = [510, 545, 546, 521, 522, 548];
+
+    let q = supabaseFiscal
+      .from('notas_fiscais')
+      .select(
+        'invoice_code, person_code, person_name, dealer_code, issue_date, ' +
+          'branch_code, total_value, operation_code, items, payments',
+      )
+      .eq('person_code', personCode)
+      .eq('operation_type', 'Output')
+      .not('invoice_status', 'eq', 'Canceled')
+      .not('invoice_status', 'eq', 'Deleted')
+      .gt('total_value', 0)
+      .order('issue_date', { ascending: false })
+      .limit(1);
+    if (opCodes) q = q.in('operation_code', opCodes);
+
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    if (!data || data.length === 0) {
+      return successResponse(res, { found: false });
+    }
+
+    const nf = data[0];
+
+    // Achata products de items[]
+    const produtos = [];
+    let totalQtd = 0;
+    let totalLiquido = 0;
+    if (Array.isArray(nf.items)) {
+      for (const it of nf.items) {
+        const prods = Array.isArray(it.products) ? it.products : [];
+        for (const p of prods) {
+          const qtd = Number(p.quantity) || 0;
+          const net = Number(p.netValue) || 0;
+          const unit = Number(p.unitValue) || 0;
+          totalQtd += qtd;
+          totalLiquido += net;
+          produtos.push({
+            sku: p.sku || p.productSku || p.productCode || '',
+            nome:
+              p.productName ||
+              p.product_name ||
+              p.description ||
+              `Produto ${p.productCode || ''}`.trim(),
+            quantidade: qtd,
+            valor_unitario: unit,
+            valor_liquido: net,
+            dealer_code: p.dealerCode ? Number(p.dealerCode) : null,
+          });
+        }
+      }
+    }
+
+    // Também a forma de pagamento (se tiver)
+    const pagamentos = [];
+    if (Array.isArray(nf.payments)) {
+      for (const pay of nf.payments) {
+        pagamentos.push({
+          forma: pay.paymentName || pay.paymentTypeName || pay.paymentType || '—',
+          parcelas: pay.installments || pay.installmentNumber || 1,
+          valor: Number(pay.value) || Number(pay.totalValue) || 0,
+        });
+      }
+    }
+
+    // Resolve nome do vendedor
+    let dealerNome = null;
+    try {
+      const map = await loadVendedoresMap();
+      const info = map.byTotvsId?.[nf.dealer_code];
+      const erpSellers = ERP_CACHE.data?.sellersMap || {};
+      dealerNome =
+        info?.nome ||
+        erpSellers[nf.dealer_code]?.name ||
+        `Vendedor ${nf.dealer_code}`;
+    } catch {}
+
+    return successResponse(res, {
+      found: true,
+      nf: {
+        invoice_code: nf.invoice_code,
+        person_code: nf.person_code,
+        person_nome: nf.person_name,
+        dealer_code: nf.dealer_code,
+        dealer_nome: dealerNome,
+        branch_code: nf.branch_code,
+        operation_code: nf.operation_code,
+        issue_date: nf.issue_date,
+        total_value: Number(nf.total_value) || 0,
+        total_quantidade: totalQtd,
+        total_liquido: totalLiquido,
+        produtos: produtos.sort((a, b) => b.valor_liquido - a.valor_liquido),
+        pagamentos,
+      },
+    });
+  }),
+);
+
 router.get(
   '/aniversariantes-hoje',
   asyncHandler(async (req, res) => {
@@ -1421,7 +1809,10 @@ router.get(
     const month = target.getMonth() + 1;
     const day = target.getDate();
     // Opcional: ?branch=99 → só clientes que compraram naquela filial
-    const branchFilter = req.query.branch ? Number(req.query.branch) : null;
+    let branchFilter = req.query.branch ? Number(req.query.branch) : null;
+    // Atalho: ?modulo=revenda → branch=99 (modo revenda multi-filial)
+    const moduloFiltro = String(req.query.modulo || '').toLowerCase();
+    if (!branchFilter && moduloFiltro === 'revenda') branchFilter = 99;
 
     const { data, error } = await supabase.rpc('aniversariantes_do_dia', {
       target_month: month,
@@ -1536,12 +1927,25 @@ router.get(
     // Em revenda (branch=99): considera QUALQUER filial 1-990 com ops de revenda.
     try {
       const opts = {};
-      if (branchFilter === 99) {
+      if (branchFilter === 99 || moduloFiltro === 'revenda') {
         // Modo revenda: any branch + revenda op codes + B2R dealers
         opts.allowedDealers = new Set([
           25, 15, 161, 165, 241, 779, 288, 251, 131,
         ]);
         opts.opCodes = REVENDA_OP_CODES;
+      } else if (moduloFiltro === 'multimarcas') {
+        opts.allowedDealers = new Set([177, 65, 259]);
+        opts.opCodes = [7235, 7241, 9127];
+      } else if (moduloFiltro === 'inbound_david') {
+        opts.allowedDealers = new Set([26, 69]);
+        opts.opCodes = [7235, 7241, 9127];
+      } else if (moduloFiltro === 'inbound_rafael') {
+        opts.allowedDealers = new Set([21]);
+        opts.opCodes = [7235, 7241, 9127];
+      } else if (moduloFiltro === 'business') {
+        opts.opCodes = [7237, 7269, 7279, 7277];
+      } else if (moduloFiltro === 'franquia') {
+        opts.opCodes = [7234, 7240, 7802];
       } else if (branchFilter) {
         opts.branch = branchFilter;
       }
@@ -2175,8 +2579,48 @@ router.get(
 
     try {
       const forceRefresh = req.query.force === '1';
+      // Filtro opcional por canal: ?canal=varejo|revenda|multimarcas|sem_categoria|outra
+      const canalFiltro = String(req.query.canal || '').toLowerCase();
+      // Se filtro for "outra:NOME", filtra por nome de outra categoria específica
+      let canalFiltroOutra = null;
+      let canalFiltroPrincipal = canalFiltro;
+      if (canalFiltro.startsWith('outra:')) {
+        canalFiltroOutra = canalFiltro.slice(6).toUpperCase();
+        canalFiltroPrincipal = 'outra';
+      }
       const data = await loadClickupLeads({ allHistory: true, forceRefresh });
-      const tarefas = (data.canais || []).flatMap((c) => c.tarefas || []);
+      let tarefas = (data.canais || []).flatMap((c) => c.tarefas || []);
+
+      // Aplica filtro por canal se solicitado
+      if (canalFiltroPrincipal) {
+        const matchCanal = (t) => {
+          const cat = String(t.canalDetalhe || '').toUpperCase().trim();
+          if (canalFiltroPrincipal === 'varejo') return cat.includes('VAREJO');
+          if (canalFiltroPrincipal === 'revenda')
+            return cat.includes('REVENDA') || cat.includes('REVENDEDOR');
+          if (canalFiltroPrincipal === 'multimarcas')
+            return cat.includes('MULTIMARCA') || cat.includes('INBOUND');
+          if (canalFiltroPrincipal === 'sem_categoria')
+            return !cat || cat === 'SEM CATEGORIA';
+          if (canalFiltroPrincipal === 'outra' && canalFiltroOutra) {
+            return cat === canalFiltroOutra;
+          }
+          if (canalFiltroPrincipal === 'outra') {
+            // Genérico: tudo que não é varejo/revenda/multimarcas/sem
+            return (
+              cat &&
+              cat !== 'SEM CATEGORIA' &&
+              !cat.includes('VAREJO') &&
+              !cat.includes('REVENDA') &&
+              !cat.includes('REVENDEDOR') &&
+              !cat.includes('MULTIMARCA') &&
+              !cat.includes('INBOUND')
+            );
+          }
+          return true;
+        };
+        tarefas = tarefas.filter(matchCanal);
+      }
 
       // ── Carrega índice de telefones (cache 30 min) para detectar leads
       // que viraram cadastros em pes_pessoa ──
@@ -2370,6 +2814,8 @@ router.get(
           .slice(-12), // últimos 12 meses
         list_id: CLICKUP_LIST_ID,
         loaded_at: new Date().toISOString(),
+        // Eco do filtro aplicado (frontend usa pra mostrar chip ativo)
+        canal_filtro: canalFiltro || null,
       };
 
       return successResponse(res, overview);
@@ -3820,15 +4266,15 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
     // Busca credev (vale-troca) usado em pagamento via fiscal/v2/invoices
     // Emite UMA transação negativa por NF que tenha credev > 0,
     // atribuída ao dealerCode (vendedor real) extraído de items[].products[].
+    // Versão OTIMIZADA: paginação em paralelo + expand mínimo (sem items)
+    // Para credev no /erp-data não precisamos do dealerCode dos products
+    // (atribuímos por personCode), então economizamos MUITO ao não expandir items.
     async function fetchPeriodoCredev({ start, end }) {
       const transacoes = [];
-      // Busca tanto Output (saídas) — credev aparece em payments dessas NFs
-      let page = 1;
-      const pageSize = 100; // invoices/search é mais pesado
-      while (page <= 50) {
-        let resp;
+      const pageSize = 100;
+      const fetchInvPage = async (page) => {
         try {
-          resp = await axios.post(
+          const resp = await axios.post(
             invoicesEndpoint,
             {
               filter: {
@@ -3838,7 +4284,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
                 startIssueDate: `${start}T00:00:00`,
                 endIssueDate: `${end}T23:59:59`,
               },
-              expand: 'payments,items',
+              expand: 'payments', // ← SEM items (3-5x mais rápido)
               page,
               pageSize,
             },
@@ -3852,61 +4298,66 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
               timeout: 120000,
             },
           );
+          return resp.data;
         } catch (err) {
           console.warn(
             `⚠️ [erp-bg credev] ${start}~${end} pág ${page}: ${err.message}`,
           );
-          break;
+          return { items: [] };
         }
-        const items = resp.data?.items || [];
-        for (const nf of items) {
-          if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
-            continue;
-          if (!nf.personCode) continue;
-          let credev = 0;
-          for (const p of nf.payments || []) {
-            if (p.documentType === 'Credev') {
-              credev += parseFloat(p.paymentValue) || 0;
-            }
-          }
-          if (credev <= 0) continue;
-          // Vendedor: dealerCode em items[].products[] (mesma lógica Analytics)
-          let dc = null;
-          for (const item of nf.items || []) {
-            for (const p of item.products || []) {
-              if (p.dealerCode) {
-                dc = parseInt(p.dealerCode);
-                break;
-              }
-            }
-            if (dc) break;
-          }
-          const opCode = parseInt(nf.operationCode);
-          const canal =
-            OPERACOES_VAREJO.includes(opCode) && nf.branchCode !== 2
-              ? 'varejo'
-              : 'revenda';
-          transacoes.push({
-            personCode: nf.personCode,
-            dt: nf.issueDate,
-            vlFat: -credev,
-            total: -credev,
-            credev,
-            quantity: 0,
-            sellerCode: dc,
-            branchCode: nf.branchCode,
-            operationCode: opCode,
-            canal,
-            kind: 'credev',
-          });
+      };
+
+      // 1ª página descobre totalPages
+      const first = await fetchInvPage(1);
+      const allItems = [...(first?.items || [])];
+      const totalPages =
+        first?.totalPages ||
+        (first?.totalItems ? Math.ceil(first.totalItems / pageSize) : 1);
+
+      // Páginas restantes em PARALELO (CONCURRENCY=5)
+      if (totalPages > 1) {
+        const remaining = Array.from(
+          { length: Math.min(totalPages - 1, 49) },
+          (_, i) => i + 2,
+        );
+        const CONC = 5;
+        for (let i = 0; i < remaining.length; i += CONC) {
+          const batch = remaining.slice(i, i + CONC);
+          const results = await Promise.all(batch.map(fetchInvPage));
+          for (const pd of results) allItems.push(...(pd?.items || []));
         }
-        const totalPages =
-          resp.data?.totalPages ||
-          (resp.data?.totalItems
-            ? Math.ceil(resp.data.totalItems / pageSize)
-            : page);
-        if (page >= totalPages || items.length < pageSize) break;
-        page++;
+      }
+
+      // Processa NFs (extrai apenas credev — sem items)
+      for (const nf of allItems) {
+        if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
+          continue;
+        if (!nf.personCode) continue;
+        let credev = 0;
+        for (const p of nf.payments || []) {
+          if (p.documentType === 'Credev') {
+            credev += parseFloat(p.paymentValue) || 0;
+          }
+        }
+        if (credev <= 0) continue;
+        const opCode = parseInt(nf.operationCode);
+        const canal =
+          OPERACOES_VAREJO.includes(opCode) && nf.branchCode !== 2
+            ? 'varejo'
+            : 'revenda';
+        transacoes.push({
+          personCode: nf.personCode,
+          dt: nf.issueDate,
+          vlFat: -credev,
+          total: -credev,
+          credev,
+          quantity: 0,
+          sellerCode: null, // não precisa pra erp-data (atribui por personCode)
+          branchCode: nf.branchCode,
+          operationCode: opCode,
+          canal,
+          kind: 'credev',
+        });
       }
       return transacoes;
     }
@@ -3933,32 +4384,31 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
       `✅ [erp-data] ${allTransacoes.length} transações carregadas (${nSales} Sales, ${nReturns} Returns)`,
     );
 
-    // ─── 3.1) Credev (vale-troca) via fiscal/v2/invoices ───────────────────
-    // Para alinhar com a Analytics: subtrai credev usado em pagamento de cada NF
+    // ─── 3.1) Credev (vale-troca) — versão otimizada ───────────────────────
+    // Subtrai credev usado em pagamento de cada NF (alinha com Analytics).
+    // OTIMIZADO: expand='payments' (sem items) + paginação paralela + todos
+    // os 12 meses em paralelo simultaneamente — corta de ~5-10min para ~30-60s.
     ERP_LOADING_PROGRESS = {
       step: 'credev',
       page: 0,
       total: periodos.length,
     };
     console.log(
-      `🧾 [erp-data] Buscando credev (vale-troca) via fiscal/v2/invoices...`,
+      `🧾 [erp-data] Buscando credev (vale-troca) — ${periodos.length} meses em paralelo...`,
     );
     let totalCredevTx = 0;
-    for (let i = 0; i < periodos.length; i += 2) {
-      const batch = periodos.slice(i, i + 2);
-      const results = await Promise.all(
-        batch.map((p) => fetchPeriodoCredev(p).catch(() => [])),
-      );
-      for (const arr of results) {
-        allTransacoes.push(...arr);
-        totalCredevTx += arr.length;
-      }
-      ERP_LOADING_PROGRESS = {
-        step: 'credev',
-        page: i + batch.length,
-        total: periodos.length,
-      };
-    }
+    // Todos os meses em paralelo (CONCURRENCY=12 = todos de uma vez)
+    const credevResults = await Promise.all(
+      periodos.map((p) =>
+        fetchPeriodoCredev(p)
+          .then((arr) => {
+            totalCredevTx += arr.length;
+            return arr;
+          })
+          .catch(() => []),
+      ),
+    );
+    for (const arr of credevResults) allTransacoes.push(...arr);
     console.log(
       `✅ [erp-data] ${totalCredevTx} transações de credev (subtraídas do faturamento)`,
     );
@@ -4218,14 +4668,10 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
         total: clientesSemNome.length,
       };
       const BATCH_SIZE = 200;
+      const CONCURRENCY = 8;
       const semNomeCodes = clientesSemNome.map((c) => c.code);
-      for (let i = 0; i < semNomeCodes.length; i += BATCH_SIZE) {
-        const batch = semNomeCodes.slice(i, i + BATCH_SIZE);
-        ERP_LOADING_PROGRESS = {
-          step: 'nomes-pes_pessoa',
-          page: i + batch.length,
-          total: semNomeCodes.length,
-        };
+
+      const fetchBatchSup = async (batch) => {
         try {
           const [pjResp, pfResp] = await Promise.all([
             axios
@@ -4244,7 +4690,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
                     Authorization: `Bearer ${token}`,
                   },
                   httpsAgent: totvsHttpsAgent,
-                  timeout: 15000,
+                  timeout: 30000,
                 },
               )
               .catch(() => ({ data: { items: [] } })),
@@ -4264,7 +4710,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
                     Authorization: `Bearer ${token}`,
                   },
                   httpsAgent: totvsHttpsAgent,
-                  timeout: 15000,
+                  timeout: 30000,
                 },
               )
               .catch(() => ({ data: { items: [] } })),
@@ -4286,9 +4732,25 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
           }
         } catch (err) {
           console.warn(
-            `⚠️ [erp-data] Falha ao buscar nomes pes_pessoa batch ${i}: ${err.message}`,
+            `⚠️ [erp-data] nomes-pes_pessoa batch falhou: ${err.message}`,
           );
         }
+      };
+
+      const batchesSup = [];
+      for (let i = 0; i < semNomeCodes.length; i += BATCH_SIZE) {
+        batchesSup.push(semNomeCodes.slice(i, i + BATCH_SIZE));
+      }
+      let processadosSup = 0;
+      for (let i = 0; i < batchesSup.length; i += CONCURRENCY) {
+        const grupo = batchesSup.slice(i, i + CONCURRENCY);
+        await Promise.all(grupo.map(fetchBatchSup));
+        processadosSup += grupo.reduce((s, b) => s + b.length, 0);
+        ERP_LOADING_PROGRESS = {
+          step: 'nomes-pes_pessoa',
+          page: processadosSup,
+          total: semNomeCodes.length,
+        };
       }
       console.log(
         `✅ [erp-data] ${Object.keys(supNamesMap).length}/${clientesSemNome.length} nomes resolvidos para clientes pes_pessoa`,
@@ -4378,7 +4840,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
     const missingNamesMap = {}; // code → { name, fantasyName, tipoPessoa }
     if (missingCodes.length > 0) {
       console.log(
-        `🔍 [erp-data] Buscando nomes de ${missingCodes.length} clientes sem cadastro em pes_pessoa...`,
+        `🔍 [erp-data] Buscando nomes de ${missingCodes.length} clientes sem cadastro em pes_pessoa (paralelo)...`,
       );
       ERP_LOADING_PROGRESS = {
         step: 'nomes-extras',
@@ -4386,15 +4848,11 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
         total: missingCodes.length,
       };
       const BATCH_SIZE = 200;
-      for (let i = 0; i < missingCodes.length; i += BATCH_SIZE) {
-        const batch = missingCodes.slice(i, i + BATCH_SIZE);
-        ERP_LOADING_PROGRESS = {
-          step: 'nomes-extras',
-          page: i + batch.length,
-          total: missingCodes.length,
-        };
+      const CONCURRENCY = 8; // 8 batches em paralelo (16x mais rápido que sequencial)
+
+      // Helper: busca um batch (PF + PJ paralelo internamente)
+      const fetchBatch = async (batch) => {
         try {
-          // Busca PJ e PF em paralelo para cada batch
           const [pjResp, pfResp] = await Promise.all([
             axios
               .post(
@@ -4412,7 +4870,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
                     Authorization: `Bearer ${token}`,
                   },
                   httpsAgent: totvsHttpsAgent,
-                  timeout: 15000,
+                  timeout: 30000,
                 },
               )
               .catch(() => ({ data: { items: [] } })),
@@ -4432,7 +4890,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
                     Authorization: `Bearer ${token}`,
                   },
                   httpsAgent: totvsHttpsAgent,
-                  timeout: 15000,
+                  timeout: 30000,
                 },
               )
               .catch(() => ({ data: { items: [] } })),
@@ -4455,10 +4913,25 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
             };
           }
         } catch (err) {
-          console.warn(
-            `⚠️ [erp-data] Falha ao buscar nomes batch ${i}: ${err.message}`,
-          );
+          console.warn(`⚠️ [erp-data] nomes-extras batch falhou: ${err.message}`);
         }
+      };
+
+      // Quebra em batches e processa CONCURRENCY=8 em paralelo
+      const batches = [];
+      for (let i = 0; i < missingCodes.length; i += BATCH_SIZE) {
+        batches.push(missingCodes.slice(i, i + BATCH_SIZE));
+      }
+      let processados = 0;
+      for (let i = 0; i < batches.length; i += CONCURRENCY) {
+        const grupo = batches.slice(i, i + CONCURRENCY);
+        await Promise.all(grupo.map(fetchBatch));
+        processados += grupo.reduce((s, b) => s + b.length, 0);
+        ERP_LOADING_PROGRESS = {
+          step: 'nomes-extras',
+          page: processados,
+          total: missingCodes.length,
+        };
       }
       console.log(
         `✅ [erp-data] ${Object.keys(missingNamesMap).length}/${missingCodes.length} nomes resolvidos via API TOTVS`,
@@ -5141,78 +5614,158 @@ router.post(
       return ALLOWED_OPENING_SEGS.has(seg) ? seg : null;
     }
 
-    // Mapeia clientes por vendedor — STREAMING via paginação Supabase
-    const personNFsMap = new Map(); // personCode -> [{date, dealerCodes, person_name, value, canal}]
+    // ─── Mapeia clientes por vendedor — TOTVS LIVE (fiscal/v2/invoices) ──
+    // Substitui Supabase notas_fiscais (que pode ter sync gap) por chamada
+    // direta na API TOTVS — garante dados frescos.
+    const personNFsMap = new Map();
+    const tokenDataOp = await getToken();
+    const accessTokenOp = tokenDataOp?.access_token;
+    if (!accessTokenOp) {
+      return errorResponse(
+        res,
+        'Token TOTVS indisponível',
+        503,
+        'TOKEN_OFF',
+      );
+    }
 
-    while (true) {
-      const { data: nfBatch, error: errPeriodo } = await supabaseFiscal
-        .from('notas_fiscais')
-        .select(
-          'person_code, person_name, items, issue_date, total_value, operation_code, branch_code, dealer_code',
-        )
-        .eq('operation_type', 'Output')
-        .gte('issue_date', datemin)
-        .lte('issue_date', datemax)
-        .not('invoice_status', 'eq', 'Canceled')
-        .not('invoice_status', 'eq', 'Deleted')
-        .lt('person_code', 100000000)
-        .range(nfOffset, nfOffset + NF_PAGE - 1);
-      if (errPeriodo) {
-        console.error('[seller-openings] Erro período:', errPeriodo.message);
-        return errorResponse(
-          res,
-          'Erro ao buscar NFs do período',
-          500,
-          'DB_ERROR',
-        );
+    // Branches: todas (pool 1) + extras conhecidas
+    let openingBranches;
+    try {
+      openingBranches = await getBranchCodes(accessTokenOp);
+    } catch (err) {
+      console.warn(
+        '[seller-openings] getBranchCodes falhou, fallback amplo:',
+        err.message,
+      );
+      openingBranches = [
+        1, 2, 5, 6, 11, 50, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94,
+        95, 96, 97, 98, 99, 100, 101, 111, 200, 600, 750, 850, 950, 960,
+      ];
+    }
+
+    // Todas ops mapeadas em segmentos (varejo + revenda + multimarcas + etc)
+    const openingOpCodes = Object.keys(OP_SEGMENTO_MAP).map(Number);
+
+    // Paginação paralela com retry
+    const fetchInvPgOp = async (page, retries = 3) => {
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          const r = await axios.post(
+            `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`,
+            {
+              filter: {
+                branchCodeList: openingBranches,
+                operationCodeList: openingOpCodes,
+                operationType: 'Output',
+                startIssueDate: `${datemin}T00:00:00`,
+                endIssueDate: `${datemax}T23:59:59`,
+              },
+              expand: 'items',
+              page,
+              pageSize: 100,
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessTokenOp}`,
+              },
+              httpsAgent: totvsHttpsAgent,
+              timeout: 120000,
+            },
+          );
+          return r.data;
+        } catch (err) {
+          const retryable =
+            err.message?.includes('stream has been aborted') ||
+            err.message?.includes('socket hang up') ||
+            err.message?.includes('ECONNRESET') ||
+            err.code === 'ECONNABORTED' ||
+            err.response?.status === 429 ||
+            err.response?.status >= 500;
+          if (retryable && attempt < retries) {
+            await new Promise((r) => setTimeout(r, attempt * 1500));
+            continue;
+          }
+          console.warn(`[seller-openings] pg ${page}: ${err.message}`);
+          return { items: [] };
+        }
       }
-      if (!nfBatch || nfBatch.length === 0) break;
+      return { items: [] };
+    };
 
-      // Processa NFs da página inline e libera o batch ao final
-      for (const nf of nfBatch) {
-        if (!nf.items || !Array.isArray(nf.items) || !nf.person_code) continue;
-        const nfDealerCodes = new Set();
-        const netByDealer = {};
-        for (const item of nf.items) {
-          const prods =
-            item.products &&
-            Array.isArray(item.products) &&
-            item.products.length > 0
-              ? item.products
-              : [item];
-          for (const p of prods) {
-            const dc = parseInt(p.dealerCode);
-            if (!isNaN(dc)) {
-              nfDealerCodes.add(dc);
-              const nv = parseFloat(p.netValue) || 0;
-              netByDealer[dc] = (netByDealer[dc] || 0) + nv;
-            }
+    const firstOp = await fetchInvPgOp(1);
+    const allOpInvoices = [...(firstOp?.items || [])];
+    const totalPagesOp = firstOp?.totalPages ||
+      (firstOp?.totalItems ? Math.ceil(firstOp.totalItems / 100) : 1);
+    console.log(
+      `[seller-openings] TOTVS: ${firstOp?.totalItems ?? '?'} NFs em ${totalPagesOp} páginas`,
+    );
+    if (totalPagesOp > 1) {
+      const remOp = Array.from({ length: totalPagesOp - 1 }, (_, i) => i + 2);
+      const CONC = 5;
+      for (let i = 0; i < remOp.length; i += CONC) {
+        const batch = remOp.slice(i, i + CONC);
+        const results = await Promise.all(batch.map(fetchInvPgOp));
+        for (const pd of results) allOpInvoices.push(...(pd?.items || []));
+      }
+    }
+
+    // Processa todas as NFs em memória
+    for (const nf of allOpInvoices) {
+      if (
+        nf.invoiceStatus === 'Canceled' ||
+        nf.invoiceStatus === 'Deleted'
+      )
+        continue;
+      const personCode = parseInt(nf.personCode);
+      if (!personCode || personCode >= 100000000) continue;
+      if (!Array.isArray(nf.items) || nf.items.length === 0) continue;
+
+      const nfDealerCodes = new Set();
+      const netByDealer = {};
+      for (const item of nf.items) {
+        const products = Array.isArray(item.products) ? item.products : [];
+        for (const p of products) {
+          const dc = parseInt(p.dealerCode);
+          if (!isNaN(dc)) {
+            nfDealerCodes.add(dc);
+            netByDealer[dc] =
+              (netByDealer[dc] || 0) + (parseFloat(p.netValue) || 0);
           }
         }
-        if (nfDealerCodes.size === 0) continue;
-
-        const netEntries = Object.entries(netByDealer);
-        const dominantDealer = netEntries.length
-          ? Number(netEntries.sort((a, b) => b[1] - a[1])[0][0])
-          : (nf.dealer_code ?? null);
-        const canal = classifyNfCanal(nf, dominantDealer);
-
-        if (!personNFsMap.has(nf.person_code))
-          personNFsMap.set(nf.person_code, []);
-        personNFsMap.get(nf.person_code).push({
-          date: nf.issue_date,
-          dealerCodes: nfDealerCodes,
-          person_name: nf.person_name || 'Sem nome',
-          value: parseFloat(nf.total_value) || 0,
-          canal,
-        });
       }
-      totalNFsProcessed += nfBatch.length;
-      if (nfBatch.length < NF_PAGE) break;
-      nfOffset += NF_PAGE;
+      if (nfDealerCodes.size === 0) continue;
+
+      const netEntries = Object.entries(netByDealer);
+      const dominantDealer = netEntries.length
+        ? Number(netEntries.sort((a, b) => b[1] - a[1])[0][0])
+        : null;
+
+      // classifyNfCanal usa nf.branch_code e nf.operation_code no formato
+      // antigo (snake_case do Supabase). Adapta o objeto da API TOTVS.
+      const nfAdapted = {
+        branch_code: parseInt(nf.branchCode),
+        operation_code: parseInt(nf.operationCode),
+        person_code: personCode,
+      };
+      const canal = classifyNfCanal(nfAdapted, dominantDealer);
+
+      if (!personNFsMap.has(personCode)) personNFsMap.set(personCode, []);
+      personNFsMap.get(personCode).push({
+        date: nf.issueDate?.slice(0, 10) || datemin,
+        dealerCodes: nfDealerCodes,
+        person_name: nf.personName || 'Sem nome',
+        value: parseFloat(nf.totalValue) || 0,
+        canal,
+      });
+      totalNFsProcessed++;
     }
+    // Suprime variáveis não utilizadas (nfOffset, NF_PAGE) — agora é TOTVS live
+    void nfOffset;
+    void NF_PAGE;
     console.log(
-      `[seller-openings] ${totalNFsProcessed} NFs processadas (streaming), ${personNFsMap.size} clientes únicos`,
+      `[seller-openings] ${totalNFsProcessed} NFs processadas (TOTVS live), ${personNFsMap.size} clientes únicos`,
     );
 
     // Para cada cliente: mapear vendedores ativos e dados da primeira NF no período
@@ -5718,9 +6271,22 @@ const CANAL_CONFIG = {
   multimarcas: {
     source: 'totvs-totals',
     branchs: [99, 2, 95, 87, 88, 90, 94, 97],
-    operations: [7235, 7241, 9127], // 9127 = SME PROMO SALES MULTIMARCAS FISCAL
-    sellers: [26, 69], // INBOUND_DEALER_SET (usado para devoluções)
-    excludeSellers: [26, 69, 21], // David, Rafael e Thalis têm módulos separados — não contam no total MTM
+    // 7235/7241/9127 = ops atuais (de 2025-09 em diante)
+    // 200 = op LEGADA usada até ~ago/2025 — incluída pra captar histórico
+    //       (LY do analytics, performance, carteira)
+    operations: [7235, 7241, 9127, 200],
+    // sellers: undefined — NÃO filtra (sale-panel/totals/search retorna TODOS
+    // os dealers das ops B2M). Antes estava `sellers: [26,69]` o que era
+    // INBOUND_DAVID e fazia o multimarcas pegar apenas David+Thalis.
+    sellers: undefined,
+    // Lista de dealers que NÃO contam em multimarcas (têm canais próprios).
+    // Aplicada via excludeSellers no callTotvsTotalsSearch (TODO: implementar)
+    // ou subtraindo inbound_david/inbound_rafael depois.
+    excludeSellers: [26, 69, 21], // David, Thalis (inbound_david), Rafael (inbound_rafael)
+    // Para credev/SaleReturns: só conta devoluções dos sellers OFICIAIS
+    // de multimarcas (Walter=177, Renato=65, Arthur=259). Returns com
+    // sellerCode=50 (GERAL) ou outros dealers não pertencem ao canal.
+    allowedSellersDevol: [177, 65, 259],
     devolucaoOps: [7244, 7245, 1214],
     devolucaoBranchs: [99, 2, 95, 87, 88, 90, 94, 97],
   },
@@ -5843,6 +6409,7 @@ const NON_VAREJO_BRANCH_INFO = {
 // Retorna array de { seller_code, seller_name, invoice_qty, invoice_value, itens_qty, tm, pa, pmpv, branch_code, branch_name, branch_short, canal }
 async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
   const sellersAllowed = new Set((cfg.sellers || []).map(Number));
+  const sellersExcluded = new Set((cfg.excludeSellers || []).map(Number));
   // Per-branch: chama sellers/search uma vez por branch (TOTVS exige 1 branch por call)
   const perBranchResults = await Promise.all(
     cfg.branchs.map(async (branchCode) => {
@@ -5870,6 +6437,8 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
     for (const r of rows) {
       const sc = Number(r.seller_code);
       if (sellersAllowed.size > 0 && !sellersAllowed.has(sc)) continue;
+      // Exclui sellers de outros canais (ex: multimarcas exclui David/Thalis/Rafael)
+      if (sellersExcluded.size > 0 && sellersExcluded.has(sc)) continue;
       const value = Number(r.seller_sale_value || r.invoice_value || 0);
       const qty = Number(r.seller_sale_qty || r.invoice_qty || 0);
       const items = Number(r.itens_qty || r.seller_sale_pieces || 0);
@@ -6121,7 +6690,7 @@ const PERSON_CACHE_TTL = 30 * 60 * 1000;
 
 // Cache em memória do resultado completo do analytics — TTL 5 min
 // Versão incrementa quando lógica de classificação muda → invalida cache.
-const ANALYTICS_CACHE_VERSION = 'v29-inbound-rafael-branch99';
+const ANALYTICS_CACHE_VERSION = 'v45-multimarcas-include-op200-legacy';
 const ANALYTICS_CACHE = new Map(); // key → { data, ts, ver }
 const ANALYTICS_CACHE_TTL = 5 * 60 * 1000;
 
@@ -6252,43 +6821,63 @@ const analyticsHandler = asyncHandler(async (req, res) => {
   // Helper paginação concorrente — busca todas páginas em paralelo após
   // a 1ª descobrir o total
   const fetchMovementPagesParallel = async (di, df, accessToken) => {
-    const fetchPage = async (page) => {
-      const r = await axios.post(
-        `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`,
-        {
-          filter: {
-            branchCodeList: branchFilter,
-            startMovementDate: `${di}T00:00:00`,
-            endMovementDate: `${df}T23:59:59`,
-          },
-          page,
-          pageSize: 1000,
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          httpsAgent: totvsHttpsAgent,
-          timeout: 120000,
-        },
-      );
-      return r.data;
+    const fetchPageWithRetry = async (page, retries = 3) => {
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          const r = await axios.post(
+            `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`,
+            {
+              filter: {
+                branchCodeList: branchFilter,
+                startMovementDate: `${di}T00:00:00`,
+                endMovementDate: `${df}T23:59:59`,
+              },
+              page,
+              pageSize: 1000,
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent: totvsHttpsAgent,
+              timeout: 120000,
+            },
+          );
+          return r.data;
+        } catch (err) {
+          const retryable =
+            err.message?.includes('stream has been aborted') ||
+            err.message?.includes('socket hang up') ||
+            err.message?.includes('ECONNRESET') ||
+            err.code === 'ECONNABORTED' ||
+            err.response?.status === 429 ||
+            err.response?.status >= 500;
+          if (retryable && attempt < retries) {
+            const delay = attempt * 1500;
+            console.warn(
+              `[analytics movement] pág ${page} tentativa ${attempt}: ${err.message}, retry em ${delay}ms`,
+            );
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          console.warn(`[analytics movement] pág ${page}: ${err.message}`);
+          return { items: [] };
+        }
+      }
+      return { items: [] };
     };
-    const first = await fetchPage(1);
+    const first = await fetchPageWithRetry(1);
     const items = [...(first?.items || [])];
     const totalPages =
       first?.totalPages ||
       (first?.totalItems ? Math.ceil(first.totalItems / 1000) : 1);
     if (totalPages > 1) {
-      // Busca páginas restantes em paralelo, em batches de 3
       const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
       const CONCURRENCY = 3;
       for (let i = 0; i < remaining.length; i += CONCURRENCY) {
         const batch = remaining.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(
-          batch.map((p) => fetchPage(p).catch(() => ({ items: [] }))),
-        );
+        const results = await Promise.all(batch.map((p) => fetchPageWithRetry(p)));
         for (const pd of results) items.push(...(pd?.items || []));
       }
     }
@@ -6304,33 +6893,56 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     accessToken,
     expand = 'payments',
   ) => {
-    const fetchPage = async (page) => {
-      const r = await axios.post(
-        `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`,
-        {
-          filter: {
-            branchCodeList: branchFilter,
-            operationCodeList: operationCodes,
-            operationType,
-            startIssueDate: `${di}T00:00:00`,
-            endIssueDate: `${df}T23:59:59`,
-          },
-          expand,
-          page,
-          pageSize: 100,
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          httpsAgent: totvsHttpsAgent,
-          timeout: 120000,
-        },
-      );
-      return r.data;
+    const fetchPageWithRetry = async (page, retries = 3) => {
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          const r = await axios.post(
+            `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`,
+            {
+              filter: {
+                branchCodeList: branchFilter,
+                operationCodeList: operationCodes,
+                operationType,
+                startIssueDate: `${di}T00:00:00`,
+                endIssueDate: `${df}T23:59:59`,
+              },
+              expand,
+              page,
+              pageSize: 100,
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent: totvsHttpsAgent,
+              timeout: 120000,
+            },
+          );
+          return r.data;
+        } catch (err) {
+          const retryable =
+            err.message?.includes('stream has been aborted') ||
+            err.message?.includes('socket hang up') ||
+            err.message?.includes('ECONNRESET') ||
+            err.code === 'ECONNABORTED' ||
+            err.response?.status === 429 ||
+            err.response?.status >= 500;
+          if (retryable && attempt < retries) {
+            const delay = attempt * 1500;
+            console.warn(
+              `[analytics invoices] pág ${page} tentativa ${attempt}: ${err.message}, retry em ${delay}ms`,
+            );
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          console.warn(`[analytics invoices] pág ${page}: ${err.message}`);
+          return { items: [] };
+        }
+      }
+      return { items: [] };
     };
-    const first = await fetchPage(1);
+    const first = await fetchPageWithRetry(1);
     const items = [...(first?.items || [])];
     const totalPages =
       first?.totalPages ||
@@ -6340,9 +6952,7 @@ const analyticsHandler = asyncHandler(async (req, res) => {
       const CONC = 3;
       for (let i = 0; i < remaining.length; i += CONC) {
         const batch = remaining.slice(i, i + CONC);
-        const results = await Promise.all(
-          batch.map((p) => fetchPage(p).catch(() => ({ items: [] }))),
-        );
+        const results = await Promise.all(batch.map((p) => fetchPageWithRetry(p)));
         for (const pd of results) items.push(...(pd?.items || []));
       }
     }
@@ -6359,6 +6969,7 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     const byPerson = new Map();
     let totalBruto = 0;
     let totalCredev = 0;
+    let totalFranquiaExcluida = 0; // NFs de clientes classificados como Franquia
     const nfsBrutoSet = new Set();
     const personsInInvoices = new Set();
 
@@ -6376,9 +6987,15 @@ const analyticsHandler = asyncHandler(async (req, res) => {
         if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
           continue;
         const pc = parseInt(nf.personCode);
-        if (!pc || franquiaPCs.has(pc)) continue;
+        if (!pc) continue;
         const total = parseFloat(nf.totalValue) || 0;
         if (total <= 0) continue;
+        // Cliente classificado como Franquia (canal próprio): rastreia o
+        // total pra subtrair do bruto do sale-panel mas não entra em byPerson
+        if (franquiaPCs.has(pc)) {
+          totalFranquiaExcluida += total;
+          continue;
+        }
         // Extract dealerCode from items[].products[]
         let dc = null;
         for (const item of nf.items || []) {
@@ -6561,6 +7178,7 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     byPerson.__bruto = totalBruto;
     byPerson.__devol = totalCredev;
     byPerson.__credev = totalCredev;
+    byPerson.__franquiaExcluida = totalFranquiaExcluida;
     byPerson.__qty = nfsBrutoSet.size;
     return byPerson;
   };
@@ -7108,13 +7726,35 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     // Sem insertDate disponível → não conta como abertura (evita falsos positivos com clientes antigos)
   }
   aberturasAtual = aberturasAtualPCs.size;
-  aberturasLY = 0;
 
-  // Match aberturas com leads ClickUp (tráfego pago / CRM)
+  // Aberturas LY (ano passado, mesmo período) — usa byPersonLY +
+  // insertDate dentro do período LY. Não checa "sem compra anterior" pois
+  // não temos lookup histórico do que o cliente fez antes do LY (ficaria
+  // 0). Usar só o critério insertDate dentro do range LY já é uma boa
+  // aproximação ("clientes cadastrados no mesmo mês do ano passado que
+  // tiveram compra no canal").
+  const dminLYTs = new Date(datemin_ly).getTime();
+  const dmaxLYTs = new Date(datemax_ly + 'T23:59:59').getTime();
+  for (const pc of byPersonLY.keys()) {
+    const pinfo = personInfo.get(pc);
+    const iDate = pinfo?.insertDate;
+    if (!iDate) continue;
+    const its = new Date(iDate).getTime();
+    if (its >= dminLYTs && its <= dmaxLYTs) aberturasLYPCs.add(pc);
+  }
+  aberturasLY = aberturasLYPCs.size;
+
+  // ─── Aberturas: cadastro TOTVS no período + sem compra anterior ──────
+  // Critério único: cadastro novo no TOTVS (insertDate dentro do período).
+  // Cadastro antigo NUNCA conta como abertura.
+  // O match com ClickUp por telefone é feito APENAS para enriquecer cada
+  // abertura com a info do lead que originou (lead_name, status, url) —
+  // não filtra a contagem. Aberturas sem lead ainda contam (cliente
+  // entrou pela loja/balcão/outro canal).
   const aberturasClickupMatch = new Map(); // personCode → { lead_name, status, url, origem, lead_date }
   if (CLICKUP_API_KEY && aberturasAtualPCs.size > 0) {
     try {
-      // Índice reverso telefone → personCode somente para as aberturas
+      // Índice reverso telefone → personCode das aberturas
       const phoneToPC = new Map();
       for (const pc of aberturasAtualPCs) {
         const pinfo = personInfo.get(pc);
@@ -7155,7 +7795,8 @@ const analyticsHandler = asyncHandler(async (req, res) => {
         }
       }
       console.log(
-        `[analytics] ClickUp: ${aberturasClickupMatch.size} aberturas com lead no CRM`,
+        `[analytics] ${aberturasAtualPCs.size} aberturas total | ` +
+          `${aberturasClickupMatch.size} com match ClickUp (origem CRM/tráfego pago)`,
       );
     } catch (err) {
       console.warn('[analytics] ClickUp match falhou:', err.message);
@@ -7192,57 +7833,80 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     byPerson.__bruto != null ? Math.round(byPerson.__bruto * 100) / 100 : null;
   let totalDevolTotvs =
     byPerson.__devol != null ? Math.round(byPerson.__devol * 100) / 100 : null;
-  if (
-    branchFilter &&
-    Array.isArray(canalCfg?.operations) &&
-    canalCfg.operations.length > 0
-  ) {
-    try {
-      const tokenData = await getToken();
-      const accessToken = tokenData?.access_token;
-      if (accessToken) {
-        // Combina ops de venda + devolução numa única chamada → líquido oficial
-        const DEVOL_TOTVS_OPS = [
-          7245,
-          7244,
-          7240,
-          7790,
-          1214,
-          20, // ops TOTVS internas
-          1202,
-          1204,
-          1411,
-          1410,
-          2202,
-          2411,
-          1950,
-          21, // CFOPs
-        ];
-        const opsCombined = Array.from(
-          new Set([...canalCfg.operations, ...DEVOL_TOTVS_OPS]),
-        );
-        const callTotalsLiquid = async (dmin, dmax) => {
-          const r = await callTotvsTotalsSearch({
-            branchs: branchFilter,
-            operations: opsCombined,
-            datemin: dmin,
-            datemax: dmax,
-          });
-          const row = r?.dataRow?.[0] || {};
-          return {
-            liquid: parseFloat(row.invoice_value) || 0,
-            qty: parseInt(row.invoice_qty) || 0,
-          };
-        };
-        // Não chama Sale Panel — usamos byPerson direto (já é Liquido = Bruto - Credev)
-        totalValue = [...byPerson.values()].reduce((s, v) => s + v.value, 0);
-        totalValueLY = [...byPersonLY.values()].reduce(
-          (s, v) => s + v.value,
-          0,
-        );
+  // canal-totals serve qualquer canal configurado (incluindo varejo, que tem
+  // source='totvs-totals-branch' e usa SPECIAL_OPERATIONS internamente).
+  // A condição abaixo dispara o reuso pra qualquer canal com cfg válido.
+  if (branchFilter && canalCfg) {
+    // ─── UNIFICADO: usa o MESMO cálculo de /api/crm/canal-totals ─────────
+    // Garante que Performance e Analytics mostrem o MESMO faturamento.
+    // - Para revenda/multimarcas/inbound: sale-panel/totals + credev em
+    //   payments + SaleReturns + exclusão franquia (revenda only).
+    // - Para varejo: fetchBranchTotalsFromTotvs (mesmo cálculo do
+    //   /api/totvs/sale-panel/ranking-faturamento).
+    const [ctCur, ctPrev] = await Promise.all([
+      getCanalTotalsCached(modulo, datemin, datemax),
+      getCanalTotalsCached(modulo, datemin_ly, datemax_ly),
+    ]);
+    if (ctCur) {
+      // Varejo (totvs-totals-branch) não tem gross_invoice_value/devolucao —
+      // o invoice_value já é "líquido" (saída-entrada via SPECIAL_OPERATIONS).
+      // Para esses canais, exibimos o invoice_value como bruto E líquido.
+      const hasBreakdown = ctCur.gross_invoice_value != null;
+      totalValueGrossTotvs = hasBreakdown
+        ? ctCur.gross_invoice_value
+        : ctCur.invoice_value || 0;
+      totalDevolTotvs = hasBreakdown
+        ? Math.round(
+            ((ctCur.devolucao_value || 0) + (ctCur.franquia_excluida || 0)) *
+              100,
+          ) / 100
+        : 0;
+      totalValue = ctCur.invoice_value || 0;
+      totalQtyTotvs = ctCur.invoice_qty || null;
+      // LY já vem na mesma resposta (totvs-totals-branch retorna totalLastYear).
+      // Pra varejo isso é mais preciso que chamar canal-totals separado pro
+      // período LY (TOTVS calcula automaticamente o mesmo período do ano anterior).
+      if (ctCur.total_last_year != null) {
+        totalValueLY = Number(ctCur.total_last_year.invoice_value || 0);
+        totalQtyLYTotvs = Number(ctCur.total_last_year.invoice_qty || 0);
       }
-    } catch (err) {
-      console.warn(`[analytics] Sale Panel total falhou: ${err.message}`);
+      console.log(
+        `[analytics ${modulo}] reusou canal-totals: bruto=${(totalValueGrossTotvs || 0).toFixed(2)} ` +
+          `devol=${(totalDevolTotvs || 0).toFixed(2)} liquido=${totalValue.toFixed(2)} ` +
+          `LY=${totalValueLY.toFixed(2)}`,
+      );
+    } else {
+      // Fallback: agregação byPerson (fiscal/v2/invoices) — pode divergir
+      // ligeiramente da Performance enquanto canal-totals não estiver
+      // cacheado. Performance carrega canal-totals automaticamente, então
+      // basta abrir Performance uma vez no período pra alinhar.
+      console.warn(
+        `[analytics ${modulo}] canal-totals não cacheado — usando fallback byPerson (Performance e Analytics podem divergir até abrir Performance)`,
+      );
+      totalValue = [...byPerson.values()].reduce((s, v) => s + v.value, 0);
+      // Aplica exclusão franquia também no fallback (revenda only)
+      if (modulo === 'revenda' && byPerson.__franquiaExcluida) {
+        // byPerson já exclui franquia das values, então sum já está ok
+      }
+      totalValueGrossTotvs =
+        byPerson.__bruto != null
+          ? Math.round(byPerson.__bruto * 100) / 100
+          : null;
+      totalDevolTotvs =
+        byPerson.__credev != null
+          ? Math.round(
+              (byPerson.__credev + (byPerson.__franquiaExcluida || 0)) * 100,
+            ) / 100
+          : null;
+    }
+    if (ctPrev) {
+      totalValueLY = ctPrev.invoice_value || 0;
+      totalQtyLYTotvs = ctPrev.invoice_qty || null;
+    } else {
+      totalValueLY = [...byPersonLY.values()].reduce(
+        (s, v) => s + v.value,
+        0,
+      );
     }
   }
   if (
@@ -7465,6 +8129,14 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     // Aberturas de cadastro (clientes registrados no período)
     total_aberturas_cadastro: aberturasAtual,
     total_aberturas_cadastro_ly: aberturasLY,
+    // Reativações: clientes que voltaram a comprar após gap (somatório das rows)
+    total_reativacoes_cadastro: rows.reduce(
+      (s, r) => s + (r.reativacoes || 0),
+      0,
+    ),
+    // LY de reativações exigiria lookup de compras antes de datemin_ly que
+    // não está disponível neste contexto — null faz o frontend esconder o label
+    total_reativacoes_cadastro_ly: null,
     ticket_medio_abertura:
       typeof ticketMedioAbertura !== 'undefined' ? ticketMedioAbertura : null,
     total_fat_abertura:
@@ -7922,6 +8594,42 @@ async function computeCanalTotalsFromSupabase({ datemin, datemax, cfg }) {
   };
 }
 
+// Cache em memória do canal-totals (TTL 5 min) — evita reconsulta frequente
+const CANAL_TOTALS_CACHE = new Map();
+const CANAL_TOTALS_CACHE_TTL = 5 * 60 * 1000;
+
+// Helper compartilhado: lê valores do canal-totals do cache OU invoca a rota
+// internamente se cache vazio. Garante que Performance e Analytics consultem
+// EXATAMENTE a mesma fonte de faturamento (sale-panel + credev em payments +
+// SaleReturns fiscal-movement + exclusão franquia para revenda).
+async function getCanalTotalsCached(modulo, datemin, datemax) {
+  const cacheKey = `${modulo}|${datemin}|${datemax}`;
+  const cached = CANAL_TOTALS_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CANAL_TOTALS_CACHE_TTL) {
+    return cached.data;
+  }
+  // Cache miss: invoca canal-totals localmente via HTTP para garantir
+  // consistência absoluta entre Performance e Analytics.
+  try {
+    const port = process.env.PORT || 4100;
+    const r = await axios.post(
+      `http://localhost:${port}/api/crm/canal-totals`,
+      { datemin, datemax, modulo },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 600000,
+      },
+    );
+    const body = r.data?.data || r.data;
+    return body && typeof body === 'object' ? body : null;
+  } catch (err) {
+    console.warn(
+      `[getCanalTotalsCached ${modulo} ${datemin}~${datemax}] HTTP fallback falhou: ${err.message}`,
+    );
+    return null;
+  }
+}
+
 router.post(
   '/canal-totals',
   asyncHandler(async (req, res) => {
@@ -7932,6 +8640,16 @@ router.post(
         'datemin, datemax e modulo obrigatórios',
         400,
         'MISSING_PARAMS',
+      );
+    }
+    // Cache hit
+    const cacheKey = `${modulo}|${datemin}|${datemax}`;
+    const cached = CANAL_TOTALS_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CANAL_TOTALS_CACHE_TTL) {
+      return successResponse(
+        res,
+        { ...cached.data, cached: true },
+        `Totais ${modulo} (cache)`,
       );
     }
     const cfg = CANAL_CONFIG[modulo];
@@ -7961,6 +8679,46 @@ router.post(
       let grossValue = Number(t.invoice_value || 0);
       let grossQty = Number(t.invoice_qty || 0);
       let grossItens = Number(t.itens_qty || 0);
+
+      // ─── Subtração de excludeSellers (canais com vendedores que têm
+      // canal próprio, ex: multimarcas exclui inbound_david [26,69] e
+      // inbound_rafael [21]) ─────────────────────────────────────────────
+      let excludedValue = 0;
+      let excludedQty = 0;
+      let excludedItens = 0;
+      if (
+        Array.isArray(cfg.excludeSellers) &&
+        cfg.excludeSellers.length > 0 &&
+        (!Array.isArray(cfg.sellers) || cfg.sellers.length === 0)
+      ) {
+        try {
+          const excData = await callTotvsTotalsSearch({
+            branchs: cfg.branchs,
+            operations: cfg.operations,
+            sellers: cfg.excludeSellers,
+            datemin,
+            datemax,
+          });
+          const exT = (excData.dataRow && excData.dataRow[0]) || {
+            invoice_value: 0,
+            invoice_qty: 0,
+            itens_qty: 0,
+          };
+          excludedValue = Number(exT.invoice_value || 0);
+          excludedQty = Number(exT.invoice_qty || 0);
+          excludedItens = Number(exT.itens_qty || 0);
+          grossValue = Math.max(0, grossValue - excludedValue);
+          grossQty = Math.max(0, grossQty - excludedQty);
+          grossItens = Math.max(0, grossItens - excludedItens);
+          console.log(
+            `[canal-totals ${modulo}] excluiu ${cfg.excludeSellers.join(',')}: -R$ ${excludedValue.toFixed(2)} (${excludedQty} NFs)`,
+          );
+        } catch (err) {
+          console.warn(
+            `[canal-totals ${modulo}] excludeSellers falhou: ${err.message}`,
+          );
+        }
+      }
 
       // ─── Suplementação por whitelist de transações ──────────────────────
       // Busca NFs específicas (cfg.manualTransactions) via fiscal/v2/invoices.
@@ -8244,7 +9002,14 @@ router.post(
 
       let devolucao_credev = 0; // credev em payments (USO)
       let devolucao_returns = 0; // SaleReturns op 21 + ops devol TOTVS (geração não usada)
+      let franquia_excluida = 0; // NFs de clientes classificados como FRANQUIA (revenda only)
       const personsInInvoices = new Set();
+      // Franquia exclusion aplicada APENAS para revenda (sistema TOTVS já parametriza
+      // canal próprio dos franqueados — não devem entrar no faturamento revenda
+      // mesmo que a operação fiscal seja de revenda).
+      const franquiaPCsForExclude = modulo === 'revenda'
+        ? await getFranquiaPersonCodes()
+        : new Set();
 
       const DEVOL_OPS_LIQUIDO_TOTVS = new Set([
         1202,
@@ -8385,6 +9150,14 @@ router.post(
             )
           : null;
 
+      // Excluir dealers do canal (ex: multimarcas excludeSellers=[26,69,21]).
+      // Quando o canal não tem allowedSellers, mas tem excludeSellers, o
+      // filtro é por exclusão — devoluções de dealers excluídos não contam.
+      const excludeSellersDevolSet =
+        Array.isArray(cfg.excludeSellers) && cfg.excludeSellers.length > 0
+          ? new Set(cfg.excludeSellers.map(Number))
+          : null;
+
       // Helper: extrai dealer dominante de items[].products[]
       const dealerFromInvoice = (nf) => {
         if (!Array.isArray(nf.items) || nf.items.length === 0) return null;
@@ -8415,9 +9188,22 @@ router.post(
             const pc = parseInt(nf.personCode);
             if (!pc) continue;
             // Filtro: NF deve ser de um dealer permitido (se canal restrito)
+            const nfDealer = (allowedSellersSet || excludeSellersDevolSet)
+              ? dealerFromInvoice(nf)
+              : null;
             if (allowedSellersSet) {
-              const dealer = dealerFromInvoice(nf);
-              if (!dealer || !allowedSellersSet.has(dealer)) continue;
+              if (!nfDealer || !allowedSellersSet.has(nfDealer)) continue;
+            }
+            // Exclui dealers de outros canais (ex: David/Thalis/Rafael
+            // em multimarcas — eles têm canais próprios)
+            if (excludeSellersDevolSet && nfDealer && excludeSellersDevolSet.has(nfDealer)) continue;
+            // EXCLUSÃO FRANQUIA (revenda only): cliente classificado como
+            // franquia não conta no faturamento revenda — soma p/ subtrair
+            // do bruto, e NÃO entra em personsInInvoices (assim seu credev
+            // também não é contabilizado).
+            if (franquiaPCsForExclude.has(pc)) {
+              franquia_excluida += parseFloat(nf.totalValue) || 0;
+              continue;
             }
             personsInInvoices.add(pc);
             for (const p of nf.payments || []) {
@@ -8438,11 +9224,13 @@ router.post(
             const pc = parseInt(it.personCode);
             if (!pc) continue;
             if (personsInInvoices.has(pc)) continue;
+            const sc = parseInt(it.sellerCode);
             // Filtro: SaleReturn deve ser de um dealer permitido
             if (allowedSellersSet) {
-              const sc = parseInt(it.sellerCode);
               if (!sc || !allowedSellersSet.has(sc)) continue;
             }
+            // Exclui dealers de outros canais (multimarcas excludeSellers)
+            if (excludeSellersDevolSet && sc && excludeSellersDevolSet.has(sc)) continue;
             const v = parseFloat(it.netValue || it.grossValue || 0);
             if (v <= 0) continue;
             devolucao_returns += v;
@@ -8458,7 +9246,8 @@ router.post(
       const devolucao_qty = 0; // qtd não computada nesse modo (usa contagem da gross)
       const devolucao_itens = 0;
 
-      const liq_value = grossValue - devolucao_value;
+      // Líquido = bruto - devoluções - franquia excluída (revenda only)
+      const liq_value = grossValue - devolucao_value - franquia_excluida;
       const liq_qty = Math.max(0, grossQty - devolucao_qty);
       const liq_itens = Math.max(0, grossItens - devolucao_itens);
       const tm = liq_qty > 0 ? liq_value / liq_qty : 0;
@@ -8480,30 +9269,40 @@ router.post(
         );
       }
 
+      const responseData = {
+        modulo,
+        invoice_value: Math.round(liq_value * 100) / 100,
+        invoice_qty: liq_qty,
+        itens_qty: liq_itens,
+        tm: Math.round(tm * 100) / 100,
+        pa: Math.round(pa * 1000) / 1000,
+        pmpv: Math.round(pmpv * 100) / 100,
+        gross_invoice_value: Math.round(grossValue * 100) / 100,
+        gross_invoice_qty: grossQty,
+        devolucao_value: Math.round(devolucao_value * 100) / 100,
+        devolucao_qty,
+        devolucao_credev: Math.round(devolucao_credev * 100) / 100,
+        devolucao_returns: Math.round(devolucao_returns * 100) / 100,
+        franquia_excluida: Math.round(franquia_excluida * 100) / 100,
+        per_seller,
+        source:
+          'totvs_gross + invoices_credev + movement_returns (analytics-aligned)',
+        branchs_used: cfg.branchs,
+        ops_used: cfg.operations,
+        sellers_used: cfg.sellers,
+        devolucao_ops_used: [...DEVOL_OPS_LIQUIDO_TOTVS],
+      };
+      // Salva no cache (TTL 5 min)
+      CANAL_TOTALS_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+      if (CANAL_TOTALS_CACHE.size > 30) {
+        const oldest = [...CANAL_TOTALS_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        CANAL_TOTALS_CACHE.delete(oldest[0]);
+      }
       return successResponse(
         res,
-        {
-          modulo,
-          invoice_value: Math.round(liq_value * 100) / 100,
-          invoice_qty: liq_qty,
-          itens_qty: liq_itens,
-          tm: Math.round(tm * 100) / 100,
-          pa: Math.round(pa * 1000) / 1000,
-          pmpv: Math.round(pmpv * 100) / 100,
-          gross_invoice_value: Math.round(grossValue * 100) / 100,
-          gross_invoice_qty: grossQty,
-          devolucao_value: Math.round(devolucao_value * 100) / 100,
-          devolucao_qty,
-          devolucao_credev: Math.round(devolucao_credev * 100) / 100,
-          devolucao_returns: Math.round(devolucao_returns * 100) / 100,
-          per_seller,
-          source:
-            'totvs_gross + invoices_credev + movement_returns (analytics-aligned)',
-          branchs_used: cfg.branchs,
-          ops_used: cfg.operations,
-          sellers_used: cfg.sellers,
-          devolucao_ops_used: [...DEVOL_OPS_LIQUIDO_TOTVS],
-        },
+        responseData,
         `Totais ${modulo} (líquido = TOTVS bruto - credev - SaleReturns)`,
       );
     }
@@ -8538,16 +9337,23 @@ router.post(
       pa: 0,
       pmpv: 0,
     };
+    // Cache também — TTL e estrutura iguais ao caminho 'totvs-totals'
+    const responseData = {
+      modulo,
+      ...total,
+      source: 'totvs',
+      branchs_used: cfg.branchs,
+      ops_used: cfg.operations,
+      per_branch: totvsData.dataRow,
+      // LY já vem na mesma resposta do TOTVS — exposto pra Analytics consumir
+      total_last_year: totvsData.totalLastYear || null,
+      per_branch_ly: totvsData.dataRowLastYear || [],
+    };
+    // cacheKey já declarado no início desta rota (linha ~8551)
+    CANAL_TOTALS_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
     return successResponse(
       res,
-      {
-        modulo,
-        ...total,
-        source: 'totvs',
-        branchs_used: cfg.branchs,
-        ops_used: cfg.operations,
-        per_branch: totvsData.dataRow,
-      },
+      responseData,
       `Totais ${modulo} (TOTVS /totals-branch)`,
     );
   }),
@@ -8585,7 +9391,7 @@ router.post(
     ]);
     const allOpCodes = Object.keys(OP_SEGMENTO_MAP).map(Number);
     const INBOUND_DAVID_DEALERS = new Set([26, 69]);
-    const INBOUND_RAFAEL_DEALER = 21;
+    const INBOUND_RAFAEL_DEALERS = new Set([21]);
     const FRANQUIA_DEALER = 40;
     const JUCELINO_DEALER = 288;
     const VAREJO_BRANCH_CODES = new Set([

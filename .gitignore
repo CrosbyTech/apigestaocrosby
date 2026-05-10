@@ -3,20 +3,4 @@ node_modules/
 
 # Variáveis de ambiente
 .env
-backend/node_modules/
-backend/.env
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
-planilhas/
-
-# WhatsApp auth/cache (runtime, não deve ser versionado)
-.wwebjs_auth/
-.wwebjs_cache/
-backend/.wwebjs_auth/
-backend/.wwebjs_cache/
-
-# Build output
-dist/
 # ... outras regras existentes ...
-backend/.cache/
-.cache/
