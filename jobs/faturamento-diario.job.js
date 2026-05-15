@@ -191,49 +191,53 @@ function mapNfToRow(nf) {
 }
 
 // ─── Lógica principal ─────────────────────────────────────────────────────────
-export async function executarFaturamentoDiario() {
-  const ontem = new Date();
-  ontem.setDate(ontem.getDate() - 1);
-  const dataStr = ontem.toISOString().split('T')[0];
-  const startIssueDate = `${dataStr}T00:00:00`;
-  const endIssueDate = `${dataStr}T23:59:59`;
+// opts.datemin / opts.datemax — YYYY-MM-DD. Se omitidos, usa "ontem" (D-1, comportamento do cron).
+// Retorna: { ok, dateRange, totalUpserted, totalProcessed }
+export async function executarFaturamentoDiario(opts = {}) {
+  let dataMinStr, dataMaxStr;
+  if (opts.datemin && opts.datemax) {
+    dataMinStr = String(opts.datemin).slice(0, 10);
+    dataMaxStr = String(opts.datemax).slice(0, 10);
+  } else {
+    const ontem = new Date();
+    ontem.setDate(ontem.getDate() - 1);
+    dataMinStr = ontem.toISOString().split('T')[0];
+    dataMaxStr = dataMinStr;
+  }
+  const startIssueDate = `${dataMinStr}T00:00:00`;
+  const endIssueDate = `${dataMaxStr}T23:59:59`;
+  const isRange = dataMinStr !== dataMaxStr;
+  const label = isRange ? `${dataMinStr} → ${dataMaxStr}` : dataMinStr;
 
-  console.log(
-    `\n🕐 [faturamento-diario] Iniciando atualização para ${dataStr}`,
-  );
+  console.log(`\n🕐 [faturamento-diario] Iniciando atualização para ${label}`);
+
+  const result = { ok: false, dateRange: label, totalUpserted: 0, totalProcessed: 0 };
 
   try {
     // 1. Obter token
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      console.error(
-        '❌ [faturamento-diario] Não foi possível obter token TOTVS',
-      );
-      return;
+      console.error('❌ [faturamento-diario] Não foi possível obter token TOTVS');
+      return result;
     }
 
     // 2. Obter lista de filiais
     const branchCodeList = await getBranchCodes(tokenData.access_token);
-    console.log(
-      `🏢 [faturamento-diario] ${branchCodeList.length} filiais encontradas`,
-    );
+    console.log(`🏢 [faturamento-diario] ${branchCodeList.length} filiais encontradas`);
 
-    // 3. Buscar notas fiscais do dia anterior
+    // 3. Buscar notas fiscais
     const items = await fetchAllPages(
       branchCodeList,
       startIssueDate,
       endIssueDate,
       tokenData.access_token,
     );
-    console.log(
-      `📄 [faturamento-diario] ${items.length} notas fiscais obtidas`,
-    );
+    console.log(`📄 [faturamento-diario] ${items.length} notas fiscais obtidas`);
 
     if (items.length === 0) {
-      console.log(
-        'ℹ️ [faturamento-diario] Nenhuma nota fiscal encontrada para ontem',
-      );
-      return;
+      console.log(`ℹ️ [faturamento-diario] Nenhuma nota fiscal encontrada (${label})`);
+      result.ok = true;
+      return result;
     }
 
     // 4. Mapear e filtrar registros válidos
@@ -253,6 +257,7 @@ export async function executarFaturamentoDiario() {
     console.log(
       `📊 [faturamento-diario] ${rows.length} registros → ${uniqueRows.length} únicos (${rows.length - uniqueRows.length} duplicados)`,
     );
+    result.totalProcessed = uniqueRows.length;
 
     // 6. Upsert no banco em lotes
     let totalUpserted = 0;
@@ -261,8 +266,7 @@ export async function executarFaturamentoDiario() {
       const { error, count } = await supabaseFiscal
         .from('notas_fiscais')
         .upsert(batch, {
-          onConflict:
-            'branch_code,transaction_code,invoice_code,issue_date,total_value',
+          onConflict: 'branch_code,transaction_code,invoice_code,issue_date,total_value',
           count: 'exact',
         });
 
@@ -270,17 +274,18 @@ export async function executarFaturamentoDiario() {
         console.error(
           `❌ [faturamento-diario] Erro no upsert (lote ${Math.floor(i / BATCH_SIZE) + 1}): ${error.message}`,
         );
-        return;
+        return result;
       }
       totalUpserted += count ?? batch.length;
     }
+    result.totalUpserted = totalUpserted;
+    result.ok = true;
 
-    console.log(
-      `✅ [faturamento-diario] Concluído: ${totalUpserted} notas fiscais salvas para ${dataStr}\n`,
-    );
+    console.log(`✅ [faturamento-diario] Concluído: ${totalUpserted} notas fiscais salvas para ${label}\n`);
   } catch (err) {
     console.error(`❌ [faturamento-diario] Erro inesperado:`, err.message);
   }
+  return result;
 }
 
 // ─── Agendamento: todo dia às 1:30 AM (Brasília) ─────────────────────────────

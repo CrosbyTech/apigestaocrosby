@@ -3,5 +3,8 @@ node_modules/
 
 # Variáveis de ambiente
 .env
+
+# Uploads/mídia baixada pelo sync UAzapi
+uploads/
+
 # ... outras regras existentes ...
-.cache/

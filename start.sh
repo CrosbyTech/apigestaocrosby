@@ -53,7 +53,8 @@ fi
 echo "=== Iniciando aplicação ==="
 
 # Configurar memória do Node.js para 4GB
-export NODE_OPTIONS="--max-old-space-size=4096 --optimize-for-size --gc-interval=100"
+# Nota: --optimize-for-size e --gc-interval não são permitidos em NODE_OPTIONS no Node 24+
+export NODE_OPTIONS="--max-old-space-size=4096"
 
 # Iniciar aplicação
 node index.js

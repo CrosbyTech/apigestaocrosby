@@ -465,6 +465,311 @@ router.post(
 
 // =============================================================================
 // TOP CUSTOMERS via fiscal-movement/search
+// =============================================================================
+// POST /api/totvs/seller-panel/sellers-detalhado
+// Híbrido: combina /sale-panel/v2/sellers/search (lista de vendedoras + valor)
+// com /sale-panel/v2/totals/search (TM, PA, PMPV por vendedor via sellers filter).
+// Retorna { dataRow: [{ seller_code, seller_name, branch_code, branch_name,
+//   invoice_value, invoice_qty, itens_qty, tm, pa, pmpv }] }
+// Body: { branchs: number[], datemin, datemax, operations?: number[] }
+//
+// Por padrão, aplica filtro de operations VAREJO (venda direta ao consumidor):
+// só vendas atendidas pra cliente, excluindo transferências entre lojas,
+// remessas, devoluções etc.
+// =============================================================================
+// Operations de venda VAREJO ao cliente final (mesmo conjunto do OP_SEGMENTO_MAP
+// com canal='varejo' em crm.routes.js).
+const VAREJO_SALE_OPERATIONS = [
+  510, 511, 521, 522, 545, 546, 548,
+  9009, 9017, 9027, 9033,
+  9400, 9401, 9420, 9067, 9404,
+];
+
+// Mapa de nomes amigáveis das filiais varejo (alinha com VAREJO_STORE_MAP)
+const VAREJO_BRANCH_NAMES = {
+  2: { name: 'João Pessoa',     short: 'João Pessoa' },
+  5: { name: 'Nova Cruz',       short: 'Nova Cruz' },
+  55: { name: 'Parnamirim',     short: 'Parnamirim' },
+  65: { name: 'Canguaretama',   short: 'Canguaretama' },
+  87: { name: 'Cidade Jardim',  short: 'Cidade Jardim' },
+  88: { name: 'Guararapes',     short: 'Guararapes' },
+  90: { name: 'Ayrton Senna',   short: 'Ayrton Senna' },
+  93: { name: 'Imperatriz',     short: 'Imperatriz' },
+  94: { name: 'Patos',          short: 'Patos' },
+  95: { name: 'Midway',         short: 'Midway' },
+  97: { name: 'Teresina',       short: 'Teresina' },
+  98: { name: 'Shopping Recife', short: 'Recife' },
+};
+
+router.post(
+  '/seller-panel/sellers-detalhado',
+  asyncHandler(async (req, res) => {
+    const { branchs, datemin, datemax, operations } = req.body || {};
+    // Se operations não vier, usa o set padrão de venda varejo ao cliente
+    const opList = Array.isArray(operations) && operations.length > 0
+      ? operations.filter(Boolean)
+      : VAREJO_SALE_OPERATIONS;
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    let token = tokenData.access_token;
+
+    const branchList = Array.isArray(branchs) && branchs.length > 0 ? branchs.filter(Boolean) : [];
+    if (branchList.length === 0) {
+      return errorResponse(res, 'branchs obrigatório (array de códigos de filial)', 400);
+    }
+
+    const SELLERS_URL = `${TOTVS_BASE_URL}/sale-panel/v2/sellers/search`;
+    const TOTALS_URL  = `${TOTVS_BASE_URL}/sale-panel/v2/totals/search`;
+
+    const baseAxiosCfg = (t) => ({
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${t}` },
+      httpsAgent, httpAgent, timeout: 60000,
+    });
+
+    const fetchWithRetry = async (url, payload) => {
+      try {
+        const r = await axios.post(url, payload, baseAxiosCfg(token));
+        return r.data;
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const nt = await getToken(true); token = nt.access_token;
+          const r2 = await axios.post(url, payload, baseAxiosCfg(token));
+          return r2.data;
+        }
+        throw err;
+      }
+    };
+
+    // 1) Lista vendedores por filial (em lotes de 5) — filtrado por operations
+    const branchInfo = {}; // branch_code → { branch_name, sellers: [{code, name, qty, value}] }
+    const BATCH = 5;
+    for (let i = 0; i < branchList.length; i += BATCH) {
+      const slice = branchList.slice(i, i + BATCH);
+      const results = await Promise.all(
+        slice.map(async (bc) => {
+          try {
+            const d = await fetchWithRetry(SELLERS_URL, {
+              branchs: [bc],
+              datemin,
+              datemax,
+              operations: opList,
+            });
+            return { bc, dataRow: d?.dataRow || [], invoiceQuantity: d?.invoiceQuantity || 0, invoiceValue: d?.invoiceValue || 0, itemQuantity: d?.itemQuantity || 0 };
+          } catch (e) {
+            console.warn(`[sellers-detalhado] sellers filial ${bc} falhou: ${e.message}`);
+            return { bc, dataRow: [], invoiceQuantity: 0, invoiceValue: 0, itemQuantity: 0 };
+          }
+        }),
+      );
+      for (const r of results) {
+        branchInfo[r.bc] = {
+          dataRow: r.dataRow,
+          invoiceQuantity: r.invoiceQuantity,
+          invoiceValue: r.invoiceValue,
+          itemQuantity: r.itemQuantity,
+        };
+      }
+    }
+
+    // 2) Constrói mapa vendedor → branch dominante (maior valor)
+    const sellerMap = new Map();
+    for (const [bc, info] of Object.entries(branchInfo)) {
+      for (const s of info.dataRow) {
+        const key = s.seller_code;
+        const val = Number(s.seller_sale_value || 0);
+        if (!sellerMap.has(key)) {
+          sellerMap.set(key, {
+            seller_code: s.seller_code,
+            seller_name: s.seller_name,
+            branchAgg: {}, // branch_code → value
+          });
+        }
+        const cur = sellerMap.get(key);
+        cur.branchAgg[bc] = (cur.branchAgg[bc] || 0) + val;
+      }
+    }
+
+    if (sellerMap.size === 0) {
+      return successResponse(res, { dataRow: [], total_branches: branchList.length });
+    }
+
+    // 3) Chama /totals/search por vendedor (lotes de 10 em paralelo) — c/ operations
+    const sellerCodes = Array.from(sellerMap.keys());
+    const sellerTotals = new Map(); // code → totals
+    const PARALLEL = 10;
+    for (let i = 0; i < sellerCodes.length; i += PARALLEL) {
+      const chunk = sellerCodes.slice(i, i + PARALLEL);
+      const results = await Promise.all(
+        chunk.map(async (code) => {
+          try {
+            const d = await fetchWithRetry(TOTALS_URL, {
+              branchs: branchList,
+              datemin,
+              datemax,
+              sellers: [Number(code)],
+              operations: opList,
+            });
+            return { code, totals: d?.dataRow?.[0] || null };
+          } catch (e) {
+            return { code, totals: null, err: e.message };
+          }
+        }),
+      );
+      for (const r of results) {
+        sellerTotals.set(r.code, r.totals);
+      }
+    }
+
+    // 4) Combina tudo
+    const dataRow = [];
+    for (const [code, info] of sellerMap.entries()) {
+      const t = sellerTotals.get(code) || {};
+      const dom = Object.entries(info.branchAgg).sort(([, a], [, b]) => b - a)[0];
+      const dominantBranchCode = dom ? Number(dom[0]) : null;
+      const branchInfoLocal = dominantBranchCode ? VAREJO_BRANCH_NAMES[dominantBranchCode] : null;
+      dataRow.push({
+        seller_code: code,
+        seller_name: info.seller_name,
+        branch_code: dominantBranchCode,
+        branch_name: branchInfoLocal?.name || (dominantBranchCode ? `Filial ${dominantBranchCode}` : null),
+        branch_short: branchInfoLocal?.short || (dominantBranchCode ? `#${dominantBranchCode}` : null),
+        invoice_value: Number(t.invoice_value) || 0,
+        invoice_qty:   Number(t.invoice_qty)   || 0,
+        itens_qty:     Number(t.itens_qty)     || 0,
+        tm:   Number(t.tm)   || 0,
+        pa:   Number(t.pa)   || 0,
+        pmpv: Number(t.pmpv) || 0,
+        // Detalhamento por filial (útil pra entender em qual loja a vendedora vende mais)
+        branches_por_valor: info.branchAgg,
+      });
+    }
+
+    // Ordena por faturamento desc
+    dataRow.sort((a, b) => b.invoice_value - a.invoice_value);
+
+    // Totais agregados
+    const totalsAgg = Object.values(branchInfo).reduce(
+      (acc, b) => ({
+        invoiceValue: acc.invoiceValue + Number(b.invoiceValue || 0),
+        invoiceQuantity: acc.invoiceQuantity + Number(b.invoiceQuantity || 0),
+        itemQuantity: acc.itemQuantity + Number(b.itemQuantity || 0),
+      }),
+      { invoiceValue: 0, invoiceQuantity: 0, itemQuantity: 0 },
+    );
+
+    return successResponse(res, {
+      dataRow,
+      branches: Object.fromEntries(
+        Object.entries(branchInfo).map(([bc, info]) => [bc, {
+          invoiceQuantity: info.invoiceQuantity,
+          invoiceValue: info.invoiceValue,
+          itemQuantity: info.itemQuantity,
+        }]),
+      ),
+      totals: {
+        invoice_value: totalsAgg.invoiceValue,
+        invoice_qty: totalsAgg.invoiceQuantity,
+        itens_qty: totalsAgg.itemQuantity,
+        tm: totalsAgg.invoiceQuantity > 0 ? totalsAgg.invoiceValue / totalsAgg.invoiceQuantity : 0,
+        pa: totalsAgg.invoiceQuantity > 0 ? totalsAgg.itemQuantity / totalsAgg.invoiceQuantity : 0,
+        pmpv: totalsAgg.itemQuantity > 0 ? totalsAgg.invoiceValue / totalsAgg.itemQuantity : 0,
+      },
+    });
+  }),
+);
+
+// =============================================================================
+// POST /api/totvs/seller-panel/totals
+// Proxy direto pra TOTVS Analytics v2: /seller-panel/totals/search
+// Retorna faturamento agregado por vendedor (TM, PA, PMPV) já calculado.
+// Body: { branchs?: number[], datemin, datemax, operations?: number[] }
+//   branchs = [] ou [0] → todas as branches
+//   operations = [] ou [0] → todas as operações
+// =============================================================================
+router.post(
+  '/seller-panel/totals',
+  asyncHandler(async (req, res) => {
+    const { branchs, datemin, datemax, operations } = req.body || {};
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    let accessToken = tokenData.access_token;
+
+    // Branches: se vazio/0, busca todas
+    let branchList = Array.isArray(branchs) ? branchs.filter((b) => b && b !== 0) : [];
+    if (branchList.length === 0) {
+      try {
+        branchList = await getBranchCodes(accessToken);
+      } catch (e) {
+        // Fallback amplo
+        branchList = [
+          1, 2, 5, 6, 11, 50, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+          96, 97, 98, 99, 100, 101, 111, 200, 300, 351, 400, 500, 550, 600, 650,
+          700, 750, 800, 850, 870, 880, 890, 891, 900, 910, 920, 930, 940, 950,
+          960, 970, 980, 990,
+        ];
+      }
+    }
+
+    // Operations: passa apenas se veio (TOTVS lida com vazio)
+    const opList = Array.isArray(operations) ? operations.filter((o) => o && o !== 0) : [];
+
+    const endpoint = `${TOTVS_BASE_URL}/analytics/v2/seller-panel/totals/search`;
+
+    const doRequest = async (token, payload) =>
+      axios.post(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        httpsAgent,
+        httpAgent,
+        timeout: 180000,
+      });
+
+    const payload = {
+      branchs: branchList,
+      datemin,
+      datemax,
+      ...(opList.length > 0 ? { operations: opList } : {}),
+    };
+
+    try {
+      let response;
+      try {
+        response = await doRequest(accessToken, payload);
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const nt = await getToken(true);
+          accessToken = nt.access_token;
+          response = await doRequest(accessToken, payload);
+        } else {
+          throw err;
+        }
+      }
+      return successResponse(res, response.data, 'OK');
+    } catch (err) {
+      const detail = err.response?.data;
+      return errorResponse(
+        res,
+        `TOTVS seller-panel/totals: ${typeof detail === 'string' ? detail : err.message}`,
+        err.response?.status || 500,
+      );
+    }
+  }),
+);
+
 // POST /api/totvs/seller-panel/top-customers
 // Body: { branchs: number[], datemin, datemax, orderByQuantity, returnItensQuantity }
 // =============================================================================

@@ -5416,6 +5416,8 @@ router.post(
         supplierCodeList,
         duplicateCodeList,
         documentTypeList,
+        expenseCodeList,
+        filtroPagamento,
       } = req.body;
 
       if (!dt_inicio || !dt_fim) {
@@ -5648,6 +5650,31 @@ router.post(
           // Na verdade, o PrevisionType fica no installment, no nível do item do DuplicateOutModel
           // Vou usar o campo correto se existir. A API retorna itens com campos variados.
         }
+      }
+
+      // DEBUG: inspecionar expense dos primeiros itens
+      const debugSample = filteredItems.slice(0, 3);
+      console.log('🔬 DEBUG expenseCodeList recebido:', expenseCodeList);
+      console.log('🔬 DEBUG expense dos 3 primeiros itens:', JSON.stringify(debugSample.map((i) => ({ expense: i.expense, keys: Object.keys(i) })), null, 2).slice(0, 1500));
+
+      // Filtro por código de despesa (expenseCodeList) — aplicado antes do map para reduzir trabalho
+      if (expenseCodeList && Array.isArray(expenseCodeList) && expenseCodeList.length > 0) {
+        const codesSet = new Set(expenseCodeList.map((c) => parseInt(c)).filter((c) => !isNaN(c)));
+        filteredItems = filteredItems.filter((item) => {
+          if (!item.expense || item.expense.length === 0) return false;
+          return item.expense.some((exp) => codesSet.has(parseInt(exp.expenseCode)));
+        });
+        console.log(`🔍 Filtro expenseCodeList (${expenseCodeList.length} códigos): ${filteredItems.length} itens restantes`);
+      }
+
+      // Filtro de pagamento
+      if (filtroPagamento && filtroPagamento !== 'TODOS') {
+        if (filtroPagamento === 'PAGO') {
+          filteredItems = filteredItems.filter((item) => !!item.settlementDate);
+        } else if (filtroPagamento === 'NAO_PAGO') {
+          filteredItems = filteredItems.filter((item) => !item.settlementDate);
+        }
+        console.log(`🔍 Filtro filtroPagamento (${filtroPagamento}): ${filteredItems.length} itens restantes`);
       }
 
       // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)

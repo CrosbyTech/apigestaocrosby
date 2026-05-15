@@ -191,8 +191,13 @@ router.get(
     if (accErr || !account)
       return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
-    const start = Math.floor(new Date(startDate).getTime() / 1000);
-    const end = Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000);
+    // Janela em BRT (America/Sao_Paulo, UTC-3) pra bater com o range do TOTVS
+    const start = Math.floor(
+      new Date(`${startDate}T00:00:00-03:00`).getTime() / 1000,
+    );
+    const end = Math.floor(
+      new Date(`${endDate}T23:59:59-03:00`).getTime() / 1000,
+    );
 
     // template_analytics tem janela máxima de 90 dias
     const now = Math.floor(Date.now() / 1000);
@@ -356,8 +361,13 @@ router.get(
     if (accErr || !account)
       return errorResponse(res, 'Conta não encontrada', 404, 'NOT_FOUND');
 
-    const start = Math.floor(new Date(startDate).getTime() / 1000);
-    const end = Math.floor(new Date(endDate).getTime() / 1000);
+    // Janela em BRT (America/Sao_Paulo, UTC-3) pra bater com o range do TOTVS
+    const start = Math.floor(
+      new Date(`${startDate}T00:00:00-03:00`).getTime() / 1000,
+    );
+    const end = Math.floor(
+      new Date(`${endDate}T23:59:59-03:00`).getTime() / 1000,
+    );
 
     // Combinar analytics (sent/delivered) + pricing_analytics (volume/cost por categoria)
     // analytics usa granularity DAY, pricing_analytics usa DAILY
@@ -1606,10 +1616,32 @@ router.post(
     // Usa a moeda da primeira conta (assumindo todas iguais)
     const totalsCurrency = allResults[0]?.currency || 'BRL';
 
+    // ─── Agregação por canal_venda ───────────────────────────────────────
+    const byCanal = {};
+    for (const acc of allResults) {
+      const c = (acc.canal_venda || 'sem_canal').toLowerCase();
+      if (!byCanal[c]) {
+        byCanal[c] = {
+          canal: c,
+          spend: 0,
+          impressions: 0,
+          clicks: 0,
+          accounts_count: 0,
+          accounts: [],
+        };
+      }
+      byCanal[c].accounts_count++;
+      byCanal[c].spend += acc.spend || 0;
+      byCanal[c].impressions += acc.impressions || 0;
+      byCanal[c].clicks += acc.clicks || 0;
+      byCanal[c].accounts.push(acc.name);
+    }
+
     successResponse(res, {
       startDate,
       endDate,
       accounts: allResults,
+      by_canal: byCanal,
       totals: {
         spend: totalSpend,
         impressions: totalImpressions,
@@ -1626,7 +1658,16 @@ router.post(
 
 // POST /api/meta/conversation-costs
 // Body: { startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD", canal?: string }
-// Busca todos os números da tabela whatsapp_accounts e faz batch request à Graph API
+//
+// Busca custos de conversa/mensagens via Graph API v22 + pricing_analytics.
+// IMPORTANTE: o antigo /phone_id/conversation_analytics foi descontinuado.
+// O endpoint atual é /waba_id/pricing_analytics e retorna data_points com
+// volume + cost (em USD) por country/pricing_category/pricing_type.
+// Como uma WABA pode ter múltiplos phone_ids, dedupamos por WABA pra não
+// contar custo duplicado.
+const GRAPH_API_VERSION = 'v22.0';
+const COTACAO_DOLAR_FALLBACK = 5.8;
+
 router.post(
   '/conversation-costs',
   asyncHandler(async (req, res) => {
@@ -1640,15 +1681,23 @@ router.post(
       );
     }
 
-    const start = Math.floor(new Date(startDate).getTime() / 1000);
-    const end = Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000);
+    // Janela em BRT (America/Sao_Paulo, UTC-3) pra bater com o range do TOTVS
+    const start = Math.floor(
+      new Date(`${startDate}T00:00:00-03:00`).getTime() / 1000,
+    );
+    const end = Math.floor(
+      new Date(`${endDate}T23:59:59-03:00`).getTime() / 1000,
+    );
 
-    // Buscar contas do Supabase, filtrando por canal se informado
     let accountsQuery = supabase
       .from('whatsapp_accounts')
-      .select('id, name, waba_id, phone_id, nr_telefone, access_token')
+      .select('id, name, waba_id, phone_id, nr_telefone, access_token, canal_venda')
       .order('name');
-    // canal_venda ainda não existe na tabela — filtro desativado até migração
+
+    // Filtro opcional por canal
+    if (canal && typeof canal === 'string') {
+      accountsQuery = accountsQuery.eq('canal_venda', canal);
+    }
 
     const { data: accounts, error: accErr } = await accountsQuery;
 
@@ -1656,138 +1705,184 @@ router.post(
     if (!accounts || accounts.length === 0) {
       return successResponse(
         res,
-        { accounts: [], totals: { conversations: 0, cost: 0 } },
-        'Nenhuma conta encontrada para este canal',
+        { accounts: [], wabas: [], by_canal: {}, totals: { conversations: 0, cost: 0, costBRL: 0 } },
+        canal ? `Nenhuma conta para canal=${canal}` : 'Nenhuma conta encontrada',
       );
     }
 
-    // Agrupar contas por access_token para fazer uma única batch request por token
-    const tokenGroups = {};
+    // Dedupe por (access_token, waba_id) — uma chamada por WABA, não por phone
+    const wabaMap = new Map();
     for (const acc of accounts) {
-      if (!acc.access_token || !acc.phone_id) continue;
-      const token = acc.access_token;
-      if (!tokenGroups[token]) tokenGroups[token] = [];
-      tokenGroups[token].push(acc);
+      if (!acc.access_token || !acc.waba_id) continue;
+      const key = `${acc.access_token}|${acc.waba_id}`;
+      if (!wabaMap.has(key)) {
+        wabaMap.set(key, {
+          token: acc.access_token,
+          waba_id: acc.waba_id,
+          accounts: [],
+        });
+      }
+      wabaMap.get(key).accounts.push(acc);
     }
 
     const dimensions = encodeURIComponent(
-      JSON.stringify([
-        'PHONE',
-        'CONVERSATION_CATEGORY',
-        'CONVERSATION_TYPE',
-        'COUNTRY',
-      ]),
+      JSON.stringify(['COUNTRY', 'PRICING_CATEGORY', 'PRICING_TYPE']),
     );
-    const analyticsPath = (phoneId) =>
-      `${phoneId}/conversation_analytics?start=${start}&end=${end}&granularity=DAILY&dimensions=${dimensions}`;
+    const pricingTypes = encodeURIComponent(
+      JSON.stringify(['REGULAR', 'FREE_CUSTOMER_SERVICE', 'FREE_ENTRY_POINT']),
+    );
 
-    const allResults = [];
-
-    // Para cada grupo de token, montar batch request (máx 50 por lote)
-    for (const [token, accs] of Object.entries(tokenGroups)) {
-      const BATCH_SIZE = 50;
-      for (let i = 0; i < accs.length; i += BATCH_SIZE) {
-        const chunk = accs.slice(i, i + BATCH_SIZE);
-
-        const batchPayload = {
-          access_token: token,
-          batch: chunk.map((acc) => ({
-            method: 'GET',
-            relative_url: analyticsPath(acc.phone_id),
-          })),
-        };
-
-        let batchResponse;
-        try {
-          const resp = await fetch('https://graph.facebook.com/v19.0/', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(batchPayload),
-          });
-          batchResponse = await resp.json();
-        } catch (err) {
-          logger.error(`Erro batch conversation_analytics: ${err.message}`);
-          continue;
+    // Chama Graph API em paralelo para cada WABA única
+    const promises = [...wabaMap.values()].map(async (group) => {
+      const url =
+        `https://graph.facebook.com/${GRAPH_API_VERSION}/${group.waba_id}` +
+        `/pricing_analytics?start=${start}&end=${end}&granularity=DAILY` +
+        `&pricing_types=${pricingTypes}&dimensions=${dimensions}`;
+      try {
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${group.token}` },
+        });
+        const body = await resp.json();
+        if (body.error) {
+          return { group, error: body.error.message, data_points: [] };
         }
-
-        if (!Array.isArray(batchResponse)) continue;
-
-        for (let j = 0; j < batchResponse.length; j++) {
-          const acc = chunk[j];
-          const item = batchResponse[j];
-
-          if (!item || item.code !== 200) {
-            const errBody = item?.body ? JSON.parse(item.body) : {};
-            allResults.push({
-              accountId: acc.id,
-              name: acc.name,
-              phone_id: acc.phone_id,
-              nr_telefone: acc.nr_telefone,
-              canal_venda: acc.canal_venda || null,
-              error: errBody?.error?.message || `HTTP ${item?.code}`,
-              data_points: [],
-            });
-            continue;
+        // pricing_analytics retorna data: [{ data_points: [...] }] OU data: [...]
+        // Normalizamos pra um array de data_points
+        let dp = [];
+        if (Array.isArray(body?.data)) {
+          if (body.data[0]?.data_points) {
+            dp = body.data.flatMap((d) => d.data_points || []);
+          } else {
+            dp = body.data;
           }
-
-          const body = JSON.parse(item.body);
-          const dataPoints = body?.data?.[0]?.data_points || [];
-
-          // Agregar totais por conta
-          let totalConversations = 0;
-          let totalCost = 0;
-          const byCategory = {};
-
-          for (const point of dataPoints) {
-            const vol = Number(point.conversation || 0);
-            const cost = Number(point.cost || 0);
-            const cat = (
-              point.conversation_category || 'UNKNOWN'
-            ).toUpperCase();
-
-            totalConversations += vol;
-            totalCost += cost;
-
-            if (!byCategory[cat])
-              byCategory[cat] = { conversations: 0, cost: 0 };
-            byCategory[cat].conversations += vol;
-            byCategory[cat].cost += cost;
-          }
-
-          allResults.push({
-            accountId: acc.id,
-            name: acc.name,
-            phone_id: acc.phone_id,
-            nr_telefone: acc.nr_telefone,
-            canal_venda: acc.canal_venda || null,
-            totalConversations,
-            totalCost,
-            byCategory,
-            data_points: dataPoints,
-          });
         }
+        return { group, data_points: dp };
+      } catch (err) {
+        return { group, error: err.message, data_points: [] };
+      }
+    });
+
+    const wabaResults = await Promise.all(promises);
+
+    // Agrega por WABA
+    const wabas = [];
+    const accountsOut = [];
+
+    for (const { group, error, data_points } of wabaResults) {
+      let totalCost = 0;
+      let totalVolume = 0;
+      const byPricingCategory = {};
+      const byPricingType = {};
+
+      for (const p of data_points) {
+        const cost = Number(p.cost || 0);
+        const vol = Number(p.volume || 0);
+        totalCost += cost;
+        totalVolume += vol;
+        const cat = String(p.pricing_category || 'UNKNOWN').toUpperCase();
+        const typ = String(p.pricing_type || 'UNKNOWN').toUpperCase();
+        if (!byPricingCategory[cat]) byPricingCategory[cat] = { cost: 0, volume: 0 };
+        byPricingCategory[cat].cost += cost;
+        byPricingCategory[cat].volume += vol;
+        if (!byPricingType[typ]) byPricingType[typ] = { cost: 0, volume: 0 };
+        byPricingType[typ].cost += cost;
+        byPricingType[typ].volume += vol;
+      }
+
+      const firstAcc = group.accounts[0];
+      wabas.push({
+        waba_id: group.waba_id,
+        name: firstAcc?.name || group.waba_id,
+        phone_ids: group.accounts.map((a) => a.phone_id),
+        phones: group.accounts.map((a) => a.nr_telefone).filter(Boolean),
+        totalCost,
+        totalVolume,
+        totalCostBRL: totalCost * COTACAO_DOLAR_FALLBACK,
+        byPricingCategory,
+        byPricingType,
+        error: error || null,
+        data_points,
+      });
+
+      // Distribui (replicado) por conta — para compatibilidade com frontend antigo
+      for (const acc of group.accounts) {
+        accountsOut.push({
+          accountId: acc.id,
+          name: acc.name,
+          phone_id: acc.phone_id,
+          waba_id: acc.waba_id,
+          nr_telefone: acc.nr_telefone,
+          canal_venda: acc.canal_venda || null,
+          // ATENÇÃO: estes valores são do WABA inteiro, não do phone individual
+          // (Meta não disponibiliza mais granularidade por phone em pricing_analytics)
+          totalConversations: totalVolume, // alias legado
+          totalVolume,
+          totalCost,
+          totalCostBRL: totalCost * COTACAO_DOLAR_FALLBACK,
+          byCategory: byPricingCategory, // alias legado
+          byPricingCategory,
+          byPricingType,
+          error: error || null,
+          // _shared_with_waba: indica quantas linhas compartilham essa WABA
+          _shared_with_waba: group.accounts.length,
+        });
       }
     }
 
-    const grandTotalCost = allResults.reduce(
-      (s, r) => s + (r.totalCost || 0),
-      0,
-    );
-    const grandTotalConversations = allResults.reduce(
-      (s, r) => s + (r.totalConversations || 0),
-      0,
-    );
+    // ─── Agregação por canal_venda ───────────────────────────────────────
+    // Soma custos de WABAs únicas por canal. Se múltiplas contas no mesmo
+    // canal compartilharem WABA, conta apenas uma vez (dedupe por waba_id).
+    const byCanal = {};
+    const seenWabaInCanal = new Map(); // canal → Set<waba_id>
+    for (const acc of accountsOut) {
+      const c = acc.canal_venda || 'sem_canal';
+      if (!byCanal[c]) {
+        byCanal[c] = {
+          canal: c,
+          cost: 0,
+          costBRL: 0,
+          volume: 0,
+          wabas: [],
+          accounts_count: 0,
+        };
+        seenWabaInCanal.set(c, new Set());
+      }
+      byCanal[c].accounts_count++;
+      // Só conta o cost se ainda não vimos essa WABA neste canal
+      if (!seenWabaInCanal.get(c).has(acc.waba_id)) {
+        seenWabaInCanal.get(c).add(acc.waba_id);
+        byCanal[c].cost += acc.totalCost;
+        byCanal[c].costBRL += acc.totalCostBRL;
+        byCanal[c].volume += acc.totalVolume;
+        byCanal[c].wabas.push(acc.waba_id);
+      }
+    }
 
-    const COTACAO_DOLAR = 5.8;
+    // Total global — soma apenas wabas únicas (não duplica se houver
+    // múltiplos phones na mesma WABA)
+    const grandTotalCost = wabas.reduce((s, w) => s + w.totalCost, 0);
+    const grandTotalVolume = wabas.reduce((s, w) => s + w.totalVolume, 0);
 
-    successResponse(res, {
+    return successResponse(res, {
       startDate,
       endDate,
-      accounts: allResults,
+      accounts: accountsOut,
+      wabas,
+      by_canal: byCanal,
       totals: {
-        conversations: grandTotalConversations,
+        conversations: grandTotalVolume, // alias legado
+        volume: grandTotalVolume,
         cost: grandTotalCost,
-        costBRL: grandTotalCost * COTACAO_DOLAR,
+        costBRL: grandTotalCost * COTACAO_DOLAR_FALLBACK,
+        currency: 'USD',
+        cotacao: COTACAO_DOLAR_FALLBACK,
+      },
+      meta: {
+        graph_api_version: GRAPH_API_VERSION,
+        endpoint: 'pricing_analytics',
+        wabas_consultadas: wabas.length,
+        accounts_total: accounts.length,
+        canal_filter: canal || null,
       },
     });
   }),

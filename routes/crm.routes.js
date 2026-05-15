@@ -112,6 +112,44 @@ if (!ERP_CACHE.data) {
   }, 8000);
 }
 
+// Pré-aquece o cache do /canal-totals para os canais sem allowedSellers
+// (franquia/business/showroom/novidadesfranquia/bazar/ricardoeletro).
+// Roda 15s após o boot (depois do ERP_CACHE) e re-roda a cada 20min.
+// Garante que /faturamento-por-segmento tenha cache fresco e retorne líquido.
+function preWarmCanalTotalsCredev() {
+  const hoje = new Date();
+  const y = hoje.getUTCFullYear();
+  const m = String(hoje.getUTCMonth() + 1).padStart(2, '0');
+  const monthStart = `${y}-${m}-01`;
+  const lastDay = new Date(Date.UTC(y, hoje.getUTCMonth() + 1, 0)).getUTCDate();
+  const monthEnd = `${y}-${m}-${String(lastDay).padStart(2, '0')}`;
+  const today = hoje.toISOString().slice(0, 10);
+  const ontem = new Date(hoje); ontem.setUTCDate(ontem.getUTCDate() - 1);
+  const ontemIso = ontem.toISOString().slice(0, 10);
+
+  // Ranges úteis: mês inteiro, mês até hoje, mês até ontem (cobre Promessa Mensal,
+  // Faturamento Canal, Comparativo, Promessa Semanal — todas variações).
+  const ranges = [
+    [monthStart, today],
+    [monthStart, ontemIso],
+    [monthStart, monthEnd],
+  ];
+  const canais = ['franquia', 'business', 'showroom', 'novidadesfranquia', 'bazar', 'ricardoeletro'];
+
+  console.log(`🔥 [pre-warm canal-totals] Aquecendo ${canais.length} canais × ${ranges.length} ranges em BG...`);
+  for (const canal of canais) {
+    for (const [dmin, dmax] of ranges) {
+      // Fire-and-forget — não bloqueia
+      getCanalTotalsCached(canal, dmin, dmax).catch((e) =>
+        console.warn(`[pre-warm ${canal} ${dmin}~${dmax}]: ${e?.message}`),
+      );
+    }
+  }
+}
+// Roda 15s após boot (após ERP_CACHE setIled) e a cada 20min
+setTimeout(preWarmCanalTotalsCredev, 15000);
+setInterval(preWarmCanalTotalsCredev, 20 * 60 * 1000);
+
 // ─── Cache para ClickUp leads (TTL = 10 min) ─────────────────────────────────
 const LEADS_CACHE = new Map(); // key: "de|ate" → { data, ts }
 const LEADS_INFLIGHT = new Map(); // key → Promise pendente (evita race)
@@ -1430,6 +1468,1197 @@ router.post(
   }),
 );
 
+// ───────────────────────────────────────────────────────────────────────────
+// SELLER METAS (Performance) — metas mensais/semanais por vendedor
+//   GET  /api/crm/seller-metas?modulo=&period_type=&period_key=&seller_code=
+//   POST /api/crm/seller-metas         (admin only — header x-user-role)
+// ───────────────────────────────────────────────────────────────────────────
+router.get(
+  '/seller-metas',
+  asyncHandler(async (req, res) => {
+    const {
+      modulo,
+      period_type,
+      period_key,
+      seller_code,
+      meta_kind,
+      entity_type,
+    } = req.query;
+    let q = supabase
+      .from('crm_seller_metas')
+      .select('*')
+      .order('updated_at', { ascending: false });
+    if (modulo) q = q.eq('modulo', String(modulo).toLowerCase());
+    if (period_type) q = q.eq('period_type', String(period_type).toLowerCase());
+    if (period_key) q = q.eq('period_key', period_key);
+    if (seller_code) q = q.eq('seller_code', Number(seller_code));
+    if (meta_kind) q = q.eq('meta_kind', String(meta_kind).toLowerCase());
+    if (entity_type) q = q.eq('entity_type', String(entity_type).toLowerCase());
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { metas: data || [] });
+  }),
+);
+
+router.post(
+  '/seller-metas',
+  asyncHandler(async (req, res) => {
+    // Auth: só admin pode editar
+    const userRole = String(
+      req.headers['x-user-role'] || req.body?.user_role || '',
+    ).toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(
+        res,
+        'Apenas administradores podem editar metas',
+        403,
+        'FORBIDDEN',
+      );
+    }
+
+    const {
+      seller_code,
+      seller_name,
+      modulo,
+      period_type,
+      period_key,
+      valor_meta,
+      meta_kind,
+      entity_type,
+      user_login,
+    } = req.body || {};
+
+    if (
+      !seller_code ||
+      !modulo ||
+      !period_type ||
+      !period_key ||
+      valor_meta == null
+    ) {
+      return errorResponse(
+        res,
+        'seller_code, modulo, period_type, period_key e valor_meta obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    if (!['mensal', 'semanal'].includes(String(period_type).toLowerCase())) {
+      return errorResponse(
+        res,
+        'period_type deve ser "mensal" ou "semanal"',
+        400,
+        'INVALID_PARAM',
+      );
+    }
+    const kind = String(meta_kind || 'faturamento').toLowerCase();
+    if (!['faturamento', 'aberturas', 'reativacoes'].includes(kind)) {
+      return errorResponse(
+        res,
+        'meta_kind deve ser "faturamento", "aberturas" ou "reativacoes"',
+        400,
+        'INVALID_PARAM',
+      );
+    }
+
+    const eType = String(entity_type || 'seller').toLowerCase();
+    if (!['seller', 'branch'].includes(eType)) {
+      return errorResponse(
+        res,
+        'entity_type deve ser "seller" ou "branch"',
+        400,
+        'INVALID_PARAM',
+      );
+    }
+    const row = {
+      seller_code: Number(seller_code),
+      seller_name: seller_name || null,
+      modulo: String(modulo).toLowerCase(),
+      entity_type: eType,
+      meta_kind: kind,
+      period_type: String(period_type).toLowerCase(),
+      period_key: String(period_key),
+      valor_meta: Number(valor_meta),
+      updated_at: new Date().toISOString(),
+      updated_by: user_login || req.headers['x-user-login'] || null,
+    };
+
+    // Upsert: insere ou atualiza pela combinação única
+    const { data, error } = await supabase
+      .from('crm_seller_metas')
+      .upsert(row, {
+        onConflict: 'entity_type,seller_code,modulo,meta_kind,period_type,period_key',
+      })
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, data, 'Meta salva');
+  }),
+);
+
+router.delete(
+  '/seller-metas/:id',
+  asyncHandler(async (req, res) => {
+    const userRole = String(
+      req.headers['x-user-role'] || '',
+    ).toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+    const { error } = await supabase
+      .from('crm_seller_metas')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { deleted: true }, 'Meta removida');
+  }),
+);
+
+// ───────────────────────────────────────────────────────────────────────────
+// CANAL METAS (Forecast) — metas mensais/semanais por canal
+//   GET  /api/crm/canal-metas?canal=&period_type=&period_key=
+//   POST /api/crm/canal-metas         (admin only — header x-user-role)
+//   DEL  /api/crm/canal-metas/:id
+// ───────────────────────────────────────────────────────────────────────────
+router.get(
+  '/canal-metas',
+  asyncHandler(async (req, res) => {
+    const { canal, period_type, period_key } = req.query;
+    let q = supabase
+      .from('forecast_canal_metas')
+      .select('*')
+      .order('updated_at', { ascending: false });
+    if (canal) q = q.eq('canal', String(canal).toLowerCase());
+    if (period_type) q = q.eq('period_type', String(period_type).toLowerCase());
+    if (period_key) q = q.eq('period_key', period_key);
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { metas: data || [] });
+  }),
+);
+
+router.post(
+  '/canal-metas',
+  asyncHandler(async (req, res) => {
+    const userRole = String(
+      req.headers['x-user-role'] || req.body?.user_role || '',
+    ).toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(
+        res,
+        'Apenas administradores podem editar metas',
+        403,
+        'FORBIDDEN',
+      );
+    }
+
+    const {
+      canal,
+      period_type,
+      period_key,
+      valor_meta,
+      justificativa,
+      user_login,
+    } = req.body || {};
+
+    if (!canal || !period_type || !period_key || valor_meta == null) {
+      return errorResponse(
+        res,
+        'canal, period_type, period_key e valor_meta obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    if (!['mensal', 'semanal'].includes(String(period_type).toLowerCase())) {
+      return errorResponse(
+        res,
+        'period_type deve ser "mensal" ou "semanal"',
+        400,
+        'INVALID_PARAM',
+      );
+    }
+
+    const row = {
+      canal: String(canal).toLowerCase(),
+      period_type: String(period_type).toLowerCase(),
+      period_key: String(period_key),
+      valor_meta: Number(valor_meta),
+      // justificativa pode vir vazia/null (limpa a anterior) ou texto
+      justificativa:
+        justificativa == null || justificativa === ''
+          ? null
+          : String(justificativa).slice(0, 1000),
+      updated_at: new Date().toISOString(),
+      updated_by: user_login || req.headers['x-user-login'] || null,
+    };
+
+    // Busca valor anterior pra gerar log de alteração
+    const { data: anterior } = await supabase
+      .from('forecast_canal_metas')
+      .select('valor_meta, justificativa')
+      .eq('canal', row.canal)
+      .eq('period_type', row.period_type)
+      .eq('period_key', row.period_key)
+      .maybeSingle();
+
+    const { data, error } = await supabase
+      .from('forecast_canal_metas')
+      .upsert(row, { onConflict: 'canal,period_type,period_key' })
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+
+    // Grava log se houve mudança (best effort — não bloqueia se falhar)
+    try {
+      const valorAnt = anterior ? Number(anterior.valor_meta) : null;
+      const justAnt = anterior?.justificativa || null;
+      const mudouValor = anterior == null || valorAnt !== row.valor_meta;
+      const mudouJustif = (justAnt || null) !== (row.justificativa || null);
+      if (mudouValor || mudouJustif) {
+        await supabase.from('forecast_canal_metas_log').insert({
+          canal: row.canal,
+          period_type: row.period_type,
+          period_key: row.period_key,
+          acao: anterior == null ? 'create' : 'update',
+          valor_meta_anterior: valorAnt,
+          valor_meta_novo: row.valor_meta,
+          justificativa_anterior: justAnt,
+          justificativa_nova: row.justificativa,
+          alterado_por: row.updated_by,
+          user_role: userRole,
+          ip_origem:
+            req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+            req.socket?.remoteAddress ||
+            null,
+        });
+      }
+    } catch (logErr) {
+      console.warn('[canal-metas/log] falha ao gravar log:', logErr.message);
+    }
+
+    return successResponse(res, data, 'Meta salva');
+  }),
+);
+
+// GET /api/crm/canal-metas-log?canal=&period_type=&period_key=&limit=
+// Histórico de alterações de metas
+router.get(
+  '/canal-metas-log',
+  asyncHandler(async (req, res) => {
+    const { canal, period_type, period_key } = req.query;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
+    let q = supabase
+      .from('forecast_canal_metas_log')
+      .select('*')
+      .order('alterado_em', { ascending: false })
+      .limit(limit);
+    if (canal) q = q.eq('canal', String(canal).toLowerCase());
+    if (period_type) q = q.eq('period_type', String(period_type).toLowerCase());
+    if (period_key) q = q.eq('period_key', String(period_key));
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { logs: data || [] });
+  }),
+);
+
+router.delete(
+  '/canal-metas/:id',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+    // Busca pra logar antes de deletar
+    const { data: anterior } = await supabase
+      .from('forecast_canal_metas')
+      .select('canal, period_type, period_key, valor_meta, justificativa')
+      .eq('id', req.params.id)
+      .maybeSingle();
+
+    const { error } = await supabase
+      .from('forecast_canal_metas')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+
+    if (anterior) {
+      try {
+        await supabase.from('forecast_canal_metas_log').insert({
+          canal: anterior.canal,
+          period_type: anterior.period_type,
+          period_key: anterior.period_key,
+          acao: 'delete',
+          valor_meta_anterior: Number(anterior.valor_meta || 0),
+          valor_meta_novo: null,
+          justificativa_anterior: anterior.justificativa || null,
+          justificativa_nova: null,
+          alterado_por: req.headers['x-user-login'] || null,
+          user_role: userRole,
+        });
+      } catch (logErr) {
+        console.warn('[canal-metas/log delete] falha:', logErr.message);
+      }
+    }
+    return successResponse(res, { deleted: true }, 'Meta removida');
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════════════
+// CRM VAREJO — AVISOS (Reunião semanal)
+// ═══════════════════════════════════════════════════════════════════════
+
+// GET /api/crm/varejo/avisos?ativo=true&ano=&semana=&limit=
+router.get(
+  '/varejo/avisos',
+  asyncHandler(async (req, res) => {
+    const ativo = req.query.ativo === undefined ? true : req.query.ativo === 'true';
+    const ano = parseInt(req.query.ano, 10);
+    const semana = parseInt(req.query.semana, 10);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+
+    let q = supabase
+      .from('crm_varejo_avisos')
+      .select('*')
+      .order('criado_em', { ascending: false })
+      .limit(limit);
+    if (ativo !== null) q = q.eq('ativo', ativo);
+    if (ano) q = q.eq('ano', ano);
+    if (semana) q = q.eq('semana_iso', semana);
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    // Filtrar os expirados (best effort no client tb, mas reforça aqui)
+    const hoje = new Date().toISOString().slice(0, 10);
+    const lista = (data || []).filter((a) => !a.expira_em || a.expira_em >= hoje);
+    return successResponse(res, { avisos: lista });
+  }),
+);
+
+// POST /api/crm/varejo/avisos
+router.post(
+  '/varejo/avisos',
+  asyncHandler(async (req, res) => {
+    const {
+      titulo,
+      conteudo,
+      prioridade = 'normal',
+      ano,
+      semana_iso,
+      expira_em,
+    } = req.body || {};
+    if (!titulo || !conteudo) {
+      return errorResponse(res, 'titulo e conteudo obrigatórios', 400);
+    }
+    if (!['normal', 'alta', 'urgente'].includes(String(prioridade))) {
+      return errorResponse(res, 'prioridade inválida (normal|alta|urgente)', 400);
+    }
+    const payload = {
+      titulo: String(titulo).trim().slice(0, 200),
+      conteudo: String(conteudo).trim(),
+      prioridade,
+      ano: ano ? Number(ano) : null,
+      semana_iso: semana_iso ? Number(semana_iso) : null,
+      expira_em: expira_em || null,
+      criado_por: req.headers['x-user-login'] || req.headers['x-user'] || null,
+    };
+    const { data, error } = await supabase
+      .from('crm_varejo_avisos')
+      .insert(payload)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 400);
+    return successResponse(res, data, 'Aviso criado');
+  }),
+);
+
+// PATCH /api/crm/varejo/avisos/:id
+router.patch(
+  '/varejo/avisos/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const patch = {};
+    for (const f of ['titulo', 'conteudo', 'prioridade', 'ano', 'semana_iso', 'expira_em', 'ativo']) {
+      if (req.body?.[f] !== undefined) patch[f] = req.body[f];
+    }
+    patch.atualizado_em = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('crm_varejo_avisos')
+      .update(patch)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 400);
+    return successResponse(res, data, 'Aviso atualizado');
+  }),
+);
+
+// DELETE /api/crm/varejo/avisos/:id  (hard delete)
+router.delete(
+  '/varejo/avisos/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const { error } = await supabase.from('crm_varejo_avisos').delete().eq('id', id);
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { ok: true }, 'Aviso removido');
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════════════
+// CRM VAREJO — COMPETIÇÕES ENTRE LOJAS
+//   GET  /api/crm/varejo/competicoes?status=ativa
+//   GET  /api/crm/varejo/competicoes/:id          (com faturamento ao vivo)
+//   POST /api/crm/varejo/competicoes              (admin)
+//   PATCH /api/crm/varejo/competicoes/:id         (admin — encerrar/cancelar/editar)
+//   DELETE /api/crm/varejo/competicoes/:id        (admin)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Mapa estático de nomes das lojas varejo (mirror do frontend)
+// Fallback quando o TOTVS não retorna nada (período sem NFs).
+const VAREJO_BRANCHES_MAP = {
+  2: 'CROSBY JOAO PESSOA',
+  5: 'CROSBY NOVA CRUZ',
+  55: 'CROSBY PARNAMIRIM',
+  65: 'CROSBY CANGUARETAMA',
+  87: 'CROSBY SHOPPING CIDADE JARDIM',
+  88: 'CROSBY SHOPPING GUARARAPES',
+  90: 'CROSBY AYRTON SENNA',
+  93: 'CROSBY IMPERATRIZ',
+  94: 'CROSBY SHOPPING PATOS',
+  95: 'CROSBY SHOPPING MIDWAY',
+  97: 'CROSBY SHOPPING TERESINA',
+  98: 'CROSBY SHOPPING RECIFE',
+};
+
+// Mapa de lojas com TODOS os branch_codes históricos.
+// Algumas lojas mudaram de código quando deixaram de ser franquia (6xxx)
+// e passaram a ser loja própria. Pra comparar com o ano anterior, somamos
+// faturamento em TODOS os codes da loja (atual + legados).
+const VAREJO_STORE_MAP = {
+  2:  { name: 'João Pessoa',      shortName: 'João Pessoa',  uf: 'PB', type: 'rua',      codes: [2] },
+  5:  { name: 'Nova Cruz',        shortName: 'Nova Cruz',    uf: 'RN', type: 'rua',      codes: [5] },
+  55: { name: 'Parnamirim',       shortName: 'Parnamirim',   uf: 'RN', type: 'rua',      codes: [55, 6030] },
+  65: { name: 'Canguaretama',     shortName: 'Canguaretama', uf: 'RN', type: 'rua',      codes: [65, 6062] },
+  87: { name: 'Cidade Jardim',    shortName: 'Cidade Jardim',uf: 'PE', type: 'shopping', codes: [87, 6156] },
+  88: { name: 'Guararapes',       shortName: 'Guararapes',   uf: 'PE', type: 'shopping', codes: [88, 6114] },
+  90: { name: 'Ayrton Senna',     shortName: 'Ayrton Senna', uf: 'RN', type: 'rua',      codes: [90, 6152] },
+  93: { name: 'Imperatriz',       shortName: 'Imperatriz',   uf: 'MA', type: 'rua',      codes: [93, 6014] },
+  94: { name: 'Patos',            shortName: 'Patos',        uf: 'PB', type: 'shopping', codes: [94, 6144] },
+  95: { name: 'Midway',           shortName: 'Midway',       uf: 'RN', type: 'shopping', codes: [95] },
+  97: { name: 'Teresina',         shortName: 'Teresina',     uf: 'PI', type: 'shopping', codes: [97, 6038] },
+  98: { name: 'Shopping Recife',  shortName: 'Shopping Recife', uf: 'PE', type: 'shopping', codes: [98] },
+};
+
+// Helper: dado um array de branch_codes + range de datas, retorna faturamento
+// por filial usando MESMO fonte do Ranking de Faturamento.
+async function fetchCompetitionRanking(branchCodes, datemin, datemax) {
+  const tokenData = await getToken();
+  const accessToken = tokenData?.access_token;
+  if (!accessToken) throw new Error('Token TOTVS indisponível');
+
+  const totvsData = await fetchBranchTotalsFromTotvs({
+    initialToken: accessToken,
+    branchs: branchCodes,
+    datemin,
+    datemax,
+    refreshToken: async () => {
+      const d = await getToken(true);
+      return d.access_token;
+    },
+    logTag: 'CRM/Competicao',
+  });
+
+  const rows = Array.isArray(totvsData.dataRow) ? totvsData.dataRow : [];
+  const byBranch = new Map();
+  // Garante entrada para todas as branches solicitadas (mesmo as sem faturamento)
+  // Já popula com nome do mapa estático (fallback se TOTVS não retornar nada).
+  for (const bc of branchCodes) {
+    const code = Number(bc);
+    byBranch.set(code, {
+      branch_code: code,
+      branch_name: VAREJO_BRANCHES_MAP[code] || `Filial ${code}`,
+      invoice_value: 0,
+      invoice_qty: 0,
+      itens_qty: 0,
+    });
+  }
+  for (const row of rows) {
+    const bc = Number(row.branch_code ?? row.branch ?? row.branchCode ?? 0);
+    if (!byBranch.has(bc)) continue;
+    const cur = byBranch.get(bc);
+    // Sobrescreve com nome do TOTVS se vier (mais autoritativo)
+    if (row.branch_name || row.branchName) {
+      cur.branch_name = row.branch_name || row.branchName;
+    }
+    cur.invoice_value += Number(row.invoice_value || 0);
+    cur.invoice_qty += Number(row.invoice_qty || 0);
+    cur.itens_qty += Number(row.itens_qty || 0);
+  }
+
+  const ranking = [...byBranch.values()]
+    .sort((a, b) => b.invoice_value - a.invoice_value)
+    .map((r, idx) => ({ ...r, posicao: idx + 1 }));
+
+  return ranking;
+}
+
+router.get(
+  '/varejo/competicoes',
+  asyncHandler(async (req, res) => {
+    const { status, includeRanking } = req.query;
+    let q = supabase
+      .from('crm_varejo_competicoes')
+      .select('*')
+      .order('data_inicio', { ascending: false });
+    if (status) q = q.eq('status', String(status).toLowerCase());
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+
+    // Opcional: anexa ranking ao vivo das ativas (limitado pra não pesar muito)
+    let competicoes = data || [];
+    if (includeRanking === 'true' || includeRanking === '1') {
+      competicoes = await Promise.all(
+        competicoes.map(async (comp) => {
+          if (comp.status !== 'ativa') return comp;
+          try {
+            const ranking = await fetchCompetitionRanking(
+              comp.branch_codes,
+              comp.data_inicio,
+              comp.data_fim,
+            );
+            return { ...comp, ranking };
+          } catch (err) {
+            return { ...comp, ranking_error: err.message };
+          }
+        }),
+      );
+    }
+    return successResponse(res, { competicoes });
+  }),
+);
+
+router.get(
+  '/varejo/competicoes/:id',
+  asyncHandler(async (req, res) => {
+    const { data: comp, error } = await supabase
+      .from('crm_varejo_competicoes')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (error) return errorResponse(res, error.message, 404, 'NOT_FOUND');
+
+    // Pra encerradas: usa ranking_final salvo (snapshot imutável)
+    // Pra ativas/canceladas: busca ao vivo do TOTVS
+    let ranking;
+    if (comp.status === 'encerrada' && comp.ranking_final) {
+      ranking = comp.ranking_final;
+    } else {
+      try {
+        ranking = await fetchCompetitionRanking(
+          comp.branch_codes,
+          comp.data_inicio,
+          comp.data_fim,
+        );
+      } catch (err) {
+        ranking = [];
+        comp.ranking_error = err.message;
+      }
+    }
+
+    return successResponse(res, { ...comp, ranking });
+  }),
+);
+
+router.post(
+  '/varejo/competicoes',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+
+    const {
+      nome,
+      descricao,
+      premiacao,
+      data_inicio,
+      data_fim,
+      duracao_preset,
+      branch_codes,
+      meta_tipo,
+      meta_valor,
+      user_login,
+    } = req.body || {};
+
+    if (!nome || !data_inicio || !data_fim || !Array.isArray(branch_codes)) {
+      return errorResponse(
+        res,
+        'nome, data_inicio, data_fim e branch_codes obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    if (branch_codes.length < 2) {
+      return errorResponse(
+        res,
+        'Competição precisa ao menos 2 lojas',
+        400,
+        'INVALID_PARAM',
+      );
+    }
+    if (new Date(data_fim) < new Date(data_inicio)) {
+      return errorResponse(
+        res,
+        'data_fim deve ser >= data_inicio',
+        400,
+        'INVALID_PARAM',
+      );
+    }
+
+    const row = {
+      nome: String(nome).slice(0, 200),
+      descricao: descricao ? String(descricao).slice(0, 1000) : null,
+      premiacao: premiacao ? String(premiacao).slice(0, 200) : null,
+      data_inicio,
+      data_fim,
+      duracao_preset: duracao_preset || 'custom',
+      branch_codes: branch_codes.map(Number).filter((n) => !isNaN(n)),
+      meta_tipo: String(meta_tipo || 'faturamento').toLowerCase(),
+      meta_valor: meta_valor != null ? Number(meta_valor) : null,
+      status: 'ativa',
+      criado_por: user_login || req.headers['x-user-login'] || 'desconhecido',
+    };
+
+    const { data, error } = await supabase
+      .from('crm_varejo_competicoes')
+      .insert(row)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, data, 'Competição criada');
+  }),
+);
+
+router.patch(
+  '/varejo/competicoes/:id',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+
+    const { acao, ...patch } = req.body || {};
+    // Ações especiais:
+    //   "encerrar" — calcula ranking final + define vencedor + status=encerrada
+    //   "cancelar" — status=cancelada
+    //   default — patch direto dos campos enviados
+    if (acao === 'encerrar') {
+      const { data: comp } = await supabase
+        .from('crm_varejo_competicoes')
+        .select('*')
+        .eq('id', req.params.id)
+        .single();
+      if (!comp) return errorResponse(res, 'Não encontrada', 404, 'NOT_FOUND');
+      let ranking;
+      try {
+        ranking = await fetchCompetitionRanking(
+          comp.branch_codes,
+          comp.data_inicio,
+          comp.data_fim,
+        );
+      } catch (err) {
+        return errorResponse(
+          res,
+          `Erro ao calcular ranking final: ${err.message}`,
+          500,
+          'RANKING_ERROR',
+        );
+      }
+      const vencedor = ranking[0] || null;
+      const update = {
+        status: 'encerrada',
+        ranking_final: ranking,
+        vencedor_branch: vencedor?.branch_code || null,
+        vencedor_valor: vencedor?.invoice_value || null,
+        encerrada_em: new Date().toISOString(),
+        encerrada_por:
+          req.body?.user_login || req.headers['x-user-login'] || 'admin',
+        updated_at: new Date().toISOString(),
+      };
+      const { data, error } = await supabase
+        .from('crm_varejo_competicoes')
+        .update(update)
+        .eq('id', req.params.id)
+        .select()
+        .single();
+      if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+      return successResponse(res, data, 'Competição encerrada');
+    }
+
+    if (acao === 'cancelar') {
+      const { data, error } = await supabase
+        .from('crm_varejo_competicoes')
+        .update({ status: 'cancelada', updated_at: new Date().toISOString() })
+        .eq('id', req.params.id)
+        .select()
+        .single();
+      if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+      return successResponse(res, data, 'Competição cancelada');
+    }
+
+    // Patch genérico
+    const allowed = [
+      'nome',
+      'descricao',
+      'premiacao',
+      'data_inicio',
+      'data_fim',
+      'branch_codes',
+      'meta_tipo',
+      'meta_valor',
+    ];
+    const update = {};
+    for (const k of allowed) {
+      if (patch[k] !== undefined) update[k] = patch[k];
+    }
+    if (Object.keys(update).length === 0) {
+      return errorResponse(res, 'Nada pra atualizar', 400, 'EMPTY_PATCH');
+    }
+    update.updated_at = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('crm_varejo_competicoes')
+      .update(update)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, data, 'Competição atualizada');
+  }),
+);
+
+router.delete(
+  '/varejo/competicoes/:id',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+    const { error } = await supabase
+      .from('crm_varejo_competicoes')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { deleted: true }, 'Competição removida');
+  }),
+);
+
+// ─── /api/crm/varejo/metas-reuniao ────────────────────────────────────
+// Retorna metas mensais (Bronze/Prata/Ouro/Diamante) por loja + faturamento
+// real do mês + nível alcançado.
+// Body: { mes: 'YYYY-MM' } (default: mês atual)
+router.post(
+  '/varejo/metas-reuniao',
+  asyncHandler(async (req, res) => {
+    const { mes } = req.body || {};
+    const targetMes =
+      mes ||
+      new Date().toLocaleDateString('en-CA', {
+        year: 'numeric',
+        month: '2-digit',
+      }).slice(0, 7); // YYYY-MM atual
+
+    // 1) Busca metas mensais calculadas do mês (tipo=lojas)
+    const { data: metasRows, error: metasErr } = await supabase
+      .from('metas_mensais_calculadas')
+      .select('*')
+      .eq('tipo', 'lojas')
+      .eq('mes', targetMes);
+    if (metasErr) return errorResponse(res, metasErr.message, 500, 'DB_ERROR');
+
+    // 2) Calcula datemin/datemax do mês alvo
+    const [ano, mm] = targetMes.split('-').map(Number);
+    const firstDay = `${targetMes}-01`;
+    const lastDate = new Date(ano, mm, 0); // último dia do mês
+    const today = new Date();
+    // Se o mês ainda não terminou, usa hoje como limite
+    const lastDay =
+      lastDate > today
+        ? today.toISOString().split('T')[0]
+        : lastDate.toISOString().split('T')[0];
+
+    // 3) Busca faturamento das lojas varejo no mês (TODAS as 12 do MAP)
+    const allCodes = Object.keys(VAREJO_STORE_MAP).map(Number);
+    const tokenData = await getToken();
+    const accessToken = tokenData?.access_token;
+    if (!accessToken) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
+    }
+    let fatData;
+    try {
+      fatData = await fetchBranchTotalsFromTotvs({
+        initialToken: accessToken,
+        branchs: allCodes,
+        datemin: firstDay,
+        datemax: lastDay,
+        refreshToken: async () => (await getToken(true)).access_token,
+        logTag: 'metas-reuniao',
+      });
+    } catch (err) {
+      return errorResponse(res, err.message, 500, 'TOTVS_ERROR');
+    }
+
+    // 4) Mapa nome (uppercase) → metas {bronze, prata, ouro, diamante}
+    const metasPorNome = new Map();
+    for (const row of metasRows || []) {
+      const key = String(row.nome || '').toUpperCase().trim();
+      metasPorNome.set(key, {
+        bronze: Number(row.bronze || 0),
+        prata: Number(row.prata || 0),
+        ouro: Number(row.ouro || 0),
+        diamante: Number(row.diamante || 0),
+        usuario: row.usuario,
+        calculado_em: row.calculado_em,
+      });
+    }
+
+    // 5) Mapa branch_code → faturamento
+    const fatPorCode = new Map();
+    for (const row of fatData?.dataRow || []) {
+      const code = Number(row.branch_code ?? row.branch ?? 0);
+      if (!fatPorCode.has(code)) {
+        fatPorCode.set(code, {
+          invoice_value: 0,
+          invoice_qty: 0,
+        });
+      }
+      const cur = fatPorCode.get(code);
+      cur.invoice_value += Number(row.invoice_value || 0);
+      cur.invoice_qty += Number(row.invoice_qty || 0);
+    }
+
+    // 6) Cruza por loja
+    function levelAlcancado(fat, metas) {
+      // Define qual nível foi alcançado (maior meta ≤ faturamento, com meta > 0)
+      const niveis = ['diamante', 'ouro', 'prata', 'bronze'];
+      for (const nivel of niveis) {
+        const valor = metas[nivel];
+        if (valor > 0 && fat >= valor) return nivel;
+      }
+      return null;
+    }
+    function proximoNivel(fat, metas) {
+      // Próximo nível que ainda falta
+      const niveis = ['bronze', 'prata', 'ouro', 'diamante'];
+      for (const nivel of niveis) {
+        if (metas[nivel] > 0 && fat < metas[nivel]) {
+          return { nivel, valor: metas[nivel], falta: metas[nivel] - fat };
+        }
+      }
+      return null; // bateu tudo
+    }
+
+    const lojas = [];
+    for (const [storeId, store] of Object.entries(VAREJO_STORE_MAP)) {
+      const code = Number(storeId);
+      const nomeKey = (VAREJO_BRANCHES_MAP[code] || '').toUpperCase().trim();
+      const metas = metasPorNome.get(nomeKey) || {
+        bronze: 0,
+        prata: 0,
+        ouro: 0,
+        diamante: 0,
+      };
+      const fat = fatPorCode.get(code) || { invoice_value: 0, invoice_qty: 0 };
+      const fatVal = fat.invoice_value;
+      const temMeta =
+        metas.bronze > 0 || metas.prata > 0 || metas.ouro > 0 || metas.diamante > 0;
+      const nivel = levelAlcancado(fatVal, metas);
+      const prox = proximoNivel(fatVal, metas);
+      const pctSobreMaiorMeta =
+        metas.diamante > 0 ? (fatVal / metas.diamante) * 100 : null;
+
+      lojas.push({
+        store_id: code,
+        name: store.name,
+        shortName: store.shortName,
+        uf: store.uf,
+        type: store.type,
+        faturamento: fatVal,
+        invoice_qty: fat.invoice_qty,
+        metas,
+        tem_meta: temMeta,
+        nivel_alcancado: nivel,
+        proximo_nivel: prox,
+        pct_diamante: pctSobreMaiorMeta,
+        usuario_meta: metas.usuario || null,
+        calculado_em: metas.calculado_em || null,
+      });
+    }
+
+    // Ordena: por nível alcançado (diamante > ouro > prata > bronze > nenhum)
+    const nivelOrder = { diamante: 4, ouro: 3, prata: 2, bronze: 1, null: 0 };
+    lojas.sort((a, b) => {
+      const av = nivelOrder[a.nivel_alcancado] ?? 0;
+      const bv = nivelOrder[b.nivel_alcancado] ?? 0;
+      if (bv !== av) return bv - av;
+      return b.faturamento - a.faturamento;
+    });
+
+    // Totais
+    const total_fat = lojas.reduce((s, l) => s + l.faturamento, 0);
+    const total_metas = {
+      bronze: lojas.reduce((s, l) => s + l.metas.bronze, 0),
+      prata: lojas.reduce((s, l) => s + l.metas.prata, 0),
+      ouro: lojas.reduce((s, l) => s + l.metas.ouro, 0),
+      diamante: lojas.reduce((s, l) => s + l.metas.diamante, 0),
+    };
+
+    // Contadores de nível atingido
+    const distribuicao = {
+      diamante: lojas.filter((l) => l.nivel_alcancado === 'diamante').length,
+      ouro: lojas.filter((l) => l.nivel_alcancado === 'ouro').length,
+      prata: lojas.filter((l) => l.nivel_alcancado === 'prata').length,
+      bronze: lojas.filter((l) => l.nivel_alcancado === 'bronze').length,
+      sem_meta: lojas.filter((l) => !l.tem_meta).length,
+      nao_atingiu: lojas.filter(
+        (l) => l.tem_meta && !l.nivel_alcancado,
+      ).length,
+    };
+
+    return successResponse(res, {
+      mes: targetMes,
+      periodo: { datemin: firstDay, datemax: lastDay },
+      lojas,
+      totais: { faturamento: total_fat, metas: total_metas },
+      distribuicao,
+    });
+  }),
+);
+
+// ─── /api/crm/varejo/crescimento ──────────────────────────────────────
+// Compara faturamento das lojas varejo no período atual vs MESMO período
+// do ano anterior. Lojas que mudaram de branch_code (eram franquia 6xxx
+// e viraram loja própria) somam ambos os códigos no período anterior.
+// POST { datemin, datemax }
+router.post(
+  '/varejo/crescimento',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax } = req.body;
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'datemin e datemax obrigatórios (YYYY-MM-DD)',
+        400,
+        'MISSING_DATES',
+      );
+    }
+
+    // Calcula período de 1 ano atrás (mesma janela de dias)
+    const datemin_prev = (() => {
+      const d = new Date(`${datemin}T00:00:00`);
+      d.setFullYear(d.getFullYear() - 1);
+      return d.toISOString().split('T')[0];
+    })();
+    const datemax_prev = (() => {
+      const d = new Date(`${datemax}T00:00:00`);
+      d.setFullYear(d.getFullYear() - 1);
+      return d.toISOString().split('T')[0];
+    })();
+
+    // Codes atuais (lojas próprias) — usadas no período atual
+    const currentCodes = Object.keys(VAREJO_STORE_MAP).map(Number);
+    // Codes históricos (current + legados) — usados no período anterior
+    const allCodes = [
+      ...new Set(
+        Object.values(VAREJO_STORE_MAP).flatMap((s) => s.codes),
+      ),
+    ];
+
+    const tokenData = await getToken();
+    const accessToken = tokenData?.access_token;
+    if (!accessToken) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
+    }
+    const refreshTk = async () => (await getToken(true)).access_token;
+
+    // Busca AMBOS períodos em paralelo
+    let atual, anterior;
+    try {
+      [atual, anterior] = await Promise.all([
+        fetchBranchTotalsFromTotvs({
+          initialToken: accessToken,
+          branchs: currentCodes,
+          datemin,
+          datemax,
+          refreshToken: refreshTk,
+          logTag: 'crescimento-atual',
+        }),
+        fetchBranchTotalsFromTotvs({
+          initialToken: accessToken,
+          branchs: allCodes,
+          datemin: datemin_prev,
+          datemax: datemax_prev,
+          refreshToken: refreshTk,
+          logTag: 'crescimento-anterior',
+        }),
+      ]);
+    } catch (err) {
+      return errorResponse(res, err.message, 500, 'TOTVS_ERROR');
+    }
+
+    // Inicializa estrutura por loja
+    const byStore = {};
+    for (const [storeId, store] of Object.entries(VAREJO_STORE_MAP)) {
+      byStore[storeId] = {
+        store_id: Number(storeId),
+        name: store.name,
+        shortName: store.shortName,
+        uf: store.uf,
+        type: store.type,
+        codes_atual: [Number(storeId)],
+        codes_anterior: store.codes,
+        codes_legados: store.codes.filter((c) => c !== Number(storeId)),
+        teve_migracao: store.codes.length > 1,
+        faturamento_atual: 0,
+        invoice_qty_atual: 0,
+        faturamento_anterior: 0,
+        invoice_qty_anterior: 0,
+      };
+    }
+
+    // Acumula atual (só currentCodes)
+    for (const row of atual?.dataRow || []) {
+      const code = Number(row.branch_code ?? row.branch ?? row.branchCode ?? 0);
+      if (byStore[code]) {
+        byStore[code].faturamento_atual += Number(row.invoice_value || 0);
+        byStore[code].invoice_qty_atual += Number(row.invoice_qty || 0);
+      }
+    }
+
+    // Acumula anterior (any code → mapeia pra storeId via VAREJO_STORE_MAP)
+    for (const row of anterior?.dataRow || []) {
+      const code = Number(row.branch_code ?? row.branch ?? row.branchCode ?? 0);
+      // Acha qual loja esse código pertence
+      for (const [storeId, store] of Object.entries(VAREJO_STORE_MAP)) {
+        if (store.codes.includes(code)) {
+          byStore[storeId].faturamento_anterior += Number(row.invoice_value || 0);
+          byStore[storeId].invoice_qty_anterior += Number(row.invoice_qty || 0);
+          break;
+        }
+      }
+    }
+
+    // Calcula deltas + crescimento
+    const lojas = Object.values(byStore).map((s) => {
+      const delta = s.faturamento_atual - s.faturamento_anterior;
+      const cresc =
+        s.faturamento_anterior > 0
+          ? (delta / s.faturamento_anterior) * 100
+          : s.faturamento_atual > 0
+            ? null // teve agora mas não tinha antes → infinito (mostra como "novo")
+            : null;
+      return { ...s, delta, crescimento_pct: cresc };
+    });
+
+    // Ordena: maior crescimento primeiro (nulls no final)
+    lojas.sort((a, b) => {
+      const ax = a.crescimento_pct == null ? -9999 : a.crescimento_pct;
+      const bx = b.crescimento_pct == null ? -9999 : b.crescimento_pct;
+      return bx - ax;
+    });
+
+    // Totais
+    const total_atual = lojas.reduce((s, l) => s + l.faturamento_atual, 0);
+    const total_anterior = lojas.reduce((s, l) => s + l.faturamento_anterior, 0);
+    const total_delta = total_atual - total_anterior;
+    const total_crescimento_pct =
+      total_anterior > 0 ? (total_delta / total_anterior) * 100 : null;
+
+    return successResponse(res, {
+      periodo_atual: { datemin, datemax },
+      periodo_anterior: { datemin: datemin_prev, datemax: datemax_prev },
+      lojas,
+      totais: {
+        atual: total_atual,
+        anterior: total_anterior,
+        delta: total_delta,
+        crescimento_pct: total_crescimento_pct,
+      },
+    });
+  }),
+);
+
+// ─── /api/crm/canais-totals-all ─────────────────────────────────────────
+// Retorna o faturamento de TODOS os canais usando a mesma lógica do
+// /api/crm/canal-totals (sale-panel + credev + franquia exclusion).
+// Estrutura compatível com a Forecast page (segmentos, segmentosQty, total).
+//   POST { datemin, datemax }
+// ───────────────────────────────────────────────────────────────────────────
+router.post(
+  '/canais-totals-all',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax } = req.body;
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'datemin e datemax obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+    const canais = [
+      'varejo',
+      'revenda',
+      'multimarcas',
+      'inbound_david',
+      'inbound_rafael',
+      'franquia',
+      'business',
+      'bazar',
+      'showroom',
+      'novidadesfranquia',
+      'ricardoeletro',
+    ];
+    const results = await Promise.all(
+      canais.map(async (modulo) => {
+        try {
+          const ct = await getCanalTotalsCached(modulo, datemin, datemax);
+          return { modulo, ct };
+        } catch (err) {
+          console.warn(`[canais-all ${modulo}] erro: ${err.message}`);
+          return { modulo, ct: null };
+        }
+      }),
+    );
+    const segmentos = {};
+    const segmentosQty = {};
+    const segmentosItens = {};
+    let total = 0;
+    let totalQty = 0;
+    let totalItens = 0;
+    for (const { modulo, ct } of results) {
+      const v = Number(ct?.invoice_value || 0);
+      const q = Number(ct?.invoice_qty || 0);
+      const i = Number(ct?.itens_qty || 0);
+      segmentos[modulo] = v;
+      segmentosQty[modulo] = q;
+      segmentosItens[modulo] = i;
+      total += v;
+      totalQty += q;
+      totalItens += i;
+    }
+    return successResponse(
+      res,
+      {
+        segmentos,
+        segmentosQty,
+        segmentosItens,
+        total,
+        totalQty,
+        totalItens,
+        period: { datemin, datemax },
+      },
+      `Faturamento de ${canais.length} canais`,
+    );
+  }),
+);
+
 // ---------------------------------------------------------------------------
 // 0d. GET /api/crm/aniversariantes-hoje
 //     Retorna clientes (is_customer=true) com aniversário no dia.
@@ -1548,11 +2777,15 @@ router.get(
 
     // Pre-filtro por módulo (operações TOTVS)
     let opCodes = null;
-    if (modulo === 'multimarcas') opCodes = [7235, 7241, 9127];
+    if (modulo === 'multimarcas') opCodes = [7235, 7241, 9127, 200];
+    else if (modulo === 'inbound_david' || modulo === 'inbound_rafael')
+      opCodes = [7235, 7241, 9127, 200]; // mesmas ops do multimarcas
     else if (modulo === 'revenda')
       opCodes = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512];
     else if (modulo === 'business') opCodes = [7237, 7269, 7279, 7277];
     else if (modulo === 'franquia') opCodes = [7234, 7240, 7802];
+    else if (modulo === 'varejo')
+      opCodes = [545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1];
 
     const dataLimite = new Date();
     dataLimite.setMonth(dataLimite.getMonth() - months);
@@ -2518,6 +3751,387 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /api/crm/conversao-resumo
+//   Resumo rápido de conversão dos leads do CRM 26 (ClickUp) por canal/período.
+//   Usa cache do loadClickupLeads (5 min).
+//   Query:
+//     canal     — varejo|revenda|multimarcas|etc (opcional; default = all)
+//     datemin   — YYYY-MM-DD (opcional; filtra por created_at do lead)
+//     datemax   — YYYY-MM-DD (opcional)
+//   Resposta:
+//     { total_leads, leads_fechados, leads_perdidos, conversao_pct, periodo }
+// ---------------------------------------------------------------------------
+router.get(
+  '/conversao-resumo',
+  asyncHandler(async (req, res) => {
+    if (!CLICKUP_API_KEY || !CLICKUP_LIST_ID) {
+      return successResponse(res, {
+        enabled: false,
+        total_leads: 0,
+        leads_fechados: 0,
+        leads_perdidos: 0,
+        conversao_pct: 0,
+        message: 'ClickUp não configurado',
+      });
+    }
+    const canalFiltro = String(req.query.canal || '').toLowerCase();
+    const datemin = req.query.datemin || null;
+    const datemax = req.query.datemax || null;
+
+    const closedRe = /(fechado|comprou|closed)/i;
+    const lostRe = /(invalido|inválido|desqualific|perdido|descart|spam)/i;
+
+    try {
+      const data = await loadClickupLeads({ allHistory: true });
+      let tarefas = (data.canais || []).flatMap((c) => c.tarefas || []);
+
+      // Filtro por canalDetalhe
+      if (canalFiltro) {
+        tarefas = tarefas.filter((t) => {
+          const cat = String(t.canalDetalhe || '').toUpperCase().trim();
+          if (canalFiltro === 'varejo') return cat.includes('VAREJO');
+          if (canalFiltro === 'revenda') return cat.includes('REVENDA') || cat.includes('REVENDEDOR');
+          if (canalFiltro === 'multimarcas') return cat.includes('MULTIMARCAS');
+          if (canalFiltro === 'franquia') return cat.includes('FRANQUIA');
+          return cat.includes(canalFiltro.toUpperCase());
+        });
+      }
+
+      // Filtro por data de criação
+      // ATENÇÃO: loadClickupLeads grava como `dataCriacao` (ISO string),
+      // não como `date_created` (timestamp ms do ClickUp raw).
+      if (datemin || datemax) {
+        const tsMin = datemin ? new Date(`${datemin}T00:00:00`).getTime() : 0;
+        const tsMax = datemax ? new Date(`${datemax}T23:59:59`).getTime() : Number.MAX_SAFE_INTEGER;
+        tarefas = tarefas.filter((t) => {
+          let ts = 0;
+          if (t.dataCriacao) ts = new Date(t.dataCriacao).getTime();
+          else if (t.date_created) ts = Number(t.date_created);
+          else if (t.dateCreated) ts = new Date(t.dateCreated).getTime();
+          return ts >= tsMin && ts <= tsMax;
+        });
+      }
+
+      let leadsFechadosStatus = 0;
+      let leadsPerdidos = 0;
+      for (const t of tarefas) {
+        const status = String(t.status || '');
+        if (closedRe.test(status)) leadsFechadosStatus += 1;
+        if (lostRe.test(status)) leadsPerdidos += 1;
+      }
+
+      const totalLeads = tarefas.length;
+
+      // ── Cruzamento com NFs do TOTVS por telefone ──
+      // Match strong (DDD presente) → person_code → NFs Output das branches do
+      // canal varejo no período. "leads_validados_nf" = leads cujo cliente
+      // efetivamente comprou no varejo no período.
+      let leadsValidadosNf = 0;
+      let leadsComMatch = 0;
+      try {
+        if (totalLeads > 0 && (canalFiltro === 'varejo' || canalFiltro === '')) {
+          // 1) Coleta phones únicos dos leads (com variantes)
+          const phoneToVariants = new Map();
+          const allVariants = new Set();
+          for (const t of tarefas) {
+            const clean = String(t.telefone || '').replace(/\D/g, '');
+            if (!clean) continue;
+            const vs = buildPhoneVariants(clean);
+            phoneToVariants.set(clean, vs);
+            vs.forEach((v) => allVariants.add(v));
+          }
+          // 2) Bulk pes_pessoa por telefone
+          const telToPersons = new Map();
+          const variantList = [...allVariants];
+          for (let i = 0; i < variantList.length; i += 1000) {
+            const chunk = variantList.slice(i, i + 1000);
+            const { data: pesData, error: pesErr } = await supabase
+              .from('pes_pessoa')
+              .select('code, telefone')
+              .in('telefone', chunk);
+            if (pesErr) throw pesErr;
+            for (const row of pesData || []) {
+              if (!row.telefone) continue;
+              if (!telToPersons.has(row.telefone)) telToPersons.set(row.telefone, []);
+              telToPersons.get(row.telefone).push(Number(row.code));
+            }
+          }
+          // 3) Mapeia lead → person_codes
+          const leadPersonCodes = new Set();
+          for (const t of tarefas) {
+            const clean = String(t.telefone || '').replace(/\D/g, '');
+            const variants = phoneToVariants.get(clean) || [];
+            for (const v of variants) {
+              const codes = telToPersons.get(v);
+              if (codes && codes.length > 0) {
+                codes.forEach((c) => leadPersonCodes.add(c));
+                break;
+              }
+            }
+          }
+          leadsComMatch = leadPersonCodes.size;
+          // 4) Bulk NFs Output das pessoas no período em branches do varejo.
+          //    Se data não veio, usa últimos 12 meses como janela default
+          //    (evita varredura completa do banco mas mantém escopo amplo).
+          if (leadPersonCodes.size > 0) {
+            const VAREJO_BRANCHES_NF = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
+            const nfMin = datemin || (() => {
+              const d = new Date(); d.setMonth(d.getMonth() - 12);
+              return d.toISOString().slice(0, 10);
+            })();
+            const nfMax = datemax || new Date().toISOString().slice(0, 10);
+            const personsWithSale = new Set();
+            const codesArr = [...leadPersonCodes];
+            for (let i = 0; i < codesArr.length; i += 200) {
+              const chunk = codesArr.slice(i, i + 200);
+              const { data: nfData } = await supabaseFiscal
+                .from('notas_fiscais')
+                .select('person_code')
+                .eq('operation_type', 'Output')
+                .not('invoice_status', 'eq', 'Canceled')
+                .not('invoice_status', 'eq', 'Deleted')
+                .in('person_code', chunk)
+                .in('branch_code', VAREJO_BRANCHES_NF)
+                .gte('issue_date', nfMin)
+                .lte('issue_date', nfMax);
+              for (const nf of nfData || []) {
+                if (nf.person_code) personsWithSale.add(Number(nf.person_code));
+              }
+            }
+            // Conta leads cuja pessoa comprou
+            for (const t of tarefas) {
+              const clean = String(t.telefone || '').replace(/\D/g, '');
+              const variants = phoneToVariants.get(clean) || [];
+              for (const v of variants) {
+                const codes = telToPersons.get(v);
+                if (codes && codes.some((c) => personsWithSale.has(c))) {
+                  leadsValidadosNf += 1;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch (xErr) {
+        console.warn('[conversao-resumo] match NF falhou:', xErr.message);
+      }
+
+      // Total fechado = status OU validado por NF (deduplicado seria ideal, mas
+      // como o status interno costuma ser mais conservador, usamos o MAIOR entre
+      // os dois pra refletir a realidade)
+      const leadsFechadosFinal = Math.max(leadsFechadosStatus, leadsValidadosNf);
+      const conv = totalLeads > 0 ? (leadsFechadosFinal / totalLeads) * 100 : 0;
+
+      return successResponse(res, {
+        enabled: true,
+        canal: canalFiltro || null,
+        periodo: { datemin, datemax },
+        total_leads: totalLeads,
+        leads_fechados: leadsFechadosFinal,
+        leads_fechados_status: leadsFechadosStatus,
+        leads_validados_nf: leadsValidadosNf,
+        leads_com_match_telefone: leadsComMatch,
+        leads_perdidos: leadsPerdidos,
+        conversao_pct: Number(conv.toFixed(2)),
+      });
+    } catch (e) {
+      return errorResponse(res, e.message || 'Falha ao calcular conversão', 500);
+    }
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/crm/conversao-clientes
+//   Lista detalhada dos leads do canal varejo com cliente, loja e venda (NF).
+//   Mesma lógica do /conversao-resumo (match telefone → pes_pessoa → NF varejo).
+//   Query: canal, datemin, datemax, status (all|fechados|abertos)
+// ---------------------------------------------------------------------------
+const VAREJO_LOJA_NAMES = {
+  2: 'João Pessoa',  5: 'Nova Cruz',  55: 'Parnamirim',  65: 'Canguaretama',
+  87: 'Cidade Jardim', 88: 'Guararapes', 90: 'Ayrton Senna', 93: 'Imperatriz',
+  94: 'Patos', 95: 'Midway', 97: 'Teresina', 98: 'Shopping Recife',
+};
+
+router.get(
+  '/conversao-clientes',
+  asyncHandler(async (req, res) => {
+    if (!CLICKUP_API_KEY || !CLICKUP_LIST_ID) {
+      return successResponse(res, { clientes: [], enabled: false });
+    }
+    const canalFiltro = String(req.query.canal || '').toLowerCase();
+    const datemin = req.query.datemin || null;
+    const datemax = req.query.datemax || null;
+    const statusFiltro = String(req.query.status || 'all').toLowerCase(); // all|fechados|abertos
+
+    try {
+      const data = await loadClickupLeads({ allHistory: true });
+      let tarefas = (data.canais || []).flatMap((c) => c.tarefas || []);
+
+      // Filtro canal
+      if (canalFiltro) {
+        tarefas = tarefas.filter((t) => {
+          const cat = String(t.canalDetalhe || '').toUpperCase().trim();
+          if (canalFiltro === 'varejo') return cat.includes('VAREJO');
+          if (canalFiltro === 'revenda') return cat.includes('REVENDA') || cat.includes('REVENDEDOR');
+          if (canalFiltro === 'multimarcas') return cat.includes('MULTIMARCAS');
+          if (canalFiltro === 'franquia') return cat.includes('FRANQUIA');
+          return cat.includes(canalFiltro.toUpperCase());
+        });
+      }
+      // Filtro data criação
+      if (datemin || datemax) {
+        const tsMin = datemin ? new Date(`${datemin}T00:00:00`).getTime() : 0;
+        const tsMax = datemax ? new Date(`${datemax}T23:59:59`).getTime() : Number.MAX_SAFE_INTEGER;
+        tarefas = tarefas.filter((t) => {
+          let ts = 0;
+          if (t.dataCriacao) ts = new Date(t.dataCriacao).getTime();
+          else if (t.date_created) ts = Number(t.date_created);
+          return ts >= tsMin && ts <= tsMax;
+        });
+      }
+
+      if (tarefas.length === 0) {
+        return successResponse(res, { clientes: [], total_leads: 0 });
+      }
+
+      // 1) Match phone → person_codes
+      const phoneToVariants = new Map();
+      const allVariants = new Set();
+      for (const t of tarefas) {
+        const clean = String(t.telefone || '').replace(/\D/g, '');
+        if (!clean) continue;
+        const vs = buildPhoneVariants(clean);
+        phoneToVariants.set(clean, vs);
+        vs.forEach((v) => allVariants.add(v));
+      }
+      const telToPersons = new Map();
+      const personIdToName = new Map();
+      const variantList = [...allVariants];
+      for (let i = 0; i < variantList.length; i += 1000) {
+        const chunk = variantList.slice(i, i + 1000);
+        const { data: pesData } = await supabase
+          .from('pes_pessoa')
+          .select('code, telefone, nm_pessoa, fantasy_name')
+          .in('telefone', chunk);
+        for (const row of pesData || []) {
+          if (!row.telefone) continue;
+          if (!telToPersons.has(row.telefone)) telToPersons.set(row.telefone, []);
+          telToPersons.get(row.telefone).push(Number(row.code));
+          personIdToName.set(Number(row.code), row.fantasy_name || row.nm_pessoa || `Cliente ${row.code}`);
+        }
+      }
+
+      // 2) Pega person_codes únicos dos leads
+      const leadToPerson = new Map(); // lead.id → person_code
+      const allPersons = new Set();
+      for (const t of tarefas) {
+        const clean = String(t.telefone || '').replace(/\D/g, '');
+        const variants = phoneToVariants.get(clean) || [];
+        for (const v of variants) {
+          const codes = telToPersons.get(v);
+          if (codes && codes.length > 0) {
+            leadToPerson.set(t.id, codes[0]);
+            codes.forEach((c) => allPersons.add(c));
+            break;
+          }
+        }
+      }
+
+      // 3) NFs Output das pessoas em branches do varejo (com data se houver)
+      const VAREJO_BRANCHES_NF = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
+      const nfMin = datemin || (() => {
+        const d = new Date(); d.setMonth(d.getMonth() - 12);
+        return d.toISOString().slice(0, 10);
+      })();
+      const nfMax = datemax || new Date().toISOString().slice(0, 10);
+      const personNfs = new Map(); // person_code → [{branch, date, value, invoice}]
+      if (allPersons.size > 0) {
+        const codesArr = [...allPersons];
+        for (let i = 0; i < codesArr.length; i += 200) {
+          const chunk = codesArr.slice(i, i + 200);
+          const { data: nfData } = await supabaseFiscal
+            .from('notas_fiscais')
+            .select('person_code, branch_code, issue_date, total_value, invoice_code')
+            .eq('operation_type', 'Output')
+            .not('invoice_status', 'eq', 'Canceled')
+            .not('invoice_status', 'eq', 'Deleted')
+            .in('person_code', chunk)
+            .in('branch_code', VAREJO_BRANCHES_NF)
+            .gte('issue_date', nfMin)
+            .lte('issue_date', nfMax)
+            .order('issue_date', { ascending: false });
+          for (const nf of nfData || []) {
+            const pc = Number(nf.person_code);
+            if (!personNfs.has(pc)) personNfs.set(pc, []);
+            personNfs.get(pc).push({
+              branch_code: nf.branch_code,
+              branch_name: VAREJO_LOJA_NAMES[nf.branch_code] || `Filial ${nf.branch_code}`,
+              issue_date: nf.issue_date,
+              total_value: Number(nf.total_value) || 0,
+              invoice_code: nf.invoice_code,
+            });
+          }
+        }
+      }
+
+      // 4) Monta lista de clientes
+      const clientes = [];
+      for (const t of tarefas) {
+        const personCode = leadToPerson.get(t.id) || null;
+        const nfs = personCode ? (personNfs.get(personCode) || []) : [];
+        const validado = nfs.length > 0;
+        const statusLower = String(t.status || '').toLowerCase();
+        const fechadoStatus = /(fechado|comprou|closed)/i.test(t.status || '');
+
+        if (statusFiltro === 'fechados' && !validado && !fechadoStatus) continue;
+        if (statusFiltro === 'abertos' && (validado || fechadoStatus)) continue;
+
+        // Primeira NF (mais recente)
+        const nfPrincipal = nfs[0] || null;
+
+        clientes.push({
+          lead_id: t.id,
+          lead_titulo: t.titulo || t.nome || '(sem título)',
+          lead_status: t.status || null,
+          lead_status_fechado: fechadoStatus,
+          lead_data_criacao: t.dataCriacao || null,
+          lead_telefone: t.telefone || null,
+          lead_vendedor: t.vendedor || null,
+          lead_url: t.clickupUrl || null,
+          canal_detalhe: t.canalDetalhe || null,
+          person_code: personCode,
+          person_nome: personCode ? personIdToName.get(personCode) : null,
+          validado_nf: validado,
+          nf_principal: nfPrincipal,
+          total_nfs: nfs.length,
+          valor_total: nfs.reduce((s, n) => s + (n.total_value || 0), 0),
+          nfs,
+        });
+      }
+
+      // Ordena: validados primeiro, depois por data de criação desc
+      clientes.sort((a, b) => {
+        if (a.validado_nf !== b.validado_nf) return a.validado_nf ? -1 : 1;
+        const da = a.lead_data_criacao ? new Date(a.lead_data_criacao).getTime() : 0;
+        const db = b.lead_data_criacao ? new Date(b.lead_data_criacao).getTime() : 0;
+        return db - da;
+      });
+
+      return successResponse(res, {
+        enabled: true,
+        canal: canalFiltro || null,
+        periodo: { datemin, datemax },
+        total_leads: tarefas.length,
+        total_validados: clientes.filter((c) => c.validado_nf).length,
+        clientes,
+      });
+    } catch (e) {
+      return errorResponse(res, e.message || 'Falha', 500);
+    }
+  }),
+);
+
 // 4. POST /api/crm/leads
 //    Busca tarefas do ClickUp em um período
 // ---------------------------------------------------------------------------
@@ -5575,7 +7189,7 @@ router.post(
     const INBOUND_DAVID_SET = new Set([26, 69]);
     const INBOUND_RAFAEL_CODE = 21;
     const VAREJO_BRANCHES_OP = new Set([
-      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97,
+      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98,
     ]);
     const REVENDA_BRANCHES_OP = new Set([99]);
     const B2R_DEALERS_EMP2_OP = new Set([288, 251, 131]);
@@ -6272,23 +7886,24 @@ const CANAL_CONFIG = {
     source: 'totvs-totals',
     branchs: [99, 2, 95, 87, 88, 90, 94, 97],
     // 7235/7241/9127 = ops atuais (de 2025-09 em diante)
-    // 200 = op LEGADA usada até ~ago/2025 — incluída pra captar histórico
-    //       (LY do analytics, performance, carteira)
+    // 200 = op LEGADA usada até ~ago/2025
     operations: [7235, 7241, 9127, 200],
-    // sellers: undefined — NÃO filtra (sale-panel/totals/search retorna TODOS
-    // os dealers das ops B2M). Antes estava `sellers: [26,69]` o que era
-    // INBOUND_DAVID e fazia o multimarcas pegar apenas David+Thalis.
+    // sellers/excludeSellers: NÃO aplica — TOTVS painel oficial considera
+    // os 5 sellers (Walter, Renato, Arthur, David, Rafael) em multimarcas
+    // (eles operam com ops B2M na branch 99).
     sellers: undefined,
-    // Lista de dealers que NÃO contam em multimarcas (têm canais próprios).
-    // Aplicada via excludeSellers no callTotvsTotalsSearch (TODO: implementar)
-    // ou subtraindo inbound_david/inbound_rafael depois.
-    excludeSellers: [26, 69, 21], // David, Thalis (inbound_david), Rafael (inbound_rafael)
-    // Para credev/SaleReturns: só conta devoluções dos sellers OFICIAIS
-    // de multimarcas (Walter=177, Renato=65, Arthur=259). Returns com
-    // sellerCode=50 (GERAL) ou outros dealers não pertencem ao canal.
-    allowedSellersDevol: [177, 65, 259],
     devolucaoOps: [7244, 7245, 1214],
     devolucaoBranchs: [99, 2, 95, 87, 88, 90, 94, 97],
+    // Whitelist manual: NFs cujo dealerCode em items[].products[] é GERAL (50)
+    // mas que no painel oficial TOTVS são atribuídas a um vendedor específico.
+    // Acontece quando o cadastro do produto tem dealer GERAL mas a NF foi
+    // efetivamente vendida por outro vendedor.
+    manualSellerOverride: [
+      // NF 827993 (GEORGE MACHADO, br 99, R$ 7.901, abr/26) → Rafael (21)
+      { branch: 99, transactionCode: 827993, sellerCode: 21 },
+      // NF 10787 (br 99, op 7235, 13/05/26, R$ 4.357, dealer=121 Peu no TOTVS) → Rafael (21)
+      { branch: 99, transactionCode: 837305, sellerCode: 21 },
+    ],
   },
   inbound_david: {
     source: 'totvs-totals',
@@ -6314,7 +7929,44 @@ const CANAL_CONFIG = {
     manualTransactions: [
       // { branch, transactionCode, motivo? }
       { branch: 99, transactionCode: 827993 }, // GEORGE 18/04/2026 R$ 7.901
+      { branch: 99, transactionCode: 837305 }, // NF 10787 · 13/05/2026 · R$ 4.357 (dealer=121 Peu no TOTVS, era Rafael)
     ],
+  },
+  // ─── Outros canais usados pelo Forecast ────────────────────────────────
+  franquia: {
+    source: 'totvs-totals-allbranchs', // busca em todas as branches
+    operations: [7234, 7240, 7802, 9124, 7259],
+    sellers: undefined,
+  },
+  business: {
+    source: 'totvs-totals-allbranchs',
+    operations: [7237, 7269, 7279, 7277],
+    sellers: undefined,
+  },
+  bazar: {
+    source: 'totvs-totals-allbranchs',
+    operations: [887],
+    sellers: undefined,
+    // Bazar não tem devolução/credev associada (peças de saldo, sem troca).
+    // Pula PASS 0 (credev) e PASS 2 (SaleReturns) — caso contrário pegaria
+    // devoluções de TODA a empresa, distorcendo o valor.
+    skipDevolucao: true,
+  },
+  showroom: {
+    source: 'totvs-totals-allbranchs',
+    operations: [7254, 7007],
+    sellers: undefined,
+  },
+  novidadesfranquia: {
+    source: 'totvs-totals-allbranchs',
+    operations: [7255],
+    sellers: undefined,
+  },
+  ricardoeletro: {
+    source: 'totvs-totals-allbranchs',
+    branchs: [11, 111],
+    operations: undefined,
+    sellers: undefined,
   },
 };
 
@@ -6410,81 +8062,215 @@ const NON_VAREJO_BRANCH_INFO = {
 async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
   const sellersAllowed = new Set((cfg.sellers || []).map(Number));
   const sellersExcluded = new Set((cfg.excludeSellers || []).map(Number));
-  // Per-branch: chama sellers/search uma vez por branch (TOTVS exige 1 branch por call)
-  const perBranchResults = await Promise.all(
-    cfg.branchs.map(async (branchCode) => {
-      try {
-        const data = await callTotvsSellersSearch({
-          branchs: [branchCode],
-          operations: cfg.operations,
-          datemin,
-          datemax,
-        });
-        return { branchCode, data };
-      } catch (err) {
-        console.warn(
-          `[canal-sellers ${modulo}] erro branch ${branchCode}: ${err.message}`,
-        );
-        return { branchCode, data: null };
+
+  // ─── Aggregation por NF principal (igual TOTVS painel oficial) ──────
+  // Pra cada NF (fiscal/v2/invoices Output):
+  //   1) determina o dealerCode PRINCIPAL = dealer com maior netValue
+  //      somado nos items[].products[]
+  //   2) atribui o totalValue INTEIRO da NF a esse dealer
+  // Resultado bate com painel oficial onde 1 NF = 1 vendedor.
+  const merged = {};
+  let invItems = [];
+  try {
+    const tokenData = await getToken();
+    const accessToken = tokenData?.access_token;
+    if (!accessToken) throw new Error('Token TOTVS indisponível');
+    const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+    const fetchInvPage = async (page) =>
+      axios
+        .post(
+          invoicesEndpoint,
+          {
+            filter: {
+              branchCodeList: cfg.branchs,
+              operationCodeList: cfg.operations,
+              operationType: 'Output',
+              startIssueDate: `${datemin}T00:00:00`,
+              endIssueDate: `${datemax}T23:59:59`,
+            },
+            expand: 'items',
+            page,
+            pageSize: 100,
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            httpsAgent: totvsHttpsAgent,
+            timeout: 120000,
+          },
+        )
+        .then((r) => r.data)
+        .catch(() => ({ items: [] }));
+    const firstInv = await fetchInvPage(1);
+    invItems = [...(firstInv?.items || [])];
+    const invTotalPages =
+      firstInv?.totalPages ||
+      (firstInv?.totalItems ? Math.ceil(firstInv.totalItems / 100) : 1);
+    if (invTotalPages > 1) {
+      const rem = Array.from({ length: invTotalPages - 1 }, (_, i) => i + 2);
+      for (let i = 0; i < rem.length; i += 3) {
+        const batch = rem.slice(i, i + 3);
+        const results = await Promise.all(batch.map(fetchInvPage));
+        for (const pd of results) invItems.push(...(pd?.items || []));
       }
-    }),
-  );
-  const result = [];
-  for (const { branchCode, data } of perBranchResults) {
-    if (!data) continue;
-    const rows = data.dataRow || [];
-    const info = NON_VAREJO_BRANCH_INFO[branchCode] || null;
-    for (const r of rows) {
-      const sc = Number(r.seller_code);
-      if (sellersAllowed.size > 0 && !sellersAllowed.has(sc)) continue;
-      // Exclui sellers de outros canais (ex: multimarcas exclui David/Thalis/Rafael)
-      if (sellersExcluded.size > 0 && sellersExcluded.has(sc)) continue;
-      const value = Number(r.seller_sale_value || r.invoice_value || 0);
-      const qty = Number(r.seller_sale_qty || r.invoice_qty || 0);
-      const items = Number(r.itens_qty || r.seller_sale_pieces || 0);
-      const tm = qty > 0 ? value / qty : 0;
-      const pa = qty > 0 && items > 0 ? items / qty : 0;
-      const pmpv = items > 0 ? value / items : 0;
-      result.push({
-        seller_code: String(sc),
-        seller_name: r.seller_name || `Vend. ${sc}`,
-        invoice_qty: qty,
-        invoice_qty_gross: qty,
-        credev_qty: 0,
-        invoice_value: Math.round(value * 100) / 100,
-        credev_value: 0,
-        itens_qty: items,
-        itens_qty_gross: items,
-        credev_itens_qty: 0,
-        tm: Math.round(tm * 100) / 100,
-        pa: Math.round(pa * 1000) / 1000,
-        pmpv: Math.round(pmpv * 100) / 100,
-        canal: modulo,
-        branch_code: branchCode,
-        branch_name: info?.name || `Filial ${branchCode}`,
-        branch_short: info?.short || null,
-      });
+    }
+  } catch (err) {
+    console.warn(
+      `[canal-sellers ${modulo}] invoices fetch falhou: ${err.message}`,
+    );
+  }
+
+  // Mapa de override manual: { "branch|txCode" → sellerCode }
+  const manualOverrideMap = new Map();
+  for (const m of cfg.manualSellerOverride || []) {
+    if (m.branch != null && m.transactionCode != null && m.sellerCode != null) {
+      manualOverrideMap.set(`${m.branch}|${m.transactionCode}`, Number(m.sellerCode));
     }
   }
-  // Agregar duplicados (mesmo seller_code em múltiplas branches — pega a maior)
-  // Para canal Revenda: cada dealer aparece só na branch principal, mas seguro agregar.
-  const merged = {};
-  for (const r of result) {
-    const k = r.seller_code;
-    if (!merged[k]) {
-      merged[k] = { ...r };
-    } else {
-      // Soma valores e refaz métricas
-      merged[k].invoice_value += r.invoice_value;
-      merged[k].invoice_qty += r.invoice_qty;
-      merged[k].itens_qty += r.itens_qty;
-      // Mantém branch onde mais vendeu como primária
-      if (r.invoice_value > merged[k].invoice_value / 2) {
-        merged[k].branch_code = r.branch_code;
-        merged[k].branch_name = r.branch_name;
-        merged[k].branch_short = r.branch_short;
+
+  // Mapa de "manualTransactions" — NFs cuja venda é desse canal, mas TOTVS
+  // tem dealer principal diferente. Atribui ao primeiro sellerCode do canal.
+  // (ex: inbound_rafael com NF do dealer Peu → força como dealer 21 Rafael).
+  const manualTxAttributionMap = new Map();
+  if (Array.isArray(cfg.manualTransactions) && cfg.manualTransactions.length > 0) {
+    const defaultSeller = Array.isArray(cfg.sellers) && cfg.sellers.length > 0
+      ? Number(cfg.sellers[0])
+      : null;
+    if (defaultSeller) {
+      for (const m of cfg.manualTransactions) {
+        if (m.branch != null && m.transactionCode != null) {
+          manualTxAttributionMap.set(`${m.branch}|${m.transactionCode}`, defaultSeller);
+        }
       }
     }
+  }
+
+  // Itera NFs e atribui totalValue ao dealer principal
+  const itensQtyByDealer = {};
+  const manualTxAttributed = new Set();
+  for (const nf of invItems) {
+    if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
+      continue;
+    const total = parseFloat(nf.totalValue) || 0;
+    if (total <= 0) continue;
+    // Calcula netValue por dealer e quantidade de peças
+    const netByDealer = {};
+    let nfQty = 0;
+    for (const item of nf.items || []) {
+      for (const p of item.products || []) {
+        const dc = p.dealerCode ? Number(p.dealerCode) : null;
+        if (!dc) continue;
+        const nv = parseFloat(p.netValue) || 0;
+        netByDealer[dc] = (netByDealer[dc] || 0) + nv;
+        const q = parseFloat(p.quantity) || 0;
+        if (q > 0) {
+          itensQtyByDealer[dc] = (itensQtyByDealer[dc] || 0) + q;
+          nfQty += q;
+        }
+      }
+    }
+    // Override manual: se NF está na whitelist, força o sellerCode
+    let mainDealer = null;
+    const overrideKey = `${nf.branchCode}|${nf.transactionCode}`;
+    if (manualOverrideMap.has(overrideKey)) {
+      mainDealer = manualOverrideMap.get(overrideKey);
+    } else if (manualTxAttributionMap.has(overrideKey)) {
+      // manualTransactions: força atribuição ao seller principal do canal
+      mainDealer = manualTxAttributionMap.get(overrideKey);
+      manualTxAttributed.add(overrideKey);
+    } else {
+      // Dealer principal = quem tem o maior netValue
+      let maxValue = -1;
+      for (const [dc, v] of Object.entries(netByDealer)) {
+        if (v > maxValue) {
+          maxValue = v;
+          mainDealer = Number(dc);
+        }
+      }
+    }
+    if (!mainDealer) continue;
+    // sellersAllowed/excluded só se aplica quando NÃO veio por manualTx
+    // (manualTx tem prioridade total — força a atribuição mesmo se filtro normal rejeitaria)
+    if (!manualTxAttributed.has(overrideKey)) {
+      if (sellersAllowed.size > 0 && !sellersAllowed.has(mainDealer)) continue;
+      if (sellersExcluded.size > 0 && sellersExcluded.has(mainDealer)) continue;
+    }
+
+    const branchCode = parseInt(nf.branchCode) || cfg.branchs[0];
+    const branchInfo = NON_VAREJO_BRANCH_INFO[branchCode] || null;
+    const k = String(mainDealer);
+    if (!merged[k]) {
+      merged[k] = {
+        seller_code: k,
+        seller_name: '', // preenche depois via sellers/search ou cadastro
+        invoice_qty: 0,
+        invoice_qty_gross: 0,
+        credev_qty: 0,
+        invoice_value: 0,
+        credev_value: 0,
+        itens_qty: 0,
+        itens_qty_gross: 0,
+        credev_itens_qty: 0,
+        tm: 0,
+        pa: 0,
+        pmpv: 0,
+        canal: modulo,
+        branch_code: branchCode,
+        branch_name: branchInfo?.name || `Filial ${branchCode}`,
+        branch_short: branchInfo?.short || null,
+      };
+    }
+    merged[k].invoice_value += total;
+    merged[k].invoice_qty += 1;
+    merged[k].invoice_qty_gross += 1;
+    merged[k].itens_qty_gross += nfQty;
+  }
+  // Aplica peças finais por dealer (do itensQtyByDealer)
+  for (const [dc, qty] of Object.entries(itensQtyByDealer)) {
+    if (merged[dc]) merged[dc].itens_qty = qty;
+  }
+
+  // Preenche nomes via sellers/search por branch (TOTVS exige 1 branch
+  // por chamada; nomes podem variar por branch então faz lookup paralelo).
+  try {
+    const nameMap = {};
+    const branchInfo = {}; // sellerCode → [branch_code]
+    await Promise.all(
+      (cfg.branchs || []).map(async (branchCode) => {
+        try {
+          const data = await callTotvsSellersSearch({
+            branchs: [branchCode],
+            operations: cfg.operations,
+            datemin,
+            datemax,
+          });
+          for (const r of data?.dataRow || []) {
+            const k = String(r.seller_code);
+            if (r.seller_name && !nameMap[k]) nameMap[k] = r.seller_name;
+            if (!branchInfo[k]) branchInfo[k] = branchCode;
+          }
+        } catch {}
+      }),
+    );
+    for (const k of Object.keys(merged)) {
+      if (!merged[k].seller_name) {
+        merged[k].seller_name = nameMap[k] || `Vend. ${k}`;
+      }
+      // Também atualiza branch_name se o NF não trouxe
+      if (
+        merged[k].branch_code &&
+        (!merged[k].branch_name || merged[k].branch_name.startsWith('Filial '))
+      ) {
+        const bc = merged[k].branch_code;
+        const info = NON_VAREJO_BRANCH_INFO[bc] || VAREJO_BRANCHES[bc] || {};
+        if (info.name) merged[k].branch_name = info.name;
+        if (info.short) merged[k].branch_short = info.short;
+      }
+    }
+  } catch (err) {
+    console.warn(`[canal-sellers ${modulo}] name lookup falhou: ${err.message}`);
   }
 
   // ─── Subtração de credev + SaleReturns por vendedor (alinha com Analytics) ───
@@ -6581,6 +8367,8 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
           if (dc) break;
         }
         if (dc && merged[dc]) {
+          // Subtrai credev do invoice_value pra alinhar com painel oficial
+          // (TOTVS painel mostra líquido = bruto - credev pago).
           merged[dc].invoice_value -= credev;
           merged[dc].credev_value = (merged[dc].credev_value || 0) + credev;
         }
@@ -6646,6 +8434,7 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         if (v <= 0) continue;
         const sc = String(it.sellerCode || '');
         if (sc && merged[sc]) {
+          // Subtrai SaleReturns do invoice_value (alinha com painel)
           merged[sc].invoice_value -= v;
           merged[sc].credev_value = (merged[sc].credev_value || 0) + v;
         }
@@ -6690,7 +8479,7 @@ const PERSON_CACHE_TTL = 30 * 60 * 1000;
 
 // Cache em memória do resultado completo do analytics — TTL 5 min
 // Versão incrementa quando lógica de classificação muda → invalida cache.
-const ANALYTICS_CACHE_VERSION = 'v45-multimarcas-include-op200-legacy';
+const ANALYTICS_CACHE_VERSION = 'v50-per-seller-net-credev-aligned-painel';
 const ANALYTICS_CACHE = new Map(); // key → { data, ts, ver }
 const ANALYTICS_CACHE_TTL = 5 * 60 * 1000;
 
@@ -8596,7 +10385,9 @@ async function computeCanalTotalsFromSupabase({ datemin, datemax, cfg }) {
 
 // Cache em memória do canal-totals (TTL 5 min) — evita reconsulta frequente
 const CANAL_TOTALS_CACHE = new Map();
-const CANAL_TOTALS_CACHE_TTL = 5 * 60 * 1000;
+const CANAL_TOTALS_CACHE_TTL = 30 * 60 * 1000; // 30 min (era 5min — credev raramente muda)
+// TTL menor para "datas que incluem hoje" — painel tempo-real precisa atualizar mais rápido
+const CANAL_TOTALS_CACHE_TTL_REALTIME = 2 * 60 * 1000; // 2 min (era 30s — evita timeouts)
 
 // Helper compartilhado: lê valores do canal-totals do cache OU invoca a rota
 // internamente se cache vazio. Garante que Performance e Analytics consultem
@@ -8642,17 +10433,22 @@ router.post(
         'MISSING_PARAMS',
       );
     }
-    // Cache hit
+    // Cache hit — TTL menor (30s) quando datemax inclui hoje (tempo real),
+    // 5 min para datas passadas. Aceita `?nocache=true` para forçar refresh.
     const cacheKey = `${modulo}|${datemin}|${datemax}`;
+    const noCache = req.query?.nocache === 'true' || req.body?.nocache === true;
+    const todayIso = new Date().toISOString().split('T')[0];
+    const isRealtime = datemax >= todayIso;
+    const effectiveTTL = isRealtime ? CANAL_TOTALS_CACHE_TTL_REALTIME : CANAL_TOTALS_CACHE_TTL;
     const cached = CANAL_TOTALS_CACHE.get(cacheKey);
-    if (cached && Date.now() - cached.ts < CANAL_TOTALS_CACHE_TTL) {
+    if (!noCache && cached && Date.now() - cached.ts < effectiveTTL) {
       return successResponse(
         res,
         { ...cached.data, cached: true },
-        `Totais ${modulo} (cache)`,
+        `Totais ${modulo} (cache${isRealtime ? ' realtime' : ''})`,
       );
     }
-    const cfg = CANAL_CONFIG[modulo];
+    let cfg = CANAL_CONFIG[modulo];
     if (!cfg) {
       return errorResponse(
         res,
@@ -8662,7 +10458,21 @@ router.post(
       );
     }
 
-    if (cfg.source === 'totvs-totals') {
+    // Para canais 'allbranchs' (franquia, business, bazar, etc.), busca a
+    // lista de todas as branches do TOTVS antes de chamar o sale-panel.
+    if (cfg.source === 'totvs-totals-allbranchs' && !cfg.branchs) {
+      try {
+        const tk = await getToken();
+        if (tk?.access_token) {
+          cfg = { ...cfg, branchs: await getBranchCodes(tk.access_token) };
+        }
+      } catch (err) {
+        console.warn(`[canal-totals ${modulo}] getBranchCodes erro: ${err.message}`);
+        cfg = { ...cfg, branchs: [] };
+      }
+    }
+
+    if (cfg.source === 'totvs-totals' || cfg.source === 'totvs-totals-allbranchs') {
       // ─── Bruto via TOTVS direto (sale-panel/v2/totals/search) ───────────
       const data = await callTotvsTotalsSearch({
         branchs: cfg.branchs,
@@ -9175,8 +10985,12 @@ router.post(
         return Number(entries.sort((a, b) => b[1] - a[1])[0][0]);
       };
 
+      // Skip total de devolução (canais sem credev/devolução conhecida —
+      // ex: bazar, configurado via cfg.skipDevolucao). Evita PASS 2 pegar
+      // devoluções de toda a empresa por falta de filtro por op.
+      const skipDevol = !!cfg.skipDevolucao;
       try {
-        if (accessToken) {
+        if (accessToken && !skipDevol) {
           // PASS 0: invoices — credev em payments (filtrado por dealer permitido)
           const invoiceItems = await fetchInvoicesPages();
           for (const nf of invoiceItems) {
@@ -9239,6 +11053,12 @@ router.post(
       } catch (err) {
         console.warn(
           `[canal-totals ${modulo}] devolução analytics-style erro: ${err.message}`,
+        );
+      }
+
+      if (skipDevol) {
+        console.log(
+          `[canal-totals ${modulo}] skipDevolucao=true — pulando subtração de credev/SaleReturns`,
         );
       }
 
@@ -9307,7 +11127,11 @@ router.post(
       );
     }
 
-    // source = 'totvs-totals-branch' (varejo) — per-branch breakdown
+    // source = 'totvs-totals-branch' (varejo) — usa MESMO CHAMADO do
+    // /sale-panel/ranking-faturamento (todas as branches via getBranchCodes,
+    // operations=undefined → SPECIAL_OPERATIONS aplicadas só nas especiais)
+    // e depois soma APENAS as branches definidas em cfg.branchs (lista varejo).
+    // Garante 100% de paridade com a página Ranking de Faturamento.
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
       return errorResponse(
@@ -9317,44 +11141,72 @@ router.post(
         'TOKEN_UNAVAILABLE',
       );
     }
+    const allBranchsForRanking = await getBranchCodes(tokenData.access_token);
     const totvsData = await fetchBranchTotalsFromTotvs({
       initialToken: tokenData.access_token,
-      branchs: cfg.branchs,
+      branchs: allBranchsForRanking,
       datemin,
       datemax,
       refreshToken: async () => {
         const data = await getToken(true);
         return data.access_token;
       },
-      logTag: `CRM/CanalTotals[${modulo}]`,
-      operations: cfg.operations,
+      logTag: `CRM/CanalTotals[${modulo}/ranking-mirror]`,
+      // operations: undefined → mesmo comportamento do ranking-faturamento
     });
-    const total = totvsData.total || {
-      invoice_value: 0,
-      invoice_qty: 0,
-      itens_qty: 0,
-      tm: 0,
-      pa: 0,
-      pmpv: 0,
+
+    // Filtra per_branch só pras filiais varejo (cfg.branchs)
+    const varejoSet = new Set((cfg.branchs || []).map((b) => Number(b)));
+    const allRows = Array.isArray(totvsData.dataRow) ? totvsData.dataRow : [];
+    const varejoRows = allRows.filter((row) => {
+      const code = Number(
+        row.branch_code ?? row.branch ?? row.branchCode ?? 0,
+      );
+      return varejoSet.has(code);
+    });
+    const allRowsLy = Array.isArray(totvsData.dataRowLastYear)
+      ? totvsData.dataRowLastYear
+      : [];
+    const varejoRowsLy = allRowsLy.filter((row) => {
+      const code = Number(
+        row.branch_code ?? row.branch ?? row.branchCode ?? 0,
+      );
+      return varejoSet.has(code);
+    });
+
+    // Soma manualmente os totais varejo (replicando a lógica do Ranking)
+    const sumRows = (rows) => {
+      const t = rows.reduce(
+        (acc, r) => ({
+          invoice_value: acc.invoice_value + Number(r.invoice_value || 0),
+          invoice_qty: acc.invoice_qty + Number(r.invoice_qty || 0),
+          itens_qty: acc.itens_qty + Number(r.itens_qty || 0),
+        }),
+        { invoice_value: 0, invoice_qty: 0, itens_qty: 0 },
+      );
+      t.tm = t.invoice_qty > 0 ? t.invoice_value / t.invoice_qty : 0;
+      t.pa = t.invoice_qty > 0 ? t.itens_qty / t.invoice_qty : 0;
+      t.pmpv = t.itens_qty > 0 ? t.invoice_value / t.itens_qty : 0;
+      return t;
     };
-    // Cache também — TTL e estrutura iguais ao caminho 'totvs-totals'
+    const total = sumRows(varejoRows);
+    const totalLy = varejoRowsLy.length > 0 ? sumRows(varejoRowsLy) : null;
+
     const responseData = {
       modulo,
       ...total,
-      source: 'totvs',
+      source: 'totvs-ranking-mirror',
       branchs_used: cfg.branchs,
-      ops_used: cfg.operations,
-      per_branch: totvsData.dataRow,
-      // LY já vem na mesma resposta do TOTVS — exposto pra Analytics consumir
-      total_last_year: totvsData.totalLastYear || null,
-      per_branch_ly: totvsData.dataRowLastYear || [],
+      ops_used: 'ranking-faturamento (mesma rota do Ranking)',
+      per_branch: varejoRows,
+      total_last_year: totalLy,
+      per_branch_ly: varejoRowsLy,
     };
-    // cacheKey já declarado no início desta rota (linha ~8551)
     CANAL_TOTALS_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
     return successResponse(
       res,
       responseData,
-      `Totais ${modulo} (TOTVS /totals-branch)`,
+      `Totais ${modulo} (mirror /ranking-faturamento, ${varejoRows.length} filiais varejo)`,
     );
   }),
 );
@@ -9395,7 +11247,7 @@ router.post(
     const FRANQUIA_DEALER = 40;
     const JUCELINO_DEALER = 288;
     const VAREJO_BRANCH_CODES = new Set([
-      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97,
+      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98,
     ]);
     const REVENDA_BRANCH_CODES = new Set([99]);
     const B2R_REVENDA_DEALERS_EMP2 = new Set([288, 251, 131]);
@@ -9670,6 +11522,8 @@ router.post(
           primaryBranchCode &&
           (VAREJO_BRANCHES[primaryBranchCode] ||
             NON_VAREJO_BRANCHES[primaryBranchCode]);
+        // BRUTO = apenas operações de saída (sem subtrair credev/devolução)
+        const grossValue = info.invoice_value + (info.credev_value || 0);
         return {
           seller_code: code,
           seller_name: vInfo?.nome || erpSeller?.name || `Vendedor ${code}`,
@@ -9677,6 +11531,7 @@ router.post(
           invoice_qty_gross: grossQty,
           credev_qty: credevQty,
           invoice_value: Math.round(info.invoice_value * 100) / 100,
+          invoice_value_gross: Math.round(grossValue * 100) / 100, // apenas saída, sem desconto
           credev_value: Math.round((info.credev_value || 0) * 100) / 100,
           itens_qty: itensNet, // líquido (descontado credev)
           itens_qty_gross: grossItens,
@@ -10093,6 +11948,144 @@ router.post(
       }
     }
 
+    // ─── CREDEV (PAGAMENTOS) por canal ─────────────────────────────────
+    // Para os canais NÃO sobrescritos via override (varejo/revenda/multimarcas/
+    // inbound_rafael já fazem isso), subtrai apenas o `devolucao_credev` do
+    // /canal-totals (PASS 0 = credev em pagamentos de NFs do período).
+    // NÃO usa SaleReturns (PASS 2) que tem "bug" de subtrair empresa inteira.
+    // ─── CREDEV (PASS 0 — pagamentos) para canais SEM allowedSellers ───
+    // Para franquia/business/bazar/showroom/novidadesfranquia/ricardoeletro:
+    // subtrai apenas o devolucao_credev (PASS 0 — credev em pagamentos das NFs
+    // do período). NÃO usa PASS 2 (SaleReturns) que tem bug para esses canais.
+    //
+    // Roda DEPOIS do override (linhas abaixo), pois usa o cache do /canal-totals
+    // que pode ter sido populado pelo override.
+    const credev_por_segmento = {};
+    const canaisPassOnly = [
+      'franquia',
+      'business',
+      'bazar',
+      'showroom',
+      'novidadesfranquia',
+      'ricardoeletro',
+    ];
+
+    // ─── OVERRIDE LÍQUIDO — APENAS canais com cálculo testado ────────────
+    // Substitui os segmentos pelos valores líquidos de /canal-totals SOMENTE
+    // nos canais cuja subtração de devolução é confiável (filtra por dealer
+    // ou tem regra bem definida):
+    //   - varejo:        ranking-mirror (sale-panel/totals-branch)
+    //   - revenda:       sale-panel + credev + SaleReturns filtrado por sellers
+    //   - multimarcas:   sale-panel + credev + SaleReturns filtrado por sellers
+    //   - inbound_david: sale-panel + credev + SaleReturns filtrado por sellers
+    //   - inbound_rafael: sale-panel + credev + SaleReturns filtrado por sellers
+    //
+    // Canais NÃO sobrescritos (mantém BRUTO via per-NF classification):
+    //   - bazar, business, showroom, novidadesfranquia, ricardoeletro
+    //   - franquia: tem cálculo próprio de credev (acima) usando per-NF
+    //   Motivo: esses canais usam `totvs-totals-allbranchs` com filtro só por
+    //   `operations` (sem sellers). A subtração via PASS 2 (fiscal-movement)
+    //   pega devoluções da empresa inteira → distorce o valor.
+    //   TODO: implementar filtro de devolução por op-code de devolução do canal.
+    try {
+      // FRANQUIA voltou para BRUTO: o /canal-totals/franquia subtrai devolução
+      // de empresa inteira (bug do PASS 2) → valor ficou subestimado.
+      // Mantém per-NF do /faturamento-por-segmento.
+      //
+      // INBOUND_RAFAEL adicionado: o /canal-totals/inbound_rafael tem
+      // manualTransactions configuradas (NFs específicas marcadas como Rafael
+      // mesmo com dealer diferente no TOTVS). Override garante que essas NFs
+      // contem para Rafael.
+      // Apenas canais COM allowedSellers usam o líquido completo do canal-totals
+      // (PASS 0 + PASS 2 filtrados por dealer — sem bug).
+      const canaisLiquidos = [
+        'varejo',
+        'revenda',
+        'multimarcas',
+        'inbound_rafael',
+        'inbound_david',
+      ];
+      const overrideResults = await Promise.all(
+        canaisLiquidos.map(async (mod) => {
+          try {
+            const ct = await getCanalTotalsCached(mod, datemin, datemax);
+            return [mod, Number(ct?.invoice_value ?? null)];
+          } catch (err) {
+            console.warn(`[fat-seg override ${mod}] ${err.message}`);
+            return [mod, null];
+          }
+        }),
+      );
+      const beforeMap = { ...segMap };
+      for (const [canal, valor] of overrideResults) {
+        if (valor != null && Number.isFinite(valor)) {
+          // Clamp em 0: alguns canais sem allowedSellers (franquia/business/
+          // showroom/novidadesfranquia) podem ficar negativos por over-subtraction
+          // de devoluções da empresa inteira. Nesses casos, exibe 0.
+          segMap[canal] = Math.max(0, Math.round(valor * 100) / 100);
+        }
+      }
+      console.log(
+        `[fat-seg] segMap líquido (canais confiáveis):`,
+        Object.fromEntries(
+          canaisLiquidos.map((c) => [
+            c,
+            `${(beforeMap[c] ?? 0).toFixed(2)} → ${(segMap[c] ?? 0).toFixed(2)}`,
+          ]),
+        ),
+      );
+    } catch (err) {
+      console.warn(
+        `[fat-seg] override líquido falhou: ${err.message} — mantendo BRUTO`,
+      );
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    // Subtrai PASS 0 (devolucao_credev) para TODOS os canais sem allowedSellers.
+    // SÍNCRONO — espera todos antes de retornar para garantir líquido sempre.
+    // Cada chamada com timeout individual (300s) — se exceder, marca como
+    // incompleto e NÃO cacheia (evita salvar bruto como líquido).
+    let credevIncomplete = false;
+    try {
+      const withTimeout = (promise, ms) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+        ]);
+
+      const credevResults = await Promise.all(
+        canaisPassOnly.map(async (canal) => {
+          try {
+            const ct = await withTimeout(getCanalTotalsCached(canal, datemin, datemax), 300000);
+            return [canal, Number(ct?.devolucao_credev || 0), true /*ok*/];
+          } catch (e) {
+            console.warn(`[fat-seg credev ${canal}] ${e.message}`);
+            return [canal, 0, false /*falhou — bloqueia cache*/];
+          }
+        }),
+      );
+      for (const [canal, credevPag, ok] of credevResults) {
+        if (!ok) {
+          // Canal-totals falhou/timeout → não temos credev real para esse canal.
+          // Marca incompleto para NÃO cachear (evitar persistir bruto).
+          credevIncomplete = true;
+          console.warn(`[fat-seg] ${canal} credev INDEFINIDO — fat-seg não será cacheado`);
+          continue;
+        }
+        if (credevPag > 0 && (segMap[canal] || 0) > 0) {
+          const before = segMap[canal];
+          segMap[canal] = Math.max(0, segMap[canal] - credevPag);
+          credev_por_segmento[canal] = credevPag;
+          console.log(
+            `[fat-seg] ${canal} - credev(pagamento) R$${credevPag.toFixed(2)}: ${before.toFixed(2)} → ${segMap[canal].toFixed(2)}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.warn(`[fat-seg] PASS 0 credev falhou: ${err.message}`);
+      credevIncomplete = true;
+    }
+
     // Arredondamentos finais
     for (const k of Object.keys(segMap)) {
       segMap[k] = Math.round(segMap[k] * 100) / 100;
@@ -10100,22 +12093,41 @@ router.post(
 
     const total = Object.values(segMap).reduce((s, v) => s + v, 0);
 
+    // Arredonda credev_por_segmento
+    const credev_por_segmento_round = {};
+    for (const [k, v] of Object.entries(credev_por_segmento)) {
+      credev_por_segmento_round[k] = Math.round(v * 100) / 100;
+    }
+    const credev_total = Object.values(credev_por_segmento_round).reduce((s, v) => s + v, 0);
+
     const responseData = {
-      // segmentos = bruto (sem deducao de credev de payments — troca de velocidade)
+      // segmentos = líquido (varejo/revenda/multimarcas via override do canal-totals;
+      //                       franquia/business/ricardoeletro/inbound_* via credev per-NF acima;
+      //                       showroom/novidadesfranquia/bazar permanecem bruto)
       segmentos: segMap,
-      segmentos_bruto: segMap,
-      credev_por_segmento: {},
+      segmentos_bruto: segMap, // mantido por compatibilidade (alguns clientes usam)
+      credev_por_segmento: credev_por_segmento_round,
       total: Math.round(total * 100) / 100,
       total_bruto: Math.round(total * 100) / 100,
-      credev_total: 0,
+      credev_total: Math.round(credev_total * 100) / 100,
       total_liquido: Math.round(total * 100) / 100,
       // Metadata
-      source: 'totvs_live',
+      source: 'totvs_live+liquido_via_canal_totals+credev_per_nf',
       nfs_processadas: totalNFsProcessadas,
       branches_used: branchCodeList.length,
     };
 
-    FATSEG_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+    // Só cacheia se TOTVS live processou ao menos 1 NF E credev foi computado
+    // completamente para todos os canais sem allowedSellers — evita salvar
+    // resposta parcial (bruto) quando canal-totals timed out / falhou.
+    if (totalNFsProcessadas > 0 && !credevIncomplete) {
+      FATSEG_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+    } else if (credevIncomplete) {
+      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — credev PASS 0 incompleto (evita persistir bruto)`);
+    } else {
+      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — TOTVS retornou 0 NFs (possível falha)`);
+    }
+    // (helper para invalidar cache via endpoint externo, declarado abaixo)
     if (FATSEG_CACHE.size > 10) {
       const oldest = [...FATSEG_CACHE.entries()].sort(
         (a, b) => a[1].ts - b[1].ts,
@@ -10124,6 +12136,33 @@ router.post(
     }
 
     return successResponse(res, responseData, 'OK (TOTVS live)');
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/crm/clear-fatseg-cache
+//      Limpa cache em memória do /faturamento-por-segmento e /canal-totals.
+// ---------------------------------------------------------------------------
+router.post(
+  '/clear-fatseg-cache',
+  asyncHandler(async (req, res) => {
+    const fatSegSize = FATSEG_CACHE.size;
+    FATSEG_CACHE.clear();
+    // Limpa canal-totals APENAS se `?full=true` — caso contrário preserva
+    // (canal-totals é caro de recriar; deve sobreviver a limpeza do fat-seg).
+    const fullClear = req.query?.full === 'true' || req.body?.full === true;
+    let canalTotalsSize = 0;
+    if (fullClear) {
+      try {
+        canalTotalsSize = CANAL_TOTALS_CACHE.size;
+        CANAL_TOTALS_CACHE.clear();
+      } catch {}
+    }
+    return successResponse(
+      res,
+      { cleared: { fatseg: fatSegSize, canalTotals: canalTotalsSize } },
+      `Cache limpo: ${fatSegSize} fatseg${fullClear ? ` + ${canalTotalsSize} canalTotals` : ' (canalTotals preservado)'}`,
+    );
   }),
 );
 

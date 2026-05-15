@@ -15,6 +15,12 @@ import metaRoutes from './routes/meta.routes.js';
 import evolutionRoutes from './routes/evolution.routes.js';
 import autentiqueRoutes from './routes/autentique.routes.js';
 import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
+import filaRoutes from './routes/fila.routes.js';
+import forecastRoutes from './routes/forecast.routes.js';
+import techRoutes from './routes/tech.routes.js';
+import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
+import { iniciarCronUazapiSync } from './services/uazapiSync.js';
+import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
 
 import {
@@ -7233,7 +7239,9 @@ import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
 import crmVendasRouter from './totvsrouter/crmVendas.js';
+import cmvRouter from './totvsrouter/cmv.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
+import { iniciarJobForecastRefYoy } from './jobs/forecast-ref-yoy.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7330,6 +7338,7 @@ app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
 app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
 app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
 app.use('/api/totvs', crmVendasRouter); // crm-vendas/*
+app.use('/api/totvs', cmvRouter); // cmv/invoices/* (proxy cru fiscal v2)
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
@@ -7340,6 +7349,10 @@ app.use('/api/meta', metaRoutes); // WhatsApp Official (Meta Graph API)
 app.use('/api/evolution', evolutionRoutes); // Evolution WhatsApp conversations
 app.use('/api/autentique', autentiqueRoutes); // Autentique assinatura digital (termo-credito, CRUD documentos)
 app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, roubos, IA
+app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
+app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
+app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
+app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -7364,7 +7377,10 @@ app.listen(PORT, async () => {
     console.error('❌ Falha ao iniciar scheduler pes_pessoa:', err.message);
   }
   iniciarJobFaturamentoDiario();
+  iniciarJobForecastRefYoy();
   iniciarCronSyncLeadsCompras();
+  iniciarCronUazapiSync();
+  iniciarUazapiMonitor();
 });
 
 export default app;
