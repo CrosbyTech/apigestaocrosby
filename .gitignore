@@ -8,3 +8,4 @@ node_modules/
 uploads/
 
 # ... outras regras existentes ...
+.cache/
