@@ -75,7 +75,7 @@ router.post(
 
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
 
-      console.log('🔍 Consultando pessoas jurídicas na API TOTVS:', {
+      console.log('🔍 Consultando pessoa jurídica na API TOTVS:', {
         endpoint,
         personCode: personCodeNum,
       });
