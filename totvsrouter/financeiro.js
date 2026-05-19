@@ -1777,19 +1777,106 @@ router.post(
         return `${datePart}T15:00:00.000Z`;
       };
 
-      // Normalizar installments — normalizar datas e remover campos não aceitos pela API TOTVS
-      // NOTA: document, prevision e stage são rejeitados pela API com "Invalid field" — omitir.
+      // Normalizar installments — normalizar datas e converter enums para o formato TOTVS
+      // TOTVS exige Document, Prevision, Stage em PascalCase como inteiros (são OBRIGATÓRIOS)
+      const DOCUMENT_TYPE_MAP = {
+        Duplicate: 1,
+        InvoicePrint: 2,
+        Commission: 3,
+        Guide: 4,
+        Financing: 5,
+        Voucher: 6,
+        Invoice: 7,
+        AccountDiscountNote: 8,
+        AdministrationFee: 9,
+        InterestWithoutFinancing: 10,
+        Bonus: 11,
+        BankDeposit: 12,
+        Compror: 13,
+        Vendor: 14,
+        Receipt: 15,
+        TedDoc: 16,
+        Loan: 17,
+        FreightKnowledge: 18,
+        ProLabore: 19,
+        AdvanceMoney: 20,
+        OutherTitle: 50,
+      };
+      const PREVISION_TYPE_MAP = { Forecast: 1, Real: 2, Consignment: 3 };
+      const STAGE_TYPE_MAP = {
+        InvoiceNotConfered: 1,
+        ReleasedForPayment: 2,
+        AuthorizedCheck: 3,
+        CheckIssued: 4,
+        InvoiceAccept: 5,
+        Endossado: 10,
+        PaymentInBank: 20,
+        Reserved: 30,
+        PaymentAutomatic: 40,
+        Finished: 90,
+      };
+
+      const toEnumInt = (map, val, fallback) => {
+        if (val === undefined || val === null || val === '') return fallback;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = parseInt(val, 10);
+          if (!isNaN(num)) return num;
+          return map[val] ?? fallback;
+        }
+        return fallback;
+      };
+
+      // Chaves "antigas" que serão removidas (variações que já existem nos payloads salvos)
+      const LEGACY_KEYS = new Set([
+        'document',
+        'prevision',
+        'stage',
+        'Document',
+        'Prevision',
+        'Stage',
+        'documentType',
+        'previsionType',
+        'stageType',
+      ]);
+
       if (Array.isArray(payload.installments)) {
+        console.log(
+          '🧹 Installments ANTES da limpeza:',
+          JSON.stringify(payload.installments, null, 2),
+        );
         payload.installments = payload.installments.map((inst) => {
-          // eslint-disable-next-line no-unused-vars
-          const { document, prevision, stage, ...rest } = inst;
+          // Capturar valores antigos (qualquer variação) antes de limpar
+          const docVal =
+            inst.Document ?? inst.document ?? inst.documentType ?? 'Duplicate';
+          const prevVal =
+            inst.Prevision ?? inst.prevision ?? inst.previsionType ?? 'Real';
+          const stageVal =
+            inst.Stage ?? inst.stage ?? inst.stageType ?? 'InvoiceNotConfered';
+
+          // Remover chaves antigas
+          const clean = {};
+          for (const [k, v] of Object.entries(inst)) {
+            if (LEGACY_KEYS.has(k)) continue;
+            clean[k] = v;
+          }
+
           return {
-            ...rest,
-            dueDate: normalizeDate(inst.dueDate),
-            issueDate: normalizePastDate(inst.issueDate),
-            arrivalDate: normalizePastDate(inst.arrivalDate),
+            ...clean,
+            // Datas normalizadas
+            dueDate: normalizeDate(clean.dueDate),
+            issueDate: normalizePastDate(clean.issueDate),
+            arrivalDate: normalizePastDate(clean.arrivalDate),
+            // Enums obrigatórios em PascalCase como inteiros
+            Document: toEnumInt(DOCUMENT_TYPE_MAP, docVal, 1),
+            Prevision: toEnumInt(PREVISION_TYPE_MAP, prevVal, 2),
+            Stage: toEnumInt(STAGE_TYPE_MAP, stageVal, 1),
           };
         });
+        console.log(
+          '✨ Installments DEPOIS da limpeza:',
+          JSON.stringify(payload.installments, null, 2),
+        );
       }
 
       // Validações mínimas exigidas pela API TOTVS
