@@ -1739,50 +1739,6 @@ router.post(
 
       const payload = req.body || {};
 
-      // Mapeamento de enums string → inteiro exigido pela API TOTVS (1-based, conforme schema oficial)
-      const DOCUMENT_TYPE_MAP = {
-        Duplicate: 1,
-        InvoicePrint: 2,
-        Commission: 3,
-        Guide: 4,
-        Financing: 5,
-        Voucher: 6,
-        Invoice: 7,
-        AccountDiscountNote: 8,
-        AdministrationFee: 9,
-        InterestWithoutFinancing: 10,
-        Bonus: 11,
-        BankDeposit: 12,
-        Compror: 13,
-        Vendor: 14,
-        Receipt: 15,
-        TedDoc: 16,
-        Loan: 17,
-        FreightKnowledge: 18,
-        ProLabore: 19,
-        AdvanceMoney: 20,
-        OutherTitle: 50,
-      };
-      const PREVISION_TYPE_MAP = { Forecast: 1, Real: 2, Consignment: 3 };
-      const STAGE_TYPE_MAP = {
-        InvoiceNotConfered: 1,
-        ReleasedForPayment: 2,
-        AuthorizedCheck: 3,
-        CheckIssued: 4,
-        InvoiceAccept: 5,
-        Endossado: 10,
-        PaymentInBank: 20,
-        Reserved: 30,
-        PaymentAutomatic: 40,
-        Finished: 90,
-      };
-
-      const resolveEnum = (map, val) => {
-        if (val === undefined || val === null) return undefined;
-        if (typeof val === 'number') return val;
-        return map[val] ?? val;
-      };
-
       // Normalizar datas para ISO 8601 com Z.
       // TOTVS aceita APENAS o horário T15:00:00.000Z — qualquer outro é rejeitado.
       const normalizeDate = (d) => {
@@ -1821,17 +1777,19 @@ router.post(
         return `${datePart}T15:00:00.000Z`;
       };
 
-      // Normalizar installments — converter enums e datas
+      // Normalizar installments — normalizar datas e remover campos não aceitos pela API TOTVS
+      // NOTA: document, prevision e stage são rejeitados pela API com "Invalid field" — omitir.
       if (Array.isArray(payload.installments)) {
-        payload.installments = payload.installments.map((inst) => ({
-          ...inst,
-          document: resolveEnum(DOCUMENT_TYPE_MAP, inst.document),
-          prevision: resolveEnum(PREVISION_TYPE_MAP, inst.prevision),
-          stage: resolveEnum(STAGE_TYPE_MAP, inst.stage),
-          dueDate: normalizeDate(inst.dueDate),
-          issueDate: normalizePastDate(inst.issueDate),
-          arrivalDate: normalizePastDate(inst.arrivalDate),
-        }));
+        payload.installments = payload.installments.map((inst) => {
+          // eslint-disable-next-line no-unused-vars
+          const { document, prevision, stage, ...rest } = inst;
+          return {
+            ...rest,
+            dueDate: normalizeDate(inst.dueDate),
+            issueDate: normalizePastDate(inst.issueDate),
+            arrivalDate: normalizePastDate(inst.arrivalDate),
+          };
+        });
       }
 
       // Validações mínimas exigidas pela API TOTVS
