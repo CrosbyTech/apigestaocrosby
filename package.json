@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "serve": "vite preview",
-    "postinstall": "npm install --prefix backend"
+    "serve": "vite preview"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
