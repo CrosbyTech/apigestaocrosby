@@ -127,13 +127,25 @@ function preWarmCanalTotalsCredev() {
   const ontem = new Date(hoje); ontem.setUTCDate(ontem.getUTCDate() - 1);
   const ontemIso = ontem.toISOString().slice(0, 10);
 
-  // Ranges úteis: mês inteiro, mês até hoje, mês até ontem (cobre Promessa Mensal,
-  // Faturamento Canal, Comparativo, Promessa Semanal — todas variações).
+  // D-1 COM rollback de domingo → casado com a lógica do promessa-mensal/semanal
+  // (em segunda-feira, D-1 normal é domingo, mas as telas fazem rollback p/ sábado).
+  // Sem isso, na segunda o cache não cobre o range real usado pelo front.
+  const ontemRollback = new Date(ontem);
+  while (ontemRollback.getUTCDay() === 0) {
+    ontemRollback.setUTCDate(ontemRollback.getUTCDate() - 1);
+  }
+  const ontemRollbackIso = ontemRollback.toISOString().slice(0, 10);
+
+  // Ranges úteis: mês inteiro, mês até hoje, mês até ontem (D-1) E mês até D-1
+  // com rollback de domingo (cobre segunda-feira corretamente).
   const ranges = [
     [monthStart, today],
     [monthStart, ontemIso],
     [monthStart, monthEnd],
   ];
+  if (ontemRollbackIso !== ontemIso) {
+    ranges.push([monthStart, ontemRollbackIso]); // só adiciona se diferente (segundas)
+  }
   const canais = ['franquia', 'business', 'showroom', 'novidadesfranquia', 'bazar', 'ricardoeletro'];
 
   console.log(`🔥 [pre-warm canal-totals] Aquecendo ${canais.length} canais × ${ranges.length} ranges em BG...`);
@@ -2563,12 +2575,23 @@ router.post(
       return bx - ax;
     });
 
-    // Totais
+    // Totais GERAIS (todas as lojas, incluindo migradas/novas)
     const total_atual = lojas.reduce((s, l) => s + l.faturamento_atual, 0);
     const total_anterior = lojas.reduce((s, l) => s + l.faturamento_anterior, 0);
     const total_delta = total_atual - total_anterior;
     const total_crescimento_pct =
       total_anterior > 0 ? (total_delta / total_anterior) * 100 : null;
+
+    // Totais COMPARÁVEIS (só lojas que tinham faturamento nos dois períodos)
+    // — comparação apples-to-apples, exclui lojas migradas/novas que distorcem.
+    const lojasComparaveis = lojas.filter(
+      (l) => l.faturamento_anterior > 0 && l.faturamento_atual > 0,
+    );
+    const comp_atual = lojasComparaveis.reduce((s, l) => s + l.faturamento_atual, 0);
+    const comp_anterior = lojasComparaveis.reduce((s, l) => s + l.faturamento_anterior, 0);
+    const comp_delta = comp_atual - comp_anterior;
+    const comp_crescimento_pct =
+      comp_anterior > 0 ? (comp_delta / comp_anterior) * 100 : null;
 
     return successResponse(res, {
       periodo_atual: { datemin, datemax },
@@ -2579,6 +2602,13 @@ router.post(
         anterior: total_anterior,
         delta: total_delta,
         crescimento_pct: total_crescimento_pct,
+        // Total comparável (exclui lojas sem ano anterior)
+        comp_atual,
+        comp_anterior,
+        comp_delta,
+        comp_crescimento_pct,
+        comp_lojas_count: lojasComparaveis.length,
+        total_lojas_count: lojas.length,
       },
     });
   }),
@@ -11232,6 +11262,149 @@ router.post(
       );
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // TOTVS LIVE para varejo — usa o mesmo endpoint do relatório oficial
+    // COMFL007 (sale-panel/v2/sellers/search) com branches do varejo.
+    // Evita o delay da sincronização do Supabase (1× por dia às 01:30) e
+    // bate 1:1 com o "Análise de Desempenho do Vendedor" do TOTVS.
+    // ═══════════════════════════════════════════════════════════════════
+    if (modulo === 'varejo') {
+      try {
+        const VAREJO_BRANCHES_LIVE = [
+          2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98,
+        ];
+        // Operações usadas pelo TOTVS para branches especiais do painel
+        // (mesma lista do /sale-panel/ranking-faturamento). Sem isso, TOTVS
+        // retorna vazio para varejo branches.
+        const SPECIAL_OPERATIONS_VAREJO = [
+          1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
+          9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405,
+          1205, 1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067, 7234,
+          7236, 7240, 7241, 7242, 7235, 7237, 7254, 7259, 7255, 7243, 7245,
+          7244,
+        ];
+        // TOTVS sale-panel/v2/sellers/search aceita 1 branch por chamada.
+        // Paraleliza com concorrência limitada para evitar rate limit.
+        const CONC = 5;
+        const allBranchResults = [];
+        for (let i = 0; i < VAREJO_BRANCHES_LIVE.length; i += CONC) {
+          const batch = VAREJO_BRANCHES_LIVE.slice(i, i + CONC);
+          const responses = await Promise.all(
+            batch.map(async (b) => {
+              try {
+                const r = await callTotvsSellersSearch({
+                  branchs: [b],
+                  datemin,
+                  datemax,
+                  operations: SPECIAL_OPERATIONS_VAREJO,
+                });
+                // TOTVS retorna 1 branch direto (não dentro de array "branches"):
+                // { dataRow:[...sellers...], invoiceQuantity, invoiceValue, itemQuantity }
+                // Empacotamos manualmente como branch object.
+                if (r && Array.isArray(r.dataRow)) {
+                  return [{
+                    branch_code: b,
+                    branch_name: r.branch_name || `Filial ${b}`,
+                    dataRow: r.dataRow,
+                    invoiceQuantity: r.invoiceQuantity || 0,
+                    invoiceValue: r.invoiceValue || 0,
+                    itemQuantity: r.itemQuantity || 0,
+                  }];
+                }
+                if (Array.isArray(r?.branches)) return r.branches;
+                return [];
+              } catch (err) {
+                console.warn(`[sellers-totals/varejo branch ${b}] ${err.message}`);
+                return [];
+              }
+            }),
+          );
+          for (const list of responses) allBranchResults.push(...list);
+        }
+        // Estrutura: cada item de allBranchResults é uma branch com .dataRow de sellers.
+        const branches = allBranchResults;
+
+        // Agrega por seller_code (vendedor pode trabalhar em múltiplas filiais).
+        const sellerAgg = new Map();
+        // pmpv (PA por loja) — usar proporcional pelo invoice_value
+        // Para calcular itens_qty por vendedor, distribuímos itemQuantity da
+        // loja proporcionalmente ao seller_sale_value.
+        for (const branch of branches) {
+          const branchCode = Number(branch.branch_code);
+          const branchName = branch.branch_name;
+          const branchItens = Number(branch.itemQuantity || 0);
+          const branchValue = Number(branch.invoiceValue || 0);
+          const sellers = Array.isArray(branch.dataRow) ? branch.dataRow : [];
+          for (const r of sellers) {
+            const code = String(r.seller_code ?? r.sellerCode ?? '');
+            if (!code || code === '0') continue;
+            const iv = Number(r.seller_sale_value || 0);
+            const iq = Number(r.seller_sale_qty || 0);
+            if (iv <= 0 && iq <= 0) continue;
+            // Distribui itens da loja proporcional ao valor do vendedor
+            const itensShare =
+              branchValue > 0 ? Math.round((iv / branchValue) * branchItens) : 0;
+
+            if (!sellerAgg.has(code)) {
+              sellerAgg.set(code, {
+                seller_code: Number(code),
+                seller_name:
+                  r.seller_name || r.sellerName || `Vendedor ${code}`,
+                invoice_value: 0,
+                invoice_value_gross: 0,
+                invoice_qty: 0,
+                itens_qty: 0,
+                credev_value: 0,
+                canalAcc: { varejo: 0 },
+                branchAcc: {},
+                canal: 'varejo',
+              });
+            }
+            const acc = sellerAgg.get(code);
+            acc.invoice_value += iv;
+            acc.invoice_value_gross += iv;
+            acc.invoice_qty += iq;
+            acc.itens_qty += itensShare;
+            acc.canalAcc.varejo += iv;
+            if (branchCode) {
+              acc.branchAcc[branchCode] = (acc.branchAcc[branchCode] || 0) + iv;
+              // Loja "principal" do vendedor = aquela onde mais vendeu
+              if (!acc.mainBranchCode || acc.branchAcc[branchCode] > acc.branchAcc[acc.mainBranchCode]) {
+                acc.mainBranchCode = branchCode;
+                acc.branch_code = branchCode;
+                acc.branch_name = branchName;
+              }
+            }
+          }
+        }
+        const dataRow = [...sellerAgg.values()].map((s) => ({
+          ...s,
+          tm: s.invoice_qty > 0 ? s.invoice_value / s.invoice_qty : 0,
+          pa: s.invoice_qty > 0 ? s.itens_qty / s.invoice_qty : 0,
+          pmpv: s.itens_qty > 0 ? s.invoice_value / s.itens_qty : 0,
+        }));
+
+        console.log(
+          `[sellers-totals/varejo TOTVS live] ${dataRow.length} vendedores, total R$${dataRow.reduce((s, x) => s + x.invoice_value, 0).toFixed(2)}`,
+        );
+        return successResponse(
+          res,
+          {
+            dataRow,
+            total: dataRow.reduce((s, x) => s + x.invoice_value, 0),
+            source: 'totvs-live (sale-panel/v2/sellers/search)',
+            modulo: 'varejo',
+          },
+          `${dataRow.length} vendedores varejo (TOTVS live)`,
+        );
+      } catch (err) {
+        console.warn(
+          `[sellers-totals/varejo TOTVS live] falhou: ${err.message} — caindo para Supabase`,
+        );
+        // Continua para o caminho legado (Supabase) abaixo se TOTVS live falhar
+      }
+    }
+
     // ── Constantes de segmentação (mesma lógica de /faturamento-por-segmento) ──
     const ALLOWED_SEGS = new Set([
       'varejo',
@@ -11748,6 +11921,9 @@ router.post(
     ) => {
       const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
       const pageSize = 100;
+      // Marcador de páginas que falharam (mesmo após retries). Se houver
+      // qualquer falha, o resultado é PARCIAL → não cachear no fat-seg.
+      const failedPages = [];
       const fetchPageWithRetry = async (page, retries = 3) => {
         for (let attempt = 1; attempt <= retries; attempt++) {
           try {
@@ -11787,11 +11963,13 @@ router.post(
               await new Promise((r) => setTimeout(r, delay));
               continue;
             }
-            console.warn(`[fat-seg invoices] pág ${page}: ${err.message}`);
-            return { items: [] };
+            console.warn(`[fat-seg invoices] pág ${page}: ${err.message} — RESULTADO PARCIAL`);
+            failedPages.push(page);
+            return { items: [], __failed: true };
           }
         }
-        return { items: [] };
+        failedPages.push(page);
+        return { items: [], __failed: true };
       };
       const first = await fetchPageWithRetry(1);
       const all = [...(first?.items || [])];
@@ -11810,6 +11988,8 @@ router.post(
           for (const pd of results) all.push(...(pd?.items || []));
         }
       }
+      // Anexa o status de páginas falhadas para o caller saber se é parcial
+      all.__failedPages = failedPages;
       return all;
     };
 
@@ -12009,7 +12189,23 @@ router.post(
         canaisLiquidos.map(async (mod) => {
           try {
             const ct = await getCanalTotalsCached(mod, datemin, datemax);
-            return [mod, Number(ct?.invoice_value ?? null)];
+            // Se canal-totals falhou (null) OU não retornou objeto válido,
+            // retorna null para que o override NÃO ocorra (mantém per-NF bruto).
+            if (!ct || typeof ct !== 'object') {
+              console.warn(`[fat-seg override ${mod}] canal-totals null — mantendo per-NF`);
+              return [mod, null];
+            }
+            const valor = Number(ct.invoice_value);
+            if (!Number.isFinite(valor)) return [mod, null];
+            // Anti-bug: se canal-totals retornou exatamente 0 MAS o per-NF
+            // (segMap atual) tem valor > 50k, é suspeito (provavelmente
+            // cache-totals incompleto/em construção). Mantém per-NF.
+            const brutoPerNf = Number(segMap[mod] || 0);
+            if (valor === 0 && brutoPerNf > 50000) {
+              console.warn(`[fat-seg override ${mod}] canal-totals=0 mas per-NF=R$${brutoPerNf.toFixed(2)} — mantendo per-NF`);
+              return [mod, null];
+            }
+            return [mod, valor];
           } catch (err) {
             console.warn(`[fat-seg override ${mod}] ${err.message}`);
             return [mod, null];
@@ -12045,6 +12241,46 @@ router.post(
     // SÍNCRONO — espera todos antes de retornar para garantir líquido sempre.
     // Cada chamada com timeout individual (300s) — se exceder, marca como
     // incompleto e NÃO cacheia (evita salvar bruto como líquido).
+    //
+    // Canais que SEMPRE têm credev em períodos do mês corrente (heurística):
+    // se canal-totals retornar credev=0 mas gross > 50k, é suspeito (provavelmente
+    // o erp-data credev ainda está carregando em BG) → marca como incompleto.
+    const CANAIS_COM_CREDEV_TIPICO = new Set([
+      'franquia',
+      'showroom',
+      'novidadesfranquia',
+    ]);
+
+    // ─── CREDEV OVERRIDES (admin) ────────────────────────────────────────
+    // Lê overrides ATIVOS com issue_date dentro do período. Indexa por canal
+    // para subtrair do total de credev (NF cujo credev foi marcado como
+    // "desconsiderar" tem o valor bruto contabilizado como faturamento).
+    const credevOverridesByCanal = new Map(); // canal → soma(credev_amount)
+    try {
+      const { data: overridesRows } = await supabase
+        .from('forecast_credev_overrides')
+        .select('canal, credev_amount, issue_date')
+        .eq('ativo', true)
+        .gte('issue_date', datemin)
+        .lte('issue_date', datemax);
+      for (const o of overridesRows || []) {
+        const k = String(o.canal).toLowerCase();
+        credevOverridesByCanal.set(
+          k,
+          (credevOverridesByCanal.get(k) || 0) + Number(o.credev_amount || 0),
+        );
+      }
+      if (credevOverridesByCanal.size > 0) {
+        console.log(
+          `[fat-seg] credev overrides aplicados:`,
+          Object.fromEntries(credevOverridesByCanal),
+        );
+      }
+    } catch (e) {
+      console.warn(`[fat-seg] falha ao ler credev overrides: ${e.message}`);
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     let credevIncomplete = false;
     try {
       const withTimeout = (promise, ms) =>
@@ -12057,33 +12293,90 @@ router.post(
         canaisPassOnly.map(async (canal) => {
           try {
             const ct = await withTimeout(getCanalTotalsCached(canal, datemin, datemax), 300000);
-            return [canal, Number(ct?.devolucao_credev || 0), true /*ok*/];
+            // ct=null significa que canal-totals retornou null (HTTP fallback falhou
+            // ou cache miss + erro). Trata como falha para não cachear bruto.
+            if (!ct || typeof ct !== 'object') {
+              return [canal, 0, false /*falhou*/, 0];
+            }
+            const credev = Number(ct?.devolucao_credev || 0);
+            const gross = Number(ct?.gross_invoice_value || 0);
+            return [canal, credev, true /*ok*/, gross];
           } catch (e) {
             console.warn(`[fat-seg credev ${canal}] ${e.message}`);
-            return [canal, 0, false /*falhou — bloqueia cache*/];
+            return [canal, 0, false /*falhou — bloqueia cache*/, 0];
           }
         }),
       );
-      for (const [canal, credevPag, ok] of credevResults) {
+      for (const [canal, credevPag, ok, gross] of credevResults) {
         if (!ok) {
-          // Canal-totals falhou/timeout → não temos credev real para esse canal.
+          // Canal-totals falhou/timeout/null → não temos credev real para esse canal.
           // Marca incompleto para NÃO cachear (evitar persistir bruto).
           credevIncomplete = true;
           console.warn(`[fat-seg] ${canal} credev INDEFINIDO — fat-seg não será cacheado`);
           continue;
         }
-        if (credevPag > 0 && (segMap[canal] || 0) > 0) {
-          const before = segMap[canal];
-          segMap[canal] = Math.max(0, segMap[canal] - credevPag);
-          credev_por_segmento[canal] = credevPag;
-          console.log(
-            `[fat-seg] ${canal} - credev(pagamento) R$${credevPag.toFixed(2)}: ${before.toFixed(2)} → ${segMap[canal].toFixed(2)}`,
+        // Heurística anti-bug-de-carregamento: se canal historicamente tem credev
+        // e o bruto per-NF (segMap) é > 50k mas credev=0, suspeita que erp-data
+        // credev ainda não terminou de carregar → bloqueia cache.
+        // Usa segMap (per-NF — sempre populado) em vez de canal-totals.gross
+        // (que pode estar 0 se canal-totals retornou parcial).
+        const brutoPerNf = Number(segMap[canal] || 0);
+        if (
+          credevPag === 0 &&
+          brutoPerNf > 50000 &&
+          CANAIS_COM_CREDEV_TIPICO.has(canal)
+        ) {
+          credevIncomplete = true;
+          console.warn(
+            `[fat-seg] ${canal} credev=0 mas bruto per-NF=R$${brutoPerNf.toFixed(2)} (canal-totals gross=R$${gross.toFixed(2)}) — SUSPEITO. NÃO cacheando.`,
           );
+          continue;
+        }
+        if (credevPag > 0 && (segMap[canal] || 0) > 0) {
+          // Aplica overrides: reduz o credev a subtrair pelo total de overrides
+          const credevOverridden = credevOverridesByCanal.get(canal) || 0;
+          const credevEffective = Math.max(0, credevPag - credevOverridden);
+          const before = segMap[canal];
+          segMap[canal] = Math.max(0, segMap[canal] - credevEffective);
+          credev_por_segmento[canal] = credevEffective;
+          if (credevOverridden > 0) {
+            console.log(
+              `[fat-seg] ${canal} - credev(pagamento) R$${credevPag.toFixed(2)} - override R$${credevOverridden.toFixed(2)} = R$${credevEffective.toFixed(2)}: ${before.toFixed(2)} → ${segMap[canal].toFixed(2)}`,
+            );
+          } else {
+            console.log(
+              `[fat-seg] ${canal} - credev(pagamento) R$${credevPag.toFixed(2)}: ${before.toFixed(2)} → ${segMap[canal].toFixed(2)}`,
+            );
+          }
         }
       }
     } catch (err) {
       console.warn(`[fat-seg] PASS 0 credev falhou: ${err.message}`);
       credevIncomplete = true;
+    }
+
+    // Aplica overrides nos canais com allowedSellers (varejo/revenda/multimarcas/
+    // inbound_*) — esses já tiveram override do canal-totals (líquido full).
+    // O credev nesses canais foi subtraído pelo /canal-totals → precisamos
+    // adicionar de volta o valor dos overrides.
+    const canaisLiquidosSet = new Set([
+      'varejo',
+      'revenda',
+      'multimarcas',
+      'inbound_rafael',
+      'inbound_david',
+    ]);
+    for (const [canal, valorOverride] of credevOverridesByCanal.entries()) {
+      if (canaisLiquidosSet.has(canal) && valorOverride > 0) {
+        const before = segMap[canal] || 0;
+        segMap[canal] = before + valorOverride;
+        // Já registrou no credev_por_segmento? Não — pra esses canais o credev
+        // foi consumido no canal-totals. Registra como "credev_override_aplicado"
+        credev_por_segmento[`${canal}_override`] = valorOverride;
+        console.log(
+          `[fat-seg] ${canal} + override credev R$${valorOverride.toFixed(2)}: ${before.toFixed(2)} → ${segMap[canal].toFixed(2)}`,
+        );
+      }
     }
 
     // Arredondamentos finais
@@ -12117,15 +12410,31 @@ router.post(
       branches_used: branchCodeList.length,
     };
 
+    // Detecta páginas TOTVS que falharam (resultado parcial → não cachear)
+    const invoicesFailedPages = Array.isArray(invoicesMain?.__failedPages)
+      ? invoicesMain.__failedPages
+      : [];
+    const reFailedPages = Array.isArray(invoicesRE?.__failedPages)
+      ? invoicesRE.__failedPages
+      : [];
+    const totvsIncomplete = invoicesFailedPages.length > 0 || reFailedPages.length > 0;
+    if (totvsIncomplete) {
+      console.warn(
+        `[fat-seg] ${cacheKey} — TOTVS retornou parcial (${invoicesFailedPages.length} pgs main falharam, ${reFailedPages.length} pgs RE)`,
+      );
+    }
+
     // Só cacheia se TOTVS live processou ao menos 1 NF E credev foi computado
-    // completamente para todos os canais sem allowedSellers — evita salvar
-    // resposta parcial (bruto) quando canal-totals timed out / falhou.
-    if (totalNFsProcessadas > 0 && !credevIncomplete) {
+    // completamente para todos os canais sem allowedSellers E nenhuma página
+    // TOTVS falhou — evita salvar resposta parcial.
+    if (totalNFsProcessadas > 0 && !credevIncomplete && !totvsIncomplete) {
       FATSEG_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+    } else if (totvsIncomplete) {
+      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — páginas TOTVS falharam (resultado parcial)`);
     } else if (credevIncomplete) {
-      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — credev PASS 0 incompleto (evita persistir bruto)`);
+      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — credev PASS 0 incompleto`);
     } else {
-      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — TOTVS retornou 0 NFs (possível falha)`);
+      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — TOTVS retornou 0 NFs`);
     }
     // (helper para invalidar cache via endpoint externo, declarado abaixo)
     if (FATSEG_CACHE.size > 10) {
@@ -12390,6 +12699,17 @@ router.post(
     const B2R_REVENDA_DEALERS_EMP99 = new Set([25, 15, 161, 165, 241, 779]);
     const BUSINESS_OP_CODES_SET = new Set(BUSINESS_OP_CODES_ARR);
 
+    // ─── manualTransactions: NFs cujo dealer no TOTVS NÃO é o do canal mas
+    //     foram corrigidas manualmente (ex.: NF do Peu reatribuída ao Rafael).
+    //     Lê do CANAL_CONFIG[canal].manualTransactions e gera um Set para lookup
+    //     rápido por "branch|transactionCode".
+    const canalCfg = CANAL_CONFIG[canal];
+    const manualTxKeys = new Set(
+      (canalCfg?.manualTransactions || []).map(
+        (m) => `${m.branch}|${m.transactionCode}`,
+      ),
+    );
+
     // Carrega franquia person codes se necessário
     const franqPersonCodes =
       canal === 'franquia' ||
@@ -12448,7 +12768,12 @@ router.post(
 
       // Determina segmento (mesma lógica do faturamento-por-segmento)
       let seg;
-      if (dealerReal === FRANQUIA_DEALER_TX) {
+      // manualTransactions: força essa NF ao canal solicitado, sobrescrevendo
+      // qualquer outra regra (ex.: NF 10787 com dealer 121 Peu → inbound_rafael)
+      const manualKey = `${branchCode}|${parseInt(nf.transactionCode)}`;
+      if (manualTxKeys.has(manualKey)) {
+        seg = canal;
+      } else if (dealerReal === FRANQUIA_DEALER_TX) {
         seg = 'franquia';
       } else if (
         dealerReal === JUCELINO_DEALER_TX &&
@@ -12522,11 +12847,23 @@ router.post(
 
     let totalBruto = 0;
     let totalCredev = 0;
+    // Vendedor "default" do canal — usado quando NF veio via manualTransactions
+    // (dealer no TOTVS é diferente, mas a venda foi efetivamente do vendedor do canal)
+    const canalDefaultSeller = (() => {
+      if (canal === 'inbound_rafael') return { nome: 'Rafael', ativo: true };
+      if (canal === 'inbound_david') return { nome: 'David', ativo: true };
+      return null;
+    })();
     const transacoes = allNFs.map((n) => {
       const dealerCode = getDealerCodeTx(n);
+      const branchCode = parseInt(n.branchCode);
+      const transactionCode = parseInt(n.transactionCode);
+      const isManualTx = manualTxKeys.has(`${branchCode}|${transactionCode}`);
       const vInfo = dealerCode ? vendMap.byTotvsId?.[dealerCode] : null;
-      const vendedor_nome = vInfo?.nome || null;
-      const vendedor_ativo = vInfo ? vInfo.ativo !== false : null;
+      // Se NF é manualTx e o dealer do TOTVS não tem vendedor mapeado, usa o
+      // vendedor "default" do canal (ex.: Rafael para inbound_rafael).
+      const vendedor_nome = vInfo?.nome || (isManualTx && canalDefaultSeller ? canalDefaultSeller.nome : null);
+      const vendedor_ativo = vInfo ? vInfo.ativo !== false : (isManualTx && canalDefaultSeller ? canalDefaultSeller.ativo : null);
       const invoiceSeq = n.invoiceSequence;
       const grossValue = parseFloat(n.totalValue) || 0;
       const credevAmount = calcCredevTx(n);
