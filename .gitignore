@@ -9,3 +9,5 @@ uploads/
 
 # ... outras regras existentes ...
 .cache/
+.wwebjs_cache/
+.wwebjs_auth/
