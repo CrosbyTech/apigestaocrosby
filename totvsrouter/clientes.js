@@ -666,6 +666,290 @@ router.post(
 );
 
 /**
+ * @route POST /totvs/person/pix-keys
+ * @desc Busca contas bancárias e chaves PIX de uma pessoa (PF ou PJ) no TOTVS.
+ *       Tenta primeiro como PJ; se não encontrar, tenta como PF.
+ * @access Public
+ * @body { personCode: number (obrigatório) }
+ * @returns {
+ *   personCode, personType ('Legal'|'Individual'),
+ *   name, cnpj/cpf,
+ *   bankAccounts: [...],
+ *   pixKeys: [{ pixKey, pixKeyType, bankNumber, branchNumber, accountNumber, accountDigit, holderName, sequenceNumber }]
+ * }
+ */
+router.post(
+  '/person/pix-keys',
+  asyncHandler(async (req, res) => {
+    const { personCode } = req.body || {};
+
+    if (personCode === undefined || personCode === null || personCode === '') {
+      return errorResponse(
+        res,
+        'O campo personCode é obrigatório',
+        400,
+        'MISSING_PERSON_CODE',
+      );
+    }
+
+    const personCodeNum =
+      typeof personCode === 'string' ? parseInt(personCode, 10) : personCode;
+
+    if (isNaN(personCodeNum) || personCodeNum <= 0) {
+      return errorResponse(
+        res,
+        'O campo personCode deve ser um número inteiro válido',
+        400,
+        'INVALID_PERSON_CODE',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const buildPayload = (expand) => ({
+        filter: { personCodeList: [personCodeNum] },
+        ...(expand ? { expand } : {}),
+        page: 1,
+        pageSize: 10,
+      });
+
+      const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+      const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+      const doRequest = async (endpoint, accessToken, expand) =>
+        axios.post(endpoint, buildPayload(expand), {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          timeout: 30000,
+        });
+
+      const tryWithRefresh = async (endpoint, expand) => {
+        try {
+          return await doRequest(endpoint, tokenData.access_token, expand);
+        } catch (err) {
+          if (err.response?.status === 401) {
+            const novo = await getToken(true);
+            return doRequest(endpoint, novo.access_token, expand);
+          }
+          throw err;
+        }
+      };
+
+      console.log('🔍 Buscando chaves PIX no TOTVS:', {
+        personCode: personCodeNum,
+      });
+
+      // 1ª tentativa: ambos endpoints com expand=bankAccounts
+      const EXPAND_PRINCIPAL = 'bankAccounts';
+      const [pjRes, pfRes] = await Promise.allSettled([
+        tryWithRefresh(pjEndpoint, EXPAND_PRINCIPAL),
+        tryWithRefresh(pfEndpoint, EXPAND_PRINCIPAL),
+      ]);
+
+      if (pjRes.status === 'rejected') {
+        console.warn(
+          '⚠️ Consulta PJ falhou:',
+          pjRes.reason?.response?.status,
+          pjRes.reason?.response?.data || pjRes.reason?.message,
+        );
+      }
+      if (pfRes.status === 'rejected') {
+        console.warn(
+          '⚠️ Consulta PF falhou:',
+          pfRes.reason?.response?.status,
+          pfRes.reason?.response?.data || pfRes.reason?.message,
+        );
+      }
+
+      const pjItems =
+        pjRes.status === 'fulfilled' ? pjRes.value.data?.items || [] : [];
+      const pfItems =
+        pfRes.status === 'fulfilled' ? pfRes.value.data?.items || [] : [];
+
+      let personType = null;
+      let person = null;
+      let endpointUsado = null;
+      if (pjItems.length > 0) {
+        person = pjItems[0];
+        personType = 'Legal';
+        endpointUsado = pjEndpoint;
+      } else if (pfItems.length > 0) {
+        person = pfItems[0];
+        personType = 'Individual';
+        endpointUsado = pfEndpoint;
+      }
+
+      if (!person) {
+        return res.status(404).json({
+          success: false,
+          message: 'Pessoa não encontrada no TOTVS',
+          error: 'PERSON_NOT_FOUND',
+          timestamp: new Date().toISOString(),
+          debug: {
+            personCode: personCodeNum,
+            pjStatus: pjRes.status,
+            pfStatus: pfRes.status,
+            pjError:
+              pjRes.status === 'rejected'
+                ? pjRes.reason?.response?.data || pjRes.reason?.message
+                : null,
+            pfError:
+              pfRes.status === 'rejected'
+                ? pfRes.reason?.response?.data || pfRes.reason?.message
+                : null,
+          },
+        });
+      }
+
+      console.log(
+        `📋 Pessoa ${personCodeNum} encontrada (${personType}). Chaves do objeto:`,
+        Object.keys(person),
+      );
+
+      // Tenta variações comuns de nome do campo
+      const extractBankAccounts = (p) => {
+        const candidates = [
+          p.bankAccounts,
+          p.bankAccount,
+          p.BankAccounts,
+          p.banks,
+          p.contas,
+        ];
+        for (const c of candidates) {
+          if (Array.isArray(c) && c.length > 0) return c;
+        }
+        return [];
+      };
+
+      let bankAccounts = extractBankAccounts(person);
+
+      // 2ª tentativa: se vazio, refaz a busca expandindo TUDO conhecido
+      if (bankAccounts.length === 0) {
+        console.log(
+          'ℹ️ bankAccounts vazio na 1ª chamada. Tentando expand alternativos...',
+        );
+        const EXPANDS_TENTATIVA = [
+          'bankAccount',
+          'phones,emails,addresses,bankAccounts',
+          'phones,emails,addresses,contacts,classifications,observations,bankAccounts,additionalFields',
+        ];
+        for (const exp of EXPANDS_TENTATIVA) {
+          try {
+            const resp = await tryWithRefresh(endpointUsado, exp);
+            const item = resp.data?.items?.[0];
+            if (item) {
+              console.log(
+                `   tentativa expand="${exp}" → keys:`,
+                Object.keys(item),
+              );
+              const ba = extractBankAccounts(item);
+              if (ba.length > 0) {
+                bankAccounts = ba;
+                person = item;
+                console.log(
+                  `   ✅ encontrado ${ba.length} conta(s) com expand="${exp}"`,
+                );
+                break;
+              }
+            }
+          } catch (e) {
+            console.warn(
+              `   tentativa expand="${exp}" falhou:`,
+              e.response?.status,
+              e.response?.data?.message || e.message,
+            );
+          }
+        }
+      }
+
+      console.log(
+        `🏦 Total bankAccounts retornado: ${bankAccounts.length}`,
+        bankAccounts.length > 0
+          ? `(primeira: ${JSON.stringify(bankAccounts[0]).slice(0, 300)})`
+          : '',
+      );
+
+      const pixKeys = bankAccounts
+        .filter((b) => b && b.pixKey && String(b.pixKey).trim() !== '')
+        .map((b) => ({
+          pixKey: b.pixKey,
+          pixKeyType: b.pixKeyType || null,
+          bankNumber: b.bankNumber ?? null,
+          branchNumber: b.branchNumber ?? null,
+          accountNumber: b.accountNumber || null,
+          accountDigit: b.accountDigit || null,
+          accountType: b.accountType || null,
+          holderName: b.holderName || null,
+          sequenceNumber: b.sequenceNumber ?? null,
+          purposeType: b.purposeType || null,
+        }));
+
+      console.log(
+        `✅ PIX TOTVS: pessoa ${personCodeNum} (${personType}) → ${pixKeys.length} chave(s) PIX em ${bankAccounts.length} conta(s)`,
+      );
+
+      return successResponse(
+        res,
+        {
+          personCode: personCodeNum,
+          personType,
+          name: person.name || null,
+          cnpj: person.cnpj || null,
+          cpf: person.cpf || null,
+          bankAccounts,
+          pixKeys,
+          debug: {
+            personKeys: Object.keys(person),
+            bankAccountsCount: bankAccounts.length,
+          },
+        },
+        `${pixKeys.length} chave(s) PIX encontrada(s)`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar chaves PIX no TOTVS:', {
+        message: error.message,
+        code: error.code,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message:
+            error.response.data?.message ||
+            error.response.data?.title ||
+            'Erro ao consultar chaves PIX na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data || null,
+          status: error.response.status,
+        });
+      }
+
+      return errorResponse(
+        res,
+        `Não foi possível conectar à API TOTVS (${error.code || error.message})`,
+        503,
+        'TOTVS_CONNECTION_ERROR',
+      );
+    }
+  }),
+);
+
+/**
  * @route POST /totvs/individual/search-by-name
  * @desc Busca pessoa física por nome na API TOTVS
  * @access Public
