@@ -1152,4 +1152,234 @@ router.post(
   }),
 );
 
+// ════════════════════════════════════════════════════════════════════
+// CREDEV OVERRIDES — admin pode desconsiderar credev de NFs específicas
+// ════════════════════════════════════════════════════════════════════
+
+// Helper: invalida cache do fat-seg via endpoint interno HTTP
+async function invalidateFatSegCache() {
+  try {
+    const port = process.env.PORT || 4100;
+    await axios.post(
+      `http://localhost:${port}/api/crm/clear-fatseg-cache`,
+      {},
+      { timeout: 10000 },
+    );
+  } catch (e) {
+    console.warn('[credev-overrides] falha ao limpar fat-seg cache:', e?.message);
+  }
+}
+
+
+// GET /api/forecast/credev-overrides?canal=&ativos_only=true
+//      Lista overrides (todos ou só ativos). Suporta filtro por canal.
+router.get(
+  '/credev-overrides',
+  asyncHandler(async (req, res) => {
+    const canal = req.query.canal;
+    const ativosOnly = req.query.ativos_only !== 'false'; // default true
+    let q = supabase
+      .from('forecast_credev_overrides')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (ativosOnly) q = q.eq('ativo', true);
+    if (canal) q = q.eq('canal', String(canal).toLowerCase());
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { overrides: data || [], count: data?.length || 0 });
+  }),
+);
+
+// POST /api/forecast/credev-overrides
+//      Cria um novo override OU reativa um inativo existente.
+//      Body: { branch_code, transaction_code, invoice_code, canal, credev_amount, motivo }
+router.post(
+  '/credev-overrides',
+  asyncHandler(async (req, res) => {
+    const {
+      branch_code,
+      transaction_code,
+      invoice_code,
+      issue_date,
+      canal,
+      credev_amount,
+      motivo,
+    } = req.body || {};
+    if (!branch_code || !transaction_code || !canal || !motivo) {
+      return errorResponse(
+        res,
+        'branch_code, transaction_code, canal e motivo são obrigatórios',
+        400,
+      );
+    }
+    if (String(motivo).trim().length < 3) {
+      return errorResponse(res, 'Motivo deve ter pelo menos 3 caracteres', 400);
+    }
+
+    const userEmail =
+      req.headers['x-user-email'] ||
+      req.user?.email ||
+      'anonimo';
+    const ipOrigem = req.ip || req.headers['x-forwarded-for'] || null;
+
+    // Verifica se já existe override (ativo ou inativo) — para reativar em vez
+    // de criar duplicado.
+    const { data: existing } = await supabase
+      .from('forecast_credev_overrides')
+      .select('*')
+      .eq('branch_code', branch_code)
+      .eq('transaction_code', transaction_code)
+      .eq('canal', String(canal).toLowerCase())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let overrideRow;
+    let acao;
+    if (existing) {
+      if (existing.ativo) {
+        return errorResponse(
+          res,
+          'Já existe um override ATIVO para essa NF/canal',
+          409,
+        );
+      }
+      // Reativa o existente atualizando motivo
+      const { data: updated, error } = await supabase
+        .from('forecast_credev_overrides')
+        .update({
+          ativo: true,
+          motivo: String(motivo).trim(),
+          credev_amount: credev_amount ?? existing.credev_amount,
+          issue_date: issue_date ?? existing.issue_date,
+          created_by: userEmail,
+          created_at: new Date().toISOString(),
+          deactivated_by: null,
+          deactivated_at: null,
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+      if (error) return errorResponse(res, error.message, 500);
+      overrideRow = updated;
+      acao = 'reactivate';
+    } else {
+      const { data: created, error } = await supabase
+        .from('forecast_credev_overrides')
+        .insert({
+          branch_code,
+          transaction_code,
+          invoice_code: invoice_code || null,
+          issue_date: issue_date || null,
+          canal: String(canal).toLowerCase(),
+          credev_amount: credev_amount || null,
+          motivo: String(motivo).trim(),
+          ativo: true,
+          created_by: userEmail,
+        })
+        .select()
+        .single();
+      if (error) return errorResponse(res, error.message, 500);
+      overrideRow = created;
+      acao = 'create';
+    }
+
+    // Log
+    await supabase.from('forecast_credev_overrides_log').insert({
+      override_id: overrideRow.id,
+      branch_code,
+      transaction_code,
+      invoice_code: invoice_code || null,
+      issue_date: issue_date || null,
+      canal: String(canal).toLowerCase(),
+      acao,
+      motivo: String(motivo).trim(),
+      credev_amount: credev_amount || null,
+      alterado_por: userEmail,
+      ip_origem: ipOrigem,
+    });
+
+    // Invalida cache do fat-seg para que o próximo request use o override
+    invalidateFatSegCache();
+
+    return successResponse(
+      res,
+      { override: overrideRow, acao },
+      acao === 'create' ? 'Override criado' : 'Override reativado',
+    );
+  }),
+);
+
+// DELETE /api/forecast/credev-overrides/:id  (soft delete = ativo=false)
+router.delete(
+  '/credev-overrides/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return errorResponse(res, 'ID inválido', 400);
+
+    const userEmail =
+      req.headers['x-user-email'] ||
+      req.user?.email ||
+      'anonimo';
+    const ipOrigem = req.ip || req.headers['x-forwarded-for'] || null;
+
+    const { data: existing, error: errSel } = await supabase
+      .from('forecast_credev_overrides')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (errSel) return errorResponse(res, errSel.message, 500);
+    if (!existing) return errorResponse(res, 'Override não encontrado', 404);
+    if (!existing.ativo) {
+      return errorResponse(res, 'Override já está inativo', 400);
+    }
+
+    const { data: updated, error } = await supabase
+      .from('forecast_credev_overrides')
+      .update({
+        ativo: false,
+        deactivated_by: userEmail,
+        deactivated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+
+    await supabase.from('forecast_credev_overrides_log').insert({
+      override_id: id,
+      branch_code: existing.branch_code,
+      transaction_code: existing.transaction_code,
+      invoice_code: existing.invoice_code,
+      canal: existing.canal,
+      acao: 'deactivate',
+      motivo: existing.motivo,
+      credev_amount: existing.credev_amount,
+      alterado_por: userEmail,
+      ip_origem: ipOrigem,
+    });
+
+    // Invalida cache do fat-seg para que o próximo request use a nova config
+    invalidateFatSegCache();
+
+    return successResponse(res, { override: updated }, 'Override desativado');
+  }),
+);
+
+// GET /api/forecast/credev-overrides/log
+//      Histórico completo de alterações
+router.get(
+  '/credev-overrides/log',
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const { data, error } = await supabase
+      .from('forecast_credev_overrides_log')
+      .select('*')
+      .order('alterado_em', { ascending: false })
+      .limit(limit);
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { log: data || [], count: data?.length || 0 });
+  }),
+);
+
 export default router;

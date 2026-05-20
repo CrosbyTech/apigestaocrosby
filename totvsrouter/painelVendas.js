@@ -14,6 +14,7 @@ import {
   getBranchesWithNames,
   fetchBranchTotalsFromTotvs,
 } from './totvsHelper.js';
+import supabase from '../config/supabase.js';
 
 const router = express.Router();
 
@@ -1421,6 +1422,167 @@ router.post(
       res,
       { transactions, total: transactions.length },
       `${transactions.length} transações encontradas`,
+    );
+  }),
+);
+
+// =============================================================================
+// COMPRAS DAS FRANQUIAS — quanto cada franquia comprou da matriz (empresa 99)
+// POST /api/totvs/sale-panel/compras-franquias
+// Body: { datemin, datemax }
+// Retorna: array de { person_code, fantasy_name, nm_pessoa, totalValue, qty }
+//
+// Lógica:
+//   1. Busca NFs em fiscal/v2/invoices/search com filtros:
+//      - branchCodeList: [99] (matriz é a vendedora)
+//      - operationCodeList: [7234, 7240, 7802, 9124, 7259] (ops de venda → franquia)
+//      - operationType: 'Output'
+//   2. Agrega por personCode (= cliente franquia)
+//   3. Enriquece com fantasy_name + nm_pessoa via pes_pessoa
+// =============================================================================
+const FRANQUIA_OP_CODES = [7234, 7240, 7802, 9124, 7259];
+
+router.post(
+  '/sale-panel/compras-franquias',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax } = req.body;
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'datemin e datemax obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
+    }
+    const accessToken = tokenData.access_token;
+
+    // ─── Busca paginada das NFs de saída da matriz para franquias ────────────
+    const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+    const pageSize = 100;
+    const filter = {
+      branchCodeList: [99],
+      operationCodeList: FRANQUIA_OP_CODES,
+      operationType: 'Output',
+      startIssueDate: `${datemin}T00:00:00`,
+      endIssueDate: `${datemax}T23:59:59`,
+    };
+
+    const fetchPage = async (page) => {
+      try {
+        const r = await axios.post(
+          endpoint,
+          { filter, page, pageSize },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            httpsAgent,
+            timeout: 60000,
+          },
+        );
+        return r.data || {};
+      } catch (err) {
+        console.warn(`[compras-franquias] pág ${page}: ${err.message}`);
+        return { items: [] };
+      }
+    };
+
+    const first = await fetchPage(1);
+    const all = [...(first.items || [])];
+    const totalPages =
+      first.totalPages ||
+      (first.totalItems ? Math.ceil(first.totalItems / pageSize) : 1);
+    if (totalPages > 1) {
+      const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+      const CONC = 8;
+      for (let i = 0; i < rem.length; i += CONC) {
+        const batch = rem.slice(i, i + CONC);
+        const results = await Promise.all(batch.map(fetchPage));
+        for (const pd of results) all.push(...(pd?.items || []));
+      }
+    }
+    console.log(`[compras-franquias] ${all.length} NFs (br 99 → franquia)`);
+
+    // ─── Agrega por personCode ──────────────────────────────────────────────
+    const byPerson = new Map(); // personCode → { totalValue, qty, sample_name }
+    for (const nf of all) {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
+        continue;
+      const personCode = parseInt(nf.personCode);
+      if (!personCode || personCode >= 100000000) continue;
+      const total = parseFloat(nf.totalValue) || 0;
+      if (total <= 0) continue;
+      if (!byPerson.has(personCode)) {
+        byPerson.set(personCode, {
+          person_code: personCode,
+          total_value: 0,
+          qty: 0,
+          sample_name: nf.personName || null,
+        });
+      }
+      const entry = byPerson.get(personCode);
+      entry.total_value += total;
+      entry.qty += 1;
+    }
+
+    if (byPerson.size === 0) {
+      return successResponse(res, { franquias: [], total: 0 }, 'OK');
+    }
+
+    // ─── Enriquece com fantasy_name + nm_pessoa via pes_pessoa ─────────────
+    const personCodes = [...byPerson.keys()];
+    const PAGE = 500;
+    const pessoasMap = new Map();
+    for (let i = 0; i < personCodes.length; i += PAGE) {
+      const chunk = personCodes.slice(i, i + PAGE);
+      const { data, error } = await supabase
+        .from('pes_pessoa')
+        .select('code, nm_pessoa, fantasy_name')
+        .in('code', chunk);
+      if (error) {
+        console.warn(`[compras-franquias] supabase erro: ${error.message}`);
+        break;
+      }
+      for (const p of data || []) {
+        pessoasMap.set(Number(p.code), {
+          nm_pessoa: p.nm_pessoa || null,
+          fantasy_name: p.fantasy_name || null,
+        });
+      }
+    }
+
+    // ─── Monta resposta ordenada por valor ─────────────────────────────────
+    const franquias = [...byPerson.values()]
+      .map((entry) => {
+        const meta = pessoasMap.get(entry.person_code) || {};
+        return {
+          person_code: entry.person_code,
+          nm_pessoa: meta.nm_pessoa || entry.sample_name || null,
+          fantasy_name: meta.fantasy_name || null,
+          total_value: Math.round(entry.total_value * 100) / 100,
+          qty: entry.qty,
+        };
+      })
+      .sort((a, b) => b.total_value - a.total_value);
+
+    const total = franquias.reduce((s, f) => s + f.total_value, 0);
+
+    return successResponse(
+      res,
+      {
+        franquias,
+        total: Math.round(total * 100) / 100,
+        count: franquias.length,
+        period: { datemin, datemax },
+      },
+      `${franquias.length} franquias compraram da matriz`,
     );
   }),
 );
