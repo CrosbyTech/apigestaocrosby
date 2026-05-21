@@ -158,9 +158,59 @@ function preWarmCanalTotalsCredev() {
     }
   }
 }
-// Roda 15s após boot (após ERP_CACHE setIled) e a cada 20min
-setTimeout(preWarmCanalTotalsCredev, 15000);
-setInterval(preWarmCanalTotalsCredev, 20 * 60 * 1000);
+// ⚠️ Pre-warm reduzido pra 3h (era 1h). Cache TTL 1h–24h cobre maioria
+// dos acessos sem precisar de pre-warm frequente.
+setTimeout(preWarmCanalTotalsCredev, 30000);
+setInterval(preWarmCanalTotalsCredev, 3 * 60 * 60 * 1000);
+
+// ─── Pre-warm das Métricas Diárias ──────────────────────────────────────────
+// Bate em /api/forecast/promessa-mensal, /promessa-semanal, /promessa-vendedores
+// e /comparativo-anual em background. Quando o usuário abre a página, todos os
+// caches já estão quentes → resposta instantânea.
+// TTL do cache fat-seg: 1h (datas passadas) / 3min (mês corrente).
+// Re-roda a cada 5min pra manter o cache fresh sem timeouts.
+function preWarmMetricasDiarias() {
+  const port = process.env.PORT || 4100;
+  const base = `http://localhost:${port}`;
+  const hoje = new Date();
+  const ano = hoje.getUTCFullYear();
+  const mes = hoje.getUTCMonth() + 1;
+  // Semana ISO corrente
+  const semanaDate = new Date(
+    Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth(), hoje.getUTCDate()),
+  );
+  const day = semanaDate.getUTCDay() || 7;
+  semanaDate.setUTCDate(semanaDate.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(semanaDate.getUTCFullYear(), 0, 1));
+  const semana = Math.ceil(((semanaDate - yearStart) / 86400000 + 1) / 7);
+
+  const endpoints = [
+    `/api/forecast/promessa-mensal?ano=${ano}&mes=${mes}`,
+    `/api/forecast/promessa-semanal?ano=${ano}&semana=${semana}`,
+    `/api/forecast/promessa-vendedores?ano=${ano}&semana=${semana}`,
+    `/api/forecast/comparativo-anual?ano=${ano}&mes=${mes}`,
+  ];
+
+  console.log(
+    `🔥 [pre-warm forecast] Aquecendo ${endpoints.length} endpoints (${ano}-${String(mes).padStart(2, '0')}, W${semana}) em BG...`,
+  );
+  for (const path of endpoints) {
+    // Fire-and-forget — não bloqueia. Cada chamada tem timeout próprio.
+    axios
+      .get(`${base}${path}`, { timeout: 600000 })
+      .then((r) => {
+        if (r.data?.success) {
+          console.log(`✅ [pre-warm forecast] ${path}`);
+        }
+      })
+      .catch((e) => {
+        console.warn(`⚠️ [pre-warm forecast] ${path}: ${e?.message}`);
+      });
+  }
+}
+// ⚠️ Pre-warm reduzido pra 3h (era 1h).
+setTimeout(preWarmMetricasDiarias, 60000);
+setInterval(preWarmMetricasDiarias, 3 * 60 * 60 * 1000);
 
 // ─── Cache para ClickUp leads (TTL = 10 min) ─────────────────────────────────
 const LEADS_CACHE = new Map(); // key: "de|ate" → { data, ts }
@@ -7161,6 +7211,13 @@ router.post(
 //     Retorna aberturas de cadastro por vendedor (primeira compra NA VIDA na Crosby)
 //     Estratégia: TOTVS person-statistics → firstPurchaseDate para cada cliente
 // ---------------------------------------------------------------------------
+// ⚠️ Cache pra reduzir carga TOTVS (full scan FIS_NFITEMPROD).
+const SELLER_OPENINGS_CACHE = new Map();
+const SELLER_OPENINGS_TTL = 60 * 60 * 1000; // 1h realtime (era 30min)
+const SELLER_OPENINGS_TTL_PAST = 24 * 60 * 60 * 1000; // 24h passado (era 12h)
+const SELLER_OPENINGS_STALE_TTL = 72 * 60 * 60 * 1000; // 72h stale
+const SELLER_OPENINGS_INFLIGHT = new Map();
+
 router.post(
   '/seller-openings',
   asyncHandler(async (req, res) => {
@@ -7178,6 +7235,45 @@ router.post(
     if (codes.length === 0) {
       return errorResponse(res, 'sellerCodes inválido', 400, 'INVALID_SELLERS');
     }
+
+    // ─── Cache key — incluindo lista ordenada de sellers ──
+    const cacheKey = `${[...codes].sort().join(',')}|${datemin}|${datemax}`;
+    const todayIso = new Date().toISOString().split('T')[0];
+    const isRealtime = datemax >= todayIso;
+    const cacheTTL = isRealtime ? SELLER_OPENINGS_TTL : SELLER_OPENINGS_TTL_PAST;
+    const cached = SELLER_OPENINGS_CACHE.get(cacheKey);
+    const cacheAge = cached ? Date.now() - cached.ts : null;
+    if (cached && cacheAge < cacheTTL) {
+      console.log(
+        `[seller-openings] CACHE HIT (idade ${Math.floor(cacheAge / 1000)}s) — ${cached.data.total} aberturas`,
+      );
+      return successResponse(
+        res,
+        { ...cached.data, cached: true },
+        'OK (cache)',
+      );
+    }
+    const hasStale = cached && cacheAge < SELLER_OPENINGS_STALE_TTL;
+
+    // ─── Request coalescing — se outra request idêntica está em curso,
+    // aguarda o resultado dela em vez de disparar nova consulta TOTVS.
+    if (SELLER_OPENINGS_INFLIGHT.has(cacheKey)) {
+      console.log(`[seller-openings] COALESCED com request in-flight — aguardando`);
+      try {
+        const result = await SELLER_OPENINGS_INFLIGHT.get(cacheKey);
+        return successResponse(res, { ...result, coalesced: true }, 'OK (coalesced)');
+      } catch (e) {
+        // Se a request in-flight falhou, prossegue normal pra tentar de novo
+        console.warn(`[seller-openings] in-flight falhou: ${e.message}`);
+      }
+    }
+    // Registra promise pra outras requests poderem coalesce
+    let coalesceResolve, coalesceReject;
+    const coalescePromise = new Promise((res_, rej) => {
+      coalesceResolve = res_;
+      coalesceReject = rej;
+    });
+    SELLER_OPENINGS_INFLIGHT.set(cacheKey, coalescePromise);
 
     console.log(
       `[seller-openings] Buscando aberturas para ${codes.length} vendedores (${datemin} → ${datemax})`,
@@ -7347,7 +7443,8 @@ router.post(
     );
     if (totalPagesOp > 1) {
       const remOp = Array.from({ length: totalPagesOp - 1 }, (_, i) => i + 2);
-      const CONC = 5;
+      // CONC reduzido 3→2 — menor carga simultânea no TOTVS
+      const CONC = 2;
       for (let i = 0; i < remOp.length; i += CONC) {
         const batch = remOp.slice(i, i + CONC);
         const results = await Promise.all(batch.map(fetchInvPgOp));
@@ -7741,34 +7838,83 @@ router.post(
       })
       .sort((a, b) => b.openings - a.openings);
 
-    const total = sellers.reduce((s, r) => s + r.openings, 0);
+    // ─── Total: clientes ÚNICOS abertos pelo time (não soma por seller) ─────
+    // Antes: `total = soma de openings por seller` — quando 2 sellers do mesmo
+    // time vendiam pro mesmo cliente novo no mesmo dia (co-venda), o cliente
+    // contava 2x no KPI "Aberturas". Agora deduplica.
+    // Per-seller (sellers[i].openings) continua mostrando cada vendedor com
+    // todos os clientes que abriu — então a soma do ranking ainda pode ser
+    // maior que `total` quando houver clientes co-vendidos por mais de 1
+    // vendedor do time. Isso é esperado e desejado.
+    const uniqueClientsOpenedByTeam = new Set();
+    for (const sellerMap of sellerOpenings.values()) {
+      for (const pc of sellerMap.keys()) uniqueClientsOpenedByTeam.add(pc);
+    }
+    const total = uniqueClientsOpenedByTeam.size;
+    // total_by_canal: também deduplicado pelo canal da primeira venda do cliente
     const total_by_canal = emptyByCanal();
-    for (const s of sellers) {
-      for (const c of ALLOWED_CANAIS)
-        total_by_canal[c] += s.openings_by_canal[c];
+    for (const pc of uniqueClientsOpenedByTeam) {
+      const periodData = clientPeriodData.get(pc);
+      const canal = periodData?.canal;
+      if (canal && total_by_canal[canal] !== undefined) {
+        total_by_canal[canal] += 1;
+      }
     }
     const total_in_canal = ALLOWED_CANAIS.reduce(
       (s, c) => s + total_by_canal[c],
       0,
     );
+    // Diagnóstico: quantas duplicatas foram removidas pelo dedup
+    const totalSomaSellers = sellers.reduce((s, r) => s + r.openings, 0);
+    const dedupedCount = totalSomaSellers - total;
+    if (dedupedCount > 0) {
+      console.log(
+        `[seller-openings] dedup: ${totalSomaSellers} (soma por seller) → ${total} (clientes únicos) — ${dedupedCount} co-vendas removidas`,
+      );
+    }
 
-    return successResponse(
-      res,
-      {
-        sellers,
-        total,
-        total_in_canal,
-        total_by_canal,
-        meta: {
-          clickup_phone_matches: clickupMatchedUnique,
-          clickup_ambiguous_phones: clickupAmbiguousPhones,
-          clickup_openings: clickupOpenings,
-          jason_openings: clickupOpenings,
-          clickup_scope: 'all_history',
-        },
+    const respData = {
+      sellers,
+      total,
+      total_in_canal,
+      total_by_canal,
+      meta: {
+        clickup_phone_matches: clickupMatchedUnique,
+        clickup_ambiguous_phones: clickupAmbiguousPhones,
+        clickup_openings: clickupOpenings,
+        jason_openings: clickupOpenings,
+        clickup_scope: 'all_history',
       },
-      `${total} aberturas de cadastro`,
-    );
+    };
+    // Cacheia (se total > 0 evita salvar resposta parcial vazia)
+    if (total > 0) {
+      SELLER_OPENINGS_CACHE.set(cacheKey, { data: respData, ts: Date.now() });
+      // Limita tamanho do cache em 20 entradas
+      if (SELLER_OPENINGS_CACHE.size > 20) {
+        const oldest = [...SELLER_OPENINGS_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        SELLER_OPENINGS_CACHE.delete(oldest[0]);
+      }
+    } else if (hasStale) {
+      // Resposta zerada + temos stale → devolve stale (TOTVS provavelmente falhou)
+      console.warn(
+        `[seller-openings] total=0 mas temos STALE de ${Math.floor(cacheAge / 1000)}s — devolvendo stale`,
+      );
+      const staleData = {
+        ...cached.data,
+        cached: true,
+        stale: true,
+        stale_age_seconds: Math.floor(cacheAge / 1000),
+      };
+      coalesceResolve(staleData);
+      SELLER_OPENINGS_INFLIGHT.delete(cacheKey);
+      return successResponse(res, staleData, 'OK (stale-while-error)');
+    }
+    // Libera coalesce waiters com o resultado e limpa in-flight
+    coalesceResolve(respData);
+    SELLER_OPENINGS_INFLIGHT.delete(cacheKey);
+    return successResponse(res, respData, `${total} aberturas de cadastro`);
   }),
 );
 
@@ -7778,6 +7924,11 @@ router.post(
 //     Retorna { dataRow: [...], metas: {...} } (metas baseadas no metaType e datas).
 //     Body: { datemin, datemax, metaType?: 'mensal' | 'semanal' | 'periodo' }
 // ---------------------------------------------------------------------------
+// ⚠️ Cache pra branches-totals (CRM Varejo dispara 3× por load).
+const BRANCHES_TOTALS_CACHE = new Map();
+const BRANCHES_TOTALS_TTL = 60 * 60 * 1000; // 1h realtime
+const BRANCHES_TOTALS_TTL_PAST = 24 * 60 * 60 * 1000; // 24h passado
+
 router.post(
   '/branches-totals',
   asyncHandler(async (req, res) => {
@@ -7788,6 +7939,20 @@ router.post(
         'datemin e datemax obrigatórios',
         400,
         'MISSING_DATES',
+      );
+    }
+
+    // Cache check
+    const btCacheKey = `${datemin}|${datemax}|${metaType || ''}`;
+    const btTodayIso = new Date().toISOString().split('T')[0];
+    const btIsRealtime = datemax >= btTodayIso;
+    const btCacheTTL = btIsRealtime ? BRANCHES_TOTALS_TTL : BRANCHES_TOTALS_TTL_PAST;
+    const btCached = BRANCHES_TOTALS_CACHE.get(btCacheKey);
+    if (btCached && Date.now() - btCached.ts < btCacheTTL) {
+      return successResponse(
+        res,
+        { ...btCached.data, cached: true },
+        'OK (cache)',
       );
     }
 
@@ -7869,9 +8034,19 @@ router.post(
       .filter(Boolean)
       .sort((a, b) => b.invoice_value - a.invoice_value);
 
+    const btRespData = { dataRow, meta: metaInfo };
+    if (dataRow.length > 0) {
+      BRANCHES_TOTALS_CACHE.set(btCacheKey, { data: btRespData, ts: Date.now() });
+      if (BRANCHES_TOTALS_CACHE.size > 30) {
+        const oldest = [...BRANCHES_TOTALS_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        BRANCHES_TOTALS_CACHE.delete(oldest[0]);
+      }
+    }
     return successResponse(
       res,
-      { dataRow, meta: metaInfo },
+      btRespData,
       `Faturamento de ${dataRow.length} filiais varejo`,
     );
   }),
@@ -7918,16 +8093,24 @@ const CANAL_CONFIG = {
     // 7235/7241/9127 = ops atuais (de 2025-09 em diante)
     // 200 = op LEGADA usada até ~ago/2025
     operations: [7235, 7241, 9127, 200],
-    // sellers/excludeSellers: NÃO aplica — TOTVS painel oficial considera
-    // os 5 sellers (Walter, Renato, Arthur, David, Rafael) em multimarcas
-    // (eles operam com ops B2M na branch 99).
+    // sellers: undefined — TOTVS retorna gross com TODOS os dealers das ops B2M.
+    // excludeSellers: separa David (26), Thalis (69) e Rafael (21) que têm canais
+    // próprios (inbound_david / inbound_rafael). Sem isso, somar
+    // multimarcas + inbound_david + inbound_rafael no Forecast contava David,
+    // Thalis e Rafael DUAS vezes. A subtração roda em:
+    //   - callTotvsTotalsSearch (gross — linhas ~10547-10585)
+    //   - PASS 0 credev e PASS 2 SaleReturns (linhas ~11067 / 11101)
     sellers: undefined,
+    excludeSellers: [21, 26, 69], // Rafael, David, Thalis (inbound)
     devolucaoOps: [7244, 7245, 1214],
     devolucaoBranchs: [99, 2, 95, 87, 88, 90, 94, 97],
     // Whitelist manual: NFs cujo dealerCode em items[].products[] é GERAL (50)
     // mas que no painel oficial TOTVS são atribuídas a um vendedor específico.
     // Acontece quando o cadastro do produto tem dealer GERAL mas a NF foi
     // efetivamente vendida por outro vendedor.
+    // OBS: As 2 NFs abaixo foram corrigidas pra Rafael (21), mas Rafael está
+    // em excludeSellers → essas NFs NÃO entram em multimarcas. Caem em
+    // inbound_rafael (que tem manualTransactions correspondente).
     manualSellerOverride: [
       // NF 827993 (GEORGE MACHADO, br 99, R$ 7.901, abr/26) → Rafael (21)
       { branch: 99, transactionCode: 827993, sellerCode: 21 },
@@ -7995,8 +8178,17 @@ const CANAL_CONFIG = {
   ricardoeletro: {
     source: 'totvs-totals-allbranchs',
     branchs: [11, 111],
+    // operations: undefined → sale-panel/totals/search retorna agregado de
+    // TODAS as ops (incluindo transferências negativas). Por isso o canal-totals
+    // pode retornar negativo. A fonte AUTORITATIVA é o fat-seg per-NF
+    // (filtra RE_EXCL_OPS client-side). O canal-totals só é usado como
+    // fallback — quando negativo, é clamped a 0 pelo fat-seg fallback.
     operations: undefined,
     sellers: undefined,
+    // Pula PASS 2 (SaleReturns) — branches 11/111 têm devolução grande que
+    // não está vinculada às ops de venda B2C-RE; PASS 2 distorce líquido.
+    // PASS 0 (credev em pagamentos da NF) é mantido — vem da própria NF.
+    skipDevolPass2: true,
   },
 };
 
@@ -8239,6 +8431,7 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         invoice_qty_gross: 0,
         credev_qty: 0,
         invoice_value: 0,
+        invoice_value_gross: 0, // bruto antes de subtrair credev/SaleReturns
         credev_value: 0,
         itens_qty: 0,
         itens_qty_gross: 0,
@@ -8253,6 +8446,7 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
       };
     }
     merged[k].invoice_value += total;
+    merged[k].invoice_value_gross += total; // mesma soma antes de subtrair credev
     merged[k].invoice_qty += 1;
     merged[k].invoice_qty_gross += 1;
     merged[k].itens_qty_gross += nfQty;
@@ -8264,6 +8458,10 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
 
   // Preenche nomes via sellers/search por branch (TOTVS exige 1 branch
   // por chamada; nomes podem variar por branch então faz lookup paralelo).
+  // Fallback em CASCATA quando TOTVS sellers/search falha/timeouts:
+  //   1) nameMap (TOTVS sellers/search)
+  //   2) vendedoresMap (Supabase v_vendedores_integracao, cache 30min)
+  //   3) "Vend. {code}" (último recurso)
   try {
     const nameMap = {};
     const branchInfo = {}; // sellerCode → [branch_code]
@@ -8281,12 +8479,28 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
             if (r.seller_name && !nameMap[k]) nameMap[k] = r.seller_name;
             if (!branchInfo[k]) branchInfo[k] = branchCode;
           }
-        } catch {}
+        } catch (e) {
+          console.warn(
+            `[canal-sellers ${modulo}] sellers/search br ${branchCode} falhou: ${e.message}`,
+          );
+        }
       }),
     );
+
+    // Carrega vendedores do Supabase como fallback (cache 30min — barato)
+    let vendedoresMap = null;
+    try {
+      vendedoresMap = await loadVendedoresMap();
+    } catch (e) {
+      console.warn(`[canal-sellers ${modulo}] loadVendedoresMap: ${e.message}`);
+    }
+
     for (const k of Object.keys(merged)) {
       if (!merged[k].seller_name) {
-        merged[k].seller_name = nameMap[k] || `Vend. ${k}`;
+        const fromTotvs = nameMap[k];
+        const fromSupa = vendedoresMap?.byTotvsId?.[k]?.nome
+          || vendedoresMap?.byTotvsId?.[Number(k)]?.nome;
+        merged[k].seller_name = fromTotvs || fromSupa || `Vend. ${k}`;
       }
       // Também atualiza branch_name se o NF não trouxe
       if (
@@ -8397,9 +8611,13 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
           if (dc) break;
         }
         if (dc && merged[dc]) {
-          // Subtrai credev do invoice_value pra alinhar com painel oficial
-          // (TOTVS painel mostra líquido = bruto - credev pago).
-          merged[dc].invoice_value -= credev;
+          // IMPORTANTE: NÃO subtrai do invoice_value (que é o bruto). Apenas
+          // contabiliza em credev_value. Isso garante CONSISTÊNCIA entre
+          // chamadas: quando o credev fetch falha em uma e sucede em outra,
+          // invoice_value permanecia bruto numa e líquido na outra, gerando
+          // valores diferentes pro mesmo vendedor (ex: Walter R$ 29k vs 15k).
+          // Agora invoice_value é SEMPRE bruto. Frontend usa credev_value
+          // pra mostrar coluna separada e calcular líquido = bruto - credev.
           merged[dc].credev_value = (merged[dc].credev_value || 0) + credev;
         }
       }
@@ -8464,8 +8682,8 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         if (v <= 0) continue;
         const sc = String(it.sellerCode || '');
         if (sc && merged[sc]) {
-          // Subtrai SaleReturns do invoice_value (alinha com painel)
-          merged[sc].invoice_value -= v;
+          // Idem: NÃO subtrai do invoice_value (bruto). Só contabiliza
+          // em credev_value pra exibição separada.
           merged[sc].credev_value = (merged[sc].credev_value || 0) + v;
         }
       }
@@ -10413,11 +10631,13 @@ async function computeCanalTotalsFromSupabase({ datemin, datemax, cfg }) {
   };
 }
 
-// Cache em memória do canal-totals (TTL 5 min) — evita reconsulta frequente
+// ⚠️ TOTVS bloqueou por queries pesadas — aumentado mais.
 const CANAL_TOTALS_CACHE = new Map();
-const CANAL_TOTALS_CACHE_TTL = 30 * 60 * 1000; // 30 min (era 5min — credev raramente muda)
-// TTL menor para "datas que incluem hoje" — painel tempo-real precisa atualizar mais rápido
-const CANAL_TOTALS_CACHE_TTL_REALTIME = 2 * 60 * 1000; // 2 min (era 30s — evita timeouts)
+const CANAL_TOTALS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h pra datas passadas (era 12h)
+const CANAL_TOTALS_CACHE_TTL_REALTIME = 60 * 60 * 1000; // 1h pra mês corrente (era 30min)
+const CANAL_TOTALS_STALE_TTL = 72 * 60 * 60 * 1000; // 72h stale-while-error (era 48h)
+// Request coalescing
+const CANAL_TOTALS_INFLIGHT = new Map();
 
 // Helper compartilhado: lê valores do canal-totals do cache OU invoca a rota
 // internamente se cache vazio. Garante que Performance e Analytics consultem
@@ -10471,13 +10691,34 @@ router.post(
     const isRealtime = datemax >= todayIso;
     const effectiveTTL = isRealtime ? CANAL_TOTALS_CACHE_TTL_REALTIME : CANAL_TOTALS_CACHE_TTL;
     const cached = CANAL_TOTALS_CACHE.get(cacheKey);
-    if (!noCache && cached && Date.now() - cached.ts < effectiveTTL) {
+    const cacheAgeCT = cached ? Date.now() - cached.ts : null;
+    if (!noCache && cached && cacheAgeCT < effectiveTTL) {
       return successResponse(
         res,
         { ...cached.data, cached: true },
         `Totais ${modulo} (cache${isRealtime ? ' realtime' : ''})`,
       );
     }
+    // Wrapper de erro: se TOTVS falhar, retorna stale cache se disponível.
+    const hasStaleCT = cached && cacheAgeCT < CANAL_TOTALS_STALE_TTL;
+    const handleTotvsFailure = (err) => {
+      if (hasStaleCT) {
+        console.warn(
+          `[canal-totals ${modulo}] erro fresh, usando STALE de ${Math.floor(cacheAgeCT / 1000)}s: ${err.message}`,
+        );
+        return successResponse(
+          res,
+          {
+            ...cached.data,
+            cached: true,
+            stale: true,
+            stale_age_seconds: Math.floor(cacheAgeCT / 1000),
+          },
+          'OK (stale-while-error)',
+        );
+      }
+      throw err; // sem stale → propaga
+    };
     let cfg = CANAL_CONFIG[modulo];
     if (!cfg) {
       return errorResponse(
@@ -10868,7 +11109,16 @@ router.post(
         20, // ops TOTVS revenda devolução
       ]);
 
-      // ── Helper: paginação invoices com expand=payments,items ──
+      // ── Helper: paginação invoices ──
+      // ⚠️ expand=items é PESADO (full scan FIS_NFITEMPROD). Só inclui
+      // quando o canal precisa filtrar por dealer (allowedSellers/
+      // excludeSellers). Pra demais (franquia/business/showroom/etc),
+      // expand=payments só (muito mais leve no TOTVS).
+      const precisaDealer = !!(
+        (Array.isArray(cfg.allowedSellers) && cfg.allowedSellers.length > 0) ||
+        (Array.isArray(cfg.excludeSellers) && cfg.excludeSellers.length > 0)
+      );
+      const expandStr = precisaDealer ? 'payments,items' : 'payments';
       const fetchInvoicesPages = async () => {
         const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
         const pageSize = 100;
@@ -10884,7 +11134,7 @@ router.post(
                   startIssueDate: `${datemin}T00:00:00`,
                   endIssueDate: `${datemax}T23:59:59`,
                 },
-                expand: 'payments,items',
+                expand: expandStr,
                 page,
                 pageSize,
               },
@@ -11019,6 +11269,10 @@ router.post(
       // ex: bazar, configurado via cfg.skipDevolucao). Evita PASS 2 pegar
       // devoluções de toda a empresa por falta de filtro por op.
       const skipDevol = !!cfg.skipDevolucao;
+      // skipDevolPass2 = pula APENAS o PASS 2 (SaleReturns via fiscal-movement)
+      // mantém PASS 0 (credev em payments). Útil pra ricardoeletro onde
+      // PASS 2 pegaria devoluções não-canal.
+      const skipDevolPass2 = !!cfg.skipDevolPass2;
       try {
         if (accessToken && !skipDevol) {
           // PASS 0: invoices — credev em payments (filtrado por dealer permitido)
@@ -11060,7 +11314,8 @@ router.post(
           // PASS 2: fiscal-movement SaleReturns para clientes NÃO em invoices
           // (filtrado por dealer permitido também — evita pegar devoluções
           // de outros vendedores na mesma branch)
-          const movItems = await fetchMovementPages();
+          // Pulável via cfg.skipDevolPass2 (ex: ricardoeletro)
+          const movItems = skipDevolPass2 ? [] : await fetchMovementPages();
           for (const it of movItems) {
             if (it.operationModel !== 'SaleReturns') continue;
             const op = parseInt(it.operationCode);
@@ -11249,6 +11504,11 @@ router.post(
 //     Quando `modulo` é enviado, filtra ao canal correspondente
 //     (multimarcas inclui inbound).
 // ---------------------------------------------------------------------------
+// ⚠️ Cache pra sellers-totals — reduz hits TOTVS no CRM Performance.
+const SELLERS_TOTALS_CACHE = new Map();
+const SELLERS_TOTALS_TTL = 60 * 60 * 1000; // 1h realtime (era 30min)
+const SELLERS_TOTALS_TTL_PAST = 24 * 60 * 60 * 1000; // 24h passado (era 12h)
+
 router.post(
   '/sellers-totals',
   asyncHandler(async (req, res) => {
@@ -11259,6 +11519,20 @@ router.post(
         'datemin e datemax obrigatórios',
         400,
         'MISSING_DATES',
+      );
+    }
+
+    // Cache check
+    const stCacheKey = `${modulo || 'all'}|${datemin}|${datemax}`;
+    const stTodayIso = new Date().toISOString().split('T')[0];
+    const stIsRealtime = datemax >= stTodayIso;
+    const stCacheTTL = stIsRealtime ? SELLERS_TOTALS_TTL : SELLERS_TOTALS_TTL_PAST;
+    const stCached = SELLERS_TOTALS_CACHE.get(stCacheKey);
+    if (stCached && Date.now() - stCached.ts < stCacheTTL) {
+      return successResponse(
+        res,
+        { ...stCached.data, cached: true },
+        'OK (cache)',
       );
     }
 
@@ -11284,8 +11558,8 @@ router.post(
           7244,
         ];
         // TOTVS sale-panel/v2/sellers/search aceita 1 branch por chamada.
-        // Paraleliza com concorrência limitada para evitar rate limit.
-        const CONC = 5;
+        // Paraleliza com concorrência limitada — reduzido 5→3 pra menor carga.
+        const CONC = 3;
         const allBranchResults = [];
         for (let i = 0; i < VAREJO_BRANCHES_LIVE.length; i += CONC) {
           const batch = VAREJO_BRANCHES_LIVE.slice(i, i + CONC);
@@ -11387,14 +11661,24 @@ router.post(
         console.log(
           `[sellers-totals/varejo TOTVS live] ${dataRow.length} vendedores, total R$${dataRow.reduce((s, x) => s + x.invoice_value, 0).toFixed(2)}`,
         );
+        const varejoResp = {
+          dataRow,
+          total: dataRow.reduce((s, x) => s + x.invoice_value, 0),
+          source: 'totvs-live (sale-panel/v2/sellers/search)',
+          modulo: 'varejo',
+        };
+        if (dataRow.length > 0) {
+          SELLERS_TOTALS_CACHE.set(stCacheKey, { data: varejoResp, ts: Date.now() });
+          if (SELLERS_TOTALS_CACHE.size > 30) {
+            const oldest = [...SELLERS_TOTALS_CACHE.entries()].sort(
+              (a, b) => a[1].ts - b[1].ts,
+            )[0];
+            SELLERS_TOTALS_CACHE.delete(oldest[0]);
+          }
+        }
         return successResponse(
           res,
-          {
-            dataRow,
-            total: dataRow.reduce((s, x) => s + x.invoice_value, 0),
-            source: 'totvs-live (sale-panel/v2/sellers/search)',
-            modulo: 'varejo',
-          },
+          varejoResp,
           `${dataRow.length} vendedores varejo (TOTVS live)`,
         );
       } catch (err) {
@@ -11729,9 +12013,19 @@ router.post(
       })
       .sort((a, b) => b.invoice_value - a.invoice_value);
 
+    const respData = { dataRow };
+    if (dataRow.length > 0) {
+      SELLERS_TOTALS_CACHE.set(stCacheKey, { data: respData, ts: Date.now() });
+      if (SELLERS_TOTALS_CACHE.size > 30) {
+        const oldest = [...SELLERS_TOTALS_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        SELLERS_TOTALS_CACHE.delete(oldest[0]);
+      }
+    }
     return successResponse(
       res,
-      { dataRow },
+      respData,
       `Faturamento de ${dataRow.length} vendedores`,
     );
   }),
@@ -11839,8 +12133,17 @@ const OP_SEGMENTO_MAP = {
 // Cache em memória do faturamento por segmento (TOTVS)
 // Datas passadas: TTL 30min | data atual: TTL 3min
 const FATSEG_CACHE = new Map();
-const FATSEG_CACHE_TTL = 3 * 60 * 1000;
-const FATSEG_CACHE_TTL_PAST = 30 * 60 * 1000;
+// ⚠️ TOTVS bloqueou crosbyapiv2 por queries pesadas. TTL extra generosos
+// pra minimizar hits no Analytics + stale-while-error pra outage:
+//   - Realtime (mês corrente):  1h   (era 30min)
+//   - Passado (mês fechado):   24h   (era 12h)
+//   - Stale-while-error:        72h  (era 48h)
+const FATSEG_CACHE_TTL = 60 * 60 * 1000;
+const FATSEG_CACHE_TTL_PAST = 24 * 60 * 60 * 1000;
+const FATSEG_STALE_TTL = 72 * 60 * 60 * 1000;
+// Request coalescing: se 2 chamadas paralelas vierem pro mesmo cacheKey,
+// a segunda espera a primeira em vez de dispará nova request TOTVS.
+const FATSEG_INFLIGHT = new Map();
 
 router.post(
   '/faturamento-por-segmento',
@@ -11860,13 +12163,17 @@ router.post(
     const today = new Date().toISOString().split('T')[0];
     const cacheTTL = datemax < today ? FATSEG_CACHE_TTL_PAST : FATSEG_CACHE_TTL;
     const cached = FATSEG_CACHE.get(cacheKey);
-    if (cached && Date.now() - cached.ts < cacheTTL) {
+    const cacheAge = cached ? Date.now() - cached.ts : null;
+    if (cached && cacheAge < cacheTTL) {
       return successResponse(
         res,
         { ...cached.data, cached: true },
         'OK (cache)',
       );
     }
+    // Stale fallback: se a refetch falhar, vamos retornar essa cache antiga.
+    // Marca no res.locals pra usar no catch global da rota (se chegar lá).
+    const hasStale = cached && cacheAge < FATSEG_STALE_TTL;
 
     const allOpCodes = Object.keys(OP_SEGMENTO_MAP).map(Number);
 
@@ -11981,7 +12288,8 @@ router.post(
       );
       if (totalPages > 1) {
         const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
-        const CONC = 5; // items-only → respostas menores → TOTVS aguenta mais concorrência
+        // CONC reduzido pra 2 — proteção máxima do banco TOTVS
+        const CONC = 2;
         for (let i = 0; i < rem.length; i += CONC) {
           const batch = rem.slice(i, i + CONC);
           const results = await Promise.all(batch.map((p) => fetchPageWithRetry(p)));
@@ -12424,17 +12732,54 @@ router.post(
       );
     }
 
-    // Só cacheia se TOTVS live processou ao menos 1 NF E credev foi computado
-    // completamente para todos os canais sem allowedSellers E nenhuma página
-    // TOTVS falhou — evita salvar resposta parcial.
+    // Cache logic:
+    // 1) Completo (sem falhas) → TTL completo (1h-24h)
+    // 2) Parcial (TOTVS retornou alguma falha) → TTL CURTO (10min) marcado
+    //    como partial=true. Evita bater TOTVS de novo nas próximas requests
+    //    enquanto TOTVS recupera. User vê dado parcial em vez de esperar.
+    // 3) Vazio (0 NFs) → não cacheia
+    const PARTIAL_TTL = 10 * 60 * 1000; // 10min
     if (totalNFsProcessadas > 0 && !credevIncomplete && !totvsIncomplete) {
       FATSEG_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+    } else if (totalNFsProcessadas > 0 && (totvsIncomplete || credevIncomplete)) {
+      // Parcial — cacheia por 10min com flag
+      const partialData = { ...responseData, partial: true };
+      FATSEG_CACHE.set(cacheKey, {
+        data: partialData,
+        ts: Date.now() - (FATSEG_CACHE_TTL - PARTIAL_TTL), // ajusta ts pra TTL curto
+      });
+      console.warn(
+        `[fat-seg] CACHEANDO PARCIAL ${cacheKey} (TTL 10min) — evita re-bater TOTVS enquanto recupera`,
+      );
     } else if (totvsIncomplete) {
-      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — páginas TOTVS falharam (resultado parcial)`);
+      console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — páginas TOTVS falharam`);
     } else if (credevIncomplete) {
       console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — credev PASS 0 incompleto`);
     } else {
       console.warn(`[fat-seg] NÃO cacheando ${cacheKey} — TOTVS retornou 0 NFs`);
+    }
+
+    // ─── STALE FALLBACK ──────────────────────────────────────────────────
+    // Se a resposta atual está incompleta (TOTVS instável) E temos cache
+    // antigo (até 24h), retorna o STALE em vez do parcial. Usuário vê valor
+    // ligeiramente desatualizado mas correto em vez de zerado.
+    if (
+      hasStale &&
+      (totvsIncomplete || credevIncomplete || totalNFsProcessadas === 0)
+    ) {
+      console.warn(
+        `[fat-seg] usando STALE cache de ${Math.floor(cacheAge / 1000)}s — TOTVS instável`,
+      );
+      return successResponse(
+        res,
+        {
+          ...cached.data,
+          cached: true,
+          stale: true,
+          stale_age_seconds: Math.floor(cacheAge / 1000),
+        },
+        'OK (stale-while-error)',
+      );
     }
     // (helper para invalidar cache via endpoint externo, declarado abaixo)
     if (FATSEG_CACHE.size > 10) {

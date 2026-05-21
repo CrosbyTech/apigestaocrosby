@@ -7242,6 +7242,10 @@ import crmVendasRouter from './totvsrouter/crmVendas.js';
 import cmvRouter from './totvsrouter/cmv.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
 import { iniciarJobForecastRefYoy } from './jobs/forecast-ref-yoy.job.js';
+import {
+  iniciarJobForecastWhatsapp,
+  executarForecastWhatsapp,
+} from './jobs/forecast-whatsapp.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7378,6 +7382,7 @@ app.listen(PORT, async () => {
   }
   iniciarJobFaturamentoDiario();
   iniciarJobForecastRefYoy();
+  iniciarJobForecastWhatsapp();
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();

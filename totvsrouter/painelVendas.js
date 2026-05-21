@@ -1428,6 +1428,13 @@ router.post(
 
 // =============================================================================
 // COMPRAS DAS FRANQUIAS — quanto cada franquia comprou da matriz (empresa 99)
+// ⚠️ Cache pra reduzir carga TOTVS (compras-franquias faz 3 fetches paginados).
+//   - Realtime (datemax >= hoje):  30min
+//   - Passado:                     12h
+const COMPRAS_FRANQUIAS_CACHE = new Map();
+const COMPRAS_FRANQUIAS_TTL = 30 * 60 * 1000;
+const COMPRAS_FRANQUIAS_TTL_PAST = 12 * 60 * 60 * 1000;
+
 // POST /api/totvs/sale-panel/compras-franquias
 // Body: { datemin, datemax }
 // Retorna: array de { person_code, fantasy_name, nm_pessoa, totalValue, qty }
@@ -1440,7 +1447,27 @@ router.post(
 //   2. Agrega por personCode (= cliente franquia)
 //   3. Enriquece com fantasy_name + nm_pessoa via pes_pessoa
 // =============================================================================
+// Ops de compra franquia ATUAL (2026+): 7234, 7240, 7802, 9124, 7259
 const FRANQUIA_OP_CODES = [7234, 7240, 7802, 9124, 7259];
+// Ops adicionais usadas APENAS em anos anteriores (matriz antiga). Somadas
+// às atuais quando busca dados LY (não usadas em 2026 para evitar varejo).
+const FRANQUIA_OP_CODES_LY_EXTRA = [
+  1711,
+  7807, 5111, 5102, 512, 5106, 400, 1400, 1410, 1407,
+  7109, 9110,
+];
+const FRANQUIA_OP_CODES_LY = [
+  ...FRANQUIA_OP_CODES,
+  ...FRANQUIA_OP_CODES_LY_EXTRA,
+];
+// Op codes considerados credev/devolução de franquia (entradas na matriz).
+// Inclui ops específicas de devolução de franquia (7243, 8888, 8889) além
+// das genéricas. O filtro final aceita apenas pessoas que compraram no
+// período (op franquia), evitando capturar devoluções de consumidor varejo.
+const FRANQUIA_CREDEV_OP_CODES = [
+  7243, 7244, 7245, 7247, 8888, 8889,
+  1, 2, 555, 9073, 9402, 9065, 9403, 9062, 9005, 7790, 20, 1214,
+];
 
 router.post(
   '/sale-panel/compras-franquias',
@@ -1455,88 +1482,263 @@ router.post(
       );
     }
 
+    // Cache check
+    const cacheKey = `${datemin}|${datemax}`;
+    const todayIso = new Date().toISOString().split('T')[0];
+    const isRealtime = datemax >= todayIso;
+    const cacheTTL = isRealtime ? COMPRAS_FRANQUIAS_TTL : COMPRAS_FRANQUIAS_TTL_PAST;
+    const cached = COMPRAS_FRANQUIAS_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < cacheTTL) {
+      console.log(
+        `[compras-franquias] CACHE HIT ${cacheKey} (idade ${Math.floor((Date.now() - cached.ts) / 1000)}s)`,
+      );
+      return successResponse(
+        res,
+        { ...cached.data, cached: true },
+        'OK (cache)',
+      );
+    }
+
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
       return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
     }
     const accessToken = tokenData.access_token;
 
-    // ─── Busca paginada das NFs de saída da matriz para franquias ────────────
+    // Período do mesmo intervalo no ANO ANTERIOR (para taxa de crescimento)
+    const subtractYear = (iso) => {
+      const d = new Date(`${iso}T12:00:00`);
+      d.setFullYear(d.getFullYear() - 1);
+      return d.toISOString().slice(0, 10);
+    };
+    const datemin_ly = subtractYear(datemin);
+    const datemax_ly = subtractYear(datemax);
+
+    // ─── Busca paginada das NFs (compras + credev) em paralelo ──────────────
     const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
     const pageSize = 100;
-    const filter = {
-      branchCodeList: [99],
+
+    // Helper: paginação completa para um filtro
+    const fetchAllPages = async (filter, tag) => {
+      const fetchPage = async (page) => {
+        try {
+          const r = await axios.post(
+            endpoint,
+            { filter, page, pageSize },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent,
+              timeout: 60000,
+            },
+          );
+          return r.data || {};
+        } catch (err) {
+          console.warn(`[compras-franquias/${tag}] pág ${page}: ${err.message}`);
+          return { items: [] };
+        }
+      };
+      const first = await fetchPage(1);
+      const out = [...(first.items || [])];
+      const totalPages =
+        first.totalPages ||
+        (first.totalItems ? Math.ceil(first.totalItems / pageSize) : 1);
+      if (totalPages > 1) {
+        const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+        // CONC reduzido 8→2 pra reduzir carga simultânea no TOTVS Analytics
+        const CONC = 2;
+        for (let i = 0; i < rem.length; i += CONC) {
+          const batch = rem.slice(i, i + CONC);
+          const results = await Promise.all(batch.map(fetchPage));
+          for (const pd of results) out.push(...(pd?.items || []));
+        }
+      }
+      return out;
+    };
+
+    // Filiais da matriz: atual = 99, legadas (anos anteriores) inclui:
+    //   75, 750, 85, 850 — matrizes antigas
+    //   1, 100, 2, 200   — também usadas em períodos anteriores
+    const MATRIZ_BRANCHES_ATUAL = [99];
+    const MATRIZ_BRANCHES_LEGACY = [75, 750, 85, 850, 1, 100, 2, 200];
+    const MATRIZ_BRANCHES_ALL = [
+      ...MATRIZ_BRANCHES_ATUAL,
+      ...MATRIZ_BRANCHES_LEGACY,
+    ];
+
+    // ─── 1) Compras: saídas da matriz com ops franquia (busca em todas filiais)
+    const filterCompras = {
+      branchCodeList: MATRIZ_BRANCHES_ALL,
       operationCodeList: FRANQUIA_OP_CODES,
       operationType: 'Output',
       startIssueDate: `${datemin}T00:00:00`,
       endIssueDate: `${datemax}T23:59:59`,
     };
-
-    const fetchPage = async (page) => {
-      try {
-        const r = await axios.post(
-          endpoint,
-          { filter, page, pageSize },
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
-            httpsAgent,
-            timeout: 60000,
-          },
-        );
-        return r.data || {};
-      } catch (err) {
-        console.warn(`[compras-franquias] pág ${page}: ${err.message}`);
-        return { items: [] };
-      }
+    // ─── 2) Credev: entradas na matriz com ops de devolução/credev ──
+    const filterCredev = {
+      branchCodeList: MATRIZ_BRANCHES_ALL,
+      operationCodeList: FRANQUIA_CREDEV_OP_CODES,
+      operationType: 'Input',
+      startIssueDate: `${datemin}T00:00:00`,
+      endIssueDate: `${datemax}T23:59:59`,
     };
 
-    const first = await fetchPage(1);
-    const all = [...(first.items || [])];
-    const totalPages =
-      first.totalPages ||
-      (first.totalItems ? Math.ceil(first.totalItems / pageSize) : 1);
-    if (totalPages > 1) {
-      const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
-      const CONC = 8;
-      for (let i = 0; i < rem.length; i += CONC) {
-        const batch = rem.slice(i, i + CONC);
-        const results = await Promise.all(batch.map(fetchPage));
-        for (const pd of results) all.push(...(pd?.items || []));
-      }
-    }
-    console.log(`[compras-franquias] ${all.length} NFs (br 99 → franquia)`);
+    // ─── Filtros para o MESMO PERÍODO no ANO ANTERIOR ──
+    // Em períodos passados, a matriz estava nas filiais legadas e usava ops
+    // diferentes. Usamos lista expandida FRANQUIA_OP_CODES_LY que inclui
+    // ops antigas (1711, 7807, 5102, etc.) além das atuais.
+    const filterComprasLy = {
+      ...filterCompras,
+      operationCodeList: FRANQUIA_OP_CODES_LY,
+      startIssueDate: `${datemin_ly}T00:00:00`,
+      endIssueDate: `${datemax_ly}T23:59:59`,
+    };
 
-    // ─── Agrega por personCode ──────────────────────────────────────────────
-    const byPerson = new Map(); // personCode → { totalValue, qty, sample_name }
-    for (const nf of all) {
-      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
-        continue;
+    const [compras, credevs, comprasLy] = await Promise.all([
+      fetchAllPages(filterCompras, 'compras'),
+      fetchAllPages(filterCredev, 'credev'),
+      fetchAllPages(filterComprasLy, 'compras-ly'),
+    ]);
+    console.log(
+      `[compras-franquias] atual: ${compras.length} compras + ${credevs.length} credev · ano anterior: ${comprasLy.length} compras`,
+    );
+
+    // Utilitários de normalização de nome (usados pra match LY ↔ 2026)
+    const normName = (s) =>
+      String(s || '')
+        .toUpperCase()
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .replace(/[^A-Z0-9 ]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const stripVariantsLy = (s) => {
+      // Gera múltiplas variações para match flexível com fantasy_name 2026
+      const v = new Set();
+      const base = normName(s);
+      if (!base) return v;
+      v.add(base);
+      // Remove prefixos comuns
+      const semPrefix = base
+        .replace(/^F?\d{2,4}\s*-?\s*/, '')
+        .replace(/\bFRANQUIA\b/g, '')
+        .replace(/\bCROSBY\b/g, '')
+        .replace(/\b(LTDA|ME|EPP|EIRELI|SA)\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (semPrefix) v.add(semPrefix);
+      return v;
+    };
+    // Filtro: aceita apenas pessoas com nome de franquia (contém CROSBY ou
+    // começa com F###). Sem isso, ops legadas como 5102/5111 capturariam
+    // muito varejo de 2025, inflando o total.
+    const looksLikeFranquia = (name) => {
+      const n = String(name || '').toUpperCase();
+      if (!n) return false;
+      // Exclui claramente não-franquia (multimarcas / internos)
+      if (/\bMTM\b|MULTIMARCAS/.test(n)) return false;
+      if (/\b(SETOR|TESTE|MATRIZ|DEPARTAMENTO|DEPTO|RH|MARKETING|FINANCEIRO|EXPEDICAO|EXPEDIÇÃO|CD|CENTRO DE DISTRIBUI)\b/.test(n)) return false;
+      return /\bCROSBY\b|^F\d{2,4}\s*-?\s*/.test(n);
+    };
+
+    // ─── Agrega COMPRAS por personCode ──
+    const byPerson = new Map();
+    const ensureEntry = (personCode, sampleName) => {
+      if (!byPerson.has(personCode)) {
+        byPerson.set(personCode, {
+          person_code: personCode,
+          total_compras: 0,
+          total_credev: 0,
+          qty: 0,
+          credev_qty: 0,
+          sample_name: sampleName || null,
+        });
+      }
+      return byPerson.get(personCode);
+    };
+    for (const nf of compras) {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
       const personCode = parseInt(nf.personCode);
       if (!personCode || personCode >= 100000000) continue;
       const total = parseFloat(nf.totalValue) || 0;
       if (total <= 0) continue;
-      if (!byPerson.has(personCode)) {
-        byPerson.set(personCode, {
-          person_code: personCode,
-          total_value: 0,
-          qty: 0,
-          sample_name: nf.personName || null,
-        });
-      }
-      const entry = byPerson.get(personCode);
-      entry.total_value += total;
-      entry.qty += 1;
+      const e = ensureEntry(personCode, nf.personName);
+      e.total_compras += total;
+      e.qty += 1;
     }
+
+    // ─── Agrega LY (ano anterior) por personCode E por NOME ──────────────
+    // IMPORTANTE: este loop roda DEPOIS de byPerson ser construído.
+    // Se o personCode da NF 2025 já é um comprador conhecido em 2026
+    // (byPerson.has), aceitamos sem aplicar `looksLikeFranquia` — afinal
+    // a entidade JÁ FOI VALIDADA como franquia pela combinação op_code+matriz
+    // do ano atual. Isso resolve casos como "SAMARCOS EMPREENDIMENTOS LTDA"
+    // (F121 - CROSBY PETROLINA em 2026) que tinha nome sem "CROSBY" em 2025.
+    const lyByPerson = new Map();
+    const lyByName = new Map();
+    let totalRawLy = 0;
+    let ignoradosLy = 0;
+    let aceitosPorCode2026 = 0;
+    for (const nf of comprasLy) {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+      const personCode = parseInt(nf.personCode);
+      if (!personCode || personCode >= 100000000) continue;
+      const total = parseFloat(nf.totalValue) || 0;
+      if (total <= 0) continue;
+      const isKnown2026 = byPerson.has(personCode);
+      if (!isKnown2026 && !looksLikeFranquia(nf.personName)) {
+        ignoradosLy++;
+        continue;
+      }
+      if (isKnown2026) aceitosPorCode2026++;
+      totalRawLy += total;
+      lyByPerson.set(personCode, (lyByPerson.get(personCode) || 0) + total);
+      // Index pelo nome com TODAS as variações
+      for (const v of stripVariantsLy(nf.personName)) {
+        if (v) lyByName.set(v, (lyByName.get(v) || 0) + total);
+      }
+    }
+    console.log(
+      `[compras-franquias] LY: ${comprasLy.length} NFs · totalRawLy=R$${totalRawLy.toFixed(2)} · ${lyByPerson.size} personCodes (${aceitosPorCode2026} herdados de 2026) · ${ignoradosLy} ignoradas`,
+    );
+
+    // ─── Agrega CREDEV — APENAS para pessoas que compraram ─────────────
+    // As ops [7245, 7244, etc.] são genéricas e capturam devoluções de
+    // consumidores finais do varejo também. Para evitar contar credev de
+    // não-franquias, só aceitamos credev de pessoas presentes em `byPerson`
+    // (que receberam NFs com ops EXCLUSIVAS de franquia — 7234/7240/...).
+    let credevIgnorados = 0;
+    let credevContados = 0;
+    for (const nf of credevs) {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+      const personCode = parseInt(nf.personCode);
+      if (!personCode || personCode >= 100000000) continue;
+      if (!byPerson.has(personCode)) {
+        credevIgnorados++;
+        continue;
+      }
+      const total = parseFloat(nf.totalValue) || 0;
+      if (total <= 0) continue;
+      const e = byPerson.get(personCode);
+      e.total_credev += total;
+      e.credev_qty += 1;
+      credevContados++;
+    }
+    console.log(
+      `[compras-franquias] credev: ${credevContados} atribuído a franquia · ${credevIgnorados} ignorado (consumidor final)`,
+    );
 
     if (byPerson.size === 0) {
       return successResponse(res, { franquias: [], total: 0 }, 'OK');
     }
 
     // ─── Enriquece com fantasy_name + nm_pessoa via pes_pessoa ─────────────
+    // Como o filtro é pelo op_code (FRANQUIA_OP_CODES, exclusivos de franquia),
+    // todas as NFs já são por definição de clientes franquia. Não usamos
+    // classifications porque na prática o campo está NULL no banco.
     const personCodes = [...byPerson.keys()];
     const PAGE = 500;
     const pessoasMap = new Map();
@@ -1558,31 +1760,425 @@ router.post(
       }
     }
 
-    // ─── Monta resposta ordenada por valor ─────────────────────────────────
+    // ─── Detector de "não-franquia" pelo nome ─────────────────────────────
+    // Alguns clientes multimarcas (fantasy_name começa com "MTM") podem
+    // comprar com ops de franquia por erro de cadastro. Excluímos pelo nome.
+    const isNaoFranquiaPorNome = (fantasy, nome) => {
+      const blob = `${fantasy || ''} ${nome || ''}`.toUpperCase();
+      // Aceita franquia legítima: nome começa com F### ou contém CROSBY
+      const isFranquiaLegit = /\bCROSBY\b|^F\d{2,4}\s*-?\s*/.test(blob);
+      if (isFranquiaLegit) return false;
+      // Caso contrário, é não-franquia
+      return true;
+    };
+
+    // ─── Busca SELLOUT (vendas próprias) atual + ano anterior ─────────────
+    let sellouTByName = new Map();
+    let sellouTByNameLy = new Map();
+    try {
+      const allBranchCodes = await getBranchCodes(accessToken);
+      const refreshTk = async () => {
+        const d = await getToken(true);
+        return d.access_token;
+      };
+      const [rankingData, rankingDataLy] = await Promise.all([
+        fetchBranchTotalsFromTotvs({
+          initialToken: accessToken,
+          branchs: allBranchCodes,
+          datemin,
+          datemax,
+          refreshToken: refreshTk,
+          logTag: 'compras-franquias/sellout',
+        }),
+        fetchBranchTotalsFromTotvs({
+          initialToken: accessToken,
+          branchs: allBranchCodes,
+          datemin: datemin_ly,
+          datemax: datemax_ly,
+          refreshToken: refreshTk,
+          logTag: 'compras-franquias/sellout-ly',
+        }).catch(() => ({ dataRow: [] })),
+      ]);
+      const norm = (s) =>
+        String(s || '')
+          .toUpperCase()
+          .normalize('NFD')
+          .replace(/[̀-ͯ]/g, '')
+          .replace(/[^A-Z0-9 ]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      const stripPrefix = (s) =>
+        s
+          .replace(/^F?\d{2,4}\s*-?\s*/i, '')
+          .replace(/\bFRANQUIA\b/g, '')
+          .replace(/\bCROSBY\b/g, '')
+          .replace(/\b(LTDA|ME|EPP|EIRELI|SA)\b/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      const indexBranchRows = (rows, target) => {
+        for (const row of rows) {
+          const name =
+            row.branch_name || row.branchName || `Filial ${row.branch_code}`;
+          const key = norm(name);
+          const value = Number(row.invoice_value || 0);
+          if (!value) continue;
+          const variants = new Set([key, stripPrefix(key)]);
+          for (const v of variants) {
+            if (v) target.set(v, (target.get(v) || 0) + value);
+          }
+        }
+      };
+      indexBranchRows(
+        Array.isArray(rankingData.dataRow) ? rankingData.dataRow : [],
+        sellouTByName,
+      );
+      indexBranchRows(
+        Array.isArray(rankingDataLy.dataRow) ? rankingDataLy.dataRow : [],
+        sellouTByNameLy,
+      );
+      console.log(
+        `[compras-franquias] sellout atual: ${sellouTByName.size} keys · LY: ${sellouTByNameLy.size} keys`,
+      );
+    } catch (err) {
+      console.warn(`[compras-franquias] sellout fetch falhou: ${err.message}`);
+    }
+    // Helper para localizar sellout de uma franquia
+    const norm2 = (s) =>
+      String(s || '')
+        .toUpperCase()
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .replace(/[^A-Z0-9 ]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const stripPrefix2 = (s) =>
+      s
+        .replace(/^F?\d{2,4}\s*-?\s*/i, '')
+        .replace(/\bFRANQUIA\b/g, '')
+        .replace(/\bCROSBY\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const findInMap = (m, fantasy, nome) => {
+      const candidates = new Set();
+      if (fantasy) {
+        candidates.add(norm2(fantasy));
+        candidates.add(stripPrefix2(norm2(fantasy)));
+      }
+      if (nome) {
+        candidates.add(norm2(nome));
+        candidates.add(stripPrefix2(norm2(nome)));
+      }
+      for (const c of candidates) {
+        if (c && m.has(c)) return m.get(c);
+      }
+      return 0;
+    };
+    const findSellout = (fantasy, nome) => findInMap(sellouTByName, fantasy, nome);
+    const findSelloutLy = (fantasy, nome) => findInMap(sellouTByNameLy, fantasy, nome);
+
+    // Calcula % de crescimento (atual vs anterior). null se não há base.
+    const calcGrowthPct = (atual, anterior) => {
+      const a = Number(atual || 0);
+      const b = Number(anterior || 0);
+      if (b <= 0) return a > 0 ? null : 0; // sem base → "novo" (null) ou 0
+      return Number((((a - b) / b) * 100).toFixed(2));
+    };
+
+    // Helper para achar compras LY por NOME (quando person_code mudou)
+    const findComprasLyByName = (fantasy, nome) => {
+      const candidates = new Set();
+      if (fantasy) {
+        candidates.add(normName(fantasy));
+        candidates.add(stripPrefix2(normName(fantasy)));
+      }
+      if (nome) {
+        candidates.add(normName(nome));
+        candidates.add(stripPrefix2(normName(nome)));
+      }
+      for (const c of candidates) {
+        if (c && lyByName.has(c)) return lyByName.get(c);
+      }
+      return 0;
+    };
+
+    // ─── Monta resposta ordenada por LÍQUIDO ──────────────────────────────
     const franquias = [...byPerson.values()]
       .map((entry) => {
         const meta = pessoasMap.get(entry.person_code) || {};
+        const liquido = entry.total_compras - entry.total_credev;
+        const sellout = findSellout(meta.fantasy_name, meta.nm_pessoa);
+        const selloutLy = findSelloutLy(meta.fantasy_name, meta.nm_pessoa);
+        // Primeiro tenta por personCode. Se 0, fallback por nome.
+        let comprasLyVal = lyByPerson.get(entry.person_code) || 0;
+        if (comprasLyVal === 0) {
+          comprasLyVal = findComprasLyByName(meta.fantasy_name, meta.nm_pessoa);
+        }
         return {
           person_code: entry.person_code,
           nm_pessoa: meta.nm_pessoa || entry.sample_name || null,
           fantasy_name: meta.fantasy_name || null,
-          total_value: Math.round(entry.total_value * 100) / 100,
+          total_compras: Math.round(entry.total_compras * 100) / 100,
+          total_credev: Math.round(entry.total_credev * 100) / 100,
+          // total_value = líquido (compras - credev) — usado no ranking principal
+          total_value: Math.round(liquido * 100) / 100,
+          // sellout = vendas próprias da franquia (sale-panel/totals-branch da filial)
+          total_sellout: Math.round(sellout * 100) / 100,
+          // Ano anterior (mesmo intervalo de dias 1 ano antes)
+          total_compras_ly: Math.round(comprasLyVal * 100) / 100,
+          total_sellout_ly: Math.round(selloutLy * 100) / 100,
+          // Taxas de crescimento (%) — null se sem base no ano anterior
+          crescimento_compras_pct: calcGrowthPct(entry.total_compras, comprasLyVal),
+          crescimento_sellout_pct: calcGrowthPct(sellout, selloutLy),
           qty: entry.qty,
+          credev_qty: entry.credev_qty,
         };
       })
+      // Remove franquias com compras = 0 (só credev, sem compra)
+      .filter((f) => f.total_compras > 0)
+      // Remove clientes não-franquia (MTM/multimarcas/outros)
+      .filter((f) => !isNaoFranquiaPorNome(f.fantasy_name, f.nm_pessoa))
       .sort((a, b) => b.total_value - a.total_value);
 
     const total = franquias.reduce((s, f) => s + f.total_value, 0);
+    const total_compras = franquias.reduce((s, f) => s + f.total_compras, 0);
+    const total_credev = franquias.reduce((s, f) => s + f.total_credev, 0);
+    const total_sellout = franquias.reduce((s, f) => s + (f.total_sellout || 0), 0);
+    // Total LY: usa soma BRUTA do período anterior (independente de match por franquia)
+    // Match por franquia é difícil porque os person_codes podem ter mudado.
+    // O sellout LY usa branches normais (consistentes), então o per-franquia funciona.
+    const total_compras_ly = totalRawLy;
+    const total_sellout_ly = franquias.reduce((s, f) => s + (f.total_sellout_ly || 0), 0);
+    const crescimento_compras_pct = calcGrowthPct(total_compras, total_compras_ly);
+    const crescimento_sellout_pct = calcGrowthPct(total_sellout, total_sellout_ly);
+
+    const responseData = {
+      franquias,
+      total: Math.round(total * 100) / 100, // líquido
+      total_compras: Math.round(total_compras * 100) / 100,
+      total_credev: Math.round(total_credev * 100) / 100,
+      total_sellout: Math.round(total_sellout * 100) / 100,
+      total_compras_ly: Math.round(total_compras_ly * 100) / 100,
+      total_sellout_ly: Math.round(total_sellout_ly * 100) / 100,
+      crescimento_compras_pct,
+      crescimento_sellout_pct,
+      count: franquias.length,
+      period: { datemin, datemax },
+      period_ly: { datemin: datemin_ly, datemax: datemax_ly },
+    };
+    // Salva no cache se tem dados
+    if (franquias.length > 0) {
+      COMPRAS_FRANQUIAS_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+      if (COMPRAS_FRANQUIAS_CACHE.size > 20) {
+        const oldest = [...COMPRAS_FRANQUIAS_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        COMPRAS_FRANQUIAS_CACHE.delete(oldest[0]);
+      }
+    }
+    return successResponse(
+      res,
+      responseData,
+      `${franquias.length} franquias · líquido R$ ${total.toFixed(2)} · sellout R$ ${total_sellout.toFixed(2)}`,
+    );
+  }),
+);
+
+// =============================================================================
+// COMPRAS-FRANQUIA-DETALHE — NFs individuais (compras + credev) por franquia
+// POST /api/totvs/sale-panel/compras-franquia-detalhe
+// Body: { datemin, datemax, person_code }
+//
+// Retorna lista de NFs envolvendo essa franquia no período:
+//   - SAÍDAS da matriz (branch 99) para a franquia → COMPRAS
+//   - ENTRADAS na matriz vindas da franquia (devoluções, vale-troca) → CREDEV
+//
+// Cada NF é marcada com is_credev=true se for devolução/credev.
+// =============================================================================
+router.post(
+  '/sale-panel/compras-franquia-detalhe',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax, person_code } = req.body;
+    if (!datemin || !datemax || !person_code) {
+      return errorResponse(
+        res,
+        'datemin, datemax e person_code obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
+    }
+    const accessToken = tokenData.access_token;
+
+    const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+    const pageSize = 100;
+
+    // Helper para paginar uma busca específica
+    const fetchAll = async (filter) => {
+      const out = [];
+      const fetchPage = async (page) => {
+        try {
+          const r = await axios.post(
+            endpoint,
+            { filter, expand: 'items,payments', page, pageSize },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent,
+              timeout: 60000,
+            },
+          );
+          return r.data || {};
+        } catch (err) {
+          console.warn(
+            `[compras-franquia-detalhe] pág ${page}: ${err.message}`,
+          );
+          return { items: [] };
+        }
+      };
+      const first = await fetchPage(1);
+      out.push(...(first.items || []));
+      const totalPages =
+        first.totalPages ||
+        (first.totalItems ? Math.ceil(first.totalItems / pageSize) : 1);
+      if (totalPages > 1) {
+        const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+        const CONC = 5;
+        for (let i = 0; i < rem.length; i += CONC) {
+          const batch = rem.slice(i, i + CONC);
+          const results = await Promise.all(batch.map(fetchPage));
+          for (const pd of results) out.push(...(pd?.items || []));
+        }
+      }
+      return out;
+    };
+
+    // Op codes adicionais por SEGMENTO (matriz vende para franquia tb por
+    // estes canais). Vamos juntar tudo numa só lista para reduzir requests.
+    const SHOWROOM_OP_CODES = [7254, 7007];
+    const NOVIDADES_OP_CODES = [7255];
+    const ALL_COMPRA_OP_CODES = [
+      ...FRANQUIA_OP_CODES,
+      ...SHOWROOM_OP_CODES,
+      ...NOVIDADES_OP_CODES,
+    ];
+
+    // Filiais da matriz (atual 99 + legadas 75/750/85/850/1/100/2/200
+    // para captura completa em períodos antigos)
+    const MATRIZ_BRANCHES = [99, 75, 750, 85, 850, 1, 100, 2, 200];
+
+    // ─── 1) COMPRAS: NFs Output da matriz para essa franquia ─────
+    const personFilterField = 'personCodeList';
+    const filterCompras = {
+      branchCodeList: MATRIZ_BRANCHES,
+      operationCodeList: ALL_COMPRA_OP_CODES,
+      operationType: 'Output',
+      [personFilterField]: [Number(person_code)],
+      startIssueDate: `${datemin}T00:00:00`,
+      endIssueDate: `${datemax}T23:59:59`,
+    };
+    const compras = await fetchAll(filterCompras);
+
+    // ─── 2) CREDEV: NFs Input na matriz vindas dessa franquia (devolução) ─
+    const filterCredev = {
+      branchCodeList: MATRIZ_BRANCHES,
+      operationCodeList: FRANQUIA_CREDEV_OP_CODES,
+      operationType: 'Input',
+      [personFilterField]: [Number(person_code)],
+      startIssueDate: `${datemin}T00:00:00`,
+      endIssueDate: `${datemax}T23:59:59`,
+    };
+    const credevs = await fetchAll(filterCredev);
+
+    // Helper: classifica o segmento pela operação de venda
+    const SHOWROOM_SET = new Set(SHOWROOM_OP_CODES);
+    const NOVIDADES_SET = new Set(NOVIDADES_OP_CODES);
+    const FRANQUIA_SET = new Set(FRANQUIA_OP_CODES);
+    const classifySegmento = (opCode) => {
+      const op = Number(opCode);
+      if (NOVIDADES_SET.has(op)) return 'novidades';
+      if (SHOWROOM_SET.has(op)) return 'showroom';
+      if (FRANQUIA_SET.has(op)) return 'franquia';
+      return 'outro';
+    };
+
+    // ─── Mapeia para formato padronizado ────────────────────────────────
+    const mapNf = (nf, isCredev) => {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') {
+        return null;
+      }
+      const total = parseFloat(nf.totalValue) || 0;
+      if (total <= 0) return null;
+      const opCode = parseInt(nf.operationCode);
+      const segmento = isCredev ? 'credev' : classifySegmento(opCode);
+      return {
+        branch_code: parseInt(nf.branchCode),
+        invoice_code: nf.invoiceCode,
+        transaction_code: nf.transactionCode,
+        serial_code: nf.serialCode,
+        issue_date: nf.issueDate ? String(nf.issueDate).slice(0, 10) : null,
+        person_code: parseInt(nf.personCode),
+        person_name: nf.personName,
+        operation_code: opCode,
+        operation_name: nf.operationName,
+        operation_type: nf.operationType,
+        is_credev: !!isCredev,
+        // Segmento: 'franquia' | 'showroom' | 'novidades' | 'credev'
+        segmento,
+        total_value: Math.round(total * 100) / 100,
+        payment_condition: nf.paymentConditionName || null,
+      };
+    };
+    const transacoes = [
+      ...compras.map((n) => mapNf(n, false)),
+      ...credevs.map((n) => mapNf(n, true)),
+    ]
+      .filter(Boolean)
+      .sort((a, b) => String(b.issue_date).localeCompare(String(a.issue_date)));
+
+    const total_compras = transacoes
+      .filter((t) => !t.is_credev)
+      .reduce((s, t) => s + t.total_value, 0);
+    const total_credev = transacoes
+      .filter((t) => t.is_credev)
+      .reduce((s, t) => s + t.total_value, 0);
+    const total_liquido = total_compras - total_credev;
+
+    // Totais por segmento (compras only — não inclui credev)
+    const totaisPorSegmento = {
+      franquia: 0,
+      showroom: 0,
+      novidades: 0,
+      outro: 0,
+    };
+    for (const t of transacoes) {
+      if (t.is_credev) continue;
+      totaisPorSegmento[t.segmento] =
+        (totaisPorSegmento[t.segmento] || 0) + t.total_value;
+    }
+    for (const k of Object.keys(totaisPorSegmento)) {
+      totaisPorSegmento[k] = Math.round(totaisPorSegmento[k] * 100) / 100;
+    }
 
     return successResponse(
       res,
       {
-        franquias,
-        total: Math.round(total * 100) / 100,
-        count: franquias.length,
+        person_code: Number(person_code),
         period: { datemin, datemax },
+        transacoes,
+        count: transacoes.length,
+        total_compras: Math.round(total_compras * 100) / 100,
+        total_credev: Math.round(total_credev * 100) / 100,
+        total_liquido: Math.round(total_liquido * 100) / 100,
+        totais_por_segmento: totaisPorSegmento,
       },
-      `${franquias.length} franquias compraram da matriz`,
+      `${transacoes.length} NFs (${compras.length} compras, ${credevs.length} credev)`,
     );
   }),
 );

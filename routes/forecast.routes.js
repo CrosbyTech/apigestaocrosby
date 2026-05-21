@@ -141,6 +141,81 @@ const CANAIS = [
 ];
 
 // ──────────────────────────────────────────────────────────────
+// BlueCard — canal QUANTITATIVO (n.º de cartões enviados)
+// ──────────────────────────────────────────────────────────────
+// Lista ClickUp "Gestão Cartões" — filtro por status="enviado" e
+// custom field "Envio do Cartão" (date) dentro do período.
+// IMPORTANTE: BlueCard usa unidade "cartões" (não R$). Não entra no
+// total monetário dos endpoints — é exibido em linha separada com
+// flag `is_quantity: true`.
+const BLUECARD_LIST_ID = process.env.BLUECARD_LIST_ID || '901109156287';
+const BLUECARD_ENVIO_FIELD_ID = 'bccdf561-eb70-4b9c-aa1d-7298b6e892e1';
+const BLUECARD_STATUS = 'enviado';
+
+// Cache: chave "datemin|datemax" → { count, ts }
+const BLUECARD_CACHE = new Map();
+const BLUECARD_TTL_MS = 5 * 60 * 1000; // 5 min
+
+async function fetchBlueCardSentCount(datemin, datemax) {
+  if (!datemin || !datemax) return 0;
+  const cacheKey = `${datemin}|${datemax}`;
+  const cached = BLUECARD_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.ts < BLUECARD_TTL_MS) return cached.count;
+
+  const apiKey = process.env.CLICKUP_API_KEY || '';
+  if (!apiKey) {
+    console.warn('[bluecard] CLICKUP_API_KEY ausente — retornando 0');
+    return 0;
+  }
+
+  // janela inclusiva em UTC
+  const dMs = new Date(`${datemin}T00:00:00Z`).getTime();
+  const aMs = new Date(`${datemax}T23:59:59Z`).getTime();
+
+  let count = 0;
+  let page = 0;
+  const MAX_PAGES = 100; // 100 × 100 = 10k cartões enviados (caso extremo)
+  while (page < MAX_PAGES) {
+    let tasks;
+    try {
+      const r = await axios.get(
+        `https://api.clickup.com/api/v2/list/${BLUECARD_LIST_ID}/task`,
+        {
+          params: {
+            subtasks: true,
+            include_closed: true,
+            page,
+            'statuses[]': BLUECARD_STATUS,
+          },
+          headers: { Authorization: apiKey },
+          timeout: 60000,
+        },
+      );
+      tasks = r.data?.tasks || [];
+    } catch (e) {
+      console.warn(`[bluecard] fetch página ${page} falhou: ${e.message}`);
+      break;
+    }
+    if (tasks.length === 0) break;
+    for (const t of tasks) {
+      const cf = (t.custom_fields || []).find(
+        (f) => f.id === BLUECARD_ENVIO_FIELD_ID,
+      );
+      const raw = cf?.value;
+      if (!raw) continue;
+      const ms = Number(raw);
+      if (!Number.isFinite(ms)) continue;
+      if (ms >= dMs && ms <= aMs) count += 1;
+    }
+    if (tasks.length < 100) break;
+    page += 1;
+  }
+
+  BLUECARD_CACHE.set(cacheKey, { count, ts: Date.now() });
+  return count;
+}
+
+// ──────────────────────────────────────────────────────────────
 // Helpers de período
 // ──────────────────────────────────────────────────────────────
 
@@ -243,7 +318,78 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     out.fabrica = FABRICA_SOURCES.reduce((s, k) => s + Number(seg[k] || 0), 0);
     return out;
   } catch (e) {
-    console.warn('[forecast/promessa] getFaturamentoPorSegmento falhou:', e?.message);
+    console.warn(
+      `[forecast/promessa] getFaturamentoPorSegmento falhou (${toYmd(datemin)}~${toYmd(datemax)}): ${e?.message} — tentando fallback via canal-totals`,
+    );
+    // ─── FALLBACK: chama /canal-totals individualmente por canal e monta segMap.
+    // É mais leve que o fat-seg (sem iteração per-NF) e mais resiliente.
+    return getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax);
+  }
+}
+
+// Lista de canais usados no forecast/comparativo. Devem ser canais que
+// /canal-totals suporta (CANAL_CONFIG no crm.routes.js).
+// `useGross: true` → usa gross_invoice_value (sem subtrair devolução).
+// Motivo: esses canais NÃO têm allowedSellers, então PASS 2 (SaleReturns)
+// pega devolução de toda a empresa → over-subtraction → negativo/subestimado.
+// fat-seg per-NF para esses retorna BRUTO; o fallback deve fazer o mesmo.
+const FAT_SEG_CANAIS = [
+  { mod: 'varejo',           useGross: false },
+  { mod: 'revenda',          useGross: false },
+  { mod: 'multimarcas',      useGross: false },
+  { mod: 'inbound_david',    useGross: false },
+  { mod: 'inbound_rafael',   useGross: false },
+  { mod: 'franquia',         useGross: true  }, // sem allowedSellers
+  { mod: 'business',         useGross: true  }, // sem allowedSellers
+  { mod: 'bazar',            useGross: true  }, // skipDevolucao já protege, mas keep gross pra consistência
+  { mod: 'showroom',         useGross: true  }, // sem allowedSellers
+  { mod: 'novidadesfranquia',useGross: true  }, // sem allowedSellers
+  { mod: 'ricardoeletro',    useGross: true  }, // skipDevolPass2 protege, gross é consistente
+];
+
+async function getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax) {
+  const di = toYmd(datemin);
+  const df = toYmd(datemax);
+  try {
+    const calls = await Promise.all(
+      FAT_SEG_CANAIS.map(async ({ mod, useGross }) => {
+        try {
+          const r = await axios.post(
+            `${INTERNAL_API_BASE}/api/crm/canal-totals`,
+            { datemin: di, datemax: df, modulo: mod },
+            { timeout: 120000 },
+          );
+          const d = r.data?.data || r.data;
+          // Usa gross pra canais sem allowedSellers (evita devol over-subtraction).
+          // Para canais com allowedSellers, o líquido é confiável.
+          const raw = useGross
+            ? (d?.gross_invoice_value ?? d?.invoice_value ?? 0)
+            : (d?.invoice_value ?? 0);
+          return [mod, Math.max(0, Number(raw) || 0)];
+        } catch (err) {
+          console.warn(
+            `[fat-seg fallback] canal ${mod} falhou: ${err.message}`,
+          );
+          return [mod, 0];
+        }
+      }),
+    );
+    const seg = Object.fromEntries(calls);
+    // Canal virtual "fabrica" = showroom + novidadesfranquia
+    seg.fabrica = FABRICA_SOURCES.reduce((s, k) => s + Number(seg[k] || 0), 0);
+    const total = Object.values(seg).reduce((s, v) => s + Number(v || 0), 0);
+    if (total === 0) {
+      console.warn(
+        `[fat-seg fallback] todos os canais retornaram 0 — pode ser TOTVS indisponível`,
+      );
+      return null; // indica falha total
+    }
+    console.log(
+      `[fat-seg fallback] ${di}~${df}: monteg segMap via canal-totals (total=R$${total.toFixed(2)})`,
+    );
+    return seg;
+  } catch (err) {
+    console.warn(`[fat-seg fallback] erro fatal: ${err.message}`);
     return null;
   }
 }
@@ -353,13 +499,18 @@ router.get(
     const refMesNum = endDate.getUTCMonth() + 1;
     const mKey = monthKey(refMesAno, refMesNum);
 
-    const [metasSemana, metasMes, fatSemana, fatDiaAnt] = await Promise.all([
+    const [metasSemana, metasMes, fatSemana, fatDiaAnt, bcSemana, bcDiaAnt] = await Promise.all([
       getMetasPorCanal('semanal', wKey),
       getMetasPorCanal('mensal', mKey),
       getFaturamentoPorSegmento(datemin, datemax),
       diaAnteriorIso
         ? getFaturamentoPorSegmento(diaAnteriorIso, diaAnteriorIso)
         : Promise.resolve(null),
+      // BlueCard — quantitativo
+      fetchBlueCardSentCount(datemin, datemax),
+      diaAnteriorIso
+        ? fetchBlueCardSentCount(diaAnteriorIso, diaAnteriorIso)
+        : Promise.resolve(0),
     ]);
 
     const diasUteisMes = diasUteisDoMes(refMesAno, refMesNum);
@@ -407,6 +558,31 @@ router.get(
     total.percentual = total.meta_realista > 0
       ? Number(((total.faturamento_real / total.meta_realista) * 100).toFixed(2))
       : 0;
+
+    // ─── BlueCard — quantidade de cartões (unidade: "cartões", NÃO R$) ─────
+    // Vai DEPOIS do total porque não soma no total monetário.
+    // Mantém mesmas chaves dos demais canais para compatibilidade visual.
+    const bluecardMetaSem = metasSemana.get('bluecard') || 0;
+    const bluecardMetaMes = metasMes.get('bluecard') || 0;
+    const bluecardDiasCanal = Math.min(diasUteisDecorridos, 6); // segue regra "demais"
+    const bluecardQntDeveria = bluecardMetaSem * bluecardDiasCanal / 6;
+    const bluecardMetaDia = bluecardMetaMes > 0 && diasUteisMes > 0
+      ? bluecardMetaMes / diasUteisMes
+      : (diasUteisTotal > 0 ? bluecardMetaSem / diasUteisTotal : 0);
+    const bluecardPct = bluecardMetaSem > 0 ? (bcSemana / bluecardMetaSem) * 100 : 0;
+    canaisOut.push({
+      canal_key: 'bluecard',
+      nome: 'BlueCard',
+      is_quantity: true,
+      unit: 'cartões',
+      meta_realista: bluecardMetaSem,
+      faturamento_real: bcSemana,
+      qnt_deveria: Number(bluecardQntDeveria.toFixed(2)),
+      meta_do_dia: Number(bluecardMetaDia.toFixed(2)),
+      fat_dia_anterior: bcDiaAnt,
+      percentual: Number(bluecardPct.toFixed(2)),
+      dias_decorridos_canal: bluecardDiasCanal,
+    });
 
     return successResponse(res, {
       ano,
@@ -488,9 +664,13 @@ function findSellerFat(perSeller, nome) {
   for (const s of perSeller || []) {
     const sname = String(s.seller_name || s.name || '').toUpperCase();
     if (sname.includes(target)) {
-      // Ordem de campos: invoice_value é o campo real do /canal-totals
-      const v = s.invoice_value ?? s.faturamento_liquido ?? s.liquido ?? s.total_liquido ?? s.total ?? 0;
-      return Number(v) || 0;
+      // /canal-totals retorna invoice_value como BRUTO em per_seller (consistente
+      // entre chamadas mesmo quando credev fetch falha). Líquido é computado
+      // aqui: bruto - credev_value. Se credev_value=0 (falhou), líquido=bruto
+      // — degradação aceitável.
+      const bruto = Number(s.invoice_value ?? s.faturamento_liquido ?? s.liquido ?? s.total_liquido ?? s.total ?? 0) || 0;
+      const credev = Number(s.credev_value || 0);
+      return Math.max(0, bruto - credev);
     }
   }
   return 0;
@@ -580,10 +760,15 @@ router.get(
         ...(card.convidados || []).map((c) => String(c.nome || c.label).toUpperCase()),
       ]);
       const extras = (ps || [])
-        .map((s) => ({
-          nome: String(s.seller_name || s.name || '').trim().toUpperCase(),
-          real: Number(s.invoice_value ?? s.faturamento_liquido ?? s.liquido ?? s.total_liquido ?? s.total ?? 0) || 0,
-        }))
+        .map((s) => {
+          // invoice_value = bruto; líquido = bruto - credev_value
+          const bruto = Number(s.invoice_value ?? s.faturamento_liquido ?? s.liquido ?? s.total_liquido ?? s.total ?? 0) || 0;
+          const credev = Number(s.credev_value || 0);
+          return {
+            nome: String(s.seller_name || s.name || '').trim().toUpperCase(),
+            real: Math.max(0, bruto - credev),
+          };
+        })
         .filter((s) => s.nome && s.real > 0 && !Array.from(tokensUsados).some((t) => s.nome.includes(t)))
         .map((s) => ({
           nome: s.nome,
@@ -723,11 +908,19 @@ router.get(
 
     // Ano anterior vem da tabela de REFERÊNCIA (valores fixos cadastrados).
     // Ano atual vem do TOTVS (real do mês corrente).
-    const [refAnt, segAtualReal] = await Promise.all([
+    // BlueCard: ano anterior e atual vêm direto do ClickUp (dado histórico
+    // presente lá; se a lista ainda não existia no período, retorna 0).
+    const [refAnt, segAtualReal, bcAtual, bcAnt] = await Promise.all([
       getRefValues(anoAnt, mes),
       periodAtualReal
         ? getFaturamentoPorSegmento(periodAtualReal.datemin, periodAtualReal.datemax)
         : Promise.resolve(null),
+      periodAtualReal
+        ? fetchBlueCardSentCount(periodAtualReal.datemin, periodAtualReal.datemax)
+        : Promise.resolve(0),
+      periodAntAcum
+        ? fetchBlueCardSentCount(periodAntAcum.datemin, periodAntAcum.datemax)
+        : Promise.resolve(0),
     ]);
 
     // FRANQUIA: subtração de credev agora é feita dentro do /fat-seg, não duplica aqui.
@@ -775,6 +968,26 @@ router.get(
     total.comparativo_pct = total.fat_ano_anterior_acumulado > 0
       ? Number((((total.fat_ano_atual_real / total.fat_ano_anterior_acumulado) - 1) * 100).toFixed(2))
       : 0;
+
+    // ─── BlueCard — quantidade de cartões enviados (ano vs ano) ────────────
+    // Para o "full" do ano anterior, usamos o mês inteiro do ano passado.
+    const bcAntFull = await fetchBlueCardSentCount(periodAntFull.datemin, periodAntFull.datemax);
+    const bcDiferenca = bcAnt - bcAtual;
+    const bcComparativoPct = bcAnt > 0
+      ? ((bcAtual / bcAnt) - 1) * 100
+      : (bcAtual > 0 ? 100 : 0);
+    canaisOut.push({
+      canal_key: 'bluecard',
+      nome: 'BlueCard',
+      is_quantity: true,
+      unit: 'cartões',
+      fat_ano_anterior_full: bcAntFull,
+      fat_ano_anterior_acumulado: bcAnt,
+      fat_ano_atual_real: bcAtual,
+      diferenca: bcDiferenca,
+      comparativo_pct: Number(bcComparativoPct.toFixed(2)),
+      dia_acumulado_ref: diaAcum,
+    });
 
     return successResponse(res, {
       ano_atual: anoAtual,
@@ -840,7 +1053,7 @@ router.get(
     // Dias úteis decorridos: até HOJE (untilToday) ou ONTEM (D-1, default)
     const diasUteisDecorridos = diasUteisDecorridosNoMes(ano, mes, untilToday ? hoje : ontem);
 
-    const [metas, fatMes, fatDia] = await Promise.all([
+    const [metas, fatMes, fatDia, bcMes, bcDia] = await Promise.all([
       getMetasPorCanal('mensal', mKey),
       realDateMax
         ? getFaturamentoPorSegmento(data_inicio, realDateMax)
@@ -848,6 +1061,12 @@ router.get(
       diaIso
         ? getFaturamentoPorSegmento(diaIso, diaIso)
         : Promise.resolve(null),
+      realDateMax
+        ? fetchBlueCardSentCount(data_inicio, realDateMax)
+        : Promise.resolve(0),
+      diaIso
+        ? fetchBlueCardSentCount(diaIso, diaIso)
+        : Promise.resolve(0),
     ]);
 
     const canaisOut = CANAIS.map((c) => {
@@ -889,6 +1108,27 @@ router.get(
       ? Number(((total.real_acumulado / total.qnt_deveria) * 100).toFixed(2))
       : 0;
 
+    // ─── BlueCard — quantidade de cartões enviados no mês ──────────────────
+    const bluecardMetaM = metas.get('bluecard') || 0;
+    const bluecardMetaDiaM = diasUteisTotal > 0 ? bluecardMetaM / diasUteisTotal : 0;
+    const bluecardQntDeveriaM = bluecardMetaDiaM * diasUteisDecorridos;
+    const bluecardPctM = bluecardQntDeveriaM > 0
+      ? (bcMes / bluecardQntDeveriaM) * 100
+      : 0;
+    canaisOut.push({
+      canal_key: 'bluecard',
+      nome: 'BlueCard',
+      is_quantity: true,
+      unit: 'cartões',
+      meta_mensal: bluecardMetaM,
+      forecast_mensal: bluecardMetaM,
+      qnt_deveria: Number(bluecardQntDeveriaM.toFixed(2)),
+      real_acumulado: bcMes,
+      meta_do_dia: Number(bluecardMetaDiaM.toFixed(2)),
+      faturado_do_dia: bcDia,
+      percentual: Number(bluecardPctM.toFixed(2)),
+    });
+
     return successResponse(res, {
       ano,
       mes,
@@ -921,6 +1161,14 @@ const fmtBRL = (v) =>
     maximumFractionDigits: 2,
   })}`;
 
+// Formata valor de um canal: R$ para monetário, "N un" para quantitativo
+const fmtCanalVal = (canal, v) => {
+  if (canal?.is_quantity) {
+    return `${Math.round(Number(v || 0))} ${canal.unit || 'un'}`;
+  }
+  return fmtBRL(v);
+};
+
 const fmtPct = (v) => `${Number(v || 0).toFixed(0)}%`;
 
 const arrowEmoji = (pct) => {
@@ -945,9 +1193,9 @@ function buildTextoMensal(d) {
   for (const c of d.canais || []) {
     if (!c.forecast_mensal && !c.real_acumulado) continue;
     lines.push(`${arrowEmoji(c.percentual)} *${c.nome}*`);
-    lines.push(`   Forecast: ${fmtBRL(c.forecast_mensal)}`);
-    lines.push(`   Real:     ${fmtBRL(c.real_acumulado)}`);
-    lines.push(`   Qnt Dev.: ${fmtBRL(c.qnt_deveria)}  |  ${fmtPct(c.percentual)}`);
+    lines.push(`   Forecast: ${fmtCanalVal(c, c.forecast_mensal)}`);
+    lines.push(`   Real:     ${fmtCanalVal(c, c.real_acumulado)}`);
+    lines.push(`   Qnt Dev.: ${fmtCanalVal(c, c.qnt_deveria)}  |  ${fmtPct(c.percentual)}`);
     lines.push('');
   }
   const t = d.total || {};
@@ -967,9 +1215,9 @@ function buildTextoSemanal(d) {
   for (const c of d.canais || []) {
     if (!c.meta_realista && !c.faturamento_real) continue;
     lines.push(`${arrowEmoji(c.percentual)} *${c.nome}*`);
-    lines.push(`   Meta:     ${fmtBRL(c.meta_realista)}`);
-    lines.push(`   Real:     ${fmtBRL(c.faturamento_real)}  (${fmtPct(c.percentual)})`);
-    lines.push(`   Fat ontem: ${fmtBRL(c.fat_dia_anterior)}`);
+    lines.push(`   Meta:     ${fmtCanalVal(c, c.meta_realista)}`);
+    lines.push(`   Real:     ${fmtCanalVal(c, c.faturamento_real)}  (${fmtPct(c.percentual)})`);
+    lines.push(`   Fat ontem: ${fmtCanalVal(c, c.fat_dia_anterior)}`);
     lines.push('');
   }
   const t = d.total || {};
@@ -1008,9 +1256,9 @@ function buildTextoComparativo(d) {
   for (const c of d.canais || []) {
     if (!c.fat_ano_anterior_full && !c.fat_ano_atual_real) continue;
     lines.push(`${arrowComp(c.comparativo_pct)} *${c.nome}* (${c.comparativo_pct >= 0 ? '+' : ''}${c.comparativo_pct.toFixed(0)}%)`);
-    lines.push(`   ${d.ano_anterior}:        ${fmtBRL(c.fat_ano_anterior_full)}`);
-    lines.push(`   ${d.ano_anterior} Acum.:  ${fmtBRL(c.fat_ano_anterior_acumulado)}`);
-    lines.push(`   ${d.ano_atual} Real:   ${fmtBRL(c.fat_ano_atual_real)}`);
+    lines.push(`   ${d.ano_anterior}:        ${fmtCanalVal(c, c.fat_ano_anterior_full)}`);
+    lines.push(`   ${d.ano_anterior} Acum.:  ${fmtCanalVal(c, c.fat_ano_anterior_acumulado)}`);
+    lines.push(`   ${d.ano_atual} Real:   ${fmtCanalVal(c, c.fat_ano_atual_real)}`);
     lines.push('');
   }
   const t = d.total || {};
@@ -1021,6 +1269,35 @@ function buildTextoComparativo(d) {
   lines.push(`Comparativo: ${t.comparativo_pct >= 0 ? '+' : ''}${Number(t.comparativo_pct || 0).toFixed(0)}%`);
   return lines.join('\n');
 }
+
+// POST /forecast/cron-trigger-whatsapp — dispara manualmente o job de envio
+// Body opcional: { phone: '84991234567', untilToday: false }
+// (se não passar phone, usa FORECAST_WHATSAPP_PHONE do .env)
+router.post(
+  '/cron-trigger-whatsapp',
+  asyncHandler(async (req, res) => {
+    const { phone, untilToday } = req.body || {};
+    // Import dinâmico pra evitar carregar Puppeteer no boot da rota
+    const { executarForecastWhatsapp } = await import(
+      '../jobs/forecast-whatsapp.job.js'
+    );
+    // Dispara em background — responde imediatamente
+    executarForecastWhatsapp({ phone, untilToday: !!untilToday })
+      .then((r) => {
+        console.log(
+          `[cron-trigger-whatsapp] resultado: ${r.indicadores?.filter((i) => i.ok).length}/${r.indicadores?.length} ok`,
+        );
+      })
+      .catch((err) => {
+        console.error(`[cron-trigger-whatsapp] erro: ${err.message}`);
+      });
+    return successResponse(
+      res,
+      { triggered: true, phone: phone || 'env', untilToday: !!untilToday },
+      'Job disparado em background. Acompanhe pelos logs.',
+    );
+  }),
+);
 
 // POST /forecast/send-whatsapp-image — recebe { phone, image (base64), caption }
 router.post(

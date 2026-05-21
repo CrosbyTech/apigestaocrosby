@@ -172,6 +172,15 @@ export async function fetchBranchTotalsFromTotvs({
         token = await refreshToken();
         return callTotvs(token, body);
       }
+      // Log do payload + resposta TOTVS pra diagnosticar 400
+      if (error.response?.status === 400) {
+        console.error(
+          `❌ [${logTag}] TOTVS 400 — body enviado: ${JSON.stringify(body).slice(0, 500)}`,
+        );
+        console.error(
+          `❌ [${logTag}] TOTVS 400 — resposta: ${JSON.stringify(error.response?.data).slice(0, 800)}`,
+        );
+      }
       throw error;
     }
   };
