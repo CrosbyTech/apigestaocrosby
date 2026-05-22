@@ -121,6 +121,178 @@ const INTERNAL_API_BASE =
   process.env.INTERNAL_API_BASE_URL || `http://localhost:${process.env.PORT || 4100}`;
 
 // ──────────────────────────────────────────────────────────────
+// EXCLUSÕES FORECAST — clientes que devem ser EXCLUÍDOS do
+// faturamento real do Forecast (mantendo no faturamento geral do CRM).
+//
+// Uso típico: cliente "franquia" virou loja própria → faturamento ainda
+// existe e é contabilizado no CRM, mas no Forecast Franquia já não deve
+// contar porque não estava previsto na meta.
+//
+// Cada exclusão tem:
+//   personCode: cliente (number)
+//   canal:      canal do segMap a abater (string — ex: 'franquia')
+//   dateFrom:   data ISO de início (YYYY-MM-DD). Aplica de dateFrom em diante.
+//   description: comentário (não usado em runtime)
+//
+// Cálculo: busca via fiscal/v2/invoices NFs com personCode + ops do canal +
+// issueDate >= dateFrom, soma totalValue, e subtrai do segMap[canal].
+// ──────────────────────────────────────────────────────────────
+const FORECAST_EXCLUSOES = [
+  {
+    personCode: 29541,
+    canal: 'franquia',
+    dateFrom: '2026-05-21',
+    description:
+      'CROSBY RECIFE MALL LTDA — virou loja própria em 21/05/2026. Faturamento dela continua no CRM mas não deve entrar no Forecast Franquia.',
+  },
+];
+
+// Cache pra evitar re-calcular exclusão a cada Forecast request
+const EXCLUSOES_CACHE = new Map();
+const EXCLUSOES_CACHE_TTL_REALTIME = 60 * 60 * 1000; // 1h
+const EXCLUSOES_CACHE_TTL_PAST = 24 * 60 * 60 * 1000; // 24h pra meses passados
+
+// Ops por canal (espelha CANAL_CONFIG do crm.routes.js)
+const CANAL_OPS = {
+  franquia: [7234, 7240, 7802, 9124, 7259],
+  multimarcas: [7235, 7241, 9127, 200],
+  business: [7237, 7269, 7279, 7277],
+};
+
+async function calcularExclusaoNF({ personCode, ops, datemin, datemax }) {
+  const { getToken } = await import('../utils/totvsTokenManager.js');
+  const { TOTVS_BASE_URL, httpsAgent, getBranchCodes } = await import(
+    '../totvsrouter/totvsHelper.js'
+  );
+  const tk = await getToken();
+  if (!tk?.access_token) return 0;
+  // fiscal/v2/invoices exige branchCodeList. Pega todas as branches.
+  let branchCodeList;
+  try {
+    branchCodeList = await getBranchCodes(tk.access_token);
+  } catch (err) {
+    // Fallback hardcoded — pode omitir branches novas adicionadas ao TOTVS
+    // após o lançamento. Se Recife Mall ou outro cliente excluido faturar
+    // em branch fora dessa lista, a exclusão silenciosamente perde a NF.
+    console.warn(
+      `[forecast/exclusoes] getBranchCodes falhou (${err.message}) — usando fallback hardcoded. Algumas NFs podem não ser excluídas se estiverem em branches novas.`,
+    );
+    branchCodeList = [
+      1, 2, 5, 6, 11, 50, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+      96, 97, 98, 99, 100, 101, 111, 200,
+    ];
+  }
+  let total = 0;
+  // fiscal/v2/invoices não aceita filter por personCode → busca por ops e
+  // filtra localmente. Paginação pequena: NFs com ops franquia são poucas.
+  for (let page = 1; page <= 20; page++) {
+    let resp;
+    try {
+      resp = await axios.post(
+        `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`,
+        {
+          filter: {
+            branchCodeList,
+            operationCodeList: ops,
+            operationType: 'Output',
+            startIssueDate: `${datemin}T00:00:00`,
+            endIssueDate: `${datemax}T23:59:59`,
+          },
+          expand: '',
+          page,
+          pageSize: 100,
+        },
+        {
+          headers: { Authorization: `Bearer ${tk.access_token}` },
+          httpsAgent,
+          timeout: 60000,
+        },
+      );
+    } catch (err) {
+      console.warn(`[forecast/exclusoes] pág ${page} falhou: ${err.message}`);
+      break;
+    }
+    const items = resp.data?.items || [];
+    if (items.length === 0) break;
+    for (const nf of items) {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+      if (parseInt(nf.personCode) !== personCode) continue;
+      total += parseFloat(nf.totalValue || 0);
+    }
+    if (items.length < 100) break;
+  }
+  return total;
+}
+
+// Calcula o total a EXCLUIR por canal para o período (datemin..datemax).
+// Retorna Map<canal, valorExcluir>.
+async function getExclusoesPorCanal(datemin, datemax) {
+  if (!datemin || !datemax) return new Map();
+  const datemin_ymd = toYmd(datemin);
+  const datemax_ymd = toYmd(datemax);
+  const result = new Map();
+  // Hoje pra decidir TTL
+  const hojeYmd = toYmd(new Date());
+  const isPast = datemax_ymd < hojeYmd;
+  const ttl = isPast ? EXCLUSOES_CACHE_TTL_PAST : EXCLUSOES_CACHE_TTL_REALTIME;
+
+  for (const ex of FORECAST_EXCLUSOES) {
+    // dateFrom é a data quando a regra começa a valer. Recorta o período
+    // pra começar em max(dateFrom, datemin_ymd). Se o recorte for vazio,
+    // não aplica (exclusão não cobre esse período).
+    const dfrom = ex.dateFrom > datemin_ymd ? ex.dateFrom : datemin_ymd;
+    if (dfrom > datemax_ymd) continue;
+
+    const ops = CANAL_OPS[ex.canal];
+    if (!Array.isArray(ops) || ops.length === 0) continue;
+
+    const cacheKey = `${ex.personCode}|${ex.canal}|${dfrom}|${datemax_ymd}`;
+    const cached = EXCLUSOES_CACHE.get(cacheKey);
+    let valor;
+    if (cached && Date.now() - cached.ts < ttl) {
+      valor = cached.valor;
+    } else {
+      valor = await calcularExclusaoNF({
+        personCode: ex.personCode,
+        ops,
+        datemin: dfrom,
+        datemax: datemax_ymd,
+      });
+      EXCLUSOES_CACHE.set(cacheKey, { valor, ts: Date.now() });
+      if (EXCLUSOES_CACHE.size > 50) {
+        const oldest = [...EXCLUSOES_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        EXCLUSOES_CACHE.delete(oldest[0]);
+      }
+      if (valor > 0) {
+        console.log(
+          `[forecast/exclusoes] ${ex.canal} − R$${valor.toFixed(2)} (personCode=${ex.personCode}, ${dfrom}..${datemax_ymd}) — ${ex.description?.slice(0, 50)}`,
+        );
+      }
+    }
+    result.set(ex.canal, (result.get(ex.canal) || 0) + valor);
+  }
+  return result;
+}
+
+// Aplica exclusões no segMap. Modifica IN-PLACE.
+async function aplicarExclusoesForecast(segMap, datemin, datemax) {
+  if (!segMap) return segMap;
+  const exclusoes = await getExclusoesPorCanal(datemin, datemax);
+  for (const [canal, valor] of exclusoes.entries()) {
+    if (valor > 0 && segMap[canal] != null) {
+      const before = Number(segMap[canal] || 0);
+      segMap[canal] = Math.max(0, before - valor);
+      console.log(
+        `[forecast/exclusoes] ${canal}: R$${before.toFixed(2)} → R$${segMap[canal].toFixed(2)} (−R$${valor.toFixed(2)} excluído)`,
+      );
+    }
+  }
+  return segMap;
+}
+
+// ──────────────────────────────────────────────────────────────
 // Configuração dos canais (igual ao Forecast "Por Canal")
 // ──────────────────────────────────────────────────────────────
 // Canal "fabrica" é virtual: soma showroom + novidadesfranquia.
@@ -310,7 +482,13 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     const r = await axios.post(
       `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento`,
       { datemin: toYmd(datemin), datemax: toYmd(datemax) },
-      { timeout: 180000 }, // endpoint pode demorar (faz paginação no TOTVS)
+      // Timeout aumentado: fat-seg per-NF demora 5-7min na PRIMEIRA carga
+      // (sem cache) pra paginar TOTVS + classificar NF a NF. Com 180s,
+      // o Comparativo/Promessa caia no fallback canal-totals que retorna
+      // valor menor pra Business (R$70 em vez de R$73k) e Bazar (R$0 em
+      // vez de R$30k) — porque sale-panel ignora algumas ops específicas.
+      // 600s (10min) cobre primeira carga; chamadas seguintes leem cache.
+      { timeout: 600000 },
     );
     const seg = r.data?.data?.segmentos || r.data?.segmentos || {};
     const out = { ...seg };
@@ -362,10 +540,27 @@ async function getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax) {
           const d = r.data?.data || r.data;
           // Usa gross pra canais sem allowedSellers (evita devol over-subtraction).
           // Para canais com allowedSellers, o líquido é confiável.
-          const raw = useGross
-            ? (d?.gross_invoice_value ?? d?.invoice_value ?? 0)
-            : (d?.invoice_value ?? 0);
-          return [mod, Math.max(0, Number(raw) || 0)];
+          const liquido = Number(d?.invoice_value ?? 0);
+          const bruto = Number(d?.gross_invoice_value ?? 0);
+          // Estratégia:
+          //   - useGross=true → sempre bruto (clamp 0)
+          //   - useGross=false → líquido se > 0; se <= 0 (devol > venda no período,
+          //     comum em inbound_david/inbound_rafael), usa bruto como floor
+          //     pra não zerar o canal (evita "Valores zerados" na Promessa Semanal)
+          let valor;
+          if (useGross) {
+            valor = Math.max(0, bruto || liquido);
+          } else if (liquido > 0) {
+            valor = liquido;
+          } else if (bruto > 0) {
+            console.warn(
+              `[fat-seg fallback ${mod}] líquido=R$${liquido.toFixed(2)} ≤ 0 → usa bruto R$${bruto.toFixed(2)}`,
+            );
+            valor = bruto;
+          } else {
+            valor = 0;
+          }
+          return [mod, valor];
         } catch (err) {
           console.warn(
             `[fat-seg fallback] canal ${mod} falhou: ${err.message}`,
@@ -512,6 +707,12 @@ router.get(
         ? fetchBlueCardSentCount(diaAnteriorIso, diaAnteriorIso)
         : Promise.resolve(0),
     ]);
+
+    // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05)
+    await aplicarExclusoesForecast(fatSemana, datemin, datemax);
+    if (fatDiaAnt && diaAnteriorIso) {
+      await aplicarExclusoesForecast(fatDiaAnt, diaAnteriorIso, diaAnteriorIso);
+    }
 
     const diasUteisMes = diasUteisDoMes(refMesAno, refMesNum);
 
@@ -824,7 +1025,8 @@ const COMPARATIVO_CANAIS = [
   { key: 'varejo',        label: 'B2C' },
   { key: 'ricardoeletro', label: 'Ricardo Eletro' },
   { key: 'fabrica',       label: 'Fábrica (Kleiton)', sources: ['showroom', 'novidadesfranquia'] }, // ops 7254, 7007, 7255
-  { key: 'franquia',      label: 'B2L' },               // B2L = Franquia (= B2L Pronta)
+  { key: 'franquia',      label: 'Franquia' },          // Antes "B2L" — renomeado pra ficar consistente com Promessa Mensal/Semanal
+  { key: 'business',      label: 'Business' },          // Ops 7237, 7269, 7279, 7277 — venda corporativa
   { key: 'bazar',         label: 'Bazar' },
 ];
 
@@ -922,6 +1124,15 @@ router.get(
         ? fetchBlueCardSentCount(periodAntAcum.datemin, periodAntAcum.datemax)
         : Promise.resolve(0),
     ]);
+
+    // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05)
+    if (segAtualReal && periodAtualReal) {
+      await aplicarExclusoesForecast(
+        segAtualReal,
+        periodAtualReal.datemin,
+        periodAtualReal.datemax,
+      );
+    }
 
     // FRANQUIA: subtração de credev agora é feita dentro do /fat-seg, não duplica aqui.
 
@@ -1068,6 +1279,14 @@ router.get(
         ? fetchBlueCardSentCount(diaIso, diaIso)
         : Promise.resolve(0),
     ]);
+
+    // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05)
+    if (fatMes && realDateMax) {
+      await aplicarExclusoesForecast(fatMes, data_inicio, realDateMax);
+    }
+    if (fatDia && diaIso) {
+      await aplicarExclusoesForecast(fatDia, diaIso, diaIso);
+    }
 
     const canaisOut = CANAIS.map((c) => {
       const meta = metas.get(c.key) || 0;

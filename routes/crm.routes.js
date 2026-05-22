@@ -8080,9 +8080,13 @@ const CANAL_CONFIG = {
     // (revenda + multi/varejo) para captar devoluções de NFs revenda mesmo
     // que feitas por vendedor que saiu ou atende múltiplos canais.
     // 25=Anderson, 15=Heyridan, 161=Cleiton, 165=Michel, 241=Yago, 779=Aldo,
-    // 288=Jucelino, 251=Felipe PB, 131=?, 94=Enri PB, 65=Renato (rev+multi),
+    // 288=Jucelino, 251=Felipe PB, 131=?, 94=Enri PB,
     // 1924=Matheus Closer, 7044=Luiz (rev+varejo)
-    sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 65, 1924, 7044],
+    // Renato (65) foi REMOVIDO: vende exclusivamente em ops multimarcas
+    // (7235/7241/9127) — regra de negócio: "Renato sempre multimarcas".
+    // Manter aqui criava expectativa de aparecer em B2R, mas o filtro AND
+    // (branchs+ops+sellers) nunca capturava as NFs dele.
+    sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
     // Devoluções de venda (não inclui vale-troca/CREDEV varejo): subtrai do bruto
     devolucaoOps: [7245, 20, 1214, 7790],
     devolucaoBranchs: [2, 5, 75, 99, 200],
@@ -8100,6 +8104,8 @@ const CANAL_CONFIG = {
     // Thalis e Rafael DUAS vezes. A subtração roda em:
     //   - callTotvsTotalsSearch (gross — linhas ~10547-10585)
     //   - PASS 0 credev e PASS 2 SaleReturns (linhas ~11067 / 11101)
+    // OBS: Thalis (69) está INATIVO (não vende mais), mas mantemos no filtro
+    // pra histórico ficar correto (NFs antigas dele classificadas em inbound_david).
     sellers: undefined,
     excludeSellers: [21, 26, 69], // Rafael, David, Thalis (inbound)
     devolucaoOps: [7244, 7245, 1214],
@@ -8122,10 +8128,19 @@ const CANAL_CONFIG = {
     source: 'totvs-totals',
     branchs: [99, 2, 95, 87, 88, 90, 94, 97],
     operations: [7235, 7241, 9127],
-    sellers: [26, 69], // David (26) + Thalis (69)
+    sellers: [26, 69], // David (26) + Thalis (69 — INATIVO, mantido pro histórico)
     allowedSellers: [26, 69], // só conta NFs desses dealers
     devolucaoOps: [7244, 7245, 1214],
     devolucaoBranchs: [99, 2, 95, 87, 88, 90, 94, 97],
+    // ─── Whitelist manual de transações ─────────────────────────────────
+    // NFs cujo OP fiscal não é multimarcas (7235/7241/9127) mas que o David/
+    // Thalis efetivamente venderam (dealer dominante = 26/69 no items[].products[]).
+    // Padrão: NF emitida com op de franquia/business mas com vendedor inbound.
+    manualTransactions: [
+      // NF 838731 · 16/05/2026 · branch 99 · op 7240 (VENDA FRANQUIA PROMOCAO)
+      // Cliente J DOS S PRAXEDES LTDA ME · R$ 3.222,75 · dealer dominante = 26 (David)
+      { branch: 99, transactionCode: 838731 },
+    ],
   },
   inbound_rafael: {
     source: 'totvs-totals',
@@ -8150,6 +8165,13 @@ const CANAL_CONFIG = {
     source: 'totvs-totals-allbranchs', // busca em todas as branches
     operations: [7234, 7240, 7802, 9124, 7259],
     sellers: undefined,
+    // ─── Exclui inbound dealers ──────────────────────────────────────────
+    // NFs op franquia (7234/7240/...) vendidas por David (26), Thalis (69)
+    // ou Rafael (21) devem ser creditadas ao inbound_david/inbound_rafael
+    // respectivos — não à franquia. Sem este excludeSellers, a venda era
+    // contabilizada DUAS vezes (em franquia E em inbound via manualTransactions).
+    // Mesma estratégia já usada em multimarcas.excludeSellers.
+    excludeSellers: [21, 26, 69], // Rafael, David, Thalis
   },
   business: {
     source: 'totvs-totals-allbranchs',
@@ -8175,15 +8197,59 @@ const CANAL_CONFIG = {
     operations: [7255],
     sellers: undefined,
   },
+  // ─── B2M_TOTAL — canal VIRTUAL pra Página de Competição ────────────────
+  // Equivale a multimarcas + inbound_david + inbound_rafael, mas via uma
+  // ÚNICA chamada sale-panel (sem excludeSellers). Existe pra reduzir carga
+  // TOTVS: a página antes fazia 3 canal-totals separados (cada um com
+  // múltiplas calls TOTVS) que em paralelo sobrecarregavam o servidor.
+  // O Forecast continua usando os 3 canais separados (multimarcas /
+  // inbound_david / inbound_rafael) que individualmente são mais leves.
+  b2m_total: {
+    source: 'totvs-totals',
+    branchs: [99, 2, 95, 87, 88, 90, 94, 97],
+    // Mesmas ops do `multimarcas` (inclui 200 LEGADA usada até ~ago/2025).
+    // Sem 200 aqui, períodos históricos divergiam entre Painel Competição
+    // (B2M total) e Forecast (multimarcas + inbound_david + inbound_rafael).
+    operations: [7235, 7241, 9127, 200],
+    sellers: undefined,
+    // SEM excludeSellers — inclui Rafael (21), David (26), Thalis (69)
+    devolucaoOps: [7244, 7245, 1214],
+    devolucaoBranchs: [99, 2, 95, 87, 88, 90, 94, 97],
+    // Combina manualTransactions de inbound_david + inbound_rafael:
+    // (NFs que precisaram override por dealer diferente no TOTVS)
+    manualTransactions: [
+      { branch: 99, transactionCode: 838731 }, // David op 7240 R$3.222,75
+      { branch: 99, transactionCode: 827993 }, // Rafael GEORGE 18/04 R$7.901
+      { branch: 99, transactionCode: 837305 }, // Rafael DULCIDALVA 13/05 R$4.357 (dealer 121 Peu)
+    ],
+  },
   ricardoeletro: {
     source: 'totvs-totals-allbranchs',
     branchs: [11, 111],
-    // operations: undefined → sale-panel/totals/search retorna agregado de
-    // TODAS as ops (incluindo transferências negativas). Por isso o canal-totals
-    // pode retornar negativo. A fonte AUTORITATIVA é o fat-seg per-NF
-    // (filtra RE_EXCL_OPS client-side). O canal-totals só é usado como
-    // fallback — quando negativo, é clamped a 0 pelo fat-seg fallback.
-    operations: undefined,
+    // ─── Operações de venda explícitas ──────────────────────────────────
+    // ANTES: operations=undefined → sale-panel agregava TODAS as ops
+    // incluindo devoluções/credev de meses anteriores. Em maio/2026, isso
+    // fazia o canal mostrar R$ 8,72 em vez de R$ 1.610 (venda real).
+    //   Filial 111: R$ 1.610 (vendas reais)
+    //   Filial  11: R$ -1.601,28 (créditos/devoluções de meses anteriores)
+    //   Soma todas: R$    8,72  ❌ (errado)
+    // DEPOIS: filtramos apenas ops de venda B2C/marketplace conhecidas.
+    // Lista mantida em sincronia com TOTVS — adicionar quando aparecer
+    // op de venda nova nas branches 11/111.
+    operations: [
+      512,  // VENDA ATACADO (uso atual em 2026)
+      5102, // VENDA MERCADORIAS (op principal histórica)
+      7236, // VENDA REVENDEDORES
+      200,  // OP legada usada até ~2025 (R$840 em mai/25)
+      510,  // VENDA VAREJO NFC-E
+      521,  // VENDA VAREJO NF-E
+      545,  // VENDA VAREJO NFC-E
+      548,  // VENDA VAREJO NF-E
+      7237, // BUSINESS
+      7269, // BUSINESS
+      7277, // BUSINESS
+      7279, // BUSINESS
+    ],
     sellers: undefined,
     // Pula PASS 2 (SaleReturns) — branches 11/111 têm devolução grande que
     // não está vinculada às ops de venda B2C-RE; PASS 2 distorce líquido.
@@ -10643,12 +10709,42 @@ const CANAL_TOTALS_INFLIGHT = new Map();
 // internamente se cache vazio. Garante que Performance e Analytics consultem
 // EXATAMENTE a mesma fonte de faturamento (sale-panel + credev em payments +
 // SaleReturns fiscal-movement + exclusão franquia para revenda).
+//
+// COALESCING: usa o mesmo CANAL_TOTALS_INFLIGHT do endpoint /canal-totals.
+// Quando 2+ helpers pedem a MESMA chave simultaneamente, só 1 dispara o
+// trabalho — os outros esperam o mesmo result. Evita N queries TOTVS
+// paralelas pra mesma combinação (caso típico: Painel Competição + Forecast
+// rodando ao mesmo tempo no mesmo período).
 async function getCanalTotalsCached(modulo, datemin, datemax) {
   const cacheKey = `${modulo}|${datemin}|${datemax}`;
   const cached = CANAL_TOTALS_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.ts < CANAL_TOTALS_CACHE_TTL) {
+  // TTL alinhado com o endpoint /canal-totals: 1h pra realtime, 24h passado.
+  // Sem isso, helper considerava cache fresh até 24h mesmo em mês corrente —
+  // valores desatualizados após 1h. E o endpoint consideraria stale, levando
+  // a comportamentos divergentes entre callers.
+  const todayIso = new Date().toISOString().split('T')[0];
+  const isRealtime = String(datemax) >= todayIso;
+  const effectiveTTL = isRealtime
+    ? CANAL_TOTALS_CACHE_TTL_REALTIME
+    : CANAL_TOTALS_CACHE_TTL;
+  if (cached && Date.now() - cached.ts < effectiveTTL) {
     return cached.data;
   }
+  // Coalescing: se já existe request idêntica em curso, espera ela
+  if (CANAL_TOTALS_INFLIGHT.has(cacheKey)) {
+    try {
+      return await CANAL_TOTALS_INFLIGHT.get(cacheKey);
+    } catch {
+      // Se a in-flight falhou, prossegue normal (fall-through)
+    }
+  }
+  // Cria promise pra outras chamadas coalescerem com esta
+  let coalesceResolve, coalesceReject;
+  const coalescePromise = new Promise((res, rej) => {
+    coalesceResolve = res;
+    coalesceReject = rej;
+  });
+  CANAL_TOTALS_INFLIGHT.set(cacheKey, coalescePromise);
   // Cache miss: invoca canal-totals localmente via HTTP para garantir
   // consistência absoluta entre Performance e Analytics.
   try {
@@ -10662,11 +10758,16 @@ async function getCanalTotalsCached(modulo, datemin, datemax) {
       },
     );
     const body = r.data?.data || r.data;
-    return body && typeof body === 'object' ? body : null;
+    const result = body && typeof body === 'object' ? body : null;
+    coalesceResolve(result);
+    CANAL_TOTALS_INFLIGHT.delete(cacheKey);
+    return result;
   } catch (err) {
     console.warn(
       `[getCanalTotalsCached ${modulo} ${datemin}~${datemax}] HTTP fallback falhou: ${err.message}`,
     );
+    coalesceResolve(null);
+    CANAL_TOTALS_INFLIGHT.delete(cacheKey);
     return null;
   }
 }
@@ -10924,11 +11025,29 @@ router.post(
                   );
                   if (dominantDealer && allowedSet.has(dominantDealer))
                     continue;
-                  grossValue += totalValue;
+                  // Anti-duplicação em NFs MISTAS (parte de items com dealer
+                  // permitido + parte com dealer corrigido via manualTx).
+                  // O sale-panel filter sellers=[...] já agrega netValue dos
+                  // items cujo dealerCode ∈ allowedSet. Adicionar totalValue
+                  // inteiro aqui duplicaria essa parte. Só adicionamos a
+                  // parcela que NÃO foi contada pelo sale-panel.
+                  // Ex: NF 837305 (R$ 4.357) tem R$ 656 com dealer=21 (Rafael)
+                  // já no sale-panel + R$ 3.701 com dealer=121 (Peu, corrigido
+                  // pra Rafael via manualTx). Incrementa só R$ 3.701.
+                  let valorJaContado = 0;
+                  for (const [dc, sum] of entries) {
+                    if (allowedSet.has(Number(dc))) valorJaContado += sum;
+                  }
+                  const valorIncremento = Math.max(
+                    0,
+                    totalValue - valorJaContado,
+                  );
+                  if (valorIncremento <= 0) continue;
+                  grossValue += valorIncremento;
                   grossQty += 1;
                   grossItens += qty;
                   manualNfsAdded++;
-                  manualValueAdded += totalValue;
+                  manualValueAdded += valorIncremento;
                 }
               } catch (err) {
                 console.warn(
@@ -11352,7 +11471,24 @@ router.post(
       const devolucao_itens = 0;
 
       // Líquido = bruto - devoluções - franquia excluída (revenda only)
-      const liq_value = grossValue - devolucao_value - franquia_excluida;
+      let liq_value = grossValue - devolucao_value - franquia_excluida;
+      // ─── Anti-zero floor ───────────────────────────────────────────────
+      // Em períodos curtos (dia/semana) com canais de pouco volume
+      // (inbound_david: 2 dealers, inbound_rafael: 1), o líquido pode ficar
+      // ≤ 0 quando devolução acumulada > venda do período. Sem proteção, a
+      // página de Competição e Forecast (Promessa Semanal) zeravam o canal.
+      // Estratégia: se líquido ≤ 0 mas houve venda bruta, expõe o BRUTO
+      // como floor (com flag pra UI saber). Não distorce relatórios mensais
+      // (período longo raramente fica negativo). Apenas evita o "R$ 0"
+      // visualmente confuso quando havia venda.
+      let liq_floored = false;
+      if (liq_value <= 0 && grossValue > 0) {
+        console.warn(
+          `[canal-totals ${modulo}] líquido=R$${liq_value.toFixed(2)} ≤ 0 (devol R$${devolucao_value.toFixed(2)} > bruto R$${grossValue.toFixed(2)}) → expõe bruto como floor`,
+        );
+        liq_value = grossValue;
+        liq_floored = true;
+      }
       const liq_qty = Math.max(0, grossQty - devolucao_qty);
       const liq_itens = Math.max(0, grossItens - devolucao_itens);
       const tm = liq_qty > 0 ? liq_value / liq_qty : 0;
@@ -11389,6 +11525,7 @@ router.post(
         devolucao_credev: Math.round(devolucao_credev * 100) / 100,
         devolucao_returns: Math.round(devolucao_returns * 100) / 100,
         franquia_excluida: Math.round(franquia_excluida * 100) / 100,
+        liquid_floored: liq_floored, // true se líquido ≤ 0 e expomos bruto (UI pode mostrar nota)
         per_seller,
         source:
           'totvs_gross + invoices_credev + movement_returns (analytics-aligned)',
@@ -12239,7 +12376,14 @@ router.post(
               {
                 filter: {
                   branchCodeList: branches,
-                  operationCodeList: operationCodes,
+                  // CRÍTICO: só inclui operationCodeList se houver ops.
+                  // Array vazio `[]` é interpretado pela TOTVS como "filtra
+                  // por lista vazia → retorna 0 NFs", em vez de "sem filtro".
+                  // Caso típico: Ricardo Eletro passa operationCodes=[] para
+                  // pegar TODAS as NFs das branches 11/111 (filtra ops
+                  // client-side via RE_EXCL_OPS).
+                  ...(Array.isArray(operationCodes) && operationCodes.length > 0
+                    && { operationCodeList: operationCodes }),
                   operationType: 'Output',
                   startIssueDate: `${datemin}T00:00:00`,
                   endIssueDate: `${datemax}T23:59:59`,
@@ -12455,7 +12599,8 @@ router.post(
       'bazar',
       'showroom',
       'novidadesfranquia',
-      'ricardoeletro',
+      // ricardoeletro removido daqui — agora está em canaisLiquidos
+      // (usa override completo do canal-totals que vem do sale-panel).
     ];
 
     // ─── OVERRIDE LÍQUIDO — APENAS canais com cálculo testado ────────────
@@ -12475,6 +12620,7 @@ router.post(
     //   `operations` (sem sellers). A subtração via PASS 2 (fiscal-movement)
     //   pega devoluções da empresa inteira → distorce o valor.
     //   TODO: implementar filtro de devolução por op-code de devolução do canal.
+    let overrideIncomplete = false;
     try {
       // FRANQUIA voltou para BRUTO: o /canal-totals/franquia subtrai devolução
       // de empresa inteira (bug do PASS 2) → valor ficou subestimado.
@@ -12492,7 +12638,17 @@ router.post(
         'multimarcas',
         'inbound_rafael',
         'inbound_david',
+        // ricardoeletro: as NFs das branches 11/111 às vezes NÃO aparecem
+        // no fiscal/v2/invoices/search (sumidas/lag/feed), mas SEMPRE estão
+        // no sale-panel/v2/totals/search que o /canal-totals/ricardoeletro
+        // usa. Sem override, o per-NF zerado fazia o forecast esquecer
+        // vendas legítimas (caso de 22/05: 2 NFs R$ 1.610 não puxavam).
+        'ricardoeletro',
       ];
+      // Flag: marca incomplete se algum override falhar (canal-totals null).
+      // Quando true, o cache do fat-seg vira PARCIAL (10min) em vez de fixo.
+      // Inicializa fora do try pra ser visível na seção de cache lá embaixo.
+      // (declarado abaixo via var-let, vide variável overrideIncomplete)
       const overrideResults = await Promise.all(
         canaisLiquidos.map(async (mod) => {
           try {
@@ -12523,10 +12679,34 @@ router.post(
       const beforeMap = { ...segMap };
       for (const [canal, valor] of overrideResults) {
         if (valor != null && Number.isFinite(valor)) {
-          // Clamp em 0: alguns canais sem allowedSellers (franquia/business/
-          // showroom/novidadesfranquia) podem ficar negativos por over-subtraction
-          // de devoluções da empresa inteira. Nesses casos, exibe 0.
-          segMap[canal] = Math.max(0, Math.round(valor * 100) / 100);
+          const liquido = Math.round(valor * 100) / 100;
+          // Se líquido <= 0 (devolução acumulada > venda no período — comum em
+          // períodos curtos como semana, especialmente inbound_david/inbound_rafael
+          // que têm 1-2 vendedores), mantém o BRUTO per-NF como floor em vez
+          // de zerar. Líquido zerado faz Promessa Semanal subestimar o canal.
+          if (liquido <= 0) {
+            const brutoPerNf = Number(beforeMap[canal] || 0);
+            if (brutoPerNf > 0) {
+              console.warn(
+                `[fat-seg override ${canal}] líquido=R$${liquido.toFixed(2)} (≤0) → mantém bruto per-NF R$${brutoPerNf.toFixed(2)} (evita zerar)`,
+              );
+              segMap[canal] = brutoPerNf;
+            } else {
+              segMap[canal] = 0;
+            }
+          } else {
+            segMap[canal] = liquido;
+          }
+        } else {
+          // canal-totals retornou null/falha — override NÃO aplicado. O segMap
+          // fica com o BRUTO per-NF que é PIOR que o líquido. Marca incomplete
+          // pra que o cache final seja PARCIAL (10min) em vez de fixo (1h-24h).
+          // Próxima request re-tenta o override (canal-totals pode ter populado
+          // cache nesse meio tempo).
+          overrideIncomplete = true;
+          console.warn(
+            `[fat-seg override ${canal}] valor null — fat-seg será marcado PARCIAL (cache 10min)`,
+          );
         }
       }
       console.log(
@@ -12542,6 +12722,8 @@ router.post(
       console.warn(
         `[fat-seg] override líquido falhou: ${err.message} — mantendo BRUTO`,
       );
+      // Bloco try inteiro falhou — TODOS os canais ficaram em bruto. Parcial.
+      overrideIncomplete = true;
     }
     // ─────────────────────────────────────────────────────────────────────
 
@@ -12645,7 +12827,21 @@ router.post(
           const credevOverridden = credevOverridesByCanal.get(canal) || 0;
           const credevEffective = Math.max(0, credevPag - credevOverridden);
           const before = segMap[canal];
-          segMap[canal] = Math.max(0, segMap[canal] - credevEffective);
+          const afterSubtract = before - credevEffective;
+          // Floor em "before * 0.1" (10% do bruto) em vez de zero — evita
+          // sumir o canal quando credev de meses anteriores excede a venda da
+          // semana. Tipicamente acontece em ricardoeletro/franquia onde o
+          // credev é grande e cíclico. Mantém pelo menos 10% do bruto visível.
+          // (Resultado ainda é estimado, não zerado.)
+          if (afterSubtract <= 0) {
+            const floor = Math.max(0, before * 0.1);
+            console.warn(
+              `[fat-seg credev ${canal}] credev R$${credevEffective.toFixed(2)} > bruto R$${before.toFixed(2)} → usa floor R$${floor.toFixed(2)} (evita zerar)`,
+            );
+            segMap[canal] = floor;
+          } else {
+            segMap[canal] = afterSubtract;
+          }
           credev_por_segmento[canal] = credevEffective;
           if (credevOverridden > 0) {
             console.log(
@@ -12734,14 +12930,23 @@ router.post(
 
     // Cache logic:
     // 1) Completo (sem falhas) → TTL completo (1h-24h)
-    // 2) Parcial (TOTVS retornou alguma falha) → TTL CURTO (10min) marcado
-    //    como partial=true. Evita bater TOTVS de novo nas próximas requests
-    //    enquanto TOTVS recupera. User vê dado parcial em vez de esperar.
+    // 2) Parcial (TOTVS retornou alguma falha, ou override líquido falhou)
+    //    → TTL CURTO (10min) marcado como partial=true. Evita bater TOTVS de
+    //    novo nas próximas requests enquanto TOTVS/cache canal-totals
+    //    recupera. User vê dado parcial em vez de esperar.
+    //    Críticos pra marcar parcial:
+    //      - totvsIncomplete: páginas da TOTVS falharam (fiscal/v2/invoices)
+    //      - credevIncomplete: credev de algum canal não veio
+    //      - overrideIncomplete: override líquido (canaisLiquidos) falhou →
+    //        valor BRUTO ao invés de LÍQUIDO. Esse é o bug típico da PRIMEIRA
+    //        carga: cache canal-totals vazio, override null, segMap fica bruto.
+    //        Sem essa flag, ficava cacheado 1h-24h como se fosse correto.
     // 3) Vazio (0 NFs) → não cacheia
     const PARTIAL_TTL = 10 * 60 * 1000; // 10min
-    if (totalNFsProcessadas > 0 && !credevIncomplete && !totvsIncomplete) {
+    const incomplete = credevIncomplete || totvsIncomplete || overrideIncomplete;
+    if (totalNFsProcessadas > 0 && !incomplete) {
       FATSEG_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
-    } else if (totalNFsProcessadas > 0 && (totvsIncomplete || credevIncomplete)) {
+    } else if (totalNFsProcessadas > 0 && incomplete) {
       // Parcial — cacheia por 10min com flag
       const partialData = { ...responseData, partial: true };
       FATSEG_CACHE.set(cacheKey, {
@@ -12790,6 +12995,209 @@ router.post(
     }
 
     return successResponse(res, responseData, 'OK (TOTVS live)');
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/crm/multimarcas-global
+//      Endpoint CONSOLIDADO usado pela aba "Multimarcas Global" da Performance.
+//      Body: { datemin, datemax }
+//      Resp: {
+//        canais: { multimarcas, inbound_david, inbound_rafael },  // canal-totals cached
+//        openings: { [seller_code]: { count, openings } },
+//      }
+//
+//      Objetivo: a aba antes fazia 4 HTTP requests do frontend (3 canais +
+//      openings). Esse endpoint faz tudo SERVER-SIDE com `getCanalTotalsCached`
+//      (que tem coalescing + cache 1h-24h) → 1 só roundtrip do front.
+//      Cache próprio (5min) — TOTVS API protegida pelo cache canal-totals/openings.
+// ---------------------------------------------------------------------------
+const MULTI_GLOBAL_CACHE = new Map();
+const MULTI_GLOBAL_CACHE_TTL = 5 * 60 * 1000; // 5 min
+const MULTI_GLOBAL_INFLIGHT = new Map();
+router.post(
+  '/multimarcas-global',
+  asyncHandler(async (req, res) => {
+    // Anti-cache HTTP — garante que o navegador sempre busque dados frescos
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    const { datemin, datemax } = req.body || {};
+    if (!datemin || !datemax) {
+      return errorResponse(
+        res,
+        'datemin e datemax obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+    const cacheKey = `${datemin}|${datemax}`;
+    const cached = MULTI_GLOBAL_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < MULTI_GLOBAL_CACHE_TTL) {
+      return successResponse(res, cached.data, 'OK (cached)');
+    }
+    // Coalescing: 2 chamadas idênticas paralelas → só 1 work, ambas esperam
+    if (MULTI_GLOBAL_INFLIGHT.has(cacheKey)) {
+      try {
+        const data = await MULTI_GLOBAL_INFLIGHT.get(cacheKey);
+        return successResponse(res, data, 'OK (coalesced)');
+      } catch {
+        // fall-through pra retry
+      }
+    }
+    let coalesceResolve, coalesceReject;
+    const coalescePromise = new Promise((r, rj) => {
+      coalesceResolve = r;
+      coalesceReject = rj;
+    });
+    MULTI_GLOBAL_INFLIGHT.set(cacheKey, coalescePromise);
+
+    try {
+      // 3 canais via getCanalTotalsCached (cache + coalescing interno)
+      const [mm, id, ir] = await Promise.all([
+        getCanalTotalsCached('multimarcas', datemin, datemax),
+        getCanalTotalsCached('inbound_david', datemin, datemax),
+        getCanalTotalsCached('inbound_rafael', datemin, datemax),
+      ]);
+
+      // Coleta sellerCodes únicos dos 3 canais pra buscar aberturas
+      const codes = new Set();
+      for (const data of [mm, id, ir]) {
+        for (const s of data?.per_seller || []) {
+          if (s.seller_code) codes.add(Number(s.seller_code));
+        }
+      }
+
+      // Fetch aberturas via HTTP local (também tem cache + coalescing)
+      let openingsMap = {};
+      if (codes.size > 0) {
+        try {
+          const port = process.env.PORT || 4100;
+          const r = await axios.post(
+            `http://localhost:${port}/api/crm/seller-openings`,
+            { sellerCodes: [...codes], datemin, datemax },
+            {
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 180000,
+            },
+          );
+          const sellers = r.data?.data?.sellers || r.data?.sellers || [];
+          for (const s of sellers) {
+            openingsMap[Number(s.seller_code)] = {
+              count: Number(s.count || 0),
+              openings: Number(s.openings || s.count || 0),
+            };
+          }
+        } catch (err) {
+          console.warn(
+            `[multimarcas-global] seller-openings falhou: ${err.message}`,
+          );
+        }
+      }
+
+      const data = {
+        canais: { multimarcas: mm, inbound_david: id, inbound_rafael: ir },
+        openings: openingsMap,
+        periodo: { datemin, datemax },
+      };
+
+      MULTI_GLOBAL_CACHE.set(cacheKey, { data, ts: Date.now() });
+      // Evicta se passar de 20 entradas
+      if (MULTI_GLOBAL_CACHE.size > 20) {
+        const oldest = [...MULTI_GLOBAL_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        MULTI_GLOBAL_CACHE.delete(oldest[0]);
+      }
+      coalesceResolve(data);
+      MULTI_GLOBAL_INFLIGHT.delete(cacheKey);
+      return successResponse(res, data, 'OK');
+    } catch (err) {
+      coalesceReject(err);
+      MULTI_GLOBAL_INFLIGHT.delete(cacheKey);
+      return errorResponse(
+        res,
+        `Erro ao consolidar multimarcas global: ${err.message}`,
+        500,
+        'MULTI_GLOBAL_ERROR',
+      );
+    }
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/crm/competicao-totais
+//      Consolida tudo que a Página de Competição precisa numa ÚNICA resposta.
+//      Body: { datemin_dia, datemax_dia, datemin_sem, datemax_sem }
+//      Resp: { dia: { revenda, multimarcas (B2M total) },
+//              semana: { revenda, multimarcas (B2M total) } }
+//
+//      Por dentro chama 8 canal-totals (com cache) e combina os 3 canais B2M
+//      (multimarcas + inbound_david + inbound_rafael). A página passa de
+//      8 HTTP roundtrips → 1.
+//      Cache próprio (5 min) — TOTVS API protegida pelo cache canal-totals.
+// ---------------------------------------------------------------------------
+const COMPETICAO_CACHE = new Map();
+const COMPETICAO_CACHE_TTL = 5 * 60 * 1000; // 5 min
+router.post(
+  '/competicao-totais',
+  asyncHandler(async (req, res) => {
+    // Anti-cache HTTP — garante que o navegador sempre busque dados frescos.
+    // Cache fica APENAS em memória do server (5min TTL). Sem isso, o browser
+    // pode cachear uma resposta antiga (ex: per_seller vazio em revenda)
+    // mesmo quando o backend já está retornando dados corretos.
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    const { datemin_dia, datemax_dia, datemin_sem, datemax_sem } = req.body || {};
+    if (!datemin_dia || !datemax_dia || !datemin_sem || !datemax_sem) {
+      return errorResponse(
+        res,
+        'datemin_dia, datemax_dia, datemin_sem, datemax_sem são obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+    const cacheKey = `${datemin_dia}|${datemax_dia}|${datemin_sem}|${datemax_sem}`;
+    const cached = COMPETICAO_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < COMPETICAO_CACHE_TTL) {
+      return successResponse(res, cached.data, 'OK (cached)');
+    }
+
+    try {
+      // 6 chamadas paralelas — Revenda (B2R) + B2M (canal virtual) + Franquia (B2L).
+      // Reduz drasticamente a carga TOTVS comparado a chamar canais separados.
+      const [revDia, b2mDia, frDia, revSem, b2mSem, frSem] = await Promise.all([
+        getCanalTotalsCached('revenda', datemin_dia, datemax_dia),
+        getCanalTotalsCached('b2m_total', datemin_dia, datemax_dia),
+        getCanalTotalsCached('franquia', datemin_dia, datemax_dia),
+        getCanalTotalsCached('revenda', datemin_sem, datemax_sem),
+        getCanalTotalsCached('b2m_total', datemin_sem, datemax_sem),
+        getCanalTotalsCached('franquia', datemin_sem, datemax_sem),
+      ]);
+
+      const data = {
+        dia: { revenda: revDia, multimarcas: b2mDia, franquia: frDia },
+        semana: { revenda: revSem, multimarcas: b2mSem, franquia: frSem },
+      };
+
+      COMPETICAO_CACHE.set(cacheKey, { data, ts: Date.now() });
+      // Limita tamanho: evicta entradas mais antigas se passar de 20
+      if (COMPETICAO_CACHE.size > 20) {
+        const oldest = [...COMPETICAO_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        COMPETICAO_CACHE.delete(oldest[0]);
+      }
+      return successResponse(res, data, 'OK');
+    } catch (err) {
+      return errorResponse(
+        res,
+        `Erro ao consolidar competição: ${err.message}`,
+        500,
+        'COMPETICAO_ERROR',
+      );
+    }
   }),
 );
 

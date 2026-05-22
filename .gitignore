@@ -9,3 +9,6 @@ uploads/
 
 # ... outras regras existentes ...
 .cache/
+
+# Logs
+*.log

@@ -256,6 +256,52 @@ router.post(
       }
     };
 
+    // Ricardo Eletro — branches 11/111 SÃO especiais (estão em SPECIAL_BRANCH_CODES),
+    // então fetchBranchTotalsFromTotvs aplicaria SPECIAL_OPERATIONS por padrão, e
+    // SPECIAL_OPERATIONS NÃO inclui ops como 512 (B2C marketplace). Pra esse canal
+    // chamamos sale-panel/v2/totals-branch DIRETO sem filtro de operations —
+    // ricardoeletro fatura em CFOPs variados (5102, 512, ...) e o filtro de op
+    // só excluiria vendas legítimas.
+    const callRicardoEletro = async () => {
+      try {
+        const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/totals-branch/search`;
+        const doCall = async (accessToken) =>
+          axios.post(
+            endpoint,
+            { branchs: RE_BRANCHES_FC, datemin, datemax }, // ← sem operations
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent,
+              timeout: 60000,
+            },
+          );
+        let resp;
+        try {
+          resp = await doCall(token);
+        } catch (err) {
+          if (err.response?.status === 401) {
+            const newTok = await refreshToken();
+            resp = await doCall(newTok);
+          } else {
+            throw err;
+          }
+        }
+        const t = resp.data?.total ?? {};
+        return {
+          invoice_value: Number(t.invoice_value ?? 0),
+          invoice_qty: Number(t.invoice_qty ?? 0),
+          itens_qty: Number(t.itens_qty ?? 0),
+        };
+      } catch (err) {
+        console.error(`[FC-ricardoeletro] Erro:`, err.message);
+        return { invoice_value: 0, invoice_qty: 0, itens_qty: 0 };
+      }
+    };
+
     // Chamadas paralelas por canal
     const [
       varejR,
@@ -280,7 +326,7 @@ router.post(
         'novidadesfranquia',
       ),
       callCanal(allBranchs, CANAL_OP_CODES_FC.business, 'business'),
-      callCanal(RE_BRANCHES_FC, undefined, 'ricardoeletro'),
+      callRicardoEletro(), // chamada dedicada — sem SPECIAL_OPERATIONS filter
     ]);
 
     const segmentos = {
