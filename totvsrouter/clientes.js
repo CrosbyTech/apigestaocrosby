@@ -1909,12 +1909,12 @@ router.get(
 router.get(
   '/clientes/search-name',
   asyncHandler(async (req, res) => {
-    const { nome, fantasia, cnpj } = req.query;
+    const { nome, fantasia, cnpj, code } = req.query;
 
-    if (!nome && !fantasia && !cnpj) {
+    if (!nome && !fantasia && !cnpj && !code) {
       return errorResponse(
         res,
-        'Informe pelo menos um dos campos: nome, fantasia ou cnpj',
+        'Informe pelo menos um dos campos: nome, fantasia, cnpj ou code',
         400,
         'MISSING_SEARCH_TERM',
       );
@@ -1929,7 +1929,13 @@ router.get(
         .order('nm_pessoa', { ascending: true })
         .limit(50);
 
-      if (cnpj) {
+      if (code) {
+        const codeNum = parseInt(String(code).replace(/\D/g, ''), 10);
+        if (Number.isNaN(codeNum)) {
+          return errorResponse(res, 'Código inválido', 400, 'INVALID_CODE');
+        }
+        query = query.eq('code', codeNum);
+      } else if (cnpj) {
         // Busca por CPF/CNPJ (campo cpf na tabela)
         const cnpjLimpo = cnpj.replace(/[^\d]/g, '');
         query = query.ilike('cpf', `%${cnpjLimpo}%`);

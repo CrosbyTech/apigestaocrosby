@@ -19,9 +19,30 @@ import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
+import monitoringRoutes from './routes/monitoring.routes.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
 import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
+import { installTotvsTracker } from './services/totvsAxiosInterceptor.js';
+
+// Instala interceptor que rastreia chamadas TOTVS (antes de qualquer rota)
+installTotvsTracker();
+
+// ─── Safety net global ─────────────────────────────────────────────────
+// Evita que erros não-tratados (ex: pg.Pool 'error', websocket reconnect,
+// timer rejeitado) DERRUBEM o processo Node inteiro. Em produção, queremos
+// log + continuar — não crashar e perder todas as requests em vôo.
+process.on('uncaughtException', (err, origin) => {
+  console.error(
+    `🚨 [uncaughtException] ${origin}:`,
+    err?.message || err,
+    err?.stack?.split('\n').slice(0, 3).join('\n') || '',
+  );
+});
+process.on('unhandledRejection', (reason, promise) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error(`🚨 [unhandledRejection]`, msg);
+});
 
 import {
   asyncHandler,
@@ -7233,6 +7254,7 @@ router.post(
 import authRouter from './totvsrouter/auth.js';
 import fiscalRouter from './totvsrouter/fiscal.js';
 import clientesRouter from './totvsrouter/clientes.js';
+import cadastroClienteRouter from './totvsrouter/cadastroCliente.js';
 import filiaisRouter from './totvsrouter/filiais.js';
 import financeiroRouter from './totvsrouter/financeiro.js';
 import estoqueRouter from './totvsrouter/estoque.js';
@@ -7336,6 +7358,7 @@ app.get(
 app.use('/api/totvs', authRouter); // GET /token, POST /auth
 app.use('/api/totvs', fiscalRouter); // boleto, DANFE, XML, NFs, movimentos fiscais
 app.use('/api/totvs', clientesRouter); // legal-entity, individual, clientes, sync
+app.use('/api/totvs', cadastroClienteRouter); // cliente/individual-customer, cliente/legal-customer
 app.use('/api/totvs', filiaisRouter); // branches, franchise, multibrand
 app.use('/api/totvs', financeiroRouter); // accounts-receivable, accounts-payable
 app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
@@ -7356,6 +7379,7 @@ app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, 
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
+app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 
 // Error handling middleware

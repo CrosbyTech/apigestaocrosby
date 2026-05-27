@@ -56,20 +56,28 @@ async function sendCrosbybotMessage(phone, text) {
   if (!number) throw new Error('Telefone inválido');
   const sender = await getCrosbybotToken();
   if (!sender?.token) {
-    throw new Error(`Instância "${CROSBYBOT_NAME}" não encontrada no banco. Rode sync.`);
+    throw new Error(
+      `Instância "${CROSBYBOT_NAME}" não encontrada no banco. Rode sync.`,
+    );
   }
   try {
     await axios.post(
       `${UAZ_BASE}/send/text`,
       { number, text },
-      { headers: { token: sender.token, 'Content-Type': 'application/json' }, timeout: 30_000 },
+      {
+        headers: { token: sender.token, 'Content-Type': 'application/json' },
+        timeout: 30_000,
+      },
     );
   } catch (err) {
     if (err.response?.status === 404) {
       await axios.post(
         `${UAZ_BASE}/sendText`,
         { number, text },
-        { headers: { token: sender.token, 'Content-Type': 'application/json' }, timeout: 30_000 },
+        {
+          headers: { token: sender.token, 'Content-Type': 'application/json' },
+          timeout: 30_000,
+        },
       );
     } else {
       throw err;
@@ -85,17 +93,36 @@ async function sendCrosbybotImage(phone, imageBase64, caption = '') {
   if (!number) throw new Error('Telefone inválido');
   const sender = await getCrosbybotToken();
   if (!sender?.token) {
-    throw new Error(`Instância "${CROSBYBOT_NAME}" não encontrada no banco. Rode sync.`);
+    throw new Error(
+      `Instância "${CROSBYBOT_NAME}" não encontrada no banco. Rode sync.`,
+    );
   }
   // Aceita imagem com ou sem prefixo data:URI
-  const cleanB64 = String(imageBase64 || '').replace(/^data:image\/\w+;base64,/, '');
+  const cleanB64 = String(imageBase64 || '').replace(
+    /^data:image\/\w+;base64,/,
+    '',
+  );
   if (!cleanB64) throw new Error('Imagem vazia');
 
   // UAzapi /send/media — tenta dois formatos comuns por compatibilidade
   const tries = [
-    { url: `${UAZ_BASE}/send/media`, body: { number, type: 'image', file: cleanB64, text: caption } },
-    { url: `${UAZ_BASE}/send/media`, body: { number, mediatype: 'image', file: `data:image/png;base64,${cleanB64}`, text: caption } },
-    { url: `${UAZ_BASE}/sendImage`,  body: { number, image: cleanB64, caption } },
+    {
+      url: `${UAZ_BASE}/send/media`,
+      body: { number, type: 'image', file: cleanB64, text: caption },
+    },
+    {
+      url: `${UAZ_BASE}/send/media`,
+      body: {
+        number,
+        mediatype: 'image',
+        file: `data:image/png;base64,${cleanB64}`,
+        text: caption,
+      },
+    },
+    {
+      url: `${UAZ_BASE}/sendImage`,
+      body: { number, image: cleanB64, caption },
+    },
   ];
   let lastErr;
   for (const t of tries) {
@@ -106,19 +133,28 @@ async function sendCrosbybotImage(phone, imageBase64, caption = '') {
         maxBodyLength: 50 * 1024 * 1024,
         maxContentLength: 50 * 1024 * 1024,
       });
-      return { sender: sender.name, recipient: number, endpoint: t.url, status: sender.status };
+      return {
+        sender: sender.name,
+        recipient: number,
+        endpoint: t.url,
+        status: sender.status,
+      };
     } catch (err) {
       lastErr = err;
       // Se for 4xx (not found), tenta o próximo formato
-      if (err.response?.status === 404 || err.response?.status === 400) continue;
+      if (err.response?.status === 404 || err.response?.status === 400)
+        continue;
       throw err;
     }
   }
-  throw lastErr || new Error('Nenhum endpoint UAzapi aceitou o envio de imagem');
+  throw (
+    lastErr || new Error('Nenhum endpoint UAzapi aceitou o envio de imagem')
+  );
 }
 
 const INTERNAL_API_BASE =
-  process.env.INTERNAL_API_BASE_URL || `http://localhost:${process.env.PORT || 4100}`;
+  process.env.INTERNAL_API_BASE_URL ||
+  `http://localhost:${process.env.PORT || 4100}`;
 
 // ──────────────────────────────────────────────────────────────
 // EXCLUSÕES FORECAST — clientes que devem ser EXCLUÍDOS do
@@ -161,9 +197,8 @@ const CANAL_OPS = {
 
 async function calcularExclusaoNF({ personCode, ops, datemin, datemax }) {
   const { getToken } = await import('../utils/totvsTokenManager.js');
-  const { TOTVS_BASE_URL, httpsAgent, getBranchCodes } = await import(
-    '../totvsrouter/totvsHelper.js'
-  );
+  const { TOTVS_BASE_URL, httpsAgent, getBranchCodes } =
+    await import('../totvsrouter/totvsHelper.js');
   const tk = await getToken();
   if (!tk?.access_token) return 0;
   // fiscal/v2/invoices exige branchCodeList. Pega todas as branches.
@@ -215,7 +250,8 @@ async function calcularExclusaoNF({ personCode, ops, datemin, datemax }) {
     const items = resp.data?.items || [];
     if (items.length === 0) break;
     for (const nf of items) {
-      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
+        continue;
       if (parseInt(nf.personCode) !== personCode) continue;
       total += parseFloat(nf.totalValue || 0);
     }
@@ -300,16 +336,16 @@ async function aplicarExclusoesForecast(segMap, datemin, datemax) {
 const FABRICA_SOURCES = ['showroom', 'novidadesfranquia'];
 
 const CANAIS = [
-  { key: 'varejo',         label: 'Varejo' },
-  { key: 'revenda',        label: 'Revenda' },
-  { key: 'multimarcas',    label: 'Multimarcas' },
-  { key: 'inbound_david',  label: 'MTM Inbound David' },
+  { key: 'varejo', label: 'Varejo' },
+  { key: 'revenda', label: 'Revenda' },
+  { key: 'multimarcas', label: 'Multimarcas' },
+  { key: 'inbound_david', label: 'MTM Inbound David' },
   { key: 'inbound_rafael', label: 'MTM Inbound Rafael' },
-  { key: 'franquia',       label: 'Franquia' },
-  { key: 'bazar',          label: 'Bazar' },
-  { key: 'fabrica',        label: 'Fábrica (Kleiton)' }, // showroom + novidadesfranquia
-  { key: 'business',       label: 'Business' },
-  { key: 'ricardoeletro',  label: 'Ricardo Eletro' },
+  { key: 'franquia', label: 'Franquia' },
+  { key: 'bazar', label: 'Bazar' },
+  { key: 'fabrica', label: 'Fábrica (Kleiton)' }, // showroom + novidadesfranquia
+  { key: 'business', label: 'Business' },
+  { key: 'ricardoeletro', label: 'Ricardo Eletro' },
 ];
 
 // ──────────────────────────────────────────────────────────────
@@ -327,6 +363,7 @@ const BLUECARD_STATUS = 'enviado';
 // Cache: chave "datemin|datemax" → { count, ts }
 const BLUECARD_CACHE = new Map();
 const BLUECARD_TTL_MS = 5 * 60 * 1000; // 5 min
+let _bluecardNoKeyWarned = false;
 
 async function fetchBlueCardSentCount(datemin, datemax) {
   if (!datemin || !datemax) return 0;
@@ -336,7 +373,12 @@ async function fetchBlueCardSentCount(datemin, datemax) {
 
   const apiKey = process.env.CLICKUP_API_KEY || '';
   if (!apiKey) {
-    console.warn('[bluecard] CLICKUP_API_KEY ausente — retornando 0');
+    if (!_bluecardNoKeyWarned) {
+      console.warn('[bluecard] CLICKUP_API_KEY ausente — retornando 0');
+      _bluecardNoKeyWarned = true;
+    }
+    // cacheia por TTL para evitar checagem constante
+    BLUECARD_CACHE.set(cacheKey, { count: 0, ts: Date.now() });
     return 0;
   }
 
@@ -392,7 +434,9 @@ async function fetchBlueCardSentCount(datemin, datemax) {
 // ──────────────────────────────────────────────────────────────
 
 function getIsoWeek(date) {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const d = new Date(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()),
+  );
   const day = d.getUTCDay() || 7;
   d.setUTCDate(d.getUTCDate() + 4 - day);
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
@@ -460,7 +504,8 @@ function diasUteisDecorridosNoMes(ano, mes, hoje) {
   const start = new Date(Date.UTC(ano, mes - 1, 1));
   const last = new Date(Date.UTC(ano, mes, 0));
   let ref = last;
-  if (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 === mes) ref = hoje;
+  if (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 === mes)
+    ref = hoje;
   else if (hoje < start) return 0;
   return diasUteisRangeMonSat(start, ref);
 }
@@ -512,17 +557,17 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
 // pega devolução de toda a empresa → over-subtraction → negativo/subestimado.
 // fat-seg per-NF para esses retorna BRUTO; o fallback deve fazer o mesmo.
 const FAT_SEG_CANAIS = [
-  { mod: 'varejo',           useGross: false },
-  { mod: 'revenda',          useGross: false },
-  { mod: 'multimarcas',      useGross: false },
-  { mod: 'inbound_david',    useGross: false },
-  { mod: 'inbound_rafael',   useGross: false },
-  { mod: 'franquia',         useGross: true  }, // sem allowedSellers
-  { mod: 'business',         useGross: true  }, // sem allowedSellers
-  { mod: 'bazar',            useGross: true  }, // skipDevolucao já protege, mas keep gross pra consistência
-  { mod: 'showroom',         useGross: true  }, // sem allowedSellers
-  { mod: 'novidadesfranquia',useGross: true  }, // sem allowedSellers
-  { mod: 'ricardoeletro',    useGross: true  }, // skipDevolPass2 protege, gross é consistente
+  { mod: 'varejo', useGross: false },
+  { mod: 'revenda', useGross: false },
+  { mod: 'multimarcas', useGross: false },
+  { mod: 'inbound_david', useGross: false },
+  { mod: 'inbound_rafael', useGross: false },
+  { mod: 'franquia', useGross: true }, // sem allowedSellers
+  { mod: 'business', useGross: true }, // sem allowedSellers
+  { mod: 'bazar', useGross: true }, // skipDevolucao já protege, mas keep gross pra consistência
+  { mod: 'showroom', useGross: true }, // sem allowedSellers
+  { mod: 'novidadesfranquia', useGross: true }, // sem allowedSellers
+  { mod: 'ricardoeletro', useGross: true }, // skipDevolPass2 protege, gross é consistente
 ];
 
 async function getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax) {
@@ -598,7 +643,12 @@ async function getMetasPorCanal(period_type, period_key) {
     .eq('period_type', period_type)
     .eq('period_key', period_key);
   if (error) return new Map();
-  return new Map((data || []).map((m) => [String(m.canal).toLowerCase(), Number(m.valor_meta || 0)]));
+  return new Map(
+    (data || []).map((m) => [
+      String(m.canal).toLowerCase(),
+      Number(m.valor_meta || 0),
+    ]),
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -628,7 +678,8 @@ router.get(
     const semana = parseInt(req.query.semana, 10) || cur.semana;
     // until_today=true → REAL acumulado vai até HOJE (visão "ao vivo");
     //                    se omitido/false → até ONTEM (D-1, default).
-    const untilToday = req.query.until_today === 'true' || req.query.until_today === '1';
+    const untilToday =
+      req.query.until_today === 'true' || req.query.until_today === '1';
 
     const { data_inicio, data_fim } = isoWeekRange(ano, semana);
     const wKey = weekKey(ano, semana);
@@ -638,9 +689,8 @@ router.get(
     const endDate = new Date(`${data_fim}T12:00:00Z`);
     const diasUteisTotal = diasUteisRangeMonSat(startDate, endDate);
     const refDecorr = hoje < endDate ? hoje : endDate;
-    const diasUteisDecorridos = refDecorr < startDate
-      ? 0
-      : diasUteisRangeMonSat(startDate, refDecorr);
+    const diasUteisDecorridos =
+      refDecorr < startDate ? 0 : diasUteisRangeMonSat(startDate, refDecorr);
 
     // Dias decorridos POR CANAL para Qnt Deveria
     //   - Varejo: conta do domingo anterior à segunda da ISO até ontem (Sun-Sat)
@@ -694,19 +744,20 @@ router.get(
     const refMesNum = endDate.getUTCMonth() + 1;
     const mKey = monthKey(refMesAno, refMesNum);
 
-    const [metasSemana, metasMes, fatSemana, fatDiaAnt, bcSemana, bcDiaAnt] = await Promise.all([
-      getMetasPorCanal('semanal', wKey),
-      getMetasPorCanal('mensal', mKey),
-      getFaturamentoPorSegmento(datemin, datemax),
-      diaAnteriorIso
-        ? getFaturamentoPorSegmento(diaAnteriorIso, diaAnteriorIso)
-        : Promise.resolve(null),
-      // BlueCard — quantitativo
-      fetchBlueCardSentCount(datemin, datemax),
-      diaAnteriorIso
-        ? fetchBlueCardSentCount(diaAnteriorIso, diaAnteriorIso)
-        : Promise.resolve(0),
-    ]);
+    const [metasSemana, metasMes, fatSemana, fatDiaAnt, bcSemana, bcDiaAnt] =
+      await Promise.all([
+        getMetasPorCanal('semanal', wKey),
+        getMetasPorCanal('mensal', mKey),
+        getFaturamentoPorSegmento(datemin, datemax),
+        diaAnteriorIso
+          ? getFaturamentoPorSegmento(diaAnteriorIso, diaAnteriorIso)
+          : Promise.resolve(null),
+        // BlueCard — quantitativo
+        fetchBlueCardSentCount(datemin, datemax),
+        diaAnteriorIso
+          ? fetchBlueCardSentCount(diaAnteriorIso, diaAnteriorIso)
+          : Promise.resolve(0),
+      ]);
 
     // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05)
     await aplicarExclusoesForecast(fatSemana, datemin, datemax);
@@ -725,12 +776,15 @@ router.get(
       // Qnt Deveria = meta × min(dias_decorridos, 6) / 6
       // Varejo: dom-sáb / Demais: seg-sáb
       const diasCanal = diasDecorridosCanal(c.key);
-      const qntDeveria = meta * diasCanal / 6;
+      const qntDeveria = (meta * diasCanal) / 6;
 
       const forecastMensal = metasMes.get(c.key) || 0;
-      const metaDoDia = forecastMensal > 0 && diasUteisMes > 0
-        ? forecastMensal / diasUteisMes
-        : (diasUteisTotal > 0 ? meta / diasUteisTotal : 0);
+      const metaDoDia =
+        forecastMensal > 0 && diasUteisMes > 0
+          ? forecastMensal / diasUteisMes
+          : diasUteisTotal > 0
+            ? meta / diasUteisTotal
+            : 0;
 
       return {
         canal_key: c.key,
@@ -754,11 +808,20 @@ router.get(
         acc.fat_dia_anterior += r.fat_dia_anterior;
         return acc;
       },
-      { meta_realista: 0, faturamento_real: 0, qnt_deveria: 0, meta_do_dia: 0, fat_dia_anterior: 0 },
+      {
+        meta_realista: 0,
+        faturamento_real: 0,
+        qnt_deveria: 0,
+        meta_do_dia: 0,
+        fat_dia_anterior: 0,
+      },
     );
-    total.percentual = total.meta_realista > 0
-      ? Number(((total.faturamento_real / total.meta_realista) * 100).toFixed(2))
-      : 0;
+    total.percentual =
+      total.meta_realista > 0
+        ? Number(
+            ((total.faturamento_real / total.meta_realista) * 100).toFixed(2),
+          )
+        : 0;
 
     // ─── BlueCard — quantidade de cartões (unidade: "cartões", NÃO R$) ─────
     // Vai DEPOIS do total porque não soma no total monetário.
@@ -766,11 +829,15 @@ router.get(
     const bluecardMetaSem = metasSemana.get('bluecard') || 0;
     const bluecardMetaMes = metasMes.get('bluecard') || 0;
     const bluecardDiasCanal = Math.min(diasUteisDecorridos, 6); // segue regra "demais"
-    const bluecardQntDeveria = bluecardMetaSem * bluecardDiasCanal / 6;
-    const bluecardMetaDia = bluecardMetaMes > 0 && diasUteisMes > 0
-      ? bluecardMetaMes / diasUteisMes
-      : (diasUteisTotal > 0 ? bluecardMetaSem / diasUteisTotal : 0);
-    const bluecardPct = bluecardMetaSem > 0 ? (bcSemana / bluecardMetaSem) * 100 : 0;
+    const bluecardQntDeveria = (bluecardMetaSem * bluecardDiasCanal) / 6;
+    const bluecardMetaDia =
+      bluecardMetaMes > 0 && diasUteisMes > 0
+        ? bluecardMetaMes / diasUteisMes
+        : diasUteisTotal > 0
+          ? bluecardMetaSem / diasUteisTotal
+          : 0;
+    const bluecardPct =
+      bluecardMetaSem > 0 ? (bcSemana / bluecardMetaSem) * 100 : 0;
     canaisOut.push({
       canal_key: 'bluecard',
       nome: 'BlueCard',
@@ -794,7 +861,12 @@ router.get(
       dias_uteis_total: diasUteisTotal,
       dias_uteis_decorridos: diasUteisDecorridos,
       period_key: wKey,
-      mes_referencia: { ano: refMesAno, mes: refMesNum, period_key: mKey, dias_uteis: diasUteisMes },
+      mes_referencia: {
+        ano: refMesAno,
+        mes: refMesNum,
+        period_key: mKey,
+        dias_uteis: diasUteisMes,
+      },
       canais: canaisOut,
       total,
     });
@@ -820,8 +892,8 @@ const VENDEDORES_CARDS = [
     canal: 'revenda',
     titulares: [
       { nome: 'CLEYTON', label: 'Cleiton' },
-      { nome: 'MICHEL',  label: 'Michel' },
-      { nome: 'YAGO',    label: 'Yago' },
+      { nome: 'MICHEL', label: 'Michel' },
+      { nome: 'YAGO', label: 'Yago' },
     ],
   },
   {
@@ -835,8 +907,18 @@ const VENDEDORES_CARDS = [
     ],
     // Vendedores "convidados": cada um puxa meta + faturamento de OUTRO canal
     convidados: [
-      { nome: 'RAFAEL', label: 'Rafael', canalMeta: 'inbound_rafael', canalFat: 'inbound_rafael' },
-      { nome: 'DAVID',  label: 'David',  canalMeta: 'inbound_david',  canalFat: 'inbound_david' },
+      {
+        nome: 'RAFAEL',
+        label: 'Rafael',
+        canalMeta: 'inbound_rafael',
+        canalFat: 'inbound_rafael',
+      },
+      {
+        nome: 'DAVID',
+        label: 'David',
+        canalMeta: 'inbound_david',
+        canalFat: 'inbound_david',
+      },
     ],
   },
 ];
@@ -855,7 +937,10 @@ async function getPerSeller(modulo, datemin, datemax) {
     const d = r.data?.data || r.data;
     return d?.per_seller || d?.totals?.per_seller || [];
   } catch (e) {
-    console.warn(`[forecast/vendedores] per_seller(${modulo}) falhou:`, e?.message);
+    console.warn(
+      `[forecast/vendedores] per_seller(${modulo}) falhou:`,
+      e?.message,
+    );
     return [];
   }
 }
@@ -869,7 +954,15 @@ function findSellerFat(perSeller, nome) {
       // entre chamadas mesmo quando credev fetch falha). Líquido é computado
       // aqui: bruto - credev_value. Se credev_value=0 (falhou), líquido=bruto
       // — degradação aceitável.
-      const bruto = Number(s.invoice_value ?? s.faturamento_liquido ?? s.liquido ?? s.total_liquido ?? s.total ?? 0) || 0;
+      const bruto =
+        Number(
+          s.invoice_value ??
+            s.faturamento_liquido ??
+            s.liquido ??
+            s.total_liquido ??
+            s.total ??
+            0,
+        ) || 0;
       const credev = Number(s.credev_value || 0);
       return Math.max(0, bruto - credev);
     }
@@ -885,7 +978,8 @@ router.get(
     const ano = parseInt(req.query.ano, 10) || cur.ano;
     const semana = parseInt(req.query.semana, 10) || cur.semana;
     // until_today=true → REAL vai até HOJE; senão até ONTEM (D-1, default)
-    const untilToday = req.query.until_today === 'true' || req.query.until_today === '1';
+    const untilToday =
+      req.query.until_today === 'true' || req.query.until_today === '1';
 
     const { data_inicio, data_fim } = isoWeekRange(ano, semana);
     const wKey = weekKey(ano, semana);
@@ -896,7 +990,8 @@ router.get(
     ontem.setUTCDate(ontem.getUTCDate() - 1);
     while (ontem.getUTCDay() === 0) ontem.setUTCDate(ontem.getUTCDate() - 1);
     const refDate = untilToday ? hoje : ontem;
-    const realDateMax = refDate < endDate ? refDate.toISOString().slice(0, 10) : data_fim;
+    const realDateMax =
+      refDate < endDate ? refDate.toISOString().slice(0, 10) : data_fim;
     const datemin = data_inicio;
     const datemax = realDateMax;
 
@@ -958,19 +1053,36 @@ router.get(
       // canal multimarcas (porque operam na branch 99 com mesmas ops).
       const tokensUsados = new Set([
         ...titulares.map((t) => String(t.nome || t).toUpperCase()),
-        ...(card.convidados || []).map((c) => String(c.nome || c.label).toUpperCase()),
+        ...(card.convidados || []).map((c) =>
+          String(c.nome || c.label).toUpperCase(),
+        ),
       ]);
       const extras = (ps || [])
         .map((s) => {
           // invoice_value = bruto; líquido = bruto - credev_value
-          const bruto = Number(s.invoice_value ?? s.faturamento_liquido ?? s.liquido ?? s.total_liquido ?? s.total ?? 0) || 0;
+          const bruto =
+            Number(
+              s.invoice_value ??
+                s.faturamento_liquido ??
+                s.liquido ??
+                s.total_liquido ??
+                s.total ??
+                0,
+            ) || 0;
           const credev = Number(s.credev_value || 0);
           return {
-            nome: String(s.seller_name || s.name || '').trim().toUpperCase(),
+            nome: String(s.seller_name || s.name || '')
+              .trim()
+              .toUpperCase(),
             real: Math.max(0, bruto - credev),
           };
         })
-        .filter((s) => s.nome && s.real > 0 && !Array.from(tokensUsados).some((t) => s.nome.includes(t)))
+        .filter(
+          (s) =>
+            s.nome &&
+            s.real > 0 &&
+            !Array.from(tokensUsados).some((t) => s.nome.includes(t)),
+        )
         .map((s) => ({
           nome: s.nome,
           meta: 0,
@@ -979,10 +1091,12 @@ router.get(
           extra: true,
         }));
 
-      const totalMeta = vendedores.reduce((acc, v) => acc + v.meta, 0)
-        + extras.reduce((a, e) => a + e.meta, 0);
-      const totalReal = vendedores.reduce((acc, v) => acc + v.real, 0)
-        + extras.reduce((a, e) => a + e.real, 0);
+      const totalMeta =
+        vendedores.reduce((acc, v) => acc + v.meta, 0) +
+        extras.reduce((a, e) => a + e.meta, 0);
+      const totalReal =
+        vendedores.reduce((acc, v) => acc + v.real, 0) +
+        extras.reduce((a, e) => a + e.real, 0);
       const totalPct = totalMeta > 0 ? (totalReal / totalMeta) * 100 : 0;
 
       return {
@@ -1020,14 +1134,22 @@ router.get(
 // que devem ser somados para formar o valor exibido (canal virtual).
 // Se ausente, usa `key` direto.
 const COMPARATIVO_CANAIS = [
-  { key: 'b2m_total',     label: 'B2M', sources: ['multimarcas', 'inbound_rafael', 'inbound_david'] }, // B2M = Multimarcas + Inbound David + Inbound Rafael
-  { key: 'revenda',       label: 'B2R' },
-  { key: 'varejo',        label: 'B2C' },
+  {
+    key: 'b2m_total',
+    label: 'B2M',
+    sources: ['multimarcas', 'inbound_rafael', 'inbound_david'],
+  }, // B2M = Multimarcas + Inbound David + Inbound Rafael
+  { key: 'revenda', label: 'B2R' },
+  { key: 'varejo', label: 'B2C' },
   { key: 'ricardoeletro', label: 'Ricardo Eletro' },
-  { key: 'fabrica',       label: 'Fábrica (Kleiton)', sources: ['showroom', 'novidadesfranquia'] }, // ops 7254, 7007, 7255
-  { key: 'franquia',      label: 'Franquia' },          // Antes "B2L" — renomeado pra ficar consistente com Promessa Mensal/Semanal
-  { key: 'business',      label: 'Business' },          // Ops 7237, 7269, 7279, 7277 — venda corporativa
-  { key: 'bazar',         label: 'Bazar' },
+  {
+    key: 'fabrica',
+    label: 'Fábrica (Kleiton)',
+    sources: ['showroom', 'novidadesfranquia'],
+  }, // ops 7254, 7007, 7255
+  { key: 'franquia', label: 'Franquia' }, // Antes "B2L" — renomeado pra ficar consistente com Promessa Mensal/Semanal
+  { key: 'business', label: 'Business' }, // Ops 7237, 7269, 7279, 7277 — venda corporativa
+  { key: 'bazar', label: 'Bazar' },
 ];
 
 // Helper: lê valores de referência fixos para um ano/mês.
@@ -1052,7 +1174,11 @@ async function getRefValues(ano, mes) {
   // Canal virtual "fabrica" = showroom + novidadesfranquia
   if (!m.has('fabrica')) {
     const sr = m.get('showroom') || { full: 0, acumulado: 0, dia: null };
-    const nv = m.get('novidadesfranquia') || { full: 0, acumulado: 0, dia: null };
+    const nv = m.get('novidadesfranquia') || {
+      full: 0,
+      acumulado: 0,
+      dia: null,
+    };
     m.set('fabrica', {
       full: Number((sr.full + nv.full).toFixed(2)),
       acumulado: Number((sr.acumulado + nv.acumulado).toFixed(2)),
@@ -1066,7 +1192,9 @@ async function getRefValues(ano, mes) {
     const id = m.get('inbound_david') || { full: 0, acumulado: 0, dia: null };
     m.set('b2m_total', {
       full: Number((mm.full + ir.full + id.full).toFixed(2)),
-      acumulado: Number((mm.acumulado + ir.acumulado + id.acumulado).toFixed(2)),
+      acumulado: Number(
+        (mm.acumulado + ir.acumulado + id.acumulado).toFixed(2),
+      ),
       dia: mm.dia || ir.dia || id.dia,
     });
   }
@@ -1078,35 +1206,53 @@ router.get(
   asyncHandler(async (req, res) => {
     const hoje = new Date();
     const anoAtual = parseInt(req.query.ano, 10) || hoje.getUTCFullYear();
-    const mes = parseInt(req.query.mes, 10) || (hoje.getUTCMonth() + 1);
+    const mes = parseInt(req.query.mes, 10) || hoje.getUTCMonth() + 1;
     const anoAnt = anoAtual - 1;
     // until_today=true → REAL 2026 vai até HOJE; senão até ONTEM (D-1, default)
-    const untilToday = req.query.until_today === 'true' || req.query.until_today === '1';
+    const untilToday =
+      req.query.until_today === 'true' || req.query.until_today === '1';
 
-    const fmt = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const fmt = (y, m, d) =>
+      `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     const lastDayAnt = new Date(Date.UTC(anoAnt, mes, 0)).getUTCDate();
     const lastDayAtual = new Date(Date.UTC(anoAtual, mes, 0)).getUTCDate();
 
     // Período cheio do ano anterior
-    const periodAntFull = { datemin: fmt(anoAnt, mes, 1), datemax: fmt(anoAnt, mes, lastDayAnt) };
+    const periodAntFull = {
+      datemin: fmt(anoAnt, mes, 1),
+      datemax: fmt(anoAnt, mes, lastDayAnt),
+    };
 
     // Período acumulado: 1º → (hoje | ontem) cap em mês corrente
     let diaAcum;
     if (hoje.getUTCFullYear() === anoAtual && hoje.getUTCMonth() + 1 === mes) {
       // Mês corrente: até hoje (untilToday) ou ontem (D-1)
-      diaAcum = untilToday ? hoje.getUTCDate() : Math.max(0, hoje.getUTCDate() - 1);
-    } else if (hoje.getUTCFullYear() < anoAtual || (hoje.getUTCFullYear() === anoAtual && hoje.getUTCMonth() + 1 < mes)) {
+      diaAcum = untilToday
+        ? hoje.getUTCDate()
+        : Math.max(0, hoje.getUTCDate() - 1);
+    } else if (
+      hoje.getUTCFullYear() < anoAtual ||
+      (hoje.getUTCFullYear() === anoAtual && hoje.getUTCMonth() + 1 < mes)
+    ) {
       diaAcum = 0; // mês futuro — sem real
     } else {
       diaAcum = lastDayAtual; // mês passado
     }
 
-    const periodAntAcum = diaAcum > 0
-      ? { datemin: fmt(anoAnt, mes, 1), datemax: fmt(anoAnt, mes, Math.min(diaAcum, lastDayAnt)) }
-      : null;
-    const periodAtualReal = diaAcum > 0
-      ? { datemin: fmt(anoAtual, mes, 1), datemax: fmt(anoAtual, mes, diaAcum) }
-      : null;
+    const periodAntAcum =
+      diaAcum > 0
+        ? {
+            datemin: fmt(anoAnt, mes, 1),
+            datemax: fmt(anoAnt, mes, Math.min(diaAcum, lastDayAnt)),
+          }
+        : null;
+    const periodAtualReal =
+      diaAcum > 0
+        ? {
+            datemin: fmt(anoAtual, mes, 1),
+            datemax: fmt(anoAtual, mes, diaAcum),
+          }
+        : null;
 
     // Ano anterior vem da tabela de REFERÊNCIA (valores fixos cadastrados).
     // Ano atual vem do TOTVS (real do mês corrente).
@@ -1115,10 +1261,16 @@ router.get(
     const [refAnt, segAtualReal, bcAtual, bcAnt] = await Promise.all([
       getRefValues(anoAnt, mes),
       periodAtualReal
-        ? getFaturamentoPorSegmento(periodAtualReal.datemin, periodAtualReal.datemax)
+        ? getFaturamentoPorSegmento(
+            periodAtualReal.datemin,
+            periodAtualReal.datemax,
+          )
         : Promise.resolve(null),
       periodAtualReal
-        ? fetchBlueCardSentCount(periodAtualReal.datemin, periodAtualReal.datemax)
+        ? fetchBlueCardSentCount(
+            periodAtualReal.datemin,
+            periodAtualReal.datemax,
+          )
         : Promise.resolve(0),
       periodAntAcum
         ? fetchBlueCardSentCount(periodAntAcum.datemin, periodAntAcum.datemax)
@@ -1151,9 +1303,12 @@ router.get(
         fat2025Real = Number((segAtualReal || {})[c.key] || 0);
       }
       const diferenca = fat2024Acum - fat2025Real;
-      const comparativo = fat2024Acum > 0
-        ? ((fat2025Real / fat2024Acum) - 1) * 100
-        : (fat2025Real > 0 ? 100 : 0); // 100% se ano passado era 0 e este ano > 0
+      const comparativo =
+        fat2024Acum > 0
+          ? (fat2025Real / fat2024Acum - 1) * 100
+          : fat2025Real > 0
+            ? 100
+            : 0; // 100% se ano passado era 0 e este ano > 0
       return {
         canal_key: c.key,
         nome: c.label,
@@ -1173,20 +1328,35 @@ router.get(
         acc.fat_ano_atual_real += r.fat_ano_atual_real;
         return acc;
       },
-      { fat_ano_anterior_full: 0, fat_ano_anterior_acumulado: 0, fat_ano_atual_real: 0 },
+      {
+        fat_ano_anterior_full: 0,
+        fat_ano_anterior_acumulado: 0,
+        fat_ano_atual_real: 0,
+      },
     );
-    total.diferenca = Number((total.fat_ano_anterior_acumulado - total.fat_ano_atual_real).toFixed(2));
-    total.comparativo_pct = total.fat_ano_anterior_acumulado > 0
-      ? Number((((total.fat_ano_atual_real / total.fat_ano_anterior_acumulado) - 1) * 100).toFixed(2))
-      : 0;
+    total.diferenca = Number(
+      (total.fat_ano_anterior_acumulado - total.fat_ano_atual_real).toFixed(2),
+    );
+    total.comparativo_pct =
+      total.fat_ano_anterior_acumulado > 0
+        ? Number(
+            (
+              (total.fat_ano_atual_real / total.fat_ano_anterior_acumulado -
+                1) *
+              100
+            ).toFixed(2),
+          )
+        : 0;
 
     // ─── BlueCard — quantidade de cartões enviados (ano vs ano) ────────────
     // Para o "full" do ano anterior, usamos o mês inteiro do ano passado.
-    const bcAntFull = await fetchBlueCardSentCount(periodAntFull.datemin, periodAntFull.datemax);
+    const bcAntFull = await fetchBlueCardSentCount(
+      periodAntFull.datemin,
+      periodAntFull.datemax,
+    );
     const bcDiferenca = bcAnt - bcAtual;
-    const bcComparativoPct = bcAnt > 0
-      ? ((bcAtual / bcAnt) - 1) * 100
-      : (bcAtual > 0 ? 100 : 0);
+    const bcComparativoPct =
+      bcAnt > 0 ? (bcAtual / bcAnt - 1) * 100 : bcAtual > 0 ? 100 : 0;
     canaisOut.push({
       canal_key: 'bluecard',
       nome: 'BlueCard',
@@ -1223,9 +1393,10 @@ router.get(
   asyncHandler(async (req, res) => {
     const hoje = new Date();
     const ano = parseInt(req.query.ano, 10) || hoje.getUTCFullYear();
-    const mes = parseInt(req.query.mes, 10) || (hoje.getUTCMonth() + 1);
+    const mes = parseInt(req.query.mes, 10) || hoje.getUTCMonth() + 1;
     // until_today=true → REAL acumulado vai até HOJE; senão até ONTEM (D-1, default)
-    const untilToday = req.query.until_today === 'true' || req.query.until_today === '1';
+    const untilToday =
+      req.query.until_today === 'true' || req.query.until_today === '1';
 
     const lastDay = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
     const data_inicio = `${ano}-${String(mes).padStart(2, '0')}-01`;
@@ -1247,22 +1418,31 @@ router.get(
     let diaIso = null;
     if (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 === mes) {
       diaIso = refIso;
-    } else if (hoje.getUTCFullYear() < ano || (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 < mes)) {
+    } else if (
+      hoje.getUTCFullYear() < ano ||
+      (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 < mes)
+    ) {
       diaIso = null;
     } else {
       diaIso = data_fim;
     }
 
     // Para o REAL acumulado: 01/MM → refIso (hoje ou ontem conforme toggle)
-    const realDateMax = (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 === mes)
-      ? refIso
-      : (hoje.getUTCFullYear() < ano || (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 < mes))
-        ? null  // mês futuro — sem dados
-        : data_fim; // mês passado — usa fim do mês
+    const realDateMax =
+      hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 === mes
+        ? refIso
+        : hoje.getUTCFullYear() < ano ||
+            (hoje.getUTCFullYear() === ano && hoje.getUTCMonth() + 1 < mes)
+          ? null // mês futuro — sem dados
+          : data_fim; // mês passado — usa fim do mês
 
     const diasUteisTotal = diasUteisDoMes(ano, mes);
     // Dias úteis decorridos: até HOJE (untilToday) ou ONTEM (D-1, default)
-    const diasUteisDecorridos = diasUteisDecorridosNoMes(ano, mes, untilToday ? hoje : ontem);
+    const diasUteisDecorridos = diasUteisDecorridosNoMes(
+      ano,
+      mes,
+      untilToday ? hoje : ontem,
+    );
 
     const [metas, fatMes, fatDia, bcMes, bcDia] = await Promise.all([
       getMetasPorCanal('mensal', mKey),
@@ -1275,9 +1455,7 @@ router.get(
       realDateMax
         ? fetchBlueCardSentCount(data_inicio, realDateMax)
         : Promise.resolve(0),
-      diaIso
-        ? fetchBlueCardSentCount(diaIso, diaIso)
-        : Promise.resolve(0),
+      diaIso ? fetchBlueCardSentCount(diaIso, diaIso) : Promise.resolve(0),
     ]);
 
     // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05)
@@ -1321,19 +1499,27 @@ router.get(
         acc.faturado_do_dia += r.faturado_do_dia;
         return acc;
       },
-      { meta_mensal: 0, forecast_mensal: 0, qnt_deveria: 0, real_acumulado: 0, meta_do_dia: 0, faturado_do_dia: 0 },
+      {
+        meta_mensal: 0,
+        forecast_mensal: 0,
+        qnt_deveria: 0,
+        real_acumulado: 0,
+        meta_do_dia: 0,
+        faturado_do_dia: 0,
+      },
     );
-    total.percentual = total.qnt_deveria > 0
-      ? Number(((total.real_acumulado / total.qnt_deveria) * 100).toFixed(2))
-      : 0;
+    total.percentual =
+      total.qnt_deveria > 0
+        ? Number(((total.real_acumulado / total.qnt_deveria) * 100).toFixed(2))
+        : 0;
 
     // ─── BlueCard — quantidade de cartões enviados no mês ──────────────────
     const bluecardMetaM = metas.get('bluecard') || 0;
-    const bluecardMetaDiaM = diasUteisTotal > 0 ? bluecardMetaM / diasUteisTotal : 0;
+    const bluecardMetaDiaM =
+      diasUteisTotal > 0 ? bluecardMetaM / diasUteisTotal : 0;
     const bluecardQntDeveriaM = bluecardMetaDiaM * diasUteisDecorridos;
-    const bluecardPctM = bluecardQntDeveriaM > 0
-      ? (bcMes / bluecardQntDeveriaM) * 100
-      : 0;
+    const bluecardPctM =
+      bluecardQntDeveriaM > 0 ? (bcMes / bluecardQntDeveriaM) * 100 : 0;
     canaisOut.push({
       canal_key: 'bluecard',
       nome: 'BlueCard',
@@ -1370,8 +1556,18 @@ router.get(
 // Body: { tipo, phone, ano?, mes?, semana? }
 // ═══════════════════════════════════════════════════════════════
 const MESES_NOMES = [
-  'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
+  'Janeiro',
+  'Fevereiro',
+  'Março',
+  'Abril',
+  'Maio',
+  'Junho',
+  'Julho',
+  'Agosto',
+  'Setembro',
+  'Outubro',
+  'Novembro',
+  'Dezembro',
 ];
 
 const fmtBRL = (v) =>
@@ -1399,7 +1595,9 @@ const arrowEmoji = (pct) => {
 const arrowComp = (pct) => (pct >= 0 ? '🟢⬆️' : '🔴⬇️');
 
 async function fetchInternal(path) {
-  const r = await axios.get(`${INTERNAL_API_BASE}/api/forecast${path}`, { timeout: 180000 });
+  const r = await axios.get(`${INTERNAL_API_BASE}/api/forecast${path}`, {
+    timeout: 180000,
+  });
   return r.data?.data || r.data;
 }
 
@@ -1414,14 +1612,18 @@ function buildTextoMensal(d) {
     lines.push(`${arrowEmoji(c.percentual)} *${c.nome}*`);
     lines.push(`   Forecast: ${fmtCanalVal(c, c.forecast_mensal)}`);
     lines.push(`   Real:     ${fmtCanalVal(c, c.real_acumulado)}`);
-    lines.push(`   Qnt Dev.: ${fmtCanalVal(c, c.qnt_deveria)}  |  ${fmtPct(c.percentual)}`);
+    lines.push(
+      `   Qnt Dev.: ${fmtCanalVal(c, c.qnt_deveria)}  |  ${fmtPct(c.percentual)}`,
+    );
     lines.push('');
   }
   const t = d.total || {};
   lines.push('━━━━━━━━━━━━━━━');
   lines.push(`*TOTAL*  ${arrowEmoji(t.percentual)}`);
   lines.push(`Forecast: ${fmtBRL(t.forecast_mensal)}`);
-  lines.push(`Real:     ${fmtBRL(t.real_acumulado)}  (${fmtPct(t.percentual)})`);
+  lines.push(
+    `Real:     ${fmtBRL(t.real_acumulado)}  (${fmtPct(t.percentual)})`,
+  );
   return lines.join('\n');
 }
 
@@ -1435,7 +1637,9 @@ function buildTextoSemanal(d) {
     if (!c.meta_realista && !c.faturamento_real) continue;
     lines.push(`${arrowEmoji(c.percentual)} *${c.nome}*`);
     lines.push(`   Meta:     ${fmtCanalVal(c, c.meta_realista)}`);
-    lines.push(`   Real:     ${fmtCanalVal(c, c.faturamento_real)}  (${fmtPct(c.percentual)})`);
+    lines.push(
+      `   Real:     ${fmtCanalVal(c, c.faturamento_real)}  (${fmtPct(c.percentual)})`,
+    );
     lines.push(`   Fat ontem: ${fmtCanalVal(c, c.fat_dia_anterior)}`);
     lines.push('');
   }
@@ -1443,7 +1647,9 @@ function buildTextoSemanal(d) {
   lines.push('━━━━━━━━━━━━━━━');
   lines.push(`*TOTAL*  ${arrowEmoji(t.percentual)}`);
   lines.push(`Meta:     ${fmtBRL(t.meta_realista)}`);
-  lines.push(`Real:     ${fmtBRL(t.faturamento_real)}  (${fmtPct(t.percentual)})`);
+  lines.push(
+    `Real:     ${fmtBRL(t.faturamento_real)}  (${fmtPct(t.percentual)})`,
+  );
   return lines.join('\n');
 }
 
@@ -1455,13 +1661,17 @@ function buildTextoVendedores(d) {
     lines.push(`*${card.label}*`);
     for (const v of card.vendedores || []) {
       const tag = v.convidado ? ' ⓘ' : '';
-      lines.push(`${arrowEmoji(v.percentual)} ${v.nome}${tag}: ${fmtBRL(v.real)} / ${fmtBRL(v.meta)} (${fmtPct(v.percentual)})`);
+      lines.push(
+        `${arrowEmoji(v.percentual)} ${v.nome}${tag}: ${fmtBRL(v.real)} / ${fmtBRL(v.meta)} (${fmtPct(v.percentual)})`,
+      );
     }
     for (const e of card.extras || []) {
       lines.push(`   ${e.nome}: ${fmtBRL(e.real)} (extra)`);
     }
     const t = card.total || {};
-    lines.push(`*Total:* ${fmtBRL(t.real)} / ${fmtBRL(t.meta)}  (${fmtPct(t.percentual)})`);
+    lines.push(
+      `*Total:* ${fmtBRL(t.real)} / ${fmtBRL(t.meta)}  (${fmtPct(t.percentual)})`,
+    );
     lines.push('');
   }
   return lines.join('\n');
@@ -1470,22 +1680,36 @@ function buildTextoVendedores(d) {
 function buildTextoComparativo(d) {
   const lines = [];
   lines.push(`📈 *Comparativo ${d.ano_anterior} × ${d.ano_atual}*`);
-  lines.push(`${MESES_NOMES[d.mes - 1]}/${d.ano_atual} (até dia ${d.dia_referencia})`);
+  lines.push(
+    `${MESES_NOMES[d.mes - 1]}/${d.ano_atual} (até dia ${d.dia_referencia})`,
+  );
   lines.push('');
   for (const c of d.canais || []) {
     if (!c.fat_ano_anterior_full && !c.fat_ano_atual_real) continue;
-    lines.push(`${arrowComp(c.comparativo_pct)} *${c.nome}* (${c.comparativo_pct >= 0 ? '+' : ''}${c.comparativo_pct.toFixed(0)}%)`);
-    lines.push(`   ${d.ano_anterior}:        ${fmtCanalVal(c, c.fat_ano_anterior_full)}`);
-    lines.push(`   ${d.ano_anterior} Acum.:  ${fmtCanalVal(c, c.fat_ano_anterior_acumulado)}`);
-    lines.push(`   ${d.ano_atual} Real:   ${fmtCanalVal(c, c.fat_ano_atual_real)}`);
+    lines.push(
+      `${arrowComp(c.comparativo_pct)} *${c.nome}* (${c.comparativo_pct >= 0 ? '+' : ''}${c.comparativo_pct.toFixed(0)}%)`,
+    );
+    lines.push(
+      `   ${d.ano_anterior}:        ${fmtCanalVal(c, c.fat_ano_anterior_full)}`,
+    );
+    lines.push(
+      `   ${d.ano_anterior} Acum.:  ${fmtCanalVal(c, c.fat_ano_anterior_acumulado)}`,
+    );
+    lines.push(
+      `   ${d.ano_atual} Real:   ${fmtCanalVal(c, c.fat_ano_atual_real)}`,
+    );
     lines.push('');
   }
   const t = d.total || {};
   lines.push('━━━━━━━━━━━━━━━');
   lines.push(`*TOTAL* ${arrowComp(t.comparativo_pct)}`);
-  lines.push(`${d.ano_anterior} Acum.: ${fmtBRL(t.fat_ano_anterior_acumulado)}`);
+  lines.push(
+    `${d.ano_anterior} Acum.: ${fmtBRL(t.fat_ano_anterior_acumulado)}`,
+  );
   lines.push(`${d.ano_atual} Real:  ${fmtBRL(t.fat_ano_atual_real)}`);
-  lines.push(`Comparativo: ${t.comparativo_pct >= 0 ? '+' : ''}${Number(t.comparativo_pct || 0).toFixed(0)}%`);
+  lines.push(
+    `Comparativo: ${t.comparativo_pct >= 0 ? '+' : ''}${Number(t.comparativo_pct || 0).toFixed(0)}%`,
+  );
   return lines.join('\n');
 }
 
@@ -1497,9 +1721,8 @@ router.post(
   asyncHandler(async (req, res) => {
     const { phone, untilToday } = req.body || {};
     // Import dinâmico pra evitar carregar Puppeteer no boot da rota
-    const { executarForecastWhatsapp } = await import(
-      '../jobs/forecast-whatsapp.job.js'
-    );
+    const { executarForecastWhatsapp } =
+      await import('../jobs/forecast-whatsapp.job.js');
     // Dispara em background — responde imediatamente
     executarForecastWhatsapp({ phone, untilToday: !!untilToday })
       .then((r) => {
@@ -1551,7 +1774,11 @@ router.post(
     if (!phone) return errorResponse(res, 'phone obrigatório', 400);
     const normalized = normalizeBrPhone(phone);
     if (!normalized || normalized.length < 12) {
-      return errorResponse(res, 'Número de telefone inválido (formato esperado: DDD+número)', 400);
+      return errorResponse(
+        res,
+        'Número de telefone inválido (formato esperado: DDD+número)',
+        400,
+      );
     }
 
     let text;
@@ -1598,7 +1825,11 @@ router.post(
 
     try {
       const r = await sendCrosbybotMessage(normalized, text);
-      return successResponse(res, { ok: true, ...r, preview: text.slice(0, 200) }, 'Mensagem enviada');
+      return successResponse(
+        res,
+        { ok: true, ...r, preview: text.slice(0, 200) },
+        'Mensagem enviada',
+      );
     } catch (e) {
       return errorResponse(res, `Falha no envio: ${e.message}`, 502);
     }
@@ -1611,7 +1842,8 @@ router.post(
 router.post(
   '/recalcular-ref-yoy',
   asyncHandler(async (req, res) => {
-    const { recalcularForecastRef } = await import('../jobs/forecast-ref-yoy.job.js');
+    const { recalcularForecastRef } =
+      await import('../jobs/forecast-ref-yoy.job.js');
     await recalcularForecastRef();
     return successResponse(res, { ok: true }, 'Referência YoY recalculada');
   }),
@@ -1623,7 +1855,10 @@ router.post(
 router.post(
   '/limpar-cache',
   asyncHandler(async (req, res) => {
-    const r = await axios.post(`${INTERNAL_API_BASE}/api/crm/clear-fatseg-cache`, {});
+    const r = await axios.post(
+      `${INTERNAL_API_BASE}/api/crm/clear-fatseg-cache`,
+      {},
+    );
     return successResponse(res, r.data?.data || { ok: true }, 'Cache limpo');
   }),
 );
@@ -1637,14 +1872,23 @@ router.post(
   asyncHandler(async (req, res) => {
     const { datemin, datemax } = req.body || {};
     if (!datemin || !datemax) {
-      return errorResponse(res, 'datemin e datemax obrigatórios (YYYY-MM-DD)', 400);
+      return errorResponse(
+        res,
+        'datemin e datemax obrigatórios (YYYY-MM-DD)',
+        400,
+      );
     }
-    const { executarFaturamentoDiario } = await import('../jobs/faturamento-diario.job.js');
+    const { executarFaturamentoDiario } =
+      await import('../jobs/faturamento-diario.job.js');
     const result = await executarFaturamentoDiario({ datemin, datemax });
     if (!result.ok) {
       return errorResponse(res, 'Falha na re-importação (ver logs)', 500);
     }
-    return successResponse(res, result, `Re-importação concluída: ${result.totalUpserted} NFs (${result.dateRange})`);
+    return successResponse(
+      res,
+      result,
+      `Re-importação concluída: ${result.totalUpserted} NFs (${result.dateRange})`,
+    );
   }),
 );
 
@@ -1662,10 +1906,12 @@ async function invalidateFatSegCache() {
       { timeout: 10000 },
     );
   } catch (e) {
-    console.warn('[credev-overrides] falha ao limpar fat-seg cache:', e?.message);
+    console.warn(
+      '[credev-overrides] falha ao limpar fat-seg cache:',
+      e?.message,
+    );
   }
 }
-
 
 // GET /api/forecast/credev-overrides?canal=&ativos_only=true
 //      Lista overrides (todos ou só ativos). Suporta filtro por canal.
@@ -1682,7 +1928,10 @@ router.get(
     if (canal) q = q.eq('canal', String(canal).toLowerCase());
     const { data, error } = await q;
     if (error) return errorResponse(res, error.message, 500);
-    return successResponse(res, { overrides: data || [], count: data?.length || 0 });
+    return successResponse(res, {
+      overrides: data || [],
+      count: data?.length || 0,
+    });
   }),
 );
 
@@ -1713,9 +1962,7 @@ router.post(
     }
 
     const userEmail =
-      req.headers['x-user-email'] ||
-      req.user?.email ||
-      'anonimo';
+      req.headers['x-user-email'] || req.user?.email || 'anonimo';
     const ipOrigem = req.ip || req.headers['x-forwarded-for'] || null;
 
     // Verifica se já existe override (ativo ou inativo) — para reativar em vez
@@ -1814,9 +2061,7 @@ router.delete(
     if (!id) return errorResponse(res, 'ID inválido', 400);
 
     const userEmail =
-      req.headers['x-user-email'] ||
-      req.user?.email ||
-      'anonimo';
+      req.headers['x-user-email'] || req.user?.email || 'anonimo';
     const ipOrigem = req.ip || req.headers['x-forwarded-for'] || null;
 
     const { data: existing, error: errSel } = await supabase

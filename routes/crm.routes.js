@@ -37,6 +37,10 @@ import {
   getBranchCodes,
   fetchBranchTotalsFromTotvs,
 } from '../totvsrouter/totvsHelper.js';
+import {
+  aplicarExclusoesForecast,
+  aplicarExclusaoCanalTotal,
+} from '../services/forecastExclusoes.js';
 
 const router = express.Router();
 
@@ -158,10 +162,17 @@ function preWarmCanalTotalsCredev() {
     }
   }
 }
-// ⚠️ Pre-warm reduzido pra 3h (era 1h). Cache TTL 1h–24h cobre maioria
-// dos acessos sem precisar de pre-warm frequente.
-setTimeout(preWarmCanalTotalsCredev, 30000);
-setInterval(preWarmCanalTotalsCredev, 3 * 60 * 60 * 1000);
+// ⚠️ PRE-WARM TEMPORARIAMENTE SUSPENSO — anti-sobrecarga TOTVS.
+// Razão: TOTVS Analytics está lento (p95 14s+) e queries paralelas estão
+// rate-limitando páginas individuais. O pre-warm gerava ~580 calls a
+// /sellers/search nos primeiros minutos pós-boot, contribuindo pra carga.
+// Quem abrir Forecast pela primeira vez vai esperar (cache vazio), mas
+// requisições subsequentes hit cache normalmente.
+// Pra reativar: descomentar as linhas abaixo.
+//
+// setTimeout(preWarmCanalTotalsCredev, 30000);
+// setInterval(preWarmCanalTotalsCredev, 3 * 60 * 60 * 1000);
+console.log('⏸ [pre-warm canal-totals] SUSPENSO — anti-sobrecarga TOTVS');
 
 // ─── Pre-warm das Métricas Diárias ──────────────────────────────────────────
 // Bate em /api/forecast/promessa-mensal, /promessa-semanal, /promessa-vendedores
@@ -208,9 +219,12 @@ function preWarmMetricasDiarias() {
       });
   }
 }
-// ⚠️ Pre-warm reduzido pra 3h (era 1h).
-setTimeout(preWarmMetricasDiarias, 60000);
-setInterval(preWarmMetricasDiarias, 3 * 60 * 60 * 1000);
+// ⚠️ PRE-WARM TEMPORARIAMENTE SUSPENSO — mesma razão acima (anti-sobrecarga).
+// Pra reativar: descomentar as linhas abaixo.
+//
+// setTimeout(preWarmMetricasDiarias, 60000);
+// setInterval(preWarmMetricasDiarias, 3 * 60 * 60 * 1000);
+console.log('⏸ [pre-warm forecast] SUSPENSO — anti-sobrecarga TOTVS');
 
 // ─── Cache para ClickUp leads (TTL = 10 min) ─────────────────────────────────
 const LEADS_CACHE = new Map(); // key: "de|ate" → { data, ts }
@@ -2695,17 +2709,26 @@ router.post(
       'novidadesfranquia',
       'ricardoeletro',
     ];
-    const results = await Promise.all(
-      canais.map(async (modulo) => {
-        try {
-          const ct = await getCanalTotalsCached(modulo, datemin, datemax);
-          return { modulo, ct };
-        } catch (err) {
-          console.warn(`[canais-all ${modulo}] erro: ${err.message}`);
-          return { modulo, ct: null };
-        }
-      }),
-    );
+    // Anti-sobrecarga TOTVS: processa em BATCHES de 4 (não 11 em paralelo).
+    // Cada canal-totals interno faz queries pesadas no Analytics — paralelismo
+    // alto provoca rate-limit/timeout e cache poisoning (resposta parcial).
+    const BATCH_SIZE = 4;
+    const results = [];
+    for (let i = 0; i < canais.length; i += BATCH_SIZE) {
+      const batch = canais.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (modulo) => {
+          try {
+            const ct = await getCanalTotalsCached(modulo, datemin, datemax);
+            return { modulo, ct };
+          } catch (err) {
+            console.warn(`[canais-all ${modulo}] erro: ${err.message}`);
+            return { modulo, ct: null };
+          }
+        }),
+      );
+      results.push(...batchResults);
+    }
     const segmentos = {};
     const segmentosQty = {};
     const segmentosItens = {};
@@ -7388,6 +7411,14 @@ router.post(
     const openingOpCodes = Object.keys(OP_SEGMENTO_MAP).map(Number);
 
     // Paginação paralela com retry
+    // ─── Rastreamento de páginas que falharam silenciosamente ───────────
+    // Bug histórico: TOTVS retorna timeout/ECONNRESET em algumas páginas e o
+    // código antigo retornava `{items:[]}` sem rastrear. Resultado: NFs
+    // perdidas aleatoriamente (ex: NF 837686 LETICIA). Agora marcamos as
+    // páginas que falharam e re-tentamos no fim, sequencialmente, com mais
+    // retries e backoff maior.
+    const failedPagesOp = new Set();
+
     const fetchInvPgOp = async (page, retries = 3) => {
       for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -7414,6 +7445,8 @@ router.post(
               timeout: 120000,
             },
           );
+          // Sucesso — remove da lista de falhadas (caso seja retry)
+          failedPagesOp.delete(page);
           return r.data;
         } catch (err) {
           const retryable =
@@ -7427,10 +7460,12 @@ router.post(
             await new Promise((r) => setTimeout(r, attempt * 1500));
             continue;
           }
-          console.warn(`[seller-openings] pg ${page}: ${err.message}`);
+          console.warn(`[seller-openings] pg ${page} (attempt ${attempt}/${retries}): ${err.message}`);
+          failedPagesOp.add(page);
           return { items: [] };
         }
       }
+      failedPagesOp.add(page);
       return { items: [] };
     };
 
@@ -7443,7 +7478,10 @@ router.post(
     );
     if (totalPagesOp > 1) {
       const remOp = Array.from({ length: totalPagesOp - 1 }, (_, i) => i + 2);
-      // CONC reduzido 3→2 — menor carga simultânea no TOTVS
+      // CONC=2 — TOTVS frequentemente rate-limita a SEGUNDA page de cada
+      // batch, fazendo páginas pares falharem silenciosamente. Mas CONC=1
+      // sequencial é ~20min total (inviável). Compromisso: CONC=2 com
+      // retry sequencial das páginas falhadas no fim (rápido).
       const CONC = 2;
       for (let i = 0; i < remOp.length; i += CONC) {
         const batch = remOp.slice(i, i + CONC);
@@ -7451,6 +7489,35 @@ router.post(
         for (const pd of results) allOpInvoices.push(...(pd?.items || []));
       }
     }
+
+    // ─── Retry sequencial das páginas que falharam ──────────────────────
+    // Cada falha pode esconder dezenas de NFs (incluindo aberturas críticas).
+    // Faz até 2 passadas extras: sequencial, com pausa de 3s entre tentativas.
+    if (failedPagesOp.size > 0) {
+      console.warn(
+        `[seller-openings] ${failedPagesOp.size} páginas falharam — retry sequencial: ${[...failedPagesOp].join(',')}`,
+      );
+      const failedList = [...failedPagesOp];
+      failedPagesOp.clear();
+      for (const pg of failedList) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const data = await fetchInvPgOp(pg, 4); // mais retries no segundo round
+        if (Array.isArray(data?.items) && data.items.length > 0) {
+          allOpInvoices.push(...data.items);
+          console.log(
+            `[seller-openings] pg ${pg} recovered no retry: +${data.items.length} NFs`,
+          );
+        }
+      }
+      if (failedPagesOp.size > 0) {
+        console.warn(
+          `[seller-openings] ${failedPagesOp.size} páginas AINDA falharam após retry: ${[...failedPagesOp].join(',')} — resultado pode estar incompleto`,
+        );
+      }
+    }
+    console.log(
+      `[seller-openings] Total coletado: ${allOpInvoices.length} NFs (de ~${(firstOp?.totalItems ?? '?')} esperadas)`,
+    );
 
     // Processa todas as NFs em memória
     for (const nf of allOpInvoices) {
@@ -8345,6 +8412,134 @@ const NON_VAREJO_BRANCH_INFO = {
   2: { name: 'JOÃO PESSOA', short: 'JPA' },
 };
 
+// ─── Mapa histórico cliente → vendedor (último que vendeu) ─────────────────
+// Usado para atribuir corretamente devoluções (SaleReturns) onde o TOTVS
+// gravou sellerCode=50 (geral). Se o cliente que devolveu foi originalmente
+// atendido pelo David (26), a devolução deve ir pro credev do David — não
+// ficar diluída no canal-geral. Cache 24h (relação cliente-vendedor é estável).
+const PC_TO_SELLER_CACHE = new Map(); // chave: `${modulo}|${rangeKey}` → Map<pc, dealerCode>
+const PC_TO_SELLER_INFLIGHT = new Map();
+const PC_TO_SELLER_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+async function getPersonCodeToSellerMap({ modulo, cfg, accessToken }) {
+  // Olha pros últimos 90 dias pra capturar maioria dos clientes ativos
+  const hoje = new Date();
+  const fim = hoje.toISOString().slice(0, 10);
+  const ini90 = new Date(hoje.getTime() - 90 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  const cacheKey = `${modulo}|${ini90}~${fim}`;
+
+  // Cache hit
+  const cached = PC_TO_SELLER_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.ts < PC_TO_SELLER_TTL_MS) {
+    return cached.map;
+  }
+  // Coalescing
+  if (PC_TO_SELLER_INFLIGHT.has(cacheKey)) {
+    try {
+      return await PC_TO_SELLER_INFLIGHT.get(cacheKey);
+    } catch {
+      // fall-through
+    }
+  }
+  // Resolve promise
+  let resolveInflight;
+  const promise = new Promise((r) => (resolveInflight = r));
+  PC_TO_SELLER_INFLIGHT.set(cacheKey, promise);
+
+  const map = new Map();
+  try {
+    const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+    const fetchPage = async (page) =>
+      axios
+        .post(
+          endpoint,
+          {
+            filter: {
+              branchCodeList: cfg.branchs,
+              operationCodeList: cfg.operations,
+              operationType: 'Output',
+              startIssueDate: `${ini90}T00:00:00`,
+              endIssueDate: `${fim}T23:59:59`,
+            },
+            expand: 'items',
+            page,
+            pageSize: 100,
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            httpsAgent: totvsHttpsAgent,
+            timeout: 180000,
+          },
+        )
+        .then((r) => r.data)
+        .catch((err) => {
+          console.warn(
+            `[pc-seller-map ${modulo}] pág ${page}: ${err.message}`,
+          );
+          return { items: [] };
+        });
+    const first = await fetchPage(1);
+    const all = [...(first?.items || [])];
+    const totalPages =
+      first?.totalPages ||
+      (first?.totalItems ? Math.ceil(first.totalItems / 100) : 1);
+    if (totalPages > 1) {
+      const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+      for (let i = 0; i < rem.length; i += 2) {
+        const batch = rem.slice(i, i + 2);
+        const results = await Promise.all(batch.map(fetchPage));
+        for (const pd of results) all.push(...(pd?.items || []));
+      }
+    }
+    // Computa dealer principal por NF e atualiza map (último wins = mais recente)
+    const sorted = all
+      .filter(
+        (nf) => nf.invoiceStatus !== 'Canceled' && nf.invoiceStatus !== 'Deleted',
+      )
+      .sort((a, b) => (a.issueDate || '').localeCompare(b.issueDate || ''));
+    for (const nf of sorted) {
+      const pc = parseInt(nf.personCode);
+      if (!pc) continue;
+      const netByDealer = {};
+      for (const item of nf.items || []) {
+        for (const p of item.products || []) {
+          const dc = p.dealerCode ? Number(p.dealerCode) : null;
+          if (!dc) continue;
+          netByDealer[dc] = (netByDealer[dc] || 0) + Number(p.netValue || 0);
+        }
+      }
+      const entries = Object.entries(netByDealer);
+      if (entries.length === 0) continue;
+      const mainDealer = Number(entries.sort((a, b) => b[1] - a[1])[0][0]);
+      map.set(pc, mainDealer);
+    }
+    console.log(
+      `[pc-seller-map ${modulo}] ${map.size} clientes mapeados (90d, ${all.length} NFs)`,
+    );
+    PC_TO_SELLER_CACHE.set(cacheKey, { map, ts: Date.now() });
+    // LRU simples — máx 10 entradas
+    if (PC_TO_SELLER_CACHE.size > 10) {
+      const oldest = [...PC_TO_SELLER_CACHE.entries()].sort(
+        (a, b) => a[1].ts - b[1].ts,
+      )[0];
+      PC_TO_SELLER_CACHE.delete(oldest[0]);
+    }
+  } catch (err) {
+    console.warn(
+      `[pc-seller-map ${modulo}] falha: ${err.message} — usando map vazio`,
+    );
+  } finally {
+    resolveInflight(map);
+    PC_TO_SELLER_INFLIGHT.delete(cacheKey);
+  }
+  return map;
+}
+
 // Fetcha per-seller via TOTVS por canal (branchs + sellers do CANAL_CONFIG)
 // Retorna array de { seller_code, seller_name, invoice_qty, invoice_value, itens_qty, tm, pa, pmpv, branch_code, branch_name, branch_short, canal }
 async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
@@ -8738,6 +8933,11 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         }
       }
 
+      // PASSO 1 — Atribui devoluções via sellerCode do TOTVS quando possível.
+      // Acumula os "órfãos" (SaleReturns com seller=50 ou fora do canal) pra
+      // decidir depois se vale buscar o mapa histórico 90d (PESADO no TOTVS:
+      // expand=items causa full scan FIS_NFITEMPROD).
+      const orphanReturns = [];
       for (const it of fmItems) {
         if (it.operationModel !== 'SaleReturns') continue;
         const op = parseInt(it.operationCode);
@@ -8748,10 +8948,54 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         if (v <= 0) continue;
         const sc = String(it.sellerCode || '');
         if (sc && merged[sc]) {
-          // Idem: NÃO subtrai do invoice_value (bruto). Só contabiliza
-          // em credev_value pra exibição separada.
           merged[sc].credev_value = (merged[sc].credev_value || 0) + v;
+        } else {
+          orphanReturns.push({ pc, v });
         }
+      }
+
+      // PASSO 2 — Só busca o mapa histórico SE:
+      //   a) Há devoluções órfãs (TOTVS atribuiu pro 'geral'/50 ou pra fora
+      //      do canal). Sem órfãos, não precisa.
+      //   b) Canal tem vendedores específicos cadastrados (revenda/multimarcas/
+      //      inbound_*). Pra varejo/franquia/business, o per_seller é livre e
+      //      não faz sentido reatribuir.
+      //   c) Total de órfãos > limiar mínimo (R$10) — evita acionar o fetch
+      //      pesado pra uma devolução de R$5 perdida.
+      const canalUsaPerSeller =
+        Array.isArray(cfg.sellers) && cfg.sellers.length > 0;
+      const totalOrfaos = orphanReturns.reduce((s, x) => s + x.v, 0);
+      const valeBuscarMapa =
+        orphanReturns.length > 0 && canalUsaPerSeller && totalOrfaos >= 10;
+
+      if (valeBuscarMapa) {
+        let pcToSeller = null;
+        try {
+          pcToSeller = await getPersonCodeToSellerMap({
+            modulo,
+            cfg,
+            accessToken,
+          });
+        } catch (err) {
+          console.warn(
+            `[canal-sellers ${modulo}] pc-seller-map falhou: ${err.message}`,
+          );
+        }
+        if (pcToSeller) {
+          for (const { pc, v } of orphanReturns) {
+            const histDealer = pcToSeller.get(pc);
+            if (histDealer && merged[String(histDealer)]) {
+              merged[String(histDealer)].credev_value =
+                (merged[String(histDealer)].credev_value || 0) + v;
+            }
+            // Não-resolvidos: ficam fora do per_seller (continuam em
+            // devolucao_returns do canal-total).
+          }
+        }
+      } else if (orphanReturns.length > 0) {
+        console.log(
+          `[canal-sellers ${modulo}] ${orphanReturns.length} devoluções órfãs (R$${totalOrfaos.toFixed(2)}) — não acionou mapa histórico (canalUsaPerSeller=${canalUsaPerSeller}, limiar=10)`,
+        );
       }
     }
   } catch (err) {
@@ -11534,13 +11778,39 @@ router.post(
         sellers_used: cfg.sellers,
         devolucao_ops_used: [...DEVOL_OPS_LIQUIDO_TOTVS],
       };
-      // Salva no cache (TTL 5 min)
-      CANAL_TOTALS_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
-      if (CANAL_TOTALS_CACHE.size > 30) {
-        const oldest = [...CANAL_TOTALS_CACHE.entries()].sort(
-          (a, b) => a[1].ts - b[1].ts,
-        )[0];
-        CANAL_TOTALS_CACHE.delete(oldest[0]);
+      // Aplica exclusões (Recife Mall fora de Franquia a partir de 21/05/2026)
+      try {
+        await aplicarExclusaoCanalTotal(responseData, datemin, datemax);
+      } catch (err) {
+        console.warn(
+          `[canal-totals ${modulo}] aplicarExclusaoCanalTotal falhou: ${err.message}`,
+        );
+      }
+      // Salva no cache APENAS se a resposta parece válida (anti-poisoning).
+      // Considera resposta INCOMPLETA (provável falha TOTVS) quando:
+      //  - invoice_value > 0 mas per_seller veio vazio para canal que tem
+      //    vendedores cadastrados (revenda, multimarcas, inbound_*).
+      //  - invoice_value == 0 quando devia ter (período passado com vendas).
+      // Nesses casos retornamos o resultado mas NÃO cacheamos — força a
+      // próxima request a tentar de novo (TOTVS pode ter respondido lento).
+      const canaisComSellers = ['revenda', 'multimarcas', 'inbound_david', 'inbound_rafael'];
+      const expectsSellers = canaisComSellers.includes(modulo);
+      const hasInv = Number(responseData.invoice_value || 0) > 0;
+      const hasSellers = Array.isArray(responseData.per_seller) && responseData.per_seller.length > 0;
+      const looksIncomplete = expectsSellers && hasInv && !hasSellers;
+      if (!looksIncomplete) {
+        // Salva no cache (TTL alinhado com getCanalTotalsCached)
+        CANAL_TOTALS_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+        if (CANAL_TOTALS_CACHE.size > 30) {
+          const oldest = [...CANAL_TOTALS_CACHE.entries()].sort(
+            (a, b) => a[1].ts - b[1].ts,
+          )[0];
+          CANAL_TOTALS_CACHE.delete(oldest[0]);
+        }
+      } else {
+        console.warn(
+          `[canal-totals ${modulo} ${datemin}~${datemax}] resposta incompleta (inv=${responseData.invoice_value}, per_seller=[]) — não cacheado`,
+        );
       }
       return successResponse(
         res,
@@ -12308,6 +12578,43 @@ router.post(
         'OK (cache)',
       );
     }
+
+    // ─── Coalescing anti-sobrecarga TOTVS ────────────────────────────────────
+    // Se 2+ usuários abrem a página de Forecast ao mesmo tempo com o mesmo
+    // range, AMBOS dispararão full scan em FIS_NFITEMPROD (expand=items). Sem
+    // coalescing, N requests = N varreduras. Com coalescing, N requests = 1
+    // varredura + (N-1) callers que aguardam o resultado da primeira.
+    // Crítico pra evitar bloqueio TOTVS por consumo excessivo do banco.
+    if (FATSEG_INFLIGHT.has(cacheKey)) {
+      try {
+        const data = await FATSEG_INFLIGHT.get(cacheKey);
+        return successResponse(res, { ...data, coalesced: true }, 'OK (coalesced)');
+      } catch {
+        // Fall through e tenta fresh
+      }
+    }
+    // Cria promise pra outros callers aguardarem este fetch
+    let _resolveInflight, _rejectInflight;
+    const _inflightPromise = new Promise((rr, rj) => {
+      _resolveInflight = rr;
+      _rejectInflight = rj;
+    });
+    FATSEG_INFLIGHT.set(cacheKey, _inflightPromise);
+    // Garante limpeza ao final (mesmo em casos de erro/return precoce)
+    res.on('finish', () => {
+      if (FATSEG_INFLIGHT.get(cacheKey) === _inflightPromise) {
+        FATSEG_INFLIGHT.delete(cacheKey);
+      }
+    });
+    // Helper: resolve inflight com o responseData calculado (chamado antes do
+    // successResponse final).
+    const fulfillInflight = (data) => {
+      try { _resolveInflight(data); } catch {}
+    };
+    const failInflight = (err) => {
+      try { _rejectInflight(err); } catch {}
+    };
+
     // Stale fallback: se a refetch falhar, vamos retornar essa cache antiga.
     // Marca no res.locals pra usar no catch global da rota (se chegar lá).
     const hasStale = cached && cacheAge < FATSEG_STALE_TTL;
@@ -12341,6 +12648,7 @@ router.post(
     // Subtrai credev em payments por segmento (alinha com CRM Analytics).
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
+      failInflight(new Error('Token TOTVS indisponível'));
       return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
     }
     const accessToken = tokenData.access_token;
@@ -12465,6 +12773,8 @@ router.post(
         return [];
       });
     } catch (err) {
+      // Rejeita inflight pra que callers em wait recebam o erro também
+      failInflight(err);
       return errorResponse(
         res,
         `Erro ao buscar invoices TOTVS: ${err.message}`,
@@ -12888,6 +13198,15 @@ router.post(
       segMap[k] = Math.round(segMap[k] * 100) / 100;
     }
 
+    // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05/2026)
+    // Modifica segMap in-place subtraindo o valor das NFs excluídas do canal
+    // correspondente. Mesmo módulo usado pelo Forecast → consistência total.
+    try {
+      await aplicarExclusoesForecast(segMap, datemin, datemax);
+    } catch (err) {
+      console.warn(`[fat-seg] aplicarExclusoesForecast falhou: ${err.message}`);
+    }
+
     const total = Object.values(segMap).reduce((s, v) => s + v, 0);
 
     // Arredonda credev_por_segmento
@@ -12975,6 +13294,13 @@ router.post(
       console.warn(
         `[fat-seg] usando STALE cache de ${Math.floor(cacheAge / 1000)}s — TOTVS instável`,
       );
+      // Resolve coalescing com dados stale pra outros callers em wait
+      fulfillInflight({
+        ...cached.data,
+        cached: true,
+        stale: true,
+        stale_age_seconds: Math.floor(cacheAge / 1000),
+      });
       return successResponse(
         res,
         {
@@ -12994,6 +13320,8 @@ router.post(
       FATSEG_CACHE.delete(oldest[0]);
     }
 
+    // Resolve coalescing — outros callers em wait recebem o mesmo responseData
+    fulfillInflight(responseData);
     return successResponse(res, responseData, 'OK (TOTVS live)');
   }),
 );

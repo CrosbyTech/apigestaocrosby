@@ -1,10 +1,11 @@
 import cron from 'node-cron';
 import axios from 'axios';
 import { logger } from './errorHandler.js';
+import { recordAuth } from '../services/totvsUsageMonitor.js';
 
 // URL da API TOTVS Moda
-const TOTVS_AUTH_ENDPOINT = 
-  process.env.TOTVS_AUTH_ENDPOINT || 
+const TOTVS_AUTH_ENDPOINT =
+  process.env.TOTVS_AUTH_ENDPOINT ||
   'https://www30.bhan.com.br:9443/api/totvsmoda/authorization/v2/token';
 
 // Credenciais padrão (podem ser sobrescritas via variáveis de ambiente)
@@ -19,12 +20,40 @@ const TOTVS_CREDENTIALS = {
 // Armazenamento do token em memória
 let currentToken = null;
 let tokenExpiresAt = null;
+// Coalescing: garante que apenas UMA chamada de auth simultânea bate no TOTVS.
+// Sem isso, N requests paralelos → N auths → TOTVS detecta como brute-force
+// → bloqueia o usuário ApiUser crosbyapiv2.
+let _generateInFlight = null;
+// Throttle: se a última falhou, espera N ms antes da próxima tentativa
+let _lastGenFailedAt = 0;
+const _GEN_RETRY_BACKOFF_MS = 10 * 1000;
 
 /**
  * Gera um novo token de autenticação na API TOTVS
  * @returns {Promise<Object>} Token e informações relacionadas
  */
 export const generateToken = async () => {
+  // Se já tem geração em andamento, aguarda ela em vez de criar outra
+  if (_generateInFlight) {
+    logger.info('🔒 Já existe geração de token em andamento — aguardando');
+    return await _generateInFlight;
+  }
+  // Backoff: se a última falhou recentemente, espera antes de re-tentar
+  const sinceLastFail = Date.now() - _lastGenFailedAt;
+  if (_lastGenFailedAt > 0 && sinceLastFail < _GEN_RETRY_BACKOFF_MS) {
+    const waitMs = _GEN_RETRY_BACKOFF_MS - sinceLastFail;
+    logger.warn(
+      `⏳ Última auth TOTVS falhou há ${Math.floor(sinceLastFail / 1000)}s — aguardando ${Math.floor(waitMs / 1000)}s antes de retentar`,
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  _generateInFlight = _doGenerateToken().finally(() => {
+    _generateInFlight = null;
+  });
+  return _generateInFlight;
+};
+
+async function _doGenerateToken() {
   try {
     logger.info('🔐 Gerando novo token TOTVS...');
 
@@ -46,10 +75,10 @@ export const generateToken = async () => {
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          'Accept': 'application/json',
+          Accept: 'application/json',
         },
         timeout: 30000,
-      }
+      },
     );
 
     const tokenData = {
@@ -62,14 +91,18 @@ export const generateToken = async () => {
 
     // Armazenar token e calcular tempo de expiração
     currentToken = tokenData;
-    tokenExpiresAt = new Date(Date.now() + (tokenData.expires_in * 1000));
+    tokenExpiresAt = new Date(Date.now() + tokenData.expires_in * 1000);
+    _lastGenFailedAt = 0; // reset backoff em sucesso
+    recordAuth(true);
 
     logger.info('✅ Token TOTVS gerado com sucesso');
-    logger.info(`   Token expira em: ${tokenExpiresAt.toLocaleString('pt-BR', { 
-      timeZone: 'America/Sao_Paulo',
-      dateStyle: 'short',
-      timeStyle: 'medium' 
-    })}`);
+    logger.info(
+      `   Token expira em: ${tokenExpiresAt.toLocaleString('pt-BR', {
+        timeZone: 'America/Sao_Paulo',
+        dateStyle: 'short',
+        timeStyle: 'medium',
+      })}`,
+    );
 
     return tokenData;
   } catch (error) {
@@ -83,10 +116,16 @@ export const generateToken = async () => {
     // Limpar token atual em caso de erro
     currentToken = null;
     tokenExpiresAt = null;
+    _lastGenFailedAt = Date.now();
+    const reason =
+      Array.isArray(error.response?.data) && error.response.data[0]?.message
+        ? error.response.data[0].message
+        : error.message;
+    recordAuth(false, reason);
 
     throw error;
   }
-};
+}
 
 /**
  * Obtém o token atual (se válido) ou gera um novo
@@ -101,15 +140,20 @@ export const getToken = async (forceNew = false) => {
 
     // Se o token ainda é válido (com margem de 5 minutos de segurança)
     if (timeUntilExpiry > 5 * 60 * 1000) {
-      logger.info('🔑 Usando token TOTVS existente (ainda válido)');
       return currentToken;
     } else {
-      logger.info('⏰ Token TOTVS expirado ou próximo do vencimento. Gerando novo...');
+      logger.info(
+        '⏰ Token TOTVS expirado ou próximo do vencimento. Gerando novo...',
+      );
     }
   }
 
-  // Gerar novo token
-  return await generateToken();
+  // Gerar novo token (mutex: evita race condition em requisições paralelas)
+  if (_generateInFlight) return _generateInFlight;
+  _generateInFlight = generateToken().finally(() => {
+    _generateInFlight = null;
+  });
+  return _generateInFlight;
 };
 
 /**
@@ -147,31 +191,35 @@ export const startTokenScheduler = () => {
   // Dia do mês: * (todos os dias)
   // Mês: * (todos os meses)
   // Dia da semana: * (todos os dias da semana)
-  
+
   const cronExpression = '0 0,6,12,18 * * *';
-  
-  const task = cron.schedule(cronExpression, async () => {
-    const now = new Date();
-    const timestamp = now.toLocaleString('pt-BR', { 
-      timeZone: 'America/Sao_Paulo',
-      dateStyle: 'short',
-      timeStyle: 'medium'
-    });
-    
-    logger.info(`🔐 ========================================`);
-    logger.info(`🔐 Geração automática de token TOTVS: ${timestamp}`);
-    logger.info(`🔐 ========================================`);
-    
-    try {
-      await generateToken();
+
+  const task = cron.schedule(
+    cronExpression,
+    async () => {
+      const now = new Date();
+      const timestamp = now.toLocaleString('pt-BR', {
+        timeZone: 'America/Sao_Paulo',
+        dateStyle: 'short',
+        timeStyle: 'medium',
+      });
+
       logger.info(`🔐 ========================================`);
-    } catch (error) {
-      logger.error('🔐 Erro na geração automática de token:', error.message);
-    }
-  }, {
-    scheduled: true,
-    timezone: 'America/Sao_Paulo' // Timezone de Brasília
-  });
+      logger.info(`🔐 Geração automática de token TOTVS: ${timestamp}`);
+      logger.info(`🔐 ========================================`);
+
+      try {
+        await generateToken();
+        logger.info(`🔐 ========================================`);
+      } catch (error) {
+        logger.error('🔐 Erro na geração automática de token:', error.message);
+      }
+    },
+    {
+      scheduled: true,
+      timezone: 'America/Sao_Paulo', // Timezone de Brasília
+    },
+  );
 
   task.start();
 
@@ -187,34 +235,35 @@ export const startTokenScheduler = () => {
   const now = new Date();
   const nextRun = new Date(now);
   const currentHour = now.getHours();
-  
+
   // Encontrar o próximo horário agendado (00, 06, 12, 18)
   const scheduledHours = [0, 6, 12, 18];
-  let nextHour = scheduledHours.find(h => h > currentHour) || scheduledHours[0];
-  
+  let nextHour =
+    scheduledHours.find((h) => h > currentHour) || scheduledHours[0];
+
   if (nextHour <= currentHour) {
     // Se já passou o último horário do dia, agendar para 00:00 do dia seguinte
     nextRun.setDate(nextRun.getDate() + 1);
     nextHour = 0;
   }
-  
+
   nextRun.setHours(nextHour);
   nextRun.setMinutes(0);
   nextRun.setSeconds(0);
   nextRun.setMilliseconds(0);
-  
-  const nextRunFormatted = nextRun.toLocaleString('pt-BR', { 
+
+  const nextRunFormatted = nextRun.toLocaleString('pt-BR', {
     timeZone: 'America/Sao_Paulo',
     dateStyle: 'short',
-    timeStyle: 'medium'
+    timeStyle: 'medium',
   });
-  
+
   logger.info(`🔐 Próxima execução agendada para: ${nextRunFormatted}`);
   logger.info('🔐 ========================================');
 
   // Gerar token imediatamente na inicialização
   logger.info('🔐 Gerando token inicial...');
-  generateToken().catch(error => {
+  generateToken().catch((error) => {
     logger.error('🔐 Erro ao gerar token inicial:', error.message);
   });
 
@@ -231,4 +280,3 @@ export const stopTokenScheduler = (task) => {
     logger.info('⏸️  Scheduler de token TOTVS PARADO');
   }
 };
-

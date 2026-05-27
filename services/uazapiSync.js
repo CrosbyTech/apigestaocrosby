@@ -276,6 +276,12 @@ export function getPool() {
     idleTimeoutMillis: 30_000,
     statement_timeout: 120_000,
   });
+  // CRÍTICO: sem este handler, qualquer erro de conexão (ECONNRESET,
+  // "Connection terminated unexpectedly", etc.) é tratado como uncaught
+  // exception e DERRUBA o processo Node inteiro.
+  pool.on('error', (err) => {
+    console.warn('[uazapi pg.Pool] erro de conexão (não-fatal):', err.message);
+  });
   return pool;
 }
 

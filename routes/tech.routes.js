@@ -305,4 +305,329 @@ router.get(
   }),
 );
 
+// ============================================================
+// PATRIMÔNIO — Inventário de bens da empresa
+// /patrimonio                  — CRUD + filtros
+// /patrimonio/estatisticas     — totais por tipo/setor/status
+// /patrimonio/proximo-codigo   — sugere próximo código (PAT-XXXXXX)
+// ============================================================
+
+const PATRIMONIO_TIPOS = new Set([
+  'ar_condicionado',
+  'celular',
+  'computador',
+  'notebook',
+  'impressora',
+  'monitor',
+  'mobiliario',
+  'televisor',
+  'roteador',
+  'outro',
+]);
+
+const PATRIMONIO_STATUS = new Set([
+  'ativo',
+  'em_manutencao',
+  'emprestado',
+  'descartado',
+  'extraviado',
+]);
+
+// GET /api/tech/patrimonio
+//   Filtros: tipo, status, setor, local, responsavel, q (busca livre)
+router.get(
+  '/patrimonio',
+  asyncHandler(async (req, res) => {
+    const { tipo, status, setor, local, responsavel, q } = req.query;
+    let query = supabase
+      .from('tech_patrimonio')
+      .select('*')
+      .order('atualizado_em', { ascending: false });
+    if (tipo) query = query.eq('tipo', tipo);
+    if (status) query = query.eq('status', status);
+    if (setor) query = query.eq('setor', setor);
+    if (local) query = query.ilike('local', `%${local}%`);
+    if (responsavel) query = query.ilike('responsavel', `%${responsavel}%`);
+    if (q) {
+      query = query.or(
+        `codigo_patrimonio.ilike.%${q}%,descricao.ilike.%${q}%,marca.ilike.%${q}%,modelo.ilike.%${q}%,numero_serie.ilike.%${q}%,responsavel.ilike.%${q}%,local.ilike.%${q}%`,
+      );
+    }
+    const { data, error } = await query;
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, {
+      items: data || [],
+      total: (data || []).length,
+    });
+  }),
+);
+
+// GET /api/tech/patrimonio/estatisticas
+router.get(
+  '/patrimonio/estatisticas',
+  asyncHandler(async (_req, res) => {
+    const { data, error } = await supabase
+      .from('tech_patrimonio')
+      .select(
+        'tipo, status, setor, local, valor_aquisicao, data_aquisicao',
+      );
+    if (error) return errorResponse(res, error.message, 500);
+    const list = data || [];
+
+    const counter = (key) => {
+      const out = {};
+      for (const r of list) {
+        const k = r[key] || 'sem_info';
+        out[k] = (out[k] || 0) + 1;
+      }
+      return out;
+    };
+    const por_tipo = counter('tipo');
+    const por_status = counter('status');
+    const por_setor = counter('setor');
+    const por_local = counter('local');
+
+    const valor_total = list.reduce(
+      (s, r) => s + (Number(r.valor_aquisicao) || 0),
+      0,
+    );
+    const valor_ativos = list
+      .filter((r) => r.status === 'ativo')
+      .reduce((s, r) => s + (Number(r.valor_aquisicao) || 0), 0);
+
+    return successResponse(res, {
+      total: list.length,
+      por_tipo,
+      por_status,
+      por_setor,
+      por_local,
+      valor_total: Number(valor_total.toFixed(2)),
+      valor_ativos: Number(valor_ativos.toFixed(2)),
+    });
+  }),
+);
+
+// GET /api/tech/patrimonio/proximo-codigo
+//   Retorna sugestão de próximo código (PAT-XXXXXX, com zero-padding)
+router.get(
+  '/patrimonio/proximo-codigo',
+  asyncHandler(async (_req, res) => {
+    const { data, error } = await supabase
+      .from('tech_patrimonio')
+      .select('codigo_patrimonio')
+      .like('codigo_patrimonio', 'PAT-%')
+      .order('id', { ascending: false })
+      .limit(50);
+    if (error) return errorResponse(res, error.message, 500);
+    let maxNum = 0;
+    for (const r of data || []) {
+      const m = String(r.codigo_patrimonio || '').match(/PAT-(\d+)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n > maxNum) maxNum = n;
+      }
+    }
+    const proximo = `PAT-${String(maxNum + 1).padStart(6, '0')}`;
+    return successResponse(res, { proximo, ultimo_numero: maxNum });
+  }),
+);
+
+// GET /api/tech/patrimonio/:id
+router.get(
+  '/patrimonio/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const { data, error } = await supabase
+      .from('tech_patrimonio')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) return errorResponse(res, error.message, 500);
+    if (!data) return errorResponse(res, 'Patrimônio não encontrado', 404);
+    return successResponse(res, data);
+  }),
+);
+
+// POST /api/tech/patrimonio
+router.post(
+  '/patrimonio',
+  asyncHandler(async (req, res) => {
+    const {
+      codigo_patrimonio,
+      tipo,
+      descricao,
+      marca,
+      modelo,
+      numero_serie,
+      local,
+      setor,
+      responsavel,
+      responsavel_cpf,
+      responsavel_email,
+      data_aquisicao,
+      valor_aquisicao,
+      fornecedor,
+      nota_fiscal,
+      status,
+      observacao,
+      criado_por,
+    } = req.body || {};
+
+    if (!codigo_patrimonio || !codigo_patrimonio.trim()) {
+      return errorResponse(res, 'codigo_patrimonio obrigatório', 400);
+    }
+    if (!tipo || !PATRIMONIO_TIPOS.has(tipo)) {
+      return errorResponse(
+        res,
+        `tipo inválido (use: ${[...PATRIMONIO_TIPOS].join(', ')})`,
+        400,
+      );
+    }
+    if (status && !PATRIMONIO_STATUS.has(status)) {
+      return errorResponse(
+        res,
+        `status inválido (use: ${[...PATRIMONIO_STATUS].join(', ')})`,
+        400,
+      );
+    }
+
+    // Verifica duplicidade
+    const { data: existente } = await supabase
+      .from('tech_patrimonio')
+      .select('id')
+      .eq('codigo_patrimonio', codigo_patrimonio.trim())
+      .maybeSingle();
+    if (existente) {
+      return errorResponse(
+        res,
+        `Código de patrimônio "${codigo_patrimonio}" já existe`,
+        409,
+      );
+    }
+
+    const payload = {
+      codigo_patrimonio: codigo_patrimonio.trim(),
+      tipo,
+      descricao: descricao || null,
+      marca: marca || null,
+      modelo: modelo || null,
+      numero_serie: numero_serie || null,
+      local: local || null,
+      setor: setor || null,
+      responsavel: responsavel || null,
+      responsavel_cpf: responsavel_cpf || null,
+      responsavel_email: responsavel_email || null,
+      data_aquisicao: data_aquisicao || null,
+      valor_aquisicao:
+        valor_aquisicao != null && valor_aquisicao !== ''
+          ? Number(valor_aquisicao)
+          : null,
+      fornecedor: fornecedor || null,
+      nota_fiscal: nota_fiscal || null,
+      status: status || 'ativo',
+      observacao: observacao || null,
+      criado_por: criado_por || null,
+      atualizado_por: criado_por || null,
+    };
+
+    const { data, error } = await supabase
+      .from('tech_patrimonio')
+      .insert(payload)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+
+    // Log
+    await supabase.from('tech_patrimonio_log').insert({
+      patrimonio_id: data.id,
+      acao: 'create',
+      valor_novo: JSON.stringify(payload).slice(0, 1000),
+      alterado_por: criado_por || null,
+    });
+
+    return successResponse(res, data);
+  }),
+);
+
+// PUT /api/tech/patrimonio/:id
+router.put(
+  '/patrimonio/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const { atualizado_por, ...patch } = req.body || {};
+
+    if (patch.tipo && !PATRIMONIO_TIPOS.has(patch.tipo)) {
+      return errorResponse(res, 'tipo inválido', 400);
+    }
+    if (patch.status && !PATRIMONIO_STATUS.has(patch.status)) {
+      return errorResponse(res, 'status inválido', 400);
+    }
+
+    // Verifica duplicidade do código se for atualizado
+    if (patch.codigo_patrimonio) {
+      const { data: existente } = await supabase
+        .from('tech_patrimonio')
+        .select('id')
+        .eq('codigo_patrimonio', patch.codigo_patrimonio.trim())
+        .neq('id', id)
+        .maybeSingle();
+      if (existente) {
+        return errorResponse(
+          res,
+          `Código de patrimônio "${patch.codigo_patrimonio}" já existe em outro item`,
+          409,
+        );
+      }
+      patch.codigo_patrimonio = patch.codigo_patrimonio.trim();
+    }
+
+    // Normaliza campos
+    if (patch.valor_aquisicao === '') patch.valor_aquisicao = null;
+    if (patch.data_aquisicao === '') patch.data_aquisicao = null;
+
+    patch.atualizado_por = atualizado_por || null;
+
+    const { data, error } = await supabase
+      .from('tech_patrimonio')
+      .update(patch)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+
+    await supabase.from('tech_patrimonio_log').insert({
+      patrimonio_id: id,
+      acao: 'update',
+      valor_novo: JSON.stringify(patch).slice(0, 1000),
+      alterado_por: atualizado_por || null,
+    });
+
+    return successResponse(res, data);
+  }),
+);
+
+// DELETE /api/tech/patrimonio/:id
+router.delete(
+  '/patrimonio/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const { deletado_por } = req.body || {};
+
+    // Log antes de deletar
+    await supabase.from('tech_patrimonio_log').insert({
+      patrimonio_id: id,
+      acao: 'delete',
+      alterado_por: deletado_por || null,
+    });
+
+    const { error } = await supabase
+      .from('tech_patrimonio')
+      .delete()
+      .eq('id', id);
+    if (error) return errorResponse(res, error.message, 500);
+
+    return successResponse(res, { id, deleted: true });
+  }),
+);
+
 export default router;

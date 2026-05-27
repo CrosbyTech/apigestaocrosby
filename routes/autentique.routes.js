@@ -32,6 +32,8 @@
  */
 
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import axios from 'axios';
 import multer from 'multer';
 import puppeteer from 'puppeteer';
@@ -1055,15 +1057,117 @@ router.post(
 // =============================================================================
 
 // ─── Helper: detecta path do Chrome para Puppeteer ───────────────────────────
-const getChromePath = () => {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH)
-    return process.env.PUPPETEER_EXECUTABLE_PATH;
+// Tenta múltiplas estratégias em ordem:
+//   1) PUPPETEER_EXECUTABLE_PATH (env var)
+//   2) puppeteer.executablePath() (path padrão do Puppeteer)
+//   3) Glob no cache puppeteer (qualquer versão chrome-linux64)
+//   4) Paths comuns do sistema (apt-get install google-chrome etc.)
+// Pula caminhos que NÃO existem no disco — evita erro "executablePath não encontrado".
+// (fs e path importados no topo do arquivo)
+
+const tryFile = (p) => {
   try {
-    const resolved = puppeteer.executablePath();
-    if (resolved) return resolved;
+    return p && fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+};
+
+const findChromeInCache = (cacheDir) => {
+  try {
+    if (!fs.existsSync(cacheDir)) return null;
+    const versions = fs
+      .readdirSync(cacheDir)
+      .filter((d) => d.startsWith('linux-') || d.startsWith('mac') || d.startsWith('win'))
+      .sort()
+      .reverse(); // versão mais recente primeiro
+    for (const v of versions) {
+      const candidates = [
+        path.join(cacheDir, v, 'chrome-linux64', 'chrome'),
+        path.join(cacheDir, v, 'chrome-mac', 'chrome'),
+        path.join(cacheDir, v, 'chrome-mac-x64', 'chrome'),
+        path.join(cacheDir, v, 'chrome-mac-arm64', 'chrome'),
+        path.join(cacheDir, v, 'chrome-win', 'chrome.exe'),
+        path.join(cacheDir, v, 'chrome-win64', 'chrome.exe'),
+      ];
+      for (const c of candidates) {
+        const found = tryFile(c);
+        if (found) return found;
+      }
+    }
   } catch {
     // ignore
   }
+  return null;
+};
+
+const getChromePath = () => {
+  // 1) Env var explícita (deploy controla)
+  const envPath = tryFile(process.env.PUPPETEER_EXECUTABLE_PATH);
+  if (envPath) {
+    console.log(`[Puppeteer] Chrome via PUPPETEER_EXECUTABLE_PATH: ${envPath}`);
+    return envPath;
+  }
+
+  // 2) puppeteer.executablePath() padrão
+  try {
+    const resolved = puppeteer.executablePath();
+    if (resolved && fs.existsSync(resolved)) {
+      console.log(`[Puppeteer] Chrome via puppeteer.executablePath(): ${resolved}`);
+      return resolved;
+    }
+    // Se não existe no disco, NÃO retorna (evita erro de file not found)
+    if (resolved) {
+      console.warn(
+        `[Puppeteer] puppeteer.executablePath()=${resolved} mas arquivo NÃO EXISTE — tentando outros paths...`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[Puppeteer] puppeteer.executablePath() falhou: ${err.message}`);
+  }
+
+  // 3) Glob no cache Puppeteer (qualquer versão presente)
+  const cacheDirs = [
+    process.env.PUPPETEER_CACHE_DIR,
+    path.resolve(process.cwd(), '.cache', 'puppeteer', 'chrome'),
+    path.resolve(process.cwd(), 'backend', '.cache', 'puppeteer', 'chrome'),
+    // Render.com padrão
+    '/opt/render/project/src/.cache/puppeteer/chrome',
+    '/opt/render/project/src/backend/.cache/puppeteer/chrome',
+    // Homedir
+    path.join(process.env.HOME || '', '.cache', 'puppeteer', 'chrome'),
+  ].filter(Boolean);
+
+  for (const dir of cacheDirs) {
+    const found = findChromeInCache(dir);
+    if (found) {
+      console.log(`[Puppeteer] Chrome encontrado no cache: ${found}`);
+      return found;
+    }
+  }
+
+  // 4) Paths comuns do sistema (apt-get etc.)
+  const systemPaths = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  ];
+  for (const p of systemPaths) {
+    const found = tryFile(p);
+    if (found) {
+      console.log(`[Puppeteer] Chrome do sistema: ${found}`);
+      return found;
+    }
+  }
+
+  console.error(
+    '[Puppeteer] Chrome NÃO ENCONTRADO em nenhum path. Instale via "npx puppeteer browsers install chrome" ou defina PUPPETEER_EXECUTABLE_PATH.',
+  );
   return null;
 };
 
@@ -1381,7 +1485,13 @@ const uploadAutentique = async (pdfBuffer, document, signers) => {
 router.post(
   '/termo-credito',
   asyncHandler(async (req, res) => {
-    const { fiscalNumber, phone: phoneOverride } = req.body;
+    const {
+      fiscalNumber,
+      phone: phoneOverride,
+      accountId,         // UUID da conta WhatsApp (whatsapp_accounts) — Meta Cloud API
+      templateName,      // Nome do template aprovado (Meta) — opcional
+      templateLanguage,  // Código do idioma (default: pt_BR)
+    } = req.body;
 
     // ── 1. Validação ──────────────────────────────────────────────────────────
     if (!fiscalNumber) {
@@ -1539,10 +1649,15 @@ router.post(
     const pdfBuffer = await gerarTermoPdf(cliente);
     console.log(`✅ [TermoCredito] PDF gerado (${pdfBuffer.length} bytes)`);
 
-    // ── 5. Envia para Autentique ──────────────────────────────────────────────
+    // ── 5. Envia para Autentique (SEM delivery WhatsApp do Autentique) ────────
+    // Antes: usava `DELIVERY_METHOD_WHATSAPP` do Autentique pra enviar o link
+    //        de assinatura — ficava preso ao número do Autentique.
+    // Agora: cria documento com delivery EMAIL (placeholder/skip) e pega o
+    //        link de assinatura pra enviar via Meta WhatsApp oficial usando
+    //        a conta escolhida em `whatsapp_accounts` (param accountId).
     const documentPayload = {
       name: `Termo de Crédito — ${cliente.name}`,
-      message: `Olá ${cliente.name.split(' ')[0]}, segue o Termo de Crédito da Crosby para sua assinatura. Por favor leia o documento e assine eletronicamente.`,
+      message: `Olá ${cliente.name.split(' ')[0]}, segue o Termo de Crédito da Crosby para sua assinatura.`,
       refusable: false,
       new_signature_style: true,
       ignore_cpf: false,
@@ -1552,12 +1667,22 @@ router.post(
       },
     };
 
+    // Cliente sem delivery method WhatsApp do Autentique (envio será via Meta)
+    const clienteEmail =
+      (cliente.emails || []).find((e) => e.isDefault)?.email ||
+      (cliente.emails || [])[0]?.email ||
+      null;
+
     const signersPayload = [
       {
         // Signatário 1: cliente
         name: cliente.name,
-        phone: whatsappPhone,
-        delivery_method: 'DELIVERY_METHOD_WHATSAPP',
+        ...(clienteEmail ? { email: clienteEmail } : { phone: whatsappPhone }),
+        // Se tem email, usa email. Senão, usa whatsapp DO AUTENTIQUE como
+        // fallback (caso conta Meta não esteja configurada/falhe).
+        delivery_method: clienteEmail
+          ? 'DELIVERY_METHOD_EMAIL'
+          : 'DELIVERY_METHOD_WHATSAPP',
         action: 'SIGN',
         configs: {
           cpf: clean.length === 11 ? clean : undefined,
@@ -1576,7 +1701,7 @@ router.post(
     ];
 
     console.log(
-      `📨 [TermoCredito] Enviando para Autentique → WhatsApp ${whatsappPhone}...`,
+      `📨 [TermoCredito] Criando documento na Autentique (delivery: ${signersPayload[0].delivery_method}, accountId Meta: ${accountId || 'NENHUM — Autentique vai enviar'})...`,
     );
 
     let docCriado;
@@ -1606,7 +1731,94 @@ router.post(
       `✅ [TermoCredito] Documento criado na Autentique: ${docCriado?.id}`,
     );
 
-    // ── 6. Salva no banco (bluecred_contratos) ────────────────────────────────
+    // ── 6. Envia o link via Meta WhatsApp oficial (se accountId fornecido) ────
+    // Pega o link de assinatura do cliente (1º signatário)
+    const clienteSigner = (docCriado?.signatures || []).find(
+      (s) => s.name === cliente.name,
+    ) || docCriado?.signatures?.[0];
+    const linkAssinatura =
+      clienteSigner?.link?.short_link ||
+      `https://app.autentique.com.br/assinar/${clienteSigner?.public_id}`;
+
+    let metaResult = null;
+    let metaError = null;
+    if (accountId) {
+      try {
+        // Busca conta Meta no Supabase
+        const { data: account, error: accErr } = await supabase
+          .from('whatsapp_accounts')
+          .select('*')
+          .eq('id', accountId)
+          .single();
+        if (accErr || !account) {
+          throw new Error(`Conta Meta não encontrada (id=${accountId})`);
+        }
+
+        const toNumber = whatsappPhone.replace(/^\+/, ''); // Meta API quer sem '+'
+        const META_GRAPH_BASE = 'https://graph.facebook.com/v22.0';
+        let metaBody;
+
+        if (templateName) {
+          // Envia via template (com 1 variável = link de assinatura)
+          metaBody = {
+            messaging_product: 'whatsapp',
+            to: toNumber,
+            type: 'template',
+            template: {
+              name: templateName,
+              language: { code: templateLanguage || 'pt_BR' },
+              components: [
+                {
+                  type: 'body',
+                  parameters: [
+                    { type: 'text', text: cliente.name.split(' ')[0] },
+                    { type: 'text', text: linkAssinatura },
+                  ],
+                },
+              ],
+            },
+          };
+        } else {
+          // Envia mensagem de texto (só funciona se janela 24h já aberta)
+          metaBody = {
+            messaging_product: 'whatsapp',
+            to: toNumber,
+            type: 'text',
+            text: {
+              body: `Olá ${cliente.name.split(' ')[0]}! 👋\n\nSegue o *Termo de Crédito Crosby* pra sua assinatura eletrônica:\n\n${linkAssinatura}\n\nQualquer dúvida estamos à disposição.`,
+            },
+          };
+        }
+
+        const metaResp = await axios.post(
+          `${META_GRAPH_BASE}/${account.phone_id}/messages`,
+          metaBody,
+          {
+            headers: {
+              Authorization: `Bearer ${account.access_token}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000,
+          },
+        );
+        metaResult = {
+          account_id: account.id,
+          account_name: account.name,
+          message_id: metaResp.data?.messages?.[0]?.id,
+          to: toNumber,
+        };
+        console.log(
+          `📲 [TermoCredito] Enviado via Meta WhatsApp (${account.name}): msg_id=${metaResult.message_id}`,
+        );
+      } catch (err) {
+        metaError = err.response?.data?.error?.message || err.message;
+        console.warn(
+          `⚠️ [TermoCredito] Falha ao enviar via Meta WhatsApp: ${metaError}`,
+        );
+      }
+    }
+
+    // ── 7. Salva no banco (bluecred_contratos) ────────────────────────────────
     try {
       await supabase.from('bluecred_contratos').insert({
         autentique_doc_id: docCriado.id,
@@ -1619,12 +1831,17 @@ router.post(
         assinaturas: [],
       });
     } catch (dbErr) {
-      // Não bloqueia a resposta — apenas loga
       console.error(
         '⚠️ [TermoCredito] Falha ao salvar no banco:',
         dbErr.message,
       );
     }
+
+    const successMsg = accountId && metaResult
+      ? `Termo de Crédito enviado para ${cliente.name} via Meta WhatsApp "${metaResult.account_name}" (${whatsappPhone})`
+      : accountId && metaError
+        ? `Documento criado na Autentique. Meta WhatsApp falhou: ${metaError}. Use o link de assinatura.`
+        : `Termo de Crédito enviado para ${cliente.name} via Autentique (${whatsappPhone})`;
 
     successResponse(
       res,
@@ -1634,9 +1851,13 @@ router.post(
           name: cliente.name,
           cpf: clean,
           whatsappPhone,
+          email: clienteEmail,
         },
+        meta: metaResult,
+        meta_error: metaError,
+        link_assinatura: linkAssinatura,
       },
-      `Termo de Crédito enviado para ${cliente.name} via WhatsApp (${whatsappPhone})`,
+      successMsg,
     );
   }),
 );
@@ -1685,6 +1906,45 @@ const QUERY_DOC_STATUS = `
     }
   }
 `;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/autentique/bluecred/count?dataInicio=YYYY-MM-DD&dataFim=YYYY-MM-DD
+// Retorna contagem de Bluecards enviados no período + breakdown por status.
+// Usado pelo card "Bluecard" da página Faturamento por Canal.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get(
+  '/bluecred/count',
+  asyncHandler(async (req, res) => {
+    const { dataInicio, dataFim } = req.query;
+
+    let query = supabase
+      .from('bluecred_contratos')
+      .select('status, created_at', { count: 'exact' });
+
+    if (dataInicio) {
+      query = query.gte('created_at', `${dataInicio}T00:00:00`);
+    }
+    if (dataFim) {
+      query = query.lte('created_at', `${dataFim}T23:59:59`);
+    }
+
+    const { data, count, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const por_status = (data || []).reduce((acc, row) => {
+      const s = row.status || 'pendente';
+      acc[s] = (acc[s] || 0) + 1;
+      return acc;
+    }, {});
+
+    res.set('Cache-Control', 'no-store');
+    successResponse(
+      res,
+      { total: count ?? (data?.length || 0), por_status, dataInicio: dataInicio || null, dataFim: dataFim || null },
+      'Contagem Bluecred OK',
+    );
+  }),
+);
 
 router.get(
   '/bluecred/contratos',
