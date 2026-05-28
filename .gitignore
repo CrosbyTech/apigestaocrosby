@@ -9,6 +9,7 @@ uploads/
 
 # ... outras regras existentes ...
 .cache/
+.erp_cache.json
 
 # Logs
 *.log
