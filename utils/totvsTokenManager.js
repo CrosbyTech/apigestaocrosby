@@ -26,13 +26,39 @@ let tokenExpiresAt = null;
 let _generateInFlight = null;
 // Throttle: se a última falhou, espera N ms antes da próxima tentativa
 let _lastGenFailedAt = 0;
-const _GEN_RETRY_BACKOFF_MS = 10 * 1000;
+const _GEN_RETRY_BACKOFF_MS = 60 * 1000; // 60s (era 10s — agressivo demais)
+
+// ─── CIRCUIT BREAKER de bloqueio ─────────────────────────────────────────────
+// Quando o TOTVS responde "ApiUser ... is Blocked", PARAR de tentar autenticar
+// por um período. Cada tentativa falhada RENOVA o bloqueio no servidor TOTVS —
+// então a única forma de liberar é ficar SEM tentar. Sem isso, o sistema entra
+// em espiral (38 tentativas em minutos) e o bloqueio nunca expira.
+let _blockedUntil = 0;
+const _BLOCK_COOLDOWN_MS = 20 * 60 * 1000; // 20 min sem nenhuma tentativa
+let _blockLogged = false;
+
+export const isTotvsBlocked = () => Date.now() < _blockedUntil;
+export const getBlockInfo = () =>
+  _blockedUntil > Date.now()
+    ? { blocked: true, retryInSeconds: Math.ceil((_blockedUntil - Date.now()) / 1000) }
+    : { blocked: false };
 
 /**
  * Gera um novo token de autenticação na API TOTVS
  * @returns {Promise<Object>} Token e informações relacionadas
  */
 export const generateToken = async () => {
+  // CIRCUIT BREAKER: se está em cooldown de bloqueio, NÃO tenta autenticar.
+  if (Date.now() < _blockedUntil) {
+    const waitS = Math.ceil((_blockedUntil - Date.now()) / 1000);
+    if (!_blockLogged) {
+      logger.warn(
+        `🚫 TOTVS bloqueou o usuário — circuit breaker ATIVO. Sem tentativas de auth por ${Math.ceil(waitS / 60)} min (deixa o bloqueio expirar).`,
+      );
+      _blockLogged = true;
+    }
+    throw new Error(`TOTVS_BLOCKED: aguardando cooldown (${waitS}s restantes)`);
+  }
   // Se já tem geração em andamento, aguarda ela em vez de criar outra
   if (_generateInFlight) {
     logger.info('🔒 Já existe geração de token em andamento — aguardando');
@@ -93,6 +119,8 @@ async function _doGenerateToken() {
     currentToken = tokenData;
     tokenExpiresAt = new Date(Date.now() + tokenData.expires_in * 1000);
     _lastGenFailedAt = 0; // reset backoff em sucesso
+    _blockedUntil = 0; // reset circuit breaker em sucesso
+    _blockLogged = false;
     recordAuth(true);
 
     logger.info('✅ Token TOTVS gerado com sucesso');
@@ -122,6 +150,15 @@ async function _doGenerateToken() {
         ? error.response.data[0].message
         : error.message;
     recordAuth(false, reason);
+
+    // CIRCUIT BREAKER: se foi bloqueio, ativa cooldown longo (para de tentar).
+    if (/blocked/i.test(String(reason))) {
+      _blockedUntil = Date.now() + _BLOCK_COOLDOWN_MS;
+      _blockLogged = false;
+      logger.error(
+        `🚫 Usuário TOTVS BLOQUEADO ("${reason}"). Circuit breaker: sem tentativas por ${_BLOCK_COOLDOWN_MS / 60000} min.`,
+      );
+    }
 
     throw error;
   }

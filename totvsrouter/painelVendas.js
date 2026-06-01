@@ -731,6 +731,102 @@ router.post(
 );
 
 // =============================================================================
+// POST /api/totvs/sale-panel/sellers-canal
+// Agrega o faturamento por vendedor (campo seller_sale_value do painel oficial
+// TOTVS /sale-panel/v2/sellers/search) somando as filiais informadas, com filtro
+// de operations. É EXATAMENTE a fonte do relatório "Faturamento por Vendedor"
+// do TOTVS (Vl. Faturado), líquido. Consulta leve (painel agregado, sem varrer
+// itens). Usado pelo Forecast (tabela por vendedor semanal/mensal).
+// Body: { branchs: number[], operations?: number[], datemin, datemax }
+// Retorna: { sellers: [{ seller_code, seller_name, value }], total }
+// =============================================================================
+router.post(
+  '/sale-panel/sellers-canal',
+  asyncHandler(async (req, res) => {
+    const { branchs, operations, datemin, datemax } = req.body || {};
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+    const branchList = Array.isArray(branchs) ? branchs.filter(Boolean) : [];
+    if (branchList.length === 0) {
+      return errorResponse(res, 'branchs obrigatório (array de filiais)', 400);
+    }
+    const tokenData = await getToken();
+    let token = tokenData?.access_token;
+    if (!token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    const SELLERS_URL = `${TOTVS_BASE_URL}/sale-panel/v2/sellers/search`;
+    const opList =
+      Array.isArray(operations) && operations.length > 0
+        ? operations.filter(Boolean)
+        : null;
+    const axiosCfg = (t) => ({
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${t}`,
+      },
+      httpsAgent,
+      httpAgent,
+      timeout: 60000,
+    });
+    const fetchBranch = async (bc) => {
+      const body = { branchs: [bc], datemin, datemax };
+      if (opList) body.operations = opList;
+      try {
+        const r = await axios.post(SELLERS_URL, body, axiosCfg(token));
+        return r.data?.dataRow || [];
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const nt = await getToken(true);
+          token = nt.access_token;
+          try {
+            const r2 = await axios.post(SELLERS_URL, body, axiosCfg(token));
+            return r2.data?.dataRow || [];
+          } catch (e2) {
+            console.warn(`[sellers-canal] filial ${bc} (retry): ${e2.message}`);
+            return [];
+          }
+        }
+        console.warn(`[sellers-canal] filial ${bc}: ${err.message}`);
+        return [];
+      }
+    };
+
+    const bySeller = new Map();
+    const BATCH = 5;
+    for (let i = 0; i < branchList.length; i += BATCH) {
+      const slice = branchList.slice(i, i + BATCH);
+      const rows = await Promise.all(slice.map(fetchBranch));
+      for (const dataRow of rows) {
+        for (const s of dataRow) {
+          const code = String(s.seller_code ?? '');
+          if (!code) continue;
+          const val = Number(s.seller_sale_value || 0);
+          const prev = bySeller.get(code) || {
+            seller_code: code,
+            seller_name: s.seller_name || '',
+            value: 0,
+          };
+          prev.value += val;
+          if (!prev.seller_name && s.seller_name) prev.seller_name = s.seller_name;
+          bySeller.set(code, prev);
+        }
+      }
+    }
+
+    const sellers = [...bySeller.values()]
+      .map((s) => ({ ...s, value: Math.round(s.value * 100) / 100 }))
+      .filter((s) => s.value > 0)
+      .sort((a, b) => b.value - a.value);
+    const total = Math.round(sellers.reduce((a, s) => a + s.value, 0) * 100) / 100;
+
+    return successResponse(res, { sellers, total });
+  }),
+);
+
+// =============================================================================
 // POST /api/totvs/seller-panel/totals
 // Proxy direto pra TOTVS Analytics v2: /seller-panel/totals/search
 // Retorna faturamento agregado por vendedor (TM, PA, PMPV) já calculado.

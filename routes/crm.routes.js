@@ -2696,6 +2696,10 @@ router.post(
         'MISSING_DATES',
       );
     }
+    // lite=true → propaga pra /canal-totals (pula credev em payments, ganho
+    // ENORME de performance e zero risco de bloqueio). Líquido aproximado.
+    const liteMode =
+      req.query?.lite === 'true' || req.body?.lite === true;
     const canais = [
       'varejo',
       'revenda',
@@ -2719,7 +2723,7 @@ router.post(
       const batchResults = await Promise.all(
         batch.map(async (modulo) => {
           try {
-            const ct = await getCanalTotalsCached(modulo, datemin, datemax);
+            const ct = await getCanalTotalsCached(modulo, datemin, datemax, { lite: liteMode });
             return { modulo, ct };
           } catch (err) {
             console.warn(`[canais-all ${modulo}] erro: ${err.message}`);
@@ -8215,6 +8219,11 @@ const CANAL_CONFIG = {
     operations: [7235, 7241, 9127],
     sellers: [21],
     allowedSellers: [21],
+    // ─── Filtro por UF do cliente ────────────────────────────────────────
+    // Só conta como inbound_rafael se cliente é dos estados MA, BA ou MG.
+    // NFs de outros estados vão pro canal multimarcas normal (spillover).
+    // Implementado via Supabase pes_pessoa + notas_fiscais — não toca TOTVS.
+    clientStatesAllow: ['MA', 'BA', 'MG'],
     devolucaoOps: [7244, 7245, 1214],
     devolucaoBranchs: [99, 2, 95, 87, 88, 90, 94, 97],
     // ─── Whitelist manual de transações ─────────────────────────────────
@@ -8632,6 +8641,9 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
 
   // Itera NFs e atribui totalValue ao dealer principal
   const itensQtyByDealer = {};
+  // DIAGNÓSTICO: rateio por vendedor (proporcional ao netValue dos itens de cada
+  // dealer na NF), pra comparar com a atribuição atual (NF inteira → principal).
+  const rateioByDealer = {};
   const manualTxAttributed = new Set();
   for (const nf of invItems) {
     if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
@@ -8711,6 +8723,34 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
     merged[k].invoice_qty += 1;
     merged[k].invoice_qty_gross += 1;
     merged[k].itens_qty_gross += nfQty;
+
+    // ─── DIAGNÓSTICO: rateio por vendedor ────────────────────────────────
+    // Distribui o total da NF proporcional ao netValue de cada dealer (item).
+    // NFs forçadas (override/manualTx) vão 100% pro seller forçado, igual main.
+    if (
+      manualTxAttributed.has(overrideKey) ||
+      manualOverrideMap.has(overrideKey)
+    ) {
+      rateioByDealer[k] = (rateioByDealer[k] || 0) + total;
+    } else {
+      const sumNet = Object.values(netByDealer).reduce((a, v) => a + v, 0);
+      if (sumNet > 0) {
+        for (const [dc, nv] of Object.entries(netByDealer)) {
+          const dcNum = Number(dc);
+          if (sellersAllowed.size > 0 && !sellersAllowed.has(dcNum)) continue;
+          if (sellersExcluded.size > 0 && sellersExcluded.has(dcNum)) continue;
+          rateioByDealer[dc] =
+            (rateioByDealer[dc] || 0) + total * (nv / sumNet);
+        }
+      } else {
+        rateioByDealer[k] = (rateioByDealer[k] || 0) + total;
+      }
+    }
+  }
+  // Anexa o rateio (diagnóstico) a cada vendedor já presente em merged
+  for (const k of Object.keys(merged)) {
+    merged[k].invoice_value_rateio =
+      Math.round((rateioByDealer[k] || 0) * 100) / 100;
   }
   // Aplica peças finais por dealer (do itensQtyByDealer)
   for (const [dc, qty] of Object.entries(itensQtyByDealer)) {
@@ -10942,6 +10982,82 @@ async function computeCanalTotalsFromSupabase({ datemin, datemax, cfg }) {
 }
 
 // ⚠️ TOTVS bloqueou por queries pesadas — aumentado mais.
+// ═══════════════════════════════════════════════════════════════════════════
+// Split UF de Rafael (inbound_rafael) — só conta como Rafael NFs onde cliente
+// é MA/BA/MG. NFs de outros estados vão pra multimarcas. Helper usa SOMENTE
+// Supabase (notas_fiscais + pes_pessoa) — não toca TOTVS, leve por design.
+// ═══════════════════════════════════════════════════════════════════════════
+const RAFAEL_UF_CACHE = new Map();
+const RAFAEL_UF_CACHE_TTL_REALTIME = 60 * 60 * 1000; // 1h pra hoje
+const RAFAEL_UF_CACHE_TTL_PAST = 24 * 60 * 60 * 1000; // 24h pra passado
+const RAFAEL_OPS = [7235, 7241, 9127];
+const RAFAEL_DEALER = 21;
+const RAFAEL_BRANCH = 99;
+const RAFAEL_UF_ALLOWED = new Set(['MA', 'BA', 'MG']);
+
+async function getRafaelUFSplit(datemin, datemax) {
+  const cacheKey = `${datemin}|${datemax}`;
+  const today = new Date().toISOString().slice(0, 10);
+  const isRealtime = String(datemax) >= today;
+  const ttl = isRealtime ? RAFAEL_UF_CACHE_TTL_REALTIME : RAFAEL_UF_CACHE_TTL_PAST;
+  const cached = RAFAEL_UF_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ttl) return cached.data;
+
+  // 1) NFs de Rafael no período via Supabase fiscal
+  const { data: nfs, error } = await supabaseFiscal
+    .from('notas_fiscais')
+    .select('person_code, total_value, invoice_status')
+    .eq('operation_type', 'Output')
+    .gte('issue_date', datemin)
+    .lte('issue_date', datemax)
+    .eq('branch_code', RAFAEL_BRANCH)
+    .eq('dealer_code', RAFAEL_DEALER)
+    .in('operation_code', RAFAEL_OPS);
+  if (error) {
+    console.warn(`[rafael-uf-split] Supabase NFs erro: ${error.message}`);
+    return { inMatching: 0, outOfState: 0, breakdown: { matching: 0, others: 0, unknown: 0 } };
+  }
+  const valid = (nfs || []).filter(
+    (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
+  );
+
+  // 2) Lookup UF dos personCodes via Supabase main (pes_pessoa)
+  const codes = [...new Set(valid.map((n) => Number(n.person_code)))];
+  const ufMap = new Map();
+  const CHUNK = 800;
+  for (let i = 0; i < codes.length; i += CHUNK) {
+    const batch = codes.slice(i, i + CHUNK);
+    const { data: pessoas } = await supabase
+      .from('pes_pessoa')
+      .select('code, uf')
+      .in('code', batch);
+    for (const p of pessoas || []) {
+      if (p?.uf) ufMap.set(Number(p.code), String(p.uf).toUpperCase().trim());
+    }
+  }
+
+  // 3) Split por UF
+  let inMatching = 0, outOfState = 0, unknown = 0;
+  for (const nf of valid) {
+    const uf = ufMap.get(Number(nf.person_code));
+    const val = Number(nf.total_value || 0);
+    if (uf && RAFAEL_UF_ALLOWED.has(uf)) inMatching += val;
+    else if (uf) outOfState += val;
+    else unknown += val; // sem UF cadastrada → trata como out-of-state (vai pro multimarcas)
+  }
+  const result = {
+    inMatching,
+    outOfState: outOfState + unknown,
+    breakdown: { matching: inMatching, others: outOfState, unknown },
+    total_nfs: valid.length,
+  };
+  RAFAEL_UF_CACHE.set(cacheKey, { data: result, ts: Date.now() });
+  console.log(
+    `[rafael-uf-split] ${datemin}~${datemax}: ${valid.length} NFs → MA/BA/MG R$${inMatching.toFixed(2)} | outros R$${outOfState.toFixed(2)} | semUF R$${unknown.toFixed(2)}`,
+  );
+  return result;
+}
+
 const CANAL_TOTALS_CACHE = new Map();
 const CANAL_TOTALS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h pra datas passadas (era 12h)
 const CANAL_TOTALS_CACHE_TTL_REALTIME = 60 * 60 * 1000; // 1h pra mês corrente (era 30min)
@@ -10959,8 +11075,9 @@ const CANAL_TOTALS_INFLIGHT = new Map();
 // trabalho — os outros esperam o mesmo result. Evita N queries TOTVS
 // paralelas pra mesma combinação (caso típico: Painel Competição + Forecast
 // rodando ao mesmo tempo no mesmo período).
-async function getCanalTotalsCached(modulo, datemin, datemax) {
-  const cacheKey = `${modulo}|${datemin}|${datemax}`;
+async function getCanalTotalsCached(modulo, datemin, datemax, opts = {}) {
+  const lite = !!opts.lite;
+  const cacheKey = `${modulo}|${datemin}|${datemax}${lite ? '|lite' : ''}`;
   const cached = CANAL_TOTALS_CACHE.get(cacheKey);
   // TTL alinhado com o endpoint /canal-totals: 1h pra realtime, 24h passado.
   // Sem isso, helper considerava cache fresh até 24h mesmo em mês corrente —
@@ -10994,8 +11111,8 @@ async function getCanalTotalsCached(modulo, datemin, datemax) {
   try {
     const port = process.env.PORT || 4100;
     const r = await axios.post(
-      `http://localhost:${port}/api/crm/canal-totals`,
-      { datemin, datemax, modulo },
+      `http://localhost:${port}/api/crm/canal-totals${lite ? '?lite=true' : ''}`,
+      { datemin, datemax, modulo, lite },
       {
         headers: { 'Content-Type': 'application/json' },
         timeout: 600000,
@@ -11030,7 +11147,16 @@ router.post(
     }
     // Cache hit — TTL menor (30s) quando datemax inclui hoje (tempo real),
     // 5 min para datas passadas. Aceita `?nocache=true` para forçar refresh.
-    const cacheKey = `${modulo}|${datemin}|${datemax}`;
+    // `?lite=true` pula PASS 0 (credev em payments — full scan FIS_NFITEMPROD),
+    // calcula líquido aproximado = bruto − returns − exclusão (sem credev em
+    // payments). Resposta marca mode='lite'. Cache key separado.
+    // EXCEÇÃO: 'franquia' SEMPRE roda full (regra do gestor: tem que ser
+    // líquido — bruto − credev − Recife Mall). Mesmo se cliente pedir lite.
+    const FORCE_FULL_CANAIS = new Set(['franquia']);
+    const liteRequested =
+      req.query?.lite === 'true' || req.body?.lite === true;
+    const liteMode = liteRequested && !FORCE_FULL_CANAIS.has(req.body?.modulo);
+    const cacheKey = `${modulo}|${datemin}|${datemax}${liteMode ? '|lite' : ''}`;
     const noCache = req.query?.nocache === 'true' || req.body?.nocache === true;
     const todayIso = new Date().toISOString().split('T')[0];
     const isRealtime = datemax >= todayIso;
@@ -11143,6 +11269,45 @@ router.post(
           console.warn(
             `[canal-totals ${modulo}] excludeSellers falhou: ${err.message}`,
           );
+        }
+      }
+
+      // ─── Override UF do Rafael (inbound_rafael) ────────────────────────
+      // Filtra grossValue do Rafael (21) apenas pra clientes MA/BA/MG.
+      // NFs de outros estados saem desse canal (entram em multimarcas).
+      // Usa SOMENTE Supabase — não toca TOTVS.
+      if (modulo === 'inbound_rafael' && Array.isArray(cfg.clientStatesAllow)) {
+        try {
+          const split = await getRafaelUFSplit(datemin, datemax);
+          const valorAntes = grossValue;
+          grossValue = Math.round(split.inMatching * 100) / 100;
+          // Mantém os qty proporcionais (aproximação) já que sale-panel não tem por UF
+          if (valorAntes > 0) {
+            const ratio = grossValue / valorAntes;
+            grossQty = Math.round(grossQty * ratio);
+            grossItens = Math.round(grossItens * ratio);
+          }
+          console.log(
+            `[canal-totals inbound_rafael] UF filter MA/BA/MG: R$${valorAntes.toFixed(2)} → R$${grossValue.toFixed(2)} (spillover pra multimarcas: R$${split.outOfState.toFixed(2)})`,
+          );
+        } catch (err) {
+          console.warn(`[canal-totals inbound_rafael] UF split falhou: ${err.message}`);
+        }
+      }
+      // ─── Spillover Rafael → multimarcas ─────────────────────────────────
+      // NFs do Rafael de clientes FORA de MA/BA/MG entram no multimarcas.
+      // Adiciona aqui pra somar ao bruto do canal multimarcas.
+      if (modulo === 'multimarcas') {
+        try {
+          const split = await getRafaelUFSplit(datemin, datemax);
+          if (split.outOfState > 0) {
+            grossValue += split.outOfState;
+            console.log(
+              `[canal-totals multimarcas] +R$${split.outOfState.toFixed(2)} spillover do Rafael (UF fora de MA/BA/MG)`,
+            );
+          }
+        } catch (err) {
+          console.warn(`[canal-totals multimarcas] spillover Rafael falhou: ${err.message}`);
         }
       }
 
@@ -11637,8 +11802,10 @@ router.post(
       // PASS 2 pegaria devoluções não-canal.
       const skipDevolPass2 = !!cfg.skipDevolPass2;
       try {
-        if (accessToken && !skipDevol) {
+        if (accessToken && !skipDevol && !liteMode) {
           // PASS 0: invoices — credev em payments (filtrado por dealer permitido)
+          // ⚠️ EXPENSIVE: full FIS_NFITEMPROD scan, expand=payments,items.
+          // Pulado em modo lite (cliente aceita líquido aproximado).
           const invoiceItems = await fetchInvoicesPages();
           for (const nf of invoiceItems) {
             if (
@@ -11710,7 +11877,27 @@ router.post(
         );
       }
 
-      const devolucao_value = devolucao_credev + devolucao_returns;
+      // ─── CREDEV/DEVOLUÇÃO = ADIANTAMENTO (lançado errado no sistema) ─────
+      // Em showroom/novidadesfranquia NÃO existe devolução real: o que
+      // aparece como credev/return é ADIANTAMENTO/lançamento de cliente
+      // incorretamente atribuído. NÃO deve abater o faturamento — bruto é o
+      // faturamento correto. Alinhado com /faturamento-por-segmento
+      // (CANAIS_CREDEV_ADIANTAMENTO mantém bruto), sem isso a aba "Métricas
+      // por Canal" mostra valores divergentes entre tabela e % atingido.
+      const CANAIS_CREDEV_ADIANTAMENTO_LOCAL = new Set([
+        'showroom',
+        'novidadesfranquia',
+      ]);
+      const ehAdiantamento = CANAIS_CREDEV_ADIANTAMENTO_LOCAL.has(modulo);
+      const credev_subtrair = ehAdiantamento ? 0 : devolucao_credev;
+      const returns_subtrair = ehAdiantamento ? 0 : devolucao_returns;
+      if (ehAdiantamento && (devolucao_credev > 0 || devolucao_returns > 0)) {
+        console.log(
+          `[canal-totals ${modulo}] credev R$${devolucao_credev.toFixed(2)} + returns R$${devolucao_returns.toFixed(2)} são ADIANTAMENTO/lançamento errado — NÃO subtraídos (mantém bruto)`,
+        );
+      }
+
+      const devolucao_value = credev_subtrair + returns_subtrair;
       const devolucao_qty = 0; // qtd não computada nesse modo (usa contagem da gross)
       const devolucao_itens = 0;
 
@@ -11770,9 +11957,11 @@ router.post(
         devolucao_returns: Math.round(devolucao_returns * 100) / 100,
         franquia_excluida: Math.round(franquia_excluida * 100) / 100,
         liquid_floored: liq_floored, // true se líquido ≤ 0 e expomos bruto (UI pode mostrar nota)
+        mode: liteMode ? 'lite' : 'full', // lite = sem credev em payments (rápido); full = oficial completo
         per_seller,
-        source:
-          'totvs_gross + invoices_credev + movement_returns (analytics-aligned)',
+        source: liteMode
+          ? 'totvs_gross + movement_returns (LITE — sem credev em payments)'
+          : 'totvs_gross + invoices_credev + movement_returns (analytics-aligned)',
         branchs_used: cfg.branchs,
         ops_used: cfg.operations,
         sellers_used: cfg.sellers,
@@ -12564,9 +12753,14 @@ router.post(
         'MISSING_DATES',
       );
     }
+    // lite=true pula o cálculo de credev em payments (PASS 0 do canal-totals,
+    // full scan FIS_NFITEMPROD). Resposta marca mode='lite' e líquido fica
+    // levemente inflado (sem subtrair credev em payments). Cache key separado.
+    const liteMode =
+      req.query?.lite === 'true' || req.body?.lite === true;
 
-    // Cache por (datemin|datemax) — TTL maior para datas já fechadas
-    const cacheKey = `${datemin}|${datemax}`;
+    // Cache por (datemin|datemax|lite) — TTL maior para datas já fechadas
+    const cacheKey = `${datemin}|${datemax}${liteMode ? '|lite' : ''}`;
     const today = new Date().toISOString().split('T')[0];
     const cacheTTL = datemax < today ? FATSEG_CACHE_TTL_PAST : FATSEG_CACHE_TTL;
     const cached = FATSEG_CACHE.get(cacheKey);
@@ -12969,7 +13163,41 @@ router.post(
               console.warn(`[fat-seg override ${mod}] canal-totals null — mantendo per-NF`);
               return [mod, null];
             }
-            const valor = Number(ct.invoice_value);
+            // ─── Canais com vendedores confiáveis (B2R/B2M + inbound) ──────────
+            // O líquido CORRETO é a SOMA do líquido por vendedor (bruto −
+            // credev_value), que usa o credev do Supabase fiscal — a MESMA fonte
+            // do painel de Vendedores. O ct.invoice_value usa o credev de
+            // TOTVS payments, que às vezes vem 0 e faz o total do canal divergir
+            // da soma dos vendedores. Reconcilia os dois painéis. Sem custo TOTVS
+            // extra: per_seller já vem no objeto canal-totals cacheado.
+            const USA_PER_SELLER_LIQUIDO = new Set([
+              'revenda',
+              'multimarcas',
+              'inbound_rafael',
+              'inbound_david',
+            ]);
+            let valor;
+            if (
+              USA_PER_SELLER_LIQUIDO.has(mod) &&
+              Array.isArray(ct.per_seller) &&
+              ct.per_seller.length > 0
+            ) {
+              valor = ct.per_seller.reduce((acc, ps) => {
+                const bruto =
+                  Number(
+                    ps.invoice_value ??
+                      ps.faturamento_liquido ??
+                      ps.liquido ??
+                      ps.total ??
+                      0,
+                  ) || 0;
+                const credev = Number(ps.credev_value || 0);
+                return acc + Math.max(0, bruto - credev);
+              }, 0);
+              valor = Math.round(valor * 100) / 100;
+            } else {
+              valor = Number(ct.invoice_value);
+            }
             if (!Number.isFinite(valor)) return [mod, null];
             // Anti-bug: se canal-totals retornou exatamente 0 MAS o per-NF
             // (segMap atual) tem valor > 50k, é suspeito (provavelmente
@@ -13045,8 +13273,17 @@ router.post(
     // Canais que SEMPRE têm credev em períodos do mês corrente (heurística):
     // se canal-totals retornar credev=0 mas gross > 50k, é suspeito (provavelmente
     // o erp-data credev ainda está carregando em BG) → marca como incompleto.
-    const CANAIS_COM_CREDEV_TIPICO = new Set([
-      'franquia',
+    // showroom/novidades saíram daqui: agora são BRUTO por definição (credev =
+    // adiantamento, não subtraído), então credev=0 não indica carga incompleta.
+    const CANAIS_COM_CREDEV_TIPICO = new Set(['franquia']);
+
+    // ─── CREDEV = ADIANTAMENTO (lançado errado no sistema) ───────────────────
+    // Em fábrica/showroom/novidades NÃO existe devolução real: o que aparece
+    // como credev é um ADIANTAMENTO de cliente lançado incorretamente. Logo
+    // NÃO deve abater o faturamento — o valor BRUTO é o faturamento correto.
+    // Ainda assim registramos o credev em credev_por_segmento para alimentar a
+    // tag informativa "Adiantamento" no frontend (FaturamentoCanal).
+    const CANAIS_CREDEV_ADIANTAMENTO = new Set([
       'showroom',
       'novidadesfranquia',
     ]);
@@ -13089,7 +13326,34 @@ router.post(
           new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
         ]);
 
-      const credevResults = await Promise.all(
+      // lite=true → pula o cálculo de credev em payments (PASS 0). Bruto fica
+      // como líquido aproximado — sem o full scan FIS_NFITEMPROD que bloqueia.
+      // EXCEÇÃO: 'franquia' SEMPRE roda credev (regra do gestor: franquia
+      // tem credev real, precisa ficar líquido).
+      const FORCE_FULL_CREDEV = new Set(['franquia']);
+      const credevResults = liteMode
+        ? await Promise.all(
+            canaisPassOnly.map(async (canal) => {
+              if (!FORCE_FULL_CREDEV.has(canal)) return [canal, 0, true, 0];
+              try {
+                const ct = await withTimeout(
+                  getCanalTotalsCached(canal, datemin, datemax, { lite: false }),
+                  300000,
+                );
+                if (!ct || typeof ct !== 'object') return [canal, 0, false, 0];
+                return [
+                  canal,
+                  Number(ct?.devolucao_credev || 0),
+                  true,
+                  Number(ct?.gross_invoice_value || 0),
+                ];
+              } catch (e) {
+                console.warn(`[fat-seg credev ${canal} forced-full] ${e.message}`);
+                return [canal, 0, false, 0];
+              }
+            }),
+          )
+        : await Promise.all(
         canaisPassOnly.map(async (canal) => {
           try {
             const ct = await withTimeout(getCanalTotalsCached(canal, datemin, datemax), 300000);
@@ -13136,6 +13400,16 @@ router.post(
           // Aplica overrides: reduz o credev a subtrair pelo total de overrides
           const credevOverridden = credevOverridesByCanal.get(canal) || 0;
           const credevEffective = Math.max(0, credevPag - credevOverridden);
+          // ─── ADIANTAMENTO: NÃO subtrai ──────────────────────────────────
+          // showroom/novidades: o credev é adiantamento lançado errado, então
+          // o faturamento BRUTO permanece. Só registra o valor para a tag.
+          if (CANAIS_CREDEV_ADIANTAMENTO.has(canal)) {
+            credev_por_segmento[canal] = credevEffective;
+            console.log(
+              `[fat-seg] ${canal} credev R$${credevEffective.toFixed(2)} é ADIANTAMENTO — NÃO subtraído (faturamento bruto mantido R$${(segMap[canal] || 0).toFixed(2)})`,
+            );
+            continue;
+          }
           const before = segMap[canal];
           const afterSubtract = before - credevEffective;
           // Floor em "before * 0.1" (10% do bruto) em vez de zero — evita
@@ -13205,6 +13479,39 @@ router.post(
       await aplicarExclusoesForecast(segMap, datemin, datemax);
     } catch (err) {
       console.warn(`[fat-seg] aplicarExclusoesForecast falhou: ${err.message}`);
+    }
+
+    // ─── SNAPSHOT OFICIAL (override por canal+período) ──────────────────
+    // Quando o cálculo automático diverge do report TOTVS oficial e o gestor
+    // valida manualmente, gravamos o valor oficial em forecast_canal_snapshot
+    // e usamos no lugar do calculado. Aplica APENAS pra fechamento de mês
+    // (period_key derivado de datemin/datemax = mês inteiro).
+    try {
+      // detecta se range é mês inteiro: YYYY-MM-01 → último dia do mês
+      const dminParts = String(datemin).split('-');
+      const dmaxParts = String(datemax).split('-');
+      const sameYM = dminParts[0] === dmaxParts[0] && dminParts[1] === dmaxParts[1];
+      const lastDay = new Date(Number(dminParts[0]), Number(dminParts[1]), 0).getDate();
+      const isMonthRange =
+        sameYM && dminParts[2] === '01' && Number(dmaxParts[2]) === lastDay;
+      if (isMonthRange) {
+        const period_key = `${dminParts[0]}-${dminParts[1]}`;
+        const { data: snaps } = await supabase
+          .from('forecast_canal_snapshot')
+          .select('canal, valor_oficial')
+          .eq('period_type', 'mensal')
+          .eq('period_key', period_key)
+          .eq('ativo', true);
+        for (const s of snaps || []) {
+          const before = segMap[s.canal];
+          segMap[s.canal] = Number(s.valor_oficial);
+          console.log(
+            `[fat-seg] snapshot oficial ${s.canal} ${period_key}: R$${(before || 0).toFixed(2)} → R$${Number(s.valor_oficial).toFixed(2)}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.warn(`[fat-seg] snapshot override falhou: ${err.message}`);
     }
 
     const total = Object.values(segMap).reduce((s, v) => s + v, 0);
@@ -13525,6 +13832,235 @@ router.post(
         500,
         'COMPETICAO_ERROR',
       );
+    }
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/crm/credev-por-vendedor
+//   Credev (vale-troca usado em PAGAMENTO) por vendedor, DIRETO do TOTVS
+//   (fiscal/v2/invoices Output com expand=payments,items). É só o credev — bem
+//   mais leve que o canal-totals inteiro. Atribui ao dealer dos itens da NF.
+//   Cache em memória (1h realtime / 24h passado) + coalescing.
+//   Body: { branchs: number[], operations?: number[], datemin, datemax }
+//   Retorna: { credev: { [seller_code]: valor } }
+// ---------------------------------------------------------------------------
+const CREDEV_VEND_CACHE = new Map();
+const CREDEV_VEND_INFLIGHT = new Map();
+router.post(
+  '/credev-por-vendedor',
+  asyncHandler(async (req, res) => {
+    let { branchs, operations, datemin, datemax, modulo } = req.body || {};
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+    // Atalho: se passou `modulo`, lê branchs/operations do CANAL_CONFIG.
+    // Default tipo = 'payments' pra TODOS os canais — único modo que mantém
+    // o dealer correto (vendedor real, não bucketa no GERAL=50). Confirmado
+    // com relatório TOTVS 0326 (Vendas por Vendedor Financeiro).
+    if (modulo && (!branchs || !branchs.length)) {
+      const cfg = CANAL_CONFIG[modulo];
+      if (cfg) {
+        branchs = cfg.branchs;
+        operations = operations || cfg.operations;
+      }
+    }
+    const branchList = Array.isArray(branchs) ? branchs.map(Number).filter(Boolean) : [];
+    const opList = Array.isArray(operations) ? operations.map(Number).filter(Boolean) : [];
+    // tipo: 'payments' (vale-troca usado em pagamento — varejo/revenda) |
+    //       'returns'  (devolução real / SaleReturns — multimarcas/atacado)
+    const tipo = req.body?.tipo === 'returns' ? 'returns' : 'payments';
+    const cacheKey = `${tipo}|${branchList.join(',')}|${opList.join(',')}|${datemin}|${datemax}`;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const ttl = datemax < todayIso ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+    const wantDetalhe = req.query?.detalhe === 'true' || req.body?.detalhe === true;
+    const cached = CREDEV_VEND_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < ttl && !wantDetalhe) {
+      return successResponse(res, { credev: cached.credev, cached: true });
+    }
+    if (CREDEV_VEND_INFLIGHT.has(cacheKey) && !wantDetalhe) {
+      const result = await CREDEV_VEND_INFLIGHT.get(cacheKey);
+      return successResponse(res, { credev: result.credev, coalesced: true });
+    }
+
+    // ─── DEVOLUÇÃO REAL (SaleReturns) — usado pra multimarcas (atacado) ─────
+    // Em vez de vale-troca em pagamento, subtrai a devolução de mercadoria real
+    // (analytics/fiscal-movement, operationModel=SaleReturns), por sellerCode.
+    // Consulta LEVE (sem expand=items).
+    if (tipo === 'returns') {
+      const _runR = (async () => {
+        const tokenData = await getToken();
+        const accessToken = tokenData?.access_token;
+        if (!accessToken) throw new Error('Token TOTVS indisponível');
+        const DEVOL_OPS = new Set([
+          1202, 1204, 1411, 1410, 2202, 2411, 1950, 21, 7245, 7244, 7240,
+          7790, 1214, 20,
+        ]);
+        const fmEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+        const fetchFm = async (page) =>
+          axios
+            .post(
+              fmEndpoint,
+              {
+                filter: {
+                  branchCodeList: branchList,
+                  startMovementDate: `${datemin}T00:00:00`,
+                  endMovementDate: `${datemax}T23:59:59`,
+                },
+                page,
+                pageSize: 1000,
+              },
+              {
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${accessToken}`,
+                },
+                httpsAgent: totvsHttpsAgent,
+                timeout: 120000,
+              },
+            )
+            .then((r) => r.data)
+            .catch(() => ({ items: [] }));
+        const first = await fetchFm(1);
+        const fmItems = [...(first?.items || [])];
+        const totalPages =
+          first?.totalPages ||
+          (first?.totalItems ? Math.ceil(first.totalItems / 1000) : 1);
+        if (totalPages > 1) {
+          const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+          for (let i = 0; i < rem.length; i += 3) {
+            const r2 = await Promise.all(rem.slice(i, i + 3).map(fetchFm));
+            for (const pd of r2) fmItems.push(...(pd?.items || []));
+          }
+        }
+        const credev = {};
+        const detalhe = [];
+        for (const it of fmItems) {
+          if (it.operationModel !== 'SaleReturns') continue;
+          const op = parseInt(it.operationCode);
+          if (!DEVOL_OPS.has(op)) continue;
+          const v = parseFloat(it.netValue || it.grossValue || 0);
+          if (v <= 0) continue;
+          const sc = parseInt(it.sellerCode);
+          if (!sc) continue;
+          credev[sc] = (credev[sc] || 0) + v;
+          detalhe.push({
+            dealer: sc,
+            invoice: it.transactionCode ?? it.invoiceCode ?? null,
+            cliente: it.personName || it.personCode || '',
+            op,
+            data: (it.movementDate || it.issueDate || '').slice(0, 10),
+            credev: Math.round(v * 100) / 100,
+          });
+        }
+        for (const k of Object.keys(credev)) credev[k] = Math.round(credev[k] * 100) / 100;
+        return { credev, detalhe };
+      })();
+      CREDEV_VEND_INFLIGHT.set(cacheKey, _runR);
+      try {
+        const result = await _runR;
+        CREDEV_VEND_CACHE.set(cacheKey, { credev: result.credev, ts: Date.now() });
+        return successResponse(
+          res,
+          wantDetalhe ? { credev: result.credev, detalhe: result.detalhe } : { credev: result.credev },
+        );
+      } finally {
+        CREDEV_VEND_INFLIGHT.delete(cacheKey);
+      }
+    }
+
+    const _run = (async () => {
+      const tokenData = await getToken();
+      const accessToken = tokenData?.access_token;
+      if (!accessToken) throw new Error('Token TOTVS indisponível');
+      const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      const fetchPage = async (page) =>
+        axios
+          .post(
+            endpoint,
+            {
+              filter: {
+                branchCodeList: branchList,
+                ...(opList.length > 0 ? { operationCodeList: opList } : {}),
+                operationType: 'Output',
+                startIssueDate: `${datemin}T00:00:00`,
+                endIssueDate: `${datemax}T23:59:59`,
+              },
+              expand: 'payments,items',
+              page,
+              pageSize: 100,
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent: totvsHttpsAgent,
+              timeout: 120000,
+            },
+          )
+          .then((r) => r.data)
+          .catch(() => ({ items: [] }));
+      const first = await fetchPage(1);
+      const invItems = [...(first?.items || [])];
+      const totalPages =
+        first?.totalPages || (first?.totalItems ? Math.ceil(first.totalItems / 100) : 1);
+      if (totalPages > 1) {
+        const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+        for (let i = 0; i < rem.length; i += 3) {
+          const results = await Promise.all(rem.slice(i, i + 3).map(fetchPage));
+          for (const pd of results) invItems.push(...(pd?.items || []));
+        }
+      }
+      const credev = {};
+      const detalhe = [];
+      for (const nf of invItems) {
+        if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+        let nfCredev = 0;
+        for (const p of nf.payments || []) {
+          if (p.documentType === 'Credev') nfCredev += parseFloat(p.paymentValue) || 0;
+        }
+        if (nfCredev <= 0) continue;
+        // dealer principal = maior netValue nos itens
+        const byDealer = {};
+        for (const item of nf.items || [])
+          for (const p of item.products || []) {
+            const dc = parseInt(p.dealerCode);
+            if (dc) byDealer[dc] = (byDealer[dc] || 0) + (parseFloat(p.netValue) || 0);
+          }
+        let mainDealer = null, max = -1;
+        for (const [dc, nv] of Object.entries(byDealer)) {
+          if (nv > max) { max = nv; mainDealer = Number(dc); }
+        }
+        if (!mainDealer) continue;
+        credev[mainDealer] = (credev[mainDealer] || 0) + nfCredev;
+        detalhe.push({
+          dealer: mainDealer,
+          invoice: nf.transactionCode ?? nf.invoiceCode ?? null,
+          cliente: nf.personName || nf.personCode || '',
+          op: nf.operationCode ?? null,
+          data: (nf.issueDate || '').slice(0, 10),
+          credev: Math.round(nfCredev * 100) / 100,
+        });
+      }
+      for (const k of Object.keys(credev)) credev[k] = Math.round(credev[k] * 100) / 100;
+      return { credev, detalhe };
+    })();
+
+    CREDEV_VEND_INFLIGHT.set(cacheKey, _run);
+    try {
+      const result = await _run;
+      CREDEV_VEND_CACHE.set(cacheKey, { credev: result.credev, ts: Date.now() });
+      if (CREDEV_VEND_CACHE.size > 100) {
+        const oldest = [...CREDEV_VEND_CACHE.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+        CREDEV_VEND_CACHE.delete(oldest[0]);
+      }
+      return successResponse(
+        res,
+        wantDetalhe ? { credev: result.credev, detalhe: result.detalhe } : { credev: result.credev },
+      );
+    } finally {
+      CREDEV_VEND_INFLIGHT.delete(cacheKey);
     }
   }),
 );

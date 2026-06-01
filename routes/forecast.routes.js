@@ -524,16 +524,15 @@ function toYmd(v) {
 
 async function getFaturamentoPorSegmento(datemin, datemax) {
   try {
+    // lite=true → pula PASS 0 (credev em payments, FIS_NFITEMPROD scan) no
+    // fat-seg. Líquido fica levemente inflado mas o card carrega em segundos
+    // e o TOTVS não bloqueia o usuário. Pra ver o líquido oficial completo,
+    // o cron noturno pode rodar full mode separado.
     const r = await axios.post(
-      `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento`,
-      { datemin: toYmd(datemin), datemax: toYmd(datemax) },
-      // Timeout aumentado: fat-seg per-NF demora 5-7min na PRIMEIRA carga
-      // (sem cache) pra paginar TOTVS + classificar NF a NF. Com 180s,
-      // o Comparativo/Promessa caia no fallback canal-totals que retorna
-      // valor menor pra Business (R$70 em vez de R$73k) e Bazar (R$0 em
-      // vez de R$30k) — porque sale-panel ignora algumas ops específicas.
-      // 600s (10min) cobre primeira carga; chamadas seguintes leem cache.
-      { timeout: 600000 },
+      `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true`,
+      { datemin: toYmd(datemin), datemax: toYmd(datemax), lite: true },
+      // Timeout reduzido pra 60s — em lite mode não precisa varrer items.
+      { timeout: 60000 },
     );
     const seg = r.data?.data?.segmentos || r.data?.segmentos || {};
     const out = { ...seg };
@@ -562,7 +561,7 @@ const FAT_SEG_CANAIS = [
   { mod: 'multimarcas', useGross: false },
   { mod: 'inbound_david', useGross: false },
   { mod: 'inbound_rafael', useGross: false },
-  { mod: 'franquia', useGross: true }, // sem allowedSellers
+  { mod: 'franquia', useGross: false }, // sempre full mode, líquido = bruto − credev − Recife Mall
   { mod: 'business', useGross: true }, // sem allowedSellers
   { mod: 'bazar', useGross: true }, // skipDevolucao já protege, mas keep gross pra consistência
   { mod: 'showroom', useGross: true }, // sem allowedSellers
@@ -577,9 +576,14 @@ async function getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax) {
     const calls = await Promise.all(
       FAT_SEG_CANAIS.map(async ({ mod, useGross }) => {
         try {
+          // lite=true → pula PASS 0 (credev em payments, full FIS_NFITEMPROD
+          // scan). Mantém bruto + returns + exclusão Recife Mall. Líquido fica
+          // levemente inflado (sem subtrair credev em payments, ~1-3% pra
+          // varejo/revenda/multimarcas), mas o ganho de performance evita
+          // bloqueio TOTVS e timeouts no /promessa-semanal|mensal e comparativo.
           const r = await axios.post(
-            `${INTERNAL_API_BASE}/api/crm/canal-totals`,
-            { datemin: di, datemax: df, modulo: mod },
+            `${INTERNAL_API_BASE}/api/crm/canal-totals?lite=true`,
+            { datemin: di, datemax: df, modulo: mod, lite: true },
             { timeout: 120000 },
           );
           const d = r.data?.data || r.data;
@@ -950,10 +954,7 @@ function findSellerFat(perSeller, nome) {
   for (const s of perSeller || []) {
     const sname = String(s.seller_name || s.name || '').toUpperCase();
     if (sname.includes(target)) {
-      // /canal-totals retorna invoice_value como BRUTO em per_seller (consistente
-      // entre chamadas mesmo quando credev fetch falha). Líquido é computado
-      // aqui: bruto - credev_value. Se credev_value=0 (falhou), líquido=bruto
-      // — degradação aceitável.
+      // Realizado por vendedor = LÍQUIDO (bruto − credev).
       const bruto =
         Number(
           s.invoice_value ??
@@ -997,122 +998,51 @@ router.get(
 
     const metasSemana = await getMetasPorCanal('semanal', wKey);
 
-    // Quais canais precisamos buscar per_seller
-    const canaisNeeded = new Set();
-    for (const card of VENDEDORES_CARDS) {
-      canaisNeeded.add(card.canal);
-      for (const conv of card.convidados || []) canaisNeeded.add(conv.canalFat);
-    }
-    const perSellerByCanal = {};
-    await Promise.all(
-      Array.from(canaisNeeded).map(async (m) => {
-        perSellerByCanal[m] = await getPerSeller(m, datemin, datemax);
+    // Fonte OFICIAL: painel de vendedores do TOTVS (mesma do relatório). Todos os
+    // vendedores do canal, todas as filiais do canal, só ops do canal. Sem cálculo
+    // próprio de credev — o seller_sale_value já é o Vl. Faturado.
+    const cards = await Promise.all(
+      VEND_MENSAL_GROUPS.map(async (g) => {
+        const liquidos = await buildVendedoresLiquido(g, datemin, datemax);
+        const meta = g.metaCanais.reduce(
+          (a, k) => a + (metasSemana.get(k) || 0),
+          0,
+        );
+        // Promessa por vendedor = meta_canal / N (rateio igual entre os titulares).
+        // Mantém a soma das promessas igual à meta do canal (sem arredondamento
+        // perdendo centavos no total).
+        const N = Math.max(1, liquidos.length);
+        const metaPorVend = meta / N;
+        const vendedores = liquidos.map((v) => {
+          const metaV = Math.round(metaPorVend * 100) / 100;
+          return {
+            seller_code: v.seller_code,
+            nome: v.nome,
+            meta: metaV,
+            bruto: v.bruto,
+            credev: v.credev,
+            real: v.real,
+            percentual:
+              metaV > 0 ? Number(((v.real / metaV) * 100).toFixed(2)) : 0,
+          };
+        });
+        const totalReal = vendedores.reduce((a, v) => a + v.real, 0);
+        return {
+          code: g.code,
+          label: `Prometido ${g.code} - Semana ${semana}`,
+          canal: g.code,
+          meta_canal: Math.round(meta * 100) / 100,
+          vendedores,
+          extras: [],
+          total: {
+            meta: Math.round(meta * 100) / 100,
+            real: Math.round(totalReal * 100) / 100,
+            percentual:
+              meta > 0 ? Number(((totalReal / meta) * 100).toFixed(2)) : 0,
+          },
+        };
       }),
     );
-
-    const cards = VENDEDORES_CARDS.map((card) => {
-      const metaTotal = metasSemana.get(card.canal) || 0;
-      const titulares = card.titulares || [];
-      const n = titulares.length;
-      const metaPorVend = n > 0 ? metaTotal / n : 0;
-      const ps = perSellerByCanal[card.canal] || [];
-
-      // Titulares: rateio meta_canal/N, faturamento via per_seller (match por nome)
-      const vendedores = titulares.map((t) => {
-        const nomeMatch = t.nome || t.label || String(t);
-        const labelOut = t.label || nomeMatch;
-        const real = findSellerFat(ps, nomeMatch);
-        const pct = metaPorVend > 0 ? (real / metaPorVend) * 100 : 0;
-        return {
-          nome: labelOut,
-          meta: Number(metaPorVend.toFixed(2)),
-          real: Number(real.toFixed(2)),
-          percentual: Number(pct.toFixed(2)),
-        };
-      });
-
-      // Convidados: meta vem do canalMeta dele, faturamento via per_seller do canalFat
-      for (const conv of card.convidados || []) {
-        const cMeta = metasSemana.get(conv.canalMeta) || 0;
-        const cPs = perSellerByCanal[conv.canalFat] || [];
-        const cReal = findSellerFat(cPs, conv.nome);
-        const pct = cMeta > 0 ? (cReal / cMeta) * 100 : 0;
-        vendedores.push({
-          nome: conv.label || conv.nome,
-          meta: Number(cMeta.toFixed(2)),
-          real: Number(cReal.toFixed(2)),
-          percentual: Number(pct.toFixed(2)),
-          convidado: true,
-          canal_origem: conv.canalMeta,
-        });
-      }
-
-      // Extras: vendedores no per_seller do canal que NÃO estão na lista (ex: Jucelino)
-      // Inclui titulares E convidados — evita duplicar Rafael/David que aparecem
-      // tanto como "convidado" (puxando do canal inbound_*) quanto no per_seller do
-      // canal multimarcas (porque operam na branch 99 com mesmas ops).
-      const tokensUsados = new Set([
-        ...titulares.map((t) => String(t.nome || t).toUpperCase()),
-        ...(card.convidados || []).map((c) =>
-          String(c.nome || c.label).toUpperCase(),
-        ),
-      ]);
-      const extras = (ps || [])
-        .map((s) => {
-          // invoice_value = bruto; líquido = bruto - credev_value
-          const bruto =
-            Number(
-              s.invoice_value ??
-                s.faturamento_liquido ??
-                s.liquido ??
-                s.total_liquido ??
-                s.total ??
-                0,
-            ) || 0;
-          const credev = Number(s.credev_value || 0);
-          return {
-            nome: String(s.seller_name || s.name || '')
-              .trim()
-              .toUpperCase(),
-            real: Math.max(0, bruto - credev),
-          };
-        })
-        .filter(
-          (s) =>
-            s.nome &&
-            s.real > 0 &&
-            !Array.from(tokensUsados).some((t) => s.nome.includes(t)),
-        )
-        .map((s) => ({
-          nome: s.nome,
-          meta: 0,
-          real: Number(s.real.toFixed(2)),
-          percentual: 0,
-          extra: true,
-        }));
-
-      const totalMeta =
-        vendedores.reduce((acc, v) => acc + v.meta, 0) +
-        extras.reduce((a, e) => a + e.meta, 0);
-      const totalReal =
-        vendedores.reduce((acc, v) => acc + v.real, 0) +
-        extras.reduce((a, e) => a + e.real, 0);
-      const totalPct = totalMeta > 0 ? (totalReal / totalMeta) * 100 : 0;
-
-      return {
-        code: card.code,
-        label: `Prometido ${card.label} - Semana ${semana}`,
-        canal: card.canal,
-        meta_canal: metaTotal,
-        vendedores,
-        extras,
-        total: {
-          meta: Number(totalMeta.toFixed(2)),
-          real: Number(totalReal.toFixed(2)),
-          percentual: Number(totalPct.toFixed(2)),
-        },
-      };
-    });
 
     return successResponse(res, {
       ano,
@@ -1120,6 +1050,361 @@ router.get(
       data_inicio,
       data_fim,
       period_key: wKey,
+      fonte: 'painel-oficial-totvs',
+      cards,
+    });
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /forecast/vendedores-mensal?ano=&mes=&until_today=
+// Faturamento por vendedor MENSAL — TODOS os vendedores de revenda/multimarcas.
+// Estratégia "soma das semanas": fatia o mês em pedaços alinhados à semana
+// (recortados ao mês), puxa per_seller LEVE de cada pedaço e soma por vendedor.
+// Evita a varredura única do mês (pesada e instável). Cada pedaço é cacheado.
+// ═══════════════════════════════════════════════════════════════
+const VEND_MENSAL_CACHE = new Map();
+const VEND_MENSAL_INFLIGHT = new Map();
+const VEND_MENSAL_TTL_REALTIME = 60 * 60 * 1000; // 1h
+const VEND_MENSAL_TTL_PAST = 24 * 60 * 60 * 1000; // 24h
+
+// Concorrência limitada (não sobrecarrega o TOTVS): processa N tarefas por vez.
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let idx = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (idx < items.length) {
+        const i = idx++;
+        results[i] = await fn(items[i], i);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+// Operações de VENDA usadas pelo painel oficial do TOTVS (sale-panel/sellers)
+// para as filiais "especiais" (inclui a 99). Mesma lista do painelVendas.js —
+// é a base do relatório oficial "Faturamento por Vendedor".
+const SPECIAL_OPERATIONS_99 = [
+  1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
+  9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
+  1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067, 7234, 7236, 7240,
+  7241, 7242, 7235, 7237, 7254, 7259, 7255, 7243, 7245, 7244,
+];
+
+// Grupos de canais da tabela mensal (todos os vendedores de cada grupo)
+const VEND_MENSAL_GROUPS = [
+  {
+    code: 'B2R',
+    label: 'B2R (Revenda)',
+    metaCanais: ['revenda'],
+    // ESCOPO = todas as filiais REVENDA (mesma base do canal-totals revenda).
+    // Antes era só [99]; agora inclui 2/200 (JPA/PB), 5 (Nova Cruz), 75 (Lagoa
+    // Center) — onde Felipe (251), Enri (94), Heyridan (15) etc também vendem.
+    // Operations do canal revenda (não SPECIAL_OPS_99 que é amplo demais).
+    branchs: [2, 5, 75, 99, 200],
+    operations: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512],
+    // Time B2R — exclui vendedores que não são do canal (Geral, Khristianna, etc.)
+    sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
+    // Revenda (varejo): credev = vale-troca usado em pagamento.
+    credevTipo: 'payments',
+  },
+  {
+    code: 'B2M',
+    label: 'B2M (Multimarcas)',
+    metaCanais: ['multimarcas', 'inbound_david', 'inbound_rafael'],
+    branchs: [99],
+    operations: SPECIAL_OPERATIONS_99,
+    // Multimarcas (atacado): credev = DEVOLUÇÃO real (SaleReturns), não vale-troca.
+    credevTipo: 'returns',
+    // Time B2M — Renato, Walter, Arthur, David, Rafael, Thalis(inativo)
+    sellers: [65, 177, 259, 26, 21, 69],
+  },
+];
+
+// Busca faturamento BRUTO por vendedor no painel OFICIAL do TOTVS
+// (sale-panel/sellers — campo seller_sale_value). Consulta leve.
+async function getSellersOficial(branchs, operations, datemin, datemax) {
+  try {
+    const r = await axios.post(
+      `${INTERNAL_API_BASE}/api/totvs/sale-panel/sellers-canal`,
+      { branchs, operations, datemin: toYmd(datemin), datemax: toYmd(datemax) },
+      { timeout: 180000 },
+    );
+    const d = r.data?.data || r.data;
+    return Array.isArray(d?.sellers) ? d.sellers : [];
+  } catch (e) {
+    console.warn(`[getSellersOficial] falhou: ${e?.message}`);
+    return [];
+  }
+}
+
+// Credev (vale-troca em pagamento) por vendedor. O payments NÃO está no Supabase,
+// então a única fonte é o canal-totals (per_seller.credev_value), que lê a API
+// fiscal do TOTVS. Soma o credev_value por seller_code somando os canais do grupo.
+// Retorna mapa { seller_code(string): valor }.
+// Fatia [datemin,datemax] em pedaços alinhados à semana (terminam no domingo),
+// pra cada canal-totals ser LEVE (varredura de ≤7 dias) e cacheável. Range curto
+// (≤8 dias) vira 1 pedaço só.
+function chunkPorSemana(datemin, datemax) {
+  const start = new Date(`${toYmd(datemin)}T12:00:00Z`);
+  const end = new Date(`${toYmd(datemax)}T12:00:00Z`);
+  const chunks = [];
+  let cur = new Date(start);
+  while (cur <= end) {
+    const dow = cur.getUTCDay() || 7; // 1=seg..7=dom
+    const sunday = new Date(cur);
+    sunday.setUTCDate(cur.getUTCDate() + (7 - dow));
+    const chunkEnd = sunday < end ? sunday : end;
+    chunks.push({ start: cur.toISOString().slice(0, 10), end: chunkEnd.toISOString().slice(0, 10) });
+    cur = new Date(chunkEnd);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return chunks;
+}
+
+async function getCredevVendedor(branchs, operations, datemin, datemax, tipo = 'payments') {
+  // Credev por vendedor via endpoint dedicado /credev-por-vendedor.
+  // tipo='payments' (vale-troca, B2R) | 'returns' (devolução real, B2M).
+  // UMA chamada por semana pra o escopo inteiro. Soma por seller_code.
+  const out = {};
+  const chunks = chunkPorSemana(datemin, datemax);
+  for (const ch of chunks) {
+    try {
+      const r = await axios.post(
+        `${INTERNAL_API_BASE}/api/crm/credev-por-vendedor`,
+        { branchs, operations, datemin: ch.start, datemax: ch.end, tipo },
+        { timeout: 200000 },
+      );
+      const d = r.data?.data || r.data;
+      for (const [code, val] of Object.entries(d?.credev || {})) {
+        out[String(code)] = (out[String(code)] || 0) + (Number(val) || 0);
+      }
+    } catch (e) {
+      console.warn(`[getCredevVendedor ${ch.start}~${ch.end}] falhou: ${e?.message}`);
+    }
+  }
+  return out;
+}
+
+// Monta a lista de vendedores LÍQUIDA de um grupo: bruto (painel oficial) −
+// credev (canal-totals per_seller), filtrando só os vendedores do time (g.sellers).
+async function buildVendedoresLiquido(g, datemin, datemax) {
+  // LÍQUIDO por vendedor = faturamento BRUTO (painel oficial, seller_sale_value)
+  // − credev (vale-troca, do canal-totals per_seller.credev_value).
+  const [sellers, credevMap] = await Promise.all([
+    getSellersOficial(g.branchs, g.operations, datemin, datemax),
+    getCredevVendedor(g.branchs, g.operations, datemin, datemax, g.credevTipo),
+  ]);
+  const allow = new Set((g.sellers || []).map(Number));
+  return sellers
+    .filter((s) => allow.size === 0 || allow.has(Number(s.seller_code)))
+    .map((s) => {
+      const bruto = Number(s.value || 0);
+      const credev = Number(credevMap[String(s.seller_code)] || 0);
+      return {
+        seller_code: String(s.seller_code),
+        nome: s.seller_name || `Vend. ${s.seller_code}`,
+        bruto: Math.round(bruto * 100) / 100,
+        credev: Math.round(credev * 100) / 100,
+        real: Math.max(0, Math.round((bruto - credev) * 100) / 100),
+      };
+    })
+    .filter((v) => v.real > 0 || v.bruto > 0)
+    .sort((a, b) => b.real - a.real);
+}
+
+router.get(
+  '/vendedores-mensal',
+  asyncHandler(async (req, res) => {
+    const hoje = new Date();
+    const ano = parseInt(req.query.ano, 10) || hoje.getUTCFullYear();
+    const mes = parseInt(req.query.mes, 10) || hoje.getUTCMonth() + 1;
+    const untilToday =
+      req.query.until_today === 'true' || req.query.until_today === '1';
+
+    const mKey = monthKey(ano, mes);
+    const cacheKey = `${mKey}|${untilToday}`;
+    const todayIso = hoje.toISOString().slice(0, 10);
+
+    // Range efetivo do mês [01, min(fim do mês, ontem|hoje)]
+    const monthStart = new Date(Date.UTC(ano, mes - 1, 1));
+    const monthEnd = new Date(Date.UTC(ano, mes, 0));
+    const ontem = new Date(hoje);
+    ontem.setUTCDate(ontem.getUTCDate() - 1);
+    while (ontem.getUTCDay() === 0) ontem.setUTCDate(ontem.getUTCDate() - 1);
+    const refDate = untilToday ? hoje : ontem;
+    let effEnd = monthEnd;
+    if (refDate < monthEnd) effEnd = refDate; // mês corrente → parcial
+    const ymd = (d) => d.toISOString().slice(0, 10);
+
+    // Mês futuro / antes do início → vazio
+    if (effEnd < monthStart) {
+      return successResponse(res, {
+        ano,
+        mes,
+        period_key: mKey,
+        chunks: [],
+        cards: VEND_MENSAL_GROUPS.map((g) => ({
+          code: g.code,
+          label: g.label,
+          meta: 0,
+          total: 0,
+          percentual: 0,
+          vendedores: [],
+        })),
+      });
+    }
+
+    const isPast = ymd(effEnd) < todayIso;
+    const ttl = isPast ? VEND_MENSAL_TTL_PAST : VEND_MENSAL_TTL_REALTIME;
+    const cached = VEND_MENSAL_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < ttl) {
+      return successResponse(res, { ...cached.data, cached: true });
+    }
+    if (VEND_MENSAL_INFLIGHT.has(cacheKey)) {
+      const data = await VEND_MENSAL_INFLIGHT.get(cacheKey);
+      return successResponse(res, { ...data, coalesced: true });
+    }
+
+    const _run = (async () => {
+      const metasMes = await getMetasPorCanal('mensal', mKey);
+      const di = ymd(monthStart);
+      const df = ymd(effEnd);
+
+      // Uma chamada ao painel OFICIAL (bruto) + credev (Supabase) por grupo.
+      // Líquido = bruto − credev. Leve e estável — sem fatiar em semanas.
+      const cards = await Promise.all(
+        VEND_MENSAL_GROUPS.map(async (g) => {
+          const vendedores = await buildVendedoresLiquido(g, di, df);
+          const total = vendedores.reduce((a, v) => a + v.real, 0);
+          const meta = g.metaCanais.reduce((a, k) => a + (metasMes.get(k) || 0), 0);
+          return {
+            code: g.code,
+            label: g.label,
+            meta: Math.round(meta * 100) / 100,
+            total: Math.round(total * 100) / 100,
+            percentual: meta > 0 ? Number(((total / meta) * 100).toFixed(2)) : 0,
+            vendedores,
+          };
+        }),
+      );
+
+      return {
+        ano,
+        mes,
+        period_key: mKey,
+        data_inicio: di,
+        data_fim: df,
+        fonte: 'painel-oficial-totvs',
+        cards,
+      };
+    })();
+
+    VEND_MENSAL_INFLIGHT.set(cacheKey, _run);
+    try {
+      const data = await _run;
+      VEND_MENSAL_CACHE.set(cacheKey, { data, ts: Date.now() });
+      if (VEND_MENSAL_CACHE.size > 30) {
+        const oldest = [...VEND_MENSAL_CACHE.entries()].sort(
+          (a, b) => a[1].ts - b[1].ts,
+        )[0];
+        VEND_MENSAL_CACHE.delete(oldest[0]);
+      }
+      return successResponse(res, data);
+    } finally {
+      VEND_MENSAL_INFLIGHT.delete(cacheKey);
+    }
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /forecast/vendedores-db?periodo_tipo=mensal&periodo_key=2026-05
+// Lê o faturamento por vendedor do SUPABASE (forecast_faturamento_vendedor) —
+// instantâneo, SEM tocar no TOTVS. Fonte abastecida pelo sync/import.
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/vendedores-db',
+  asyncHandler(async (req, res) => {
+    const hoje = new Date();
+    const periodo_tipo = req.query.periodo_tipo === 'semanal' ? 'semanal' : 'mensal';
+    let periodo_key = req.query.periodo_key;
+    if (!periodo_key) {
+      if (periodo_tipo === 'mensal') {
+        periodo_key = monthKey(hoje.getUTCFullYear(), hoje.getUTCMonth() + 1);
+      } else {
+        const cur = getIsoWeek(hoje);
+        periodo_key = weekKey(cur.ano, cur.semana);
+      }
+    }
+    let { data: rows, error } = await supabase
+      .from('forecast_faturamento_vendedor')
+      .select('grupo, seller_code, seller_name, bruto, credev, liquido, atualizado_em')
+      .eq('periodo_tipo', periodo_tipo)
+      .eq('periodo_key', periodo_key);
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+
+    // Fallback inteligente: se período pedido não tem dados (ex: início do
+    // mês quando ainda não importou), retorna o ÚLTIMO período disponível.
+    let periodo_key_real = periodo_key;
+    let fallback_aplicado = false;
+    if (!rows || rows.length === 0) {
+      const { data: ultimo } = await supabase
+        .from('forecast_faturamento_vendedor')
+        .select('periodo_key')
+        .eq('periodo_tipo', periodo_tipo)
+        .order('periodo_key', { ascending: false })
+        .limit(1);
+      if (ultimo && ultimo[0]?.periodo_key) {
+        periodo_key_real = ultimo[0].periodo_key;
+        fallback_aplicado = true;
+        const fb = await supabase
+          .from('forecast_faturamento_vendedor')
+          .select('grupo, seller_code, seller_name, bruto, credev, liquido, atualizado_em')
+          .eq('periodo_tipo', periodo_tipo)
+          .eq('periodo_key', periodo_key_real);
+        rows = fb.data || [];
+      }
+    }
+
+    const metas = await getMetasPorCanal(periodo_tipo, periodo_key_real);
+    const cards = VEND_MENSAL_GROUPS.map((g) => {
+      const grp = (rows || []).filter((r) => r.grupo === g.code);
+      const vendedores = grp
+        .map((r) => ({
+          seller_code: r.seller_code,
+          nome: r.seller_name || `Vend. ${r.seller_code}`,
+          bruto: Number(r.bruto || 0),
+          credev: Number(r.credev || 0),
+          real: Number(r.liquido || 0),
+        }))
+        .filter((v) => v.real > 0 || v.bruto > 0)
+        .sort((a, b) => b.real - a.real);
+      const total = vendedores.reduce((a, v) => a + v.real, 0);
+      const meta = g.metaCanais.reduce((a, k) => a + (metas.get(k) || 0), 0);
+      const atualizado_em = grp
+        .map((r) => r.atualizado_em)
+        .sort()
+        .pop() || null;
+      return {
+        code: g.code,
+        label: g.label,
+        meta: Math.round(meta * 100) / 100,
+        total: Math.round(total * 100) / 100,
+        percentual: meta > 0 ? Number(((total / meta) * 100).toFixed(2)) : 0,
+        atualizado_em,
+        vendedores,
+      };
+    });
+    return successResponse(res, {
+      periodo_tipo,
+      periodo_key: periodo_key_real,
+      periodo_key_solicitado: periodo_key,
+      fallback_aplicado,
+      fonte: 'supabase',
       cards,
     });
   }),
@@ -1660,10 +1945,8 @@ function buildTextoVendedores(d) {
   for (const card of d.cards || []) {
     lines.push(`*${card.label}*`);
     for (const v of card.vendedores || []) {
-      const tag = v.convidado ? ' ⓘ' : '';
-      lines.push(
-        `${arrowEmoji(v.percentual)} ${v.nome}${tag}: ${fmtBRL(v.real)} / ${fmtBRL(v.meta)} (${fmtPct(v.percentual)})`,
-      );
+      // Realizado por vendedor (painel oficial). Meta é só no total do canal.
+      lines.push(`• ${v.nome}: ${fmtBRL(v.real)}`);
     }
     for (const e of card.extras || []) {
       lines.push(`   ${e.nome}: ${fmtBRL(e.real)} (extra)`);

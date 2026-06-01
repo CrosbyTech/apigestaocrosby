@@ -19,9 +19,11 @@ export const FORECAST_EXCLUSOES = [
   {
     personCode: 29541,
     canal: 'franquia',
-    dateFrom: '2026-05-21',
+    // Excluir mês todo (não só a partir de 21/05) — solicitação do gestor
+    // pra simplificar e evitar queries fragmentadas que estressam o TOTVS.
+    dateFrom: '2026-05-01',
     description:
-      'CROSBY RECIFE MALL LTDA — virou loja própria em 21/05/2026. Faturamento dela continua no CRM mas não deve entrar como Franquia.',
+      'CROSBY RECIFE MALL LTDA — virou loja própria em 21/05/2026, exclusão estendida pro mês inteiro de maio.',
   },
 ];
 
