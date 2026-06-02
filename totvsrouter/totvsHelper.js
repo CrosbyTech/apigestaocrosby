@@ -104,6 +104,7 @@ export const SPECIAL_OPERATIONS = [
   1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
   9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
   1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067,
+  5919, // adicionada em 2026-06 a pedido do gestor — entra no Ranking de Faturamento
 ];
 
 // Chama TOTVS /sale-panel/v2/totals-branch/search para um conjunto de filiais

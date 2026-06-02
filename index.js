@@ -17,6 +17,8 @@ import autentiqueRoutes from './routes/autentique.routes.js';
 import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
+import bluecardRoutes from './routes/bluecard.routes.js';
+import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
@@ -7378,6 +7380,8 @@ app.use('/api/autentique', autentiqueRoutes); // Autentique assinatura digital (
 app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, roubos, IA
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
+app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
+app.use('/api/expedicao-showroom', expedicaoShowroomRoutes); // Expedição Showroom — controle envios
 app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
 app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres

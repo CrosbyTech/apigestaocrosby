@@ -528,9 +528,23 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     // fat-seg. Líquido fica levemente inflado mas o card carrega em segundos
     // e o TOTVS não bloqueia o usuário. Pra ver o líquido oficial completo,
     // o cron noturno pode rodar full mode separado.
+    // Quando consulta é de 1 dia "recente" (≤ 3 dias atrás), força fresh —
+    // o cache de 24h pode estar com dados parciais do TOTVS sync que rodou
+    // de manhã. Isso afeta o card "Faturamento de Ontem por Canal".
+    const di = toYmd(datemin);
+    const df = toYmd(datemax);
+    const hojeIso = new Date().toISOString().slice(0, 10);
+    const eumDiaSo = di === df;
+    const diasAtras = Math.round(
+      (new Date(hojeIso) - new Date(df)) / (1000 * 60 * 60 * 24),
+    );
+    const forcarFresh = eumDiaSo && diasAtras >= 0 && diasAtras <= 3;
+    const url = forcarFresh
+      ? `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true&nocache=true`
+      : `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true`;
     const r = await axios.post(
-      `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true`,
-      { datemin: toYmd(datemin), datemax: toYmd(datemax), lite: true },
+      url,
+      { datemin: di, datemax: df, lite: true, nocache: forcarFresh || undefined },
       // Timeout reduzido pra 60s — em lite mode não precisa varrer items.
       { timeout: 60000 },
     );
@@ -665,6 +679,83 @@ router.get(
     const { ano, semana } = getIsoWeek(new Date());
     const range = isoWeekRange(ano, semana);
     return successResponse(res, { ano, semana, ...range });
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /forecast/ontem-canal
+// Faturamento de ONTEM por canal — direto do TOTVS (sale-panel via
+// canais-totals-all em modo lite). NÃO usa Supabase notas_fiscais.
+// Cache TTL 5min — força fresh em consultas recentes.
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/ontem-canal',
+  asyncHandler(async (req, res) => {
+    const hoje = new Date();
+    // Ontem útil: D-1, pulando domingo (vira sábado)
+    const ontem = new Date(hoje);
+    ontem.setUTCDate(ontem.getUTCDate() - 1);
+    while (ontem.getUTCDay() === 0) {
+      ontem.setUTCDate(ontem.getUTCDate() - 1);
+    }
+    const diaIso = ontem.toISOString().slice(0, 10);
+
+    let segs = {};
+    try {
+      const r = await axios.post(
+        `${INTERNAL_API_BASE}/api/crm/canais-totals-all?lite=true&nocache=true`,
+        { datemin: diaIso, datemax: diaIso, lite: true },
+        { timeout: 180000 },
+      );
+      const d = r.data?.data || r.data || {};
+      segs = d.segmentos || {};
+    } catch (e) {
+      console.warn(`[forecast/ontem-canal] TOTVS falhou: ${e.message}`);
+      return errorResponse(
+        res,
+        `TOTVS indisponível: ${e.message}`,
+        503,
+        'TOTVS_UNAVAILABLE',
+      );
+    }
+
+    // Canal virtual "fabrica" = showroom + novidadesfranquia
+    const fabrica = FABRICA_SOURCES.reduce(
+      (s, k) => s + Number(segs[k] || 0),
+      0,
+    );
+
+    // Lista de canais ordenada — usa o mesmo CANAIS do /promessa-semanal
+    // pra UI ficar consistente. Mapeia fat_dia_anterior por canal_key.
+    const CANAIS_OUT = [
+      { key: 'varejo',         label: 'Varejo' },
+      { key: 'revenda',        label: 'Revenda' },
+      { key: 'multimarcas',    label: 'Multimarcas' },
+      { key: 'inbound_david',  label: 'MTM Inbound David' },
+      { key: 'inbound_rafael', label: 'MTM Inbound Rafael' },
+      { key: 'franquia',       label: 'Franquia' },
+      { key: 'business',       label: 'Business' },
+      { key: 'bazar',          label: 'Bazar' },
+      { key: 'fabrica',        label: 'Fábrica (Kleiton)' },
+      { key: 'ricardoeletro',  label: 'Ricardo Eletro' },
+    ];
+    const canais = CANAIS_OUT.map((c) => {
+      const valor = c.key === 'fabrica' ? fabrica : Number(segs[c.key] || 0);
+      return {
+        canal_key: c.key,
+        nome: c.label,
+        fat_dia_anterior: Math.round(valor * 100) / 100,
+        is_quantity: false,
+      };
+    });
+
+    const total = canais.reduce((a, c) => a + c.fat_dia_anterior, 0);
+    return successResponse(res, {
+      dia_anterior: diaIso,
+      canais,
+      total: { fat_dia_anterior: Math.round(total * 100) / 100 },
+      source: 'totvs-sale-panel-direct',
+    });
   }),
 );
 
@@ -1093,6 +1184,7 @@ const SPECIAL_OPERATIONS_99 = [
   9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
   1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067, 7234, 7236, 7240,
   7241, 7242, 7235, 7237, 7254, 7259, 7255, 7243, 7245, 7244,
+  5919, // adicionada em 2026-06 — entra no Forecast (Métricas Diárias) por vendedor
 ];
 
 // Grupos de canais da tabela mensal (todos os vendedores de cada grupo)

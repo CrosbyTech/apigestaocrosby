@@ -12118,13 +12118,15 @@ router.post(
       );
     }
 
-    // Cache check
+    // Cache check (com bypass via ?nocache=true)
+    const noCache =
+      req.query?.nocache === 'true' || req.body?.nocache === true;
     const stCacheKey = `${modulo || 'all'}|${datemin}|${datemax}`;
     const stTodayIso = new Date().toISOString().split('T')[0];
     const stIsRealtime = datemax >= stTodayIso;
     const stCacheTTL = stIsRealtime ? SELLERS_TOTALS_TTL : SELLERS_TOTALS_TTL_PAST;
     const stCached = SELLERS_TOTALS_CACHE.get(stCacheKey);
-    if (stCached && Date.now() - stCached.ts < stCacheTTL) {
+    if (!noCache && stCached && Date.now() - stCached.ts < stCacheTTL) {
       return successResponse(
         res,
         { ...stCached.data, cached: true },
@@ -12152,6 +12154,7 @@ router.post(
           1205, 1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067, 7234,
           7236, 7240, 7241, 7242, 7235, 7237, 7254, 7259, 7255, 7243, 7245,
           7244,
+          5919, // adicionada em 2026-06 — entra também no Desempenho varejo
         ];
         // TOTVS sale-panel/v2/sellers/search aceita 1 branch por chamada.
         // Paraleliza com concorrência limitada — reduzido 5→3 pra menor carga.
@@ -12763,9 +12766,13 @@ router.post(
     const cacheKey = `${datemin}|${datemax}${liteMode ? '|lite' : ''}`;
     const today = new Date().toISOString().split('T')[0];
     const cacheTTL = datemax < today ? FATSEG_CACHE_TTL_PAST : FATSEG_CACHE_TTL;
+    // ?nocache=true força bypass do cache (usado pelo "Faturamento de Ontem"
+    // pra garantir que NFs sincronizadas hoje pelo TOTVS apareçam).
+    const noCache =
+      req.query?.nocache === 'true' || req.body?.nocache === true;
     const cached = FATSEG_CACHE.get(cacheKey);
     const cacheAge = cached ? Date.now() - cached.ts : null;
-    if (cached && cacheAge < cacheTTL) {
+    if (!noCache && cached && cacheAge < cacheTTL) {
       return successResponse(
         res,
         { ...cached.data, cached: true },
