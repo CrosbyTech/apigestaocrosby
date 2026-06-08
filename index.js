@@ -19,6 +19,8 @@ import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
 import bluecardRoutes from './routes/bluecard.routes.js';
 import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
+import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js';
+import faturamentoTransacaoRoutes from './routes/faturamentoTransacao.routes.js';
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
@@ -7270,6 +7272,9 @@ import {
   iniciarJobForecastWhatsapp,
   executarForecastWhatsapp,
 } from './jobs/forecast-whatsapp.job.js';
+import { iniciarFaturamentoHistoricoJob } from './jobs/faturamento-historico.job.js';
+import { iniciarTransacaoHistoricoSync } from './jobs/transacao-historico-sync.job.js';
+import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7382,6 +7387,8 @@ app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
 app.use('/api/expedicao-showroom', expedicaoShowroomRoutes); // Expedição Showroom — controle envios
+app.use('/api/faturamento-historico', faturamentoHistoricoRoutes); // Faturamento histórico diário por canal
+app.use('/api/faturamento-transacao', faturamentoTransacaoRoutes); // Faturamento histórico por NF (transação)
 app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
 app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
@@ -7411,6 +7418,9 @@ app.listen(PORT, async () => {
   iniciarJobFaturamentoDiario();
   iniciarJobForecastRefYoy();
   iniciarJobForecastWhatsapp();
+  iniciarFaturamentoHistoricoJob();
+  iniciarTransacaoHistoricoSync();
+  iniciarPessoasBluecredSync();
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();

@@ -476,6 +476,33 @@ function isoWeekRange(ano, semana) {
 function weekKey(ano, semana) {
   return `${ano}-W${String(semana).padStart(2, '0')}`;
 }
+
+// Mapeia (ano ISO, semana ISO) → chave de meta semanal no formato
+// 'YYYY-MM-Sn' usado pelo novo PlanejamentoMensalModal.
+//
+// Regra: pega a SEGUNDA-feira da semana ISO; o mês e o "número fixo de semana"
+// dentro daquele mês determinam a chave:
+//   dia 1-7  → S1
+//   dia 8-14 → S2
+//   dia 15-21→ S3
+//   dia 22-28→ S4
+//   dia 29+  → S5
+//
+// Ex: W22/2026 (start 25/05) → '2026-05-S4'
+//     W23/2026 (start 01/06) → '2026-06-S1'
+//     W27/2026 (start 29/06) → '2026-06-S5'
+function isoWeekToMonthSemKey(ano, semana) {
+  const { data_inicio } = isoWeekRange(ano, semana);
+  // data_inicio já é a segunda
+  const [y, m, d] = data_inicio.split('-').map(Number);
+  let s;
+  if (d <= 7) s = 1;
+  else if (d <= 14) s = 2;
+  else if (d <= 21) s = 3;
+  else if (d <= 28) s = 4;
+  else s = 5;
+  return `${y}-${String(m).padStart(2, '0')}-S${s}`;
+}
 function monthKey(ano, mes) {
   return `${ano}-${String(mes).padStart(2, '0')}`;
 }
@@ -760,6 +787,73 @@ router.get(
 );
 
 // ═══════════════════════════════════════════════════════════════
+// GET /forecast/bluecred-count?datemin=&datemax=
+// Conta clientes classificados como "BLUE CRED" no TOTVS
+// (typeCode=55 / code='8' / 'TIPO CLIENTE VAREJO' / BLUE CRED)
+// Lê da tabela local `pessoas_bluecred`, populada por job diário.
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/bluecred-count',
+  asyncHandler(async (req, res) => {
+    const datemin = req.query.datemin;
+    const datemax = req.query.datemax;
+    // Total geral (ignora datas)
+    const { count: total, error: e1 } = await supabase
+      .from('pessoas_bluecred')
+      .select('*', { count: 'exact', head: true });
+    if (e1) return errorResponse(res, e1.message, 500);
+    // Período (data de classificação)
+    let no_periodo = null;
+    if (datemin && datemax) {
+      const { count, error } = await supabase
+        .from('pessoas_bluecred')
+        .select('*', { count: 'exact', head: true })
+        .gte('classified_at', `${datemin}T00:00:00`)
+        .lte('classified_at', `${datemax}T23:59:59`);
+      if (!error) no_periodo = count || 0;
+    }
+    return successResponse(res, {
+      total: total || 0,
+      no_periodo,
+      datemin: datemin || null,
+      datemax: datemax || null,
+    });
+  }),
+);
+
+// POST /forecast/bluecred-sync — dispara sync manual
+router.post(
+  '/bluecred-sync',
+  asyncHandler(async (req, res) => {
+    const { executarSyncBluecred } = await import('../jobs/pessoas-bluecred-sync.job.js');
+    const r = await executarSyncBluecred();
+    return successResponse(res, r);
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /forecast/bluecard-count?datemin=&datemax=
+// Conta cartões BlueCard enviados via ClickUp no período.
+// Usa fetchBlueCardSentCount com cache 5 min.
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/bluecard-count',
+  asyncHandler(async (req, res) => {
+    const datemin = req.query.datemin;
+    const datemax = req.query.datemax;
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+    try {
+      const count = await fetchBlueCardSentCount(datemin, datemax);
+      return successResponse(res, { count, datemin, datemax });
+    } catch (e) {
+      return errorResponse(res, `fetchBlueCardSentCount falhou: ${e.message}`, 500);
+    }
+  }),
+);
+
+// ═══════════════════════════════════════════════════════════════
 // GET /forecast/promessa-semanal?ano=&semana=
 // Lê metas da forecast_canal_metas (period_type='semanal', period_key='YYYY-Www')
 // ═══════════════════════════════════════════════════════════════
@@ -778,6 +872,9 @@ router.get(
 
     const { data_inicio, data_fim } = isoWeekRange(ano, semana);
     const wKey = weekKey(ano, semana);
+    // metaKey: chave da meta semanal no banco (formato novo 'YYYY-MM-Sn').
+    // Cadastrado pelo PlanejamentoMensalModal (semanas do mês, 7 em 7 dias).
+    const metaKey = isoWeekToMonthSemKey(ano, semana);
 
     // Dias úteis (seg-sáb) da semana (uso geral)
     const startDate = new Date(`${data_inicio}T12:00:00Z`);
@@ -841,7 +938,7 @@ router.get(
 
     const [metasSemana, metasMes, fatSemana, fatDiaAnt, bcSemana, bcDiaAnt] =
       await Promise.all([
-        getMetasPorCanal('semanal', wKey),
+        getMetasPorCanal('semanal', metaKey),
         getMetasPorCanal('mensal', mKey),
         getFaturamentoPorSegmento(datemin, datemax),
         diaAnteriorIso
@@ -858,6 +955,44 @@ router.get(
     await aplicarExclusoesForecast(fatSemana, datemin, datemax);
     if (fatDiaAnt && diaAnteriorIso) {
       await aplicarExclusoesForecast(fatDiaAnt, diaAnteriorIso, diaAnteriorIso);
+    }
+
+    // ─── Override REVENDA + MULTIMARCAS: fonte canônica = painel de vendedores
+    // O fat-seg perde NFs por filtros de branch/op no canal-totals; o painel
+    // de vendedores TOTVS (B2R/B2M) é mais completo. Reusa buildVendedoresLiquido
+    // pra garantir que a Promessa Semanal mostre o mesmo número do "Faturado
+    // por Vendedor".
+    //
+    // B2R → canal 'revenda'
+    // B2M → soma jogada em 'multimarcas' (atualmente todos os vendedores ativos
+    //       do B2M são multimarcas; inbound_david/rafael ficam com o que o
+    //       fat-seg/canal-totals retornou — geralmente 0).
+    const aplicarOverride = async (grupo, canalKey, dmin, dmax, target) => {
+      const liquidos = await buildVendedoresLiquido(grupo, dmin, dmax);
+      const soma = liquidos.reduce((s, v) => s + Number(v.real || 0), 0);
+      const prev = Number((target || {})[canalKey] || 0);
+      target[canalKey] = Math.round(soma * 100) / 100;
+      console.log(
+        `[promessa-semanal ${dmin}~${dmax}] ${canalKey} override: fat-seg=R$${prev.toFixed(2)} → painel-vend=R$${target[canalKey].toFixed(2)} (${liquidos.length} vend)`,
+      );
+    };
+    try {
+      const grupoB2R = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2R');
+      const grupoB2M = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2M');
+      // Override SEMPRE até HOJE (não importa o flag until_today) — garante
+      // que o número bate com o "Faturado por Vendedor" do TOTVS ao vivo.
+      // Se o domingo da semana ainda não chegou, pega até hoje; senão até dom.
+      const overrideMax = hojeIso < data_fim ? hojeIso : data_fim;
+      const overrides = [];
+      if (grupoB2R) overrides.push(aplicarOverride(grupoB2R, 'revenda', datemin, overrideMax, fatSemana));
+      if (grupoB2M) overrides.push(aplicarOverride(grupoB2M, 'multimarcas', datemin, overrideMax, fatSemana));
+      if (fatDiaAnt && diaAnteriorIso) {
+        if (grupoB2R) overrides.push(aplicarOverride(grupoB2R, 'revenda', diaAnteriorIso, diaAnteriorIso, fatDiaAnt));
+        if (grupoB2M) overrides.push(aplicarOverride(grupoB2M, 'multimarcas', diaAnteriorIso, diaAnteriorIso, fatDiaAnt));
+      }
+      await Promise.all(overrides);
+    } catch (err) {
+      console.warn('[promessa-semanal] override revenda/multimarcas falhou:', err.message);
     }
 
     const diasUteisMes = diasUteisDoMes(refMesAno, refMesNum);
@@ -1075,6 +1210,7 @@ router.get(
 
     const { data_inicio, data_fim } = isoWeekRange(ano, semana);
     const wKey = weekKey(ano, semana);
+    const metaKey = isoWeekToMonthSemKey(ano, semana);
 
     // Para o REAL: cap em (hoje|ontem) se semana corrente/futura
     const endDate = new Date(`${data_fim}T12:00:00Z`);
@@ -1087,7 +1223,7 @@ router.get(
     const datemin = data_inicio;
     const datemax = realDateMax;
 
-    const metasSemana = await getMetasPorCanal('semanal', wKey);
+    const metasSemana = await getMetasPorCanal('semanal', metaKey);
 
     // Fonte OFICIAL: painel de vendedores do TOTVS (mesma do relatório). Todos os
     // vendedores do canal, todas as filiais do canal, só ops do canal. Sem cálculo
@@ -1841,6 +1977,37 @@ router.get(
     }
     if (fatDia && diaIso) {
       await aplicarExclusoesForecast(fatDia, diaIso, diaIso);
+    }
+
+    // ─── Override REVENDA + MULTIMARCAS: fonte canônica = painel de vendedores
+    // Mesma lógica do /promessa-semanal. Garante consistência entre Mensal,
+    // Semanal e "Faturado por Vendedor".
+    const aplicarOverrideMes = async (grupo, canalKey, dmin, dmax, target) => {
+      const liquidos = await buildVendedoresLiquido(grupo, dmin, dmax);
+      const soma = liquidos.reduce((s, v) => s + Number(v.real || 0), 0);
+      const prev = Number((target || {})[canalKey] || 0);
+      target[canalKey] = Math.round(soma * 100) / 100;
+      console.log(
+        `[promessa-mensal ${dmin}~${dmax}] ${canalKey} override: fat-seg=R$${prev.toFixed(2)} → painel-vend=R$${target[canalKey].toFixed(2)} (${liquidos.length} vend)`,
+      );
+    };
+    try {
+      const grupoB2R = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2R');
+      const grupoB2M = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2M');
+      // Override SEMPRE até HOJE (não importa o flag until_today) — garante
+      // que bate com o "Faturado por Vendedor" ao vivo.
+      const hojeIsoMes = hoje.toISOString().slice(0, 10);
+      const overrideMaxMes = hojeIsoMes < data_fim ? hojeIsoMes : data_fim;
+      const overrides = [];
+      if (grupoB2R && fatMes) overrides.push(aplicarOverrideMes(grupoB2R, 'revenda', data_inicio, overrideMaxMes, fatMes));
+      if (grupoB2M && fatMes) overrides.push(aplicarOverrideMes(grupoB2M, 'multimarcas', data_inicio, overrideMaxMes, fatMes));
+      if (fatDia && diaIso) {
+        if (grupoB2R) overrides.push(aplicarOverrideMes(grupoB2R, 'revenda', diaIso, diaIso, fatDia));
+        if (grupoB2M) overrides.push(aplicarOverrideMes(grupoB2M, 'multimarcas', diaIso, diaIso, fatDia));
+      }
+      await Promise.all(overrides);
+    } catch (err) {
+      console.warn('[promessa-mensal] override revenda/multimarcas falhou:', err.message);
     }
 
     const canaisOut = CANAIS.map((c) => {

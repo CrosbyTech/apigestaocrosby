@@ -12696,19 +12696,26 @@ const OP_SEGMENTO_MAP = {
   7236: 'revenda',
   9122: 'revenda',
   5102: 'revenda',
+  5202: 'revenda', // 5202 - revenda
   7242: 'revenda',
   9061: 'revenda', // 5102F VENDAS PARA DENTRO DO RN
   9001: 'revenda', // 5102F - VENDAS PARA DENTRO DO ESTADO
   9121: 'revenda', // SME PROMO SALES REVENDA - FISCAL
+  1407: 'revenda', // 1407 - revenda
+  7806: 'revenda', // 7806 - revenda
+  7809: 'revenda', // 7809 - revenda
+  512:  'revenda', // 512 - revenda
   // Franquia
   7234: 'franquia',
   7240: 'franquia',
   7802: 'franquia',
   9124: 'franquia', // SME PROMO SALES FRANQUIA - FISCAL
   7259: 'franquia', // SUFRAMA DE VENDA DE MERC PARA TERCEIROS
-  // Multimarcas
+  // Multimarcas (op 200 é legada — usada até 2025 apenas pra captura LY/12m,
+  // NÃO entra no faturamento corrente)
   7235: 'multimarcas',
   7241: 'multimarcas',
+  9127: 'multimarcas',
   // Bazar
   887: 'bazar',
   // Varejo Shopping (lojas em shopping mall — tabela shopping)
@@ -13472,6 +13479,68 @@ router.post(
           `[fat-seg] ${canal} + override credev R$${valorOverride.toFixed(2)}: ${before.toFixed(2)} → ${segMap[canal].toFixed(2)}`,
         );
       }
+    }
+
+    // ─── Override REVENDA + MULTIMARCAS via Painel de Vendedores TOTVS ─────
+    // O fat-seg perde NFs por filtros de branch/op. O painel de vendedores
+    // (sale-panel/sellers-canal) é a fonte canônica oficial. Faz a soma do
+    // líquido = bruto − credev usando os mesmos grupos B2R/B2M do Forecast.
+    //
+    // Configuração inline (não importa de forecast.routes.js pra evitar
+    // dependência circular):
+    const OVERRIDE_GRUPOS = [
+      {
+        canal: 'revenda',
+        branchs: [2, 5, 75, 99, 200],
+        operations: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512],
+        sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
+        credevTipo: 'payments',
+      },
+      {
+        canal: 'multimarcas',
+        branchs: [99],
+        operations: [7235, 7241, 9127],
+        sellers: [65, 177, 259, 26, 21, 69],
+        credevTipo: 'returns',
+      },
+    ];
+    try {
+      const baseUrl = `http://localhost:${process.env.PORT || 4100}`;
+      await Promise.all(OVERRIDE_GRUPOS.map(async (g) => {
+        try {
+          const [sellersRes, credevRes] = await Promise.all([
+            axios.post(
+              `${baseUrl}/api/totvs/sale-panel/sellers-canal`,
+              { branchs: g.branchs, operations: g.operations, datemin, datemax },
+              { timeout: 180000 },
+            ),
+            axios.post(
+              `${baseUrl}/api/crm/credev-por-vendedor`,
+              { branchs: g.branchs, operations: g.operations, datemin, datemax, tipo: g.credevTipo },
+              { timeout: 180000 },
+            ),
+          ]);
+          const sellers = (sellersRes.data?.data || sellersRes.data)?.sellers || [];
+          const credev = (credevRes.data?.data || credevRes.data)?.credev || {};
+          const allow = new Set(g.sellers.map(Number));
+          let soma = 0;
+          for (const s of sellers) {
+            if (!allow.has(Number(s.seller_code))) continue;
+            const bruto = Number(s.value || 0);
+            const cred = Number(credev[String(s.seller_code)] || 0);
+            soma += Math.max(0, bruto - cred);
+          }
+          const prev = Number(segMap[g.canal] || 0);
+          segMap[g.canal] = Math.round(soma * 100) / 100;
+          console.log(
+            `[fat-seg ${g.canal} override painel-vend] R$${prev.toFixed(2)} → R$${segMap[g.canal].toFixed(2)}`,
+          );
+        } catch (err) {
+          console.warn(`[fat-seg override ${g.canal}] falhou: ${err?.message}`);
+        }
+      }));
+    } catch (err) {
+      console.warn('[fat-seg override painel-vend] erro fatal:', err.message);
     }
 
     // Arredondamentos finais
