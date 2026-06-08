@@ -934,6 +934,7 @@ async function findTotvsPeopleByPhone(rawPhone, cache = new Map()) {
 // Usadas para classificar cliente como Ativo/A Inativar/Inativo.
 const OPERACOES_VAREJO = [
   545, 546, 9001, 9009, 510, 521, 511, 522, 9017, 9027, 1,
+  5919, // adicionada em 2026-06
 ];
 const OPERACOES_REVENDA = [
   5102, 5202, 1407, 9120, 9121, 9122, 9113, 9111, 9001, 9009, 9061, 9067, 9400,
@@ -12724,6 +12725,7 @@ const OP_SEGMENTO_MAP = {
   9420: 'varejo', // 5102F - VENDAS PARA DENTRO DO ESTADO (TABELA SHOPPING) RN
   9067: 'varejo', // 5102F VENDAS PARA DENTRO DA PB VAREJO SHOPPING
   9404: 'varejo', // 5102F NF-E - VENDAS PARA DENTRO DO ESTADO (TABELA SHOPPING)
+  5919: 'varejo', // adicionada em 2026-06
   // Showroom
   7254: 'showroom',
   7007: 'showroom',

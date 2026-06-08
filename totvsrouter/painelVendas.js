@@ -531,6 +531,7 @@ const VAREJO_SALE_OPERATIONS = [
   510, 511, 521, 522, 545, 546, 548,
   9009, 9017, 9027, 9033,
   9400, 9401, 9420, 9067, 9404,
+  5919, // adicionada em 2026-06 — entra no Ranking de Faturamento por loja
 ];
 
 // Mapa de nomes amigáveis das filiais varejo (alinha com VAREJO_STORE_MAP)

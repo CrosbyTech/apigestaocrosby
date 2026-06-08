@@ -31,6 +31,7 @@ const OP_SEGMENTO_MAP = {
   545: 'varejo', 546: 'varejo', 548: 'varejo',
   9009: 'varejo', 9017: 'varejo', 9027: 'varejo', 9033: 'varejo',
   9400: 'varejo', 9401: 'varejo', 9420: 'varejo', 9067: 'varejo', 9404: 'varejo',
+  5919: 'varejo', // adicionada em 2026-06
   // Revendedor
   7236: 'revenda', 9122: 'revenda', 5102: 'revenda', 5202: 'revenda',
   7242: 'revenda', 9061: 'revenda', 9001: 'revenda', 9121: 'revenda',
