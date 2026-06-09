@@ -11,5 +11,9 @@ uploads/
 .cache/
 .erp_cache.json
 
+# WhatsApp Web auth session (dados do browser, não deve ir ao repositório)
+.wwebjs_auth/
+.wwebjs_cache/
+
 # Logs
 *.log

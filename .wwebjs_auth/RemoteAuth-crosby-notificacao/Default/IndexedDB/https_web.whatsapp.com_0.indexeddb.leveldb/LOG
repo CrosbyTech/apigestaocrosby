@@ -1,6 +1,0 @@
-2026/06/09-11:05:28.747 f30 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb since it was missing.
-2026/06/09-11:05:28.806 f30 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/06/09-11:22:27.148 9ee8 Level-0 table #5: started
-2026/06/09-11:22:27.229 9ee8 Level-0 table #5: 283696 bytes OK
-2026/06/09-11:22:27.242 9ee8 Delete type=0 #3
-2026/06/09-11:22:27.248 9ee8 Manual compaction at level-0 from (begin) .. (end); will stop at (end)
