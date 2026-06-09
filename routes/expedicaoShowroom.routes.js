@@ -14,7 +14,9 @@ const TOTVS_BASE_URL =
   process.env.TOTVS_BASE_URL || 'https://apitotvsmoda.bhan.com.br/api/totvsmoda';
 
 // Operações que pertencem a Showroom + Novidades Franquia
-const OPERATIONS = [7254, 7007, 7255];
+// 7254/7007 = showroom · 7255 = novidades franquia
+// 7234 = venda · 7240 = promo · 7259 = suframa (adicionadas em 2026-06)
+const OPERATIONS = [7254, 7007, 7255, 7234, 7240, 7259];
 const STATUS_VALIDOS = new Set(['enviado_blue', 'recebido_blue', 'enviado_cliente']);
 const TRANSPORTADORAS_VALIDAS = new Set([
   'latam', 'azul', 'correios', 'retirada', 'taxista', 'paulao',

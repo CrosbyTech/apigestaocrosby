@@ -15,6 +15,118 @@ import {
   fetchBranchTotalsFromTotvs,
 } from './totvsHelper.js';
 import supabase from '../config/supabase.js';
+import supabaseFiscal from '../config/supabaseFiscal.js';
+
+// Operações que o TOTVS NÃO classifica como operationModel "Sales", então
+// não retornam no /sale-panel/v2/totals-branch/search mesmo passando elas
+// em `operations`. Precisam ser somadas manualmente do Supabase fiscal.
+// Adicione aqui novas ops que o gestor pedir para incluir no Ranking.
+const RANKING_NON_SALES_OPS = [5919]; // 5919 = REMESSA DE BONIFICACAO - ELITE
+
+// Busca no Supabase fiscal o agregado por filial das operações fora do
+// universo "Sales" do TOTVS, no período. Retorna mapa { branchCode: {invoice_qty, invoice_value, itens_qty} }
+async function fetchNonSalesAgg({ branchs, datemin, datemax }) {
+  if (!RANKING_NON_SALES_OPS.length || !branchs?.length) return {};
+  try {
+    const { data, error } = await supabaseFiscal
+      .from('notas_fiscais')
+      .select('branch_code, total_value, quantity, invoice_status')
+      .in('operation_code', RANKING_NON_SALES_OPS)
+      .in('branch_code', branchs)
+      .eq('operation_type', 'Output')
+      .gte('issue_date', datemin)
+      .lte('issue_date', datemax)
+      .limit(50000);
+    if (error) {
+      console.error('[Ranking/NonSales] supabase erro:', error.message);
+      return {};
+    }
+    const agg = {};
+    for (const r of data || []) {
+      if (r.invoice_status === 'Canceled' || r.invoice_status === 'Deleted') continue;
+      const code = Number(r.branch_code);
+      if (!agg[code]) agg[code] = { invoice_qty: 0, invoice_value: 0, itens_qty: 0 };
+      agg[code].invoice_qty += 1;
+      agg[code].invoice_value += Number(r.total_value || 0);
+      agg[code].itens_qty += Number(r.quantity || 0);
+    }
+    console.log(
+      `[Ranking/NonSales] +${Object.keys(agg).length} filiais com ops ${RANKING_NON_SALES_OPS.join(',')}`,
+    );
+    return agg;
+  } catch (e) {
+    console.error('[Ranking/NonSales] fetch falhou:', e.message);
+    return {};
+  }
+}
+
+// Mescla o agregado non-sales no dataRow TOTVS por filial.
+function mergeNonSalesIntoDataRow(dataRow, agg) {
+  if (!agg || !Object.keys(agg).length) return dataRow;
+  const map = new Map();
+  for (const row of dataRow || []) {
+    const code = Number(row.branch_code);
+    map.set(code, { ...row });
+  }
+  for (const [code, extra] of Object.entries(agg)) {
+    const codeNum = Number(code);
+    const existing = map.get(codeNum);
+    if (existing) {
+      existing.invoice_qty = (existing.invoice_qty || 0) + extra.invoice_qty;
+      existing.invoice_value =
+        Number(existing.invoice_value || 0) + extra.invoice_value;
+      existing.itens_qty = (existing.itens_qty || 0) + extra.itens_qty;
+      existing.tm =
+        existing.invoice_qty > 0
+          ? existing.invoice_value / existing.invoice_qty
+          : 0;
+      existing.pa =
+        existing.invoice_qty > 0
+          ? existing.itens_qty / existing.invoice_qty
+          : 0;
+      existing.pmpv =
+        existing.itens_qty > 0
+          ? existing.invoice_value / existing.itens_qty
+          : 0;
+      map.set(codeNum, existing);
+    }
+    // Se a filial não estava no dataRow (sem vendas Sales), criamos uma entrada
+    // só com a 5919 — assim ela aparece no ranking.
+    else {
+      map.set(codeNum, {
+        branch_code: String(codeNum),
+        branch_name: '',
+        invoice_qty: extra.invoice_qty,
+        invoice_value: extra.invoice_value,
+        itens_qty: extra.itens_qty,
+        tm: extra.invoice_qty > 0 ? extra.invoice_value / extra.invoice_qty : 0,
+        pa: extra.invoice_qty > 0 ? extra.itens_qty / extra.invoice_qty : 0,
+        pmpv: extra.itens_qty > 0 ? extra.invoice_value / extra.itens_qty : 0,
+      });
+    }
+  }
+  return Array.from(map.values());
+}
+
+// Re-soma os totais agregados (header) a partir do dataRow final.
+function recalcTotal(dataRow) {
+  if (!Array.isArray(dataRow) || dataRow.length === 0) return null;
+  const summed = dataRow.reduce(
+    (acc, r) => ({
+      invoice_qty: acc.invoice_qty + Number(r.invoice_qty || 0),
+      invoice_value: acc.invoice_value + Number(r.invoice_value || 0),
+      itens_qty: acc.itens_qty + Number(r.itens_qty || 0),
+    }),
+    { invoice_qty: 0, invoice_value: 0, itens_qty: 0 },
+  );
+  summed.tm =
+    summed.invoice_qty > 0 ? summed.invoice_value / summed.invoice_qty : 0;
+  summed.pa =
+    summed.invoice_qty > 0 ? summed.itens_qty / summed.invoice_qty : 0;
+  summed.pmpv =
+    summed.itens_qty > 0 ? summed.invoice_value / summed.itens_qty : 0;
+  return summed;
+}
 
 const router = express.Router();
 
@@ -147,21 +259,44 @@ router.post(
       resolvedBranchs = await getBranchCodes(token);
     }
 
-    const mergedData = await fetchBranchTotalsFromTotvs({
-      initialToken: token,
-      branchs: resolvedBranchs,
-      datemin,
-      datemax,
-      refreshToken: async () => {
-        const data = await getToken(true);
-        return data.access_token;
-      },
-      logTag: 'RankingFaturamento',
-    });
+    const [mergedData, nonSalesAgg] = await Promise.all([
+      fetchBranchTotalsFromTotvs({
+        initialToken: token,
+        branchs: resolvedBranchs,
+        datemin,
+        datemax,
+        refreshToken: async () => {
+          const data = await getToken(true);
+          return data.access_token;
+        },
+        logTag: 'RankingFaturamento',
+      }),
+      // Operações fora de "Sales" do TOTVS (ex: 5919 REMESSA DE BONIFICACAO ELITE)
+      // não voltam no totals-branch/search, somamos manualmente do Supabase.
+      fetchNonSalesAgg({
+        branchs: resolvedBranchs,
+        datemin,
+        datemax,
+      }),
+    ]);
+
+    // Mescla as ops non-sales no resultado, mantém ordenação por invoice_value
+    const augmentedDataRow = mergeNonSalesIntoDataRow(
+      mergedData.dataRow,
+      nonSalesAgg,
+    ).sort(
+      (a, b) => Number(b.invoice_value || 0) - Number(a.invoice_value || 0),
+    );
+
+    const augmented = {
+      ...mergedData,
+      dataRow: augmentedDataRow,
+      total: recalcTotal(augmentedDataRow) || mergedData.total,
+    };
 
     return successResponse(
       res,
-      mergedData,
+      augmented,
       'Ranking de faturamento por filial obtido com sucesso',
     );
   }),
