@@ -1070,6 +1070,7 @@ router.post(
         filtroPagamento = 'TODOS',
         valorInicial,
         valorFinal,
+        expenseCodeList,
       } = req.body;
 
       if (!dt_inicio || !dt_fim) {
@@ -1305,9 +1306,9 @@ router.post(
 
       // Situação já filtrada via API (filter.status com enum string)
 
-      // Filtro de pagamento (ABERTO = sem liquidação, PAGO = liquidado)
+      // Filtro de pagamento (ABERTO/NAO_PAGO = sem liquidação, PAGO = liquidado)
       if (filtroPagamento && filtroPagamento !== 'TODOS') {
-        if (filtroPagamento === 'ABERTO') {
+        if (filtroPagamento === 'ABERTO' || filtroPagamento === 'NAO_PAGO') {
           filteredItems = filteredItems.filter(
             (item) =>
               (!item.settlementDate || item.settlementDate === '') &&
@@ -1324,6 +1325,27 @@ router.post(
                 item.paidValue > 0),
           );
         }
+      }
+
+      // Filtro por código de despesa — aplicado antes do enriquecimento de fornecedores
+      // para reduzir drasticamente o volume de dados processados
+      if (
+        expenseCodeList &&
+        Array.isArray(expenseCodeList) &&
+        expenseCodeList.length > 0
+      ) {
+        const codesSet = new Set(
+          expenseCodeList.map((c) => parseInt(c)).filter((c) => !isNaN(c)),
+        );
+        const beforeCount = filteredItems.length;
+        filteredItems = filteredItems.filter((item) => {
+          const expArr =
+            item.expense && item.expense.length > 0 ? item.expense : [];
+          return expArr.some((e) => codesSet.has(parseInt(e.expenseCode)));
+        });
+        console.log(
+          `🔍 Filtro expenseCodeList (${expenseCodeList.join(',')}): ${beforeCount} → ${filteredItems.length} itens`,
+        );
       }
 
       // Filtro de valor (backup server-side, caso a API TOTVS não suporte os campos)
@@ -1907,6 +1929,14 @@ router.post(
           'VALIDATION',
         );
       }
+      if (String(payload.duplicateCode).length > 10) {
+        return errorResponse(
+          res,
+          `O código da duplicata "${payload.duplicateCode}" excede 10 caracteres. Edite a solicitação e corrija o campo "Código da duplicata" antes de reenviar.`,
+          400,
+          'VALIDATION',
+        );
+      }
       if (
         !Array.isArray(payload.installments) ||
         payload.installments.length === 0
@@ -2119,6 +2149,103 @@ router.get(
       name: found.name || found.companyName || found.fantasyName || '',
       code: found.code || found.personCode || null,
       cpfCnpj: raw,
+    });
+  }),
+);
+
+// ─── Detalhes do Fornecedor (nome, CNPJ, telefones) ──────────────────────────
+router.post(
+  '/supplier-details',
+  asyncHandler(async (req, res) => {
+    const { supplierCode } = req.body;
+    if (!supplierCode) {
+      return errorResponse(
+        res,
+        'supplierCode é obrigatório',
+        400,
+        'MISSING_PARAM',
+      );
+    }
+    const code = parseInt(supplierCode);
+    if (isNaN(code)) {
+      return errorResponse(res, 'supplierCode inválido', 400, 'INVALID_PARAM');
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+
+    const headers = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Bearer ${tokenData.access_token}`,
+    };
+    const payload = {
+      filter: { personCodeList: [code] },
+      expand: 'phones,addresses',
+      page: 1,
+      pageSize: 5,
+    };
+
+    const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+    const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+    const [pjResp, pfResp] = await Promise.allSettled([
+      axios.post(pjEndpoint, payload, {
+        headers,
+        timeout: 15000,
+        httpsAgent,
+        httpAgent,
+      }),
+      axios.post(pfEndpoint, payload, {
+        headers,
+        timeout: 15000,
+        httpsAgent,
+        httpAgent,
+      }),
+    ]);
+
+    const pjItems =
+      pjResp.status === 'fulfilled' ? pjResp.value.data?.items || [] : [];
+    const pfItems =
+      pfResp.status === 'fulfilled' ? pfResp.value.data?.items || [] : [];
+    const item = pjItems[0] || pfItems[0] || null;
+
+    if (!item) {
+      return successResponse(
+        res,
+        { code, phones: [], addresses: [] },
+        'Fornecedor não encontrado na base TOTVS',
+      );
+    }
+
+    const phones = (item.phones || []).map((p) => ({
+      type: p.phoneType || p.type || '',
+      ddd: p.areaCode || p.ddd || '',
+      number: p.number || '',
+      full: ((p.areaCode || p.ddd || '') + (p.number || '')).replace(/\D/g, ''),
+      isDefault: !!p.isDefault,
+    }));
+
+    const addresses = (item.addresses || []).map((a) => ({
+      street: a.street || a.address || '',
+      number: a.number || '',
+      complement: a.complement || '',
+      neighborhood: a.neighborhood || '',
+      city: a.city || '',
+      uf: a.uf || a.state || '',
+      isDefault: !!a.isDefault,
+    }));
+
+    return successResponse(res, {
+      code: item.code || code,
+      name: item.name || item.corporateName || '',
+      fantasyName: item.fantasyName || '',
+      cpfCnpj: item.cnpj || item.cpf || item.cpfCnpj || '',
+      phones,
+      addresses,
+      email: item.email || item.emails?.[0]?.address || '',
     });
   }),
 );

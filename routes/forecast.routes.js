@@ -570,10 +570,22 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
       ? `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true&nocache=true`
       : `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true`;
     const r = await axios.post(
+<<<<<<< HEAD
       url,
       { datemin: di, datemax: df, lite: true, nocache: forcarFresh || undefined },
       // Timeout reduzido pra 60s — em lite mode não precisa varrer items.
       { timeout: 60000 },
+=======
+      `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento`,
+      { datemin: toYmd(datemin), datemax: toYmd(datemax) },
+      // Timeout aumentado: fat-seg per-NF demora 5-7min na PRIMEIRA carga
+      // (sem cache) pra paginar TOTVS + classificar NF a NF. Com 180s,
+      // o Comparativo/Promessa caia no fallback canal-totals que retorna
+      // valor menor pra Business (R$70 em vez de R$73k) e Bazar (R$0 em
+      // vez de R$30k) — porque sale-panel ignora algumas ops específicas.
+      // 600s (10min) cobre primeira carga; chamadas seguintes leem cache.
+      { timeout: 600000 },
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
     );
     const seg = r.data?.data?.segmentos || r.data?.segmentos || {};
     const out = { ...seg };
@@ -602,7 +614,11 @@ const FAT_SEG_CANAIS = [
   { mod: 'multimarcas', useGross: false },
   { mod: 'inbound_david', useGross: false },
   { mod: 'inbound_rafael', useGross: false },
+<<<<<<< HEAD
   { mod: 'franquia', useGross: false }, // sempre full mode, líquido = bruto − credev − Recife Mall
+=======
+  { mod: 'franquia', useGross: true }, // sem allowedSellers
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
   { mod: 'business', useGross: true }, // sem allowedSellers
   { mod: 'bazar', useGross: true }, // skipDevolucao já protege, mas keep gross pra consistência
   { mod: 'showroom', useGross: true }, // sem allowedSellers
@@ -617,6 +633,7 @@ async function getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax) {
     const calls = await Promise.all(
       FAT_SEG_CANAIS.map(async ({ mod, useGross }) => {
         try {
+<<<<<<< HEAD
           // lite=true → pula PASS 0 (credev em payments, full FIS_NFITEMPROD
           // scan). Mantém bruto + returns + exclusão Recife Mall. Líquido fica
           // levemente inflado (sem subtrair credev em payments, ~1-3% pra
@@ -625,6 +642,11 @@ async function getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax) {
           const r = await axios.post(
             `${INTERNAL_API_BASE}/api/crm/canal-totals?lite=true`,
             { datemin: di, datemax: df, modulo: mod, lite: true },
+=======
+          const r = await axios.post(
+            `${INTERNAL_API_BASE}/api/crm/canal-totals`,
+            { datemin: di, datemax: df, modulo: mod },
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
             { timeout: 120000 },
           );
           const d = r.data?.data || r.data;
@@ -938,7 +960,11 @@ router.get(
 
     const [metasSemana, metasMes, fatSemana, fatDiaAnt, bcSemana, bcDiaAnt] =
       await Promise.all([
+<<<<<<< HEAD
         getMetasPorCanal('semanal', metaKey),
+=======
+        getMetasPorCanal('semanal', wKey),
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
         getMetasPorCanal('mensal', mKey),
         getFaturamentoPorSegmento(datemin, datemax),
         diaAnteriorIso
@@ -956,6 +982,7 @@ router.get(
     if (fatDiaAnt && diaAnteriorIso) {
       await aplicarExclusoesForecast(fatDiaAnt, diaAnteriorIso, diaAnteriorIso);
     }
+<<<<<<< HEAD
 
     // ─── Override REVENDA + MULTIMARCAS: fonte canônica = painel de vendedores
     // O fat-seg perde NFs por filtros de branch/op no canal-totals; o painel
@@ -994,6 +1021,8 @@ router.get(
     } catch (err) {
       console.warn('[promessa-semanal] override revenda/multimarcas falhou:', err.message);
     }
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
     const diasUteisMes = diasUteisDoMes(refMesAno, refMesNum);
 
@@ -1180,7 +1209,14 @@ function findSellerFat(perSeller, nome) {
   for (const s of perSeller || []) {
     const sname = String(s.seller_name || s.name || '').toUpperCase();
     if (sname.includes(target)) {
+<<<<<<< HEAD
       // Realizado por vendedor = LÍQUIDO (bruto − credev).
+=======
+      // /canal-totals retorna invoice_value como BRUTO em per_seller (consistente
+      // entre chamadas mesmo quando credev fetch falha). Líquido é computado
+      // aqui: bruto - credev_value. Se credev_value=0 (falhou), líquido=bruto
+      // — degradação aceitável.
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
       const bruto =
         Number(
           s.invoice_value ??
@@ -1271,6 +1307,113 @@ router.get(
       }),
     );
 
+<<<<<<< HEAD
+=======
+    const cards = VENDEDORES_CARDS.map((card) => {
+      const metaTotal = metasSemana.get(card.canal) || 0;
+      const titulares = card.titulares || [];
+      const n = titulares.length;
+      const metaPorVend = n > 0 ? metaTotal / n : 0;
+      const ps = perSellerByCanal[card.canal] || [];
+
+      // Titulares: rateio meta_canal/N, faturamento via per_seller (match por nome)
+      const vendedores = titulares.map((t) => {
+        const nomeMatch = t.nome || t.label || String(t);
+        const labelOut = t.label || nomeMatch;
+        const real = findSellerFat(ps, nomeMatch);
+        const pct = metaPorVend > 0 ? (real / metaPorVend) * 100 : 0;
+        return {
+          nome: labelOut,
+          meta: Number(metaPorVend.toFixed(2)),
+          real: Number(real.toFixed(2)),
+          percentual: Number(pct.toFixed(2)),
+        };
+      });
+
+      // Convidados: meta vem do canalMeta dele, faturamento via per_seller do canalFat
+      for (const conv of card.convidados || []) {
+        const cMeta = metasSemana.get(conv.canalMeta) || 0;
+        const cPs = perSellerByCanal[conv.canalFat] || [];
+        const cReal = findSellerFat(cPs, conv.nome);
+        const pct = cMeta > 0 ? (cReal / cMeta) * 100 : 0;
+        vendedores.push({
+          nome: conv.label || conv.nome,
+          meta: Number(cMeta.toFixed(2)),
+          real: Number(cReal.toFixed(2)),
+          percentual: Number(pct.toFixed(2)),
+          convidado: true,
+          canal_origem: conv.canalMeta,
+        });
+      }
+
+      // Extras: vendedores no per_seller do canal que NÃO estão na lista (ex: Jucelino)
+      // Inclui titulares E convidados — evita duplicar Rafael/David que aparecem
+      // tanto como "convidado" (puxando do canal inbound_*) quanto no per_seller do
+      // canal multimarcas (porque operam na branch 99 com mesmas ops).
+      const tokensUsados = new Set([
+        ...titulares.map((t) => String(t.nome || t).toUpperCase()),
+        ...(card.convidados || []).map((c) =>
+          String(c.nome || c.label).toUpperCase(),
+        ),
+      ]);
+      const extras = (ps || [])
+        .map((s) => {
+          // invoice_value = bruto; líquido = bruto - credev_value
+          const bruto =
+            Number(
+              s.invoice_value ??
+                s.faturamento_liquido ??
+                s.liquido ??
+                s.total_liquido ??
+                s.total ??
+                0,
+            ) || 0;
+          const credev = Number(s.credev_value || 0);
+          return {
+            nome: String(s.seller_name || s.name || '')
+              .trim()
+              .toUpperCase(),
+            real: Math.max(0, bruto - credev),
+          };
+        })
+        .filter(
+          (s) =>
+            s.nome &&
+            s.real > 0 &&
+            !Array.from(tokensUsados).some((t) => s.nome.includes(t)),
+        )
+        .map((s) => ({
+          nome: s.nome,
+          meta: 0,
+          real: Number(s.real.toFixed(2)),
+          percentual: 0,
+          extra: true,
+        }));
+
+      const totalMeta =
+        vendedores.reduce((acc, v) => acc + v.meta, 0) +
+        extras.reduce((a, e) => a + e.meta, 0);
+      const totalReal =
+        vendedores.reduce((acc, v) => acc + v.real, 0) +
+        extras.reduce((a, e) => a + e.real, 0);
+      const totalPct = totalMeta > 0 ? (totalReal / totalMeta) * 100 : 0;
+
+      return {
+        code: card.code,
+        label: `Prometido ${card.label} - Semana ${semana}`,
+        canal: card.canal,
+        meta_canal: metaTotal,
+        vendedores,
+        extras,
+        total: {
+          meta: Number(totalMeta.toFixed(2)),
+          real: Number(totalReal.toFixed(2)),
+          percentual: Number(totalPct.toFixed(2)),
+        },
+      };
+    });
+
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
     return successResponse(res, {
       ano,
       semana_iso: semana,
@@ -1979,6 +2122,7 @@ router.get(
       await aplicarExclusoesForecast(fatDia, diaIso, diaIso);
     }
 
+<<<<<<< HEAD
     // ─── Override REVENDA + MULTIMARCAS: fonte canônica = painel de vendedores
     // Mesma lógica do /promessa-semanal. Garante consistência entre Mensal,
     // Semanal e "Faturado por Vendedor".
@@ -2010,6 +2154,8 @@ router.get(
       console.warn('[promessa-mensal] override revenda/multimarcas falhou:', err.message);
     }
 
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
     const canaisOut = CANAIS.map((c) => {
       const meta = metas.get(c.key) || 0;
       const real = Number((fatMes || {})[c.key] || 0);
@@ -2204,8 +2350,15 @@ function buildTextoVendedores(d) {
   for (const card of d.cards || []) {
     lines.push(`*${card.label}*`);
     for (const v of card.vendedores || []) {
+<<<<<<< HEAD
       // Realizado por vendedor (painel oficial). Meta é só no total do canal.
       lines.push(`• ${v.nome}: ${fmtBRL(v.real)}`);
+=======
+      const tag = v.convidado ? ' ⓘ' : '';
+      lines.push(
+        `${arrowEmoji(v.percentual)} ${v.nome}${tag}: ${fmtBRL(v.real)} / ${fmtBRL(v.meta)} (${fmtPct(v.percentual)})`,
+      );
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
     }
     for (const e of card.extras || []) {
       lines.push(`   ${e.nome}: ${fmtBRL(e.real)} (extra)`);

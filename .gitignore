@@ -9,11 +9,14 @@ uploads/
 
 # ... outras regras existentes ...
 .cache/
+<<<<<<< HEAD
 .erp_cache.json
 
 # WhatsApp Web auth session (dados do browser, não deve ir ao repositório)
 .wwebjs_auth/
 .wwebjs_cache/
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
 # Logs
 *.log

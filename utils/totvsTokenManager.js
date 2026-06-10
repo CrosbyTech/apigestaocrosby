@@ -20,6 +20,7 @@ const TOTVS_CREDENTIALS = {
 // Armazenamento do token em memória
 let currentToken = null;
 let tokenExpiresAt = null;
+<<<<<<< HEAD
 // Coalescing: garante que apenas UMA chamada de auth simultânea bate no TOTVS.
 // Sem isso, N requests paralelos → N auths → TOTVS detecta como brute-force
 // → bloqueia o usuário ApiUser crosbyapiv2.
@@ -42,6 +43,9 @@ export const getBlockInfo = () =>
   _blockedUntil > Date.now()
     ? { blocked: true, retryInSeconds: Math.ceil((_blockedUntil - Date.now()) / 1000) }
     : { blocked: false };
+=======
+let _generateInFlight = null; // mutex: evita gerar token em paralelo
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
 /**
  * Gera um novo token de autenticação na API TOTVS
@@ -118,10 +122,13 @@ async function _doGenerateToken() {
     // Armazenar token e calcular tempo de expiração
     currentToken = tokenData;
     tokenExpiresAt = new Date(Date.now() + tokenData.expires_in * 1000);
+<<<<<<< HEAD
     _lastGenFailedAt = 0; // reset backoff em sucesso
     _blockedUntil = 0; // reset circuit breaker em sucesso
     _blockLogged = false;
     recordAuth(true);
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
     logger.info('✅ Token TOTVS gerado com sucesso');
     logger.info(

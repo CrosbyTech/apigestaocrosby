@@ -9,8 +9,13 @@
     "npm": ">=8.0.0"
   },
   "scripts": {
+<<<<<<< HEAD
     "start": "bash start.sh",
     "postinstall": "node scripts/install-chrome.mjs",
+=======
+    "start": "cross-env NODE_OPTIONS=--max-old-space-size=4096 bash start.sh",
+    "postinstall": "npx puppeteer browsers install chrome",
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=--max-old-space-size=4096 nodemon index.js",
     "test": "cross-env NODE_ENV=test jest",
     "lint": "eslint . --ext .js",

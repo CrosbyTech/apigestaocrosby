@@ -5655,16 +5655,36 @@ router.post(
       // DEBUG: inspecionar expense dos primeiros itens
       const debugSample = filteredItems.slice(0, 3);
       console.log('🔬 DEBUG expenseCodeList recebido:', expenseCodeList);
-      console.log('🔬 DEBUG expense dos 3 primeiros itens:', JSON.stringify(debugSample.map((i) => ({ expense: i.expense, keys: Object.keys(i) })), null, 2).slice(0, 1500));
+      console.log(
+        '🔬 DEBUG expense dos 3 primeiros itens:',
+        JSON.stringify(
+          debugSample.map((i) => ({
+            expense: i.expense,
+            keys: Object.keys(i),
+          })),
+          null,
+          2,
+        ).slice(0, 1500),
+      );
 
       // Filtro por código de despesa (expenseCodeList) — aplicado antes do map para reduzir trabalho
-      if (expenseCodeList && Array.isArray(expenseCodeList) && expenseCodeList.length > 0) {
-        const codesSet = new Set(expenseCodeList.map((c) => parseInt(c)).filter((c) => !isNaN(c)));
+      if (
+        expenseCodeList &&
+        Array.isArray(expenseCodeList) &&
+        expenseCodeList.length > 0
+      ) {
+        const codesSet = new Set(
+          expenseCodeList.map((c) => parseInt(c)).filter((c) => !isNaN(c)),
+        );
         filteredItems = filteredItems.filter((item) => {
           if (!item.expense || item.expense.length === 0) return false;
-          return item.expense.some((exp) => codesSet.has(parseInt(exp.expenseCode)));
+          return item.expense.some((exp) =>
+            codesSet.has(parseInt(exp.expenseCode)),
+          );
         });
-        console.log(`🔍 Filtro expenseCodeList (${expenseCodeList.length} códigos): ${filteredItems.length} itens restantes`);
+        console.log(
+          `🔍 Filtro expenseCodeList (${expenseCodeList.length} códigos): ${filteredItems.length} itens restantes`,
+        );
       }
 
       // Filtro de pagamento
@@ -5674,7 +5694,9 @@ router.post(
         } else if (filtroPagamento === 'NAO_PAGO') {
           filteredItems = filteredItems.filter((item) => !item.settlementDate);
         }
-        console.log(`🔍 Filtro filtroPagamento (${filtroPagamento}): ${filteredItems.length} itens restantes`);
+        console.log(
+          `🔍 Filtro filtroPagamento (${filtroPagamento}): ${filteredItems.length} itens restantes`,
+        );
       }
 
       // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)
@@ -6277,12 +6299,12 @@ router.get(
 router.get(
   '/clientes/search-name',
   asyncHandler(async (req, res) => {
-    const { nome, fantasia, cnpj } = req.query;
+    const { nome, fantasia, cnpj, code } = req.query;
 
-    if (!nome && !fantasia && !cnpj) {
+    if (!nome && !fantasia && !cnpj && !code) {
       return errorResponse(
         res,
-        'Informe pelo menos um dos campos: nome, fantasia ou cnpj',
+        'Informe pelo menos um dos campos: nome, fantasia, cnpj ou code',
         400,
         'MISSING_SEARCH_TERM',
       );
@@ -6297,7 +6319,10 @@ router.get(
         .order('nm_pessoa', { ascending: true })
         .limit(50);
 
-      if (cnpj) {
+      if (code) {
+        // Busca pelo código do cliente (campo code na tabela)
+        query = query.eq('code', parseInt(code, 10));
+      } else if (cnpj) {
         // Busca por CPF/CNPJ (campo cpf na tabela)
         const cnpjLimpo = cnpj.replace(/[^\d]/g, '');
         query = query.ilike('cpf', `%${cnpjLimpo}%`);
@@ -6331,10 +6356,88 @@ router.get(
           uniqueMap.set(row.code, row);
         }
       }
-      const clientes = Array.from(uniqueMap.values());
+      let clientes = Array.from(uniqueMap.values());
+
+      // Fallback: se busca por code não retornou resultado, tenta direto no TOTVS
+      if (code && clientes.length === 0) {
+        console.log(
+          `⚠️ Código ${code} não encontrado no cache (pes_pessoa). Buscando direto no TOTVS...`,
+        );
+        try {
+          const codeInt = parseInt(code, 10);
+          const tokenData = await getToken();
+          const totvsFilter = {
+            filter: { personCodeList: [codeInt] },
+            page: 1,
+            pageSize: 10,
+          };
+          const totvsHeaders = {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${tokenData.access_token}`,
+          };
+          const totvsOpts = { headers: totvsHeaders, timeout: 15000 };
+
+          const [pjResp, pfResp] = await Promise.allSettled([
+            axios.post(
+              `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+              totvsFilter,
+              totvsOpts,
+            ),
+            axios.post(
+              `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+              totvsFilter,
+              totvsOpts,
+            ),
+          ]);
+
+          const { mapPersonToRow, upsertBatch } =
+            await import('../utils/syncPesPessoa.js');
+
+          const totvsRows = [];
+          if (pjResp.status === 'fulfilled') {
+            (pjResp.value.data?.items || []).forEach((item) =>
+              totvsRows.push(mapPersonToRow(item, 'PJ')),
+            );
+          }
+          if (pfResp.status === 'fulfilled') {
+            (pfResp.value.data?.items || []).forEach((item) =>
+              totvsRows.push(mapPersonToRow(item, 'PF')),
+            );
+          }
+
+          const found = totvsRows.filter((r) => r.code === codeInt);
+          if (found.length > 0) {
+            // Salva no cache para próximas buscas
+            await upsertBatch(found).catch(() => {});
+            clientes = found.map((r) => ({
+              code: r.code,
+              cd_empresacad: r.cd_empresacad,
+              nm_pessoa: r.nm_pessoa,
+              fantasy_name: r.fantasy_name,
+              cpf: r.cpf,
+              tipo_pessoa: r.tipo_pessoa,
+              telefone: r.telefone,
+              email: r.email,
+              is_customer: r.is_customer,
+              customer_status: r.customer_status,
+              person_status: r.person_status,
+            }));
+            console.log(
+              `✅ TOTVS fallback: código ${code} encontrado (${clientes.length} registro(s))`,
+            );
+          } else {
+            console.log(`❌ TOTVS fallback: código ${code} não encontrado`);
+          }
+        } catch (fallbackErr) {
+          console.warn(
+            `⚠️ Fallback TOTVS falhou para code ${code}: ${fallbackErr.message}`,
+          );
+        }
+      }
 
       console.log(
-        `🔍 Busca por nome: "${nome || ''}" / fantasia: "${fantasia || ''}" → ${clientes.length} resultados`,
+        `🔍 Busca por: code: "${code || ''}" nome: "${nome || ''}" / fantasia: "${fantasia || ''}" → ${clientes.length} resultados`,
       );
 
       successResponse(

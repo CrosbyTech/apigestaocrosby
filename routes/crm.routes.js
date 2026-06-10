@@ -162,6 +162,7 @@ function preWarmCanalTotalsCredev() {
     }
   }
 }
+<<<<<<< HEAD
 // ⚠️ PRE-WARM TEMPORARIAMENTE SUSPENSO — anti-sobrecarga TOTVS.
 // Razão: TOTVS Analytics está lento (p95 14s+) e queries paralelas estão
 // rate-limitando páginas individuais. O pre-warm gerava ~580 calls a
@@ -173,6 +174,12 @@ function preWarmCanalTotalsCredev() {
 // setTimeout(preWarmCanalTotalsCredev, 30000);
 // setInterval(preWarmCanalTotalsCredev, 3 * 60 * 60 * 1000);
 console.log('⏸ [pre-warm canal-totals] SUSPENSO — anti-sobrecarga TOTVS');
+=======
+// ⚠️ Pre-warm reduzido pra 3h (era 1h). Cache TTL 1h–24h cobre maioria
+// dos acessos sem precisar de pre-warm frequente.
+setTimeout(preWarmCanalTotalsCredev, 30000);
+setInterval(preWarmCanalTotalsCredev, 3 * 60 * 60 * 1000);
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
 // ─── Pre-warm das Métricas Diárias ──────────────────────────────────────────
 // Bate em /api/forecast/promessa-mensal, /promessa-semanal, /promessa-vendedores
@@ -219,12 +226,18 @@ function preWarmMetricasDiarias() {
       });
   }
 }
+<<<<<<< HEAD
 // ⚠️ PRE-WARM TEMPORARIAMENTE SUSPENSO — mesma razão acima (anti-sobrecarga).
 // Pra reativar: descomentar as linhas abaixo.
 //
 // setTimeout(preWarmMetricasDiarias, 60000);
 // setInterval(preWarmMetricasDiarias, 3 * 60 * 60 * 1000);
 console.log('⏸ [pre-warm forecast] SUSPENSO — anti-sobrecarga TOTVS');
+=======
+// ⚠️ Pre-warm reduzido pra 3h (era 1h).
+setTimeout(preWarmMetricasDiarias, 60000);
+setInterval(preWarmMetricasDiarias, 3 * 60 * 60 * 1000);
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
 // ─── Cache para ClickUp leads (TTL = 10 min) ─────────────────────────────────
 const LEADS_CACHE = new Map(); // key: "de|ate" → { data, ts }
@@ -7483,10 +7496,14 @@ router.post(
     );
     if (totalPagesOp > 1) {
       const remOp = Array.from({ length: totalPagesOp - 1 }, (_, i) => i + 2);
+<<<<<<< HEAD
       // CONC=2 — TOTVS frequentemente rate-limita a SEGUNDA page de cada
       // batch, fazendo páginas pares falharem silenciosamente. Mas CONC=1
       // sequencial é ~20min total (inviável). Compromisso: CONC=2 com
       // retry sequencial das páginas falhadas no fim (rápido).
+=======
+      // CONC reduzido 3→2 — menor carga simultânea no TOTVS
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
       const CONC = 2;
       for (let i = 0; i < remOp.length; i += CONC) {
         const batch = remOp.slice(i, i + CONC);
@@ -8989,6 +9006,11 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         if (v <= 0) continue;
         const sc = String(it.sellerCode || '');
         if (sc && merged[sc]) {
+<<<<<<< HEAD
+=======
+          // Idem: NÃO subtrai do invoice_value (bruto). Só contabiliza
+          // em credev_value pra exibição separada.
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
           merged[sc].credev_value = (merged[sc].credev_value || 0) + v;
         } else {
           orphanReturns.push({ pc, v });
@@ -10983,6 +11005,7 @@ async function computeCanalTotalsFromSupabase({ datemin, datemax, cfg }) {
 }
 
 // ⚠️ TOTVS bloqueou por queries pesadas — aumentado mais.
+<<<<<<< HEAD
 // ═══════════════════════════════════════════════════════════════════════════
 // Split UF de Rafael (inbound_rafael) — só conta como Rafael NFs onde cliente
 // é MA/BA/MG. NFs de outros estados vão pra multimarcas. Helper usa SOMENTE
@@ -11059,6 +11082,8 @@ async function getRafaelUFSplit(datemin, datemax) {
   return result;
 }
 
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 const CANAL_TOTALS_CACHE = new Map();
 const CANAL_TOTALS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h pra datas passadas (era 12h)
 const CANAL_TOTALS_CACHE_TTL_REALTIME = 60 * 60 * 1000; // 1h pra mês corrente (era 30min)
@@ -11076,9 +11101,14 @@ const CANAL_TOTALS_INFLIGHT = new Map();
 // trabalho — os outros esperam o mesmo result. Evita N queries TOTVS
 // paralelas pra mesma combinação (caso típico: Painel Competição + Forecast
 // rodando ao mesmo tempo no mesmo período).
+<<<<<<< HEAD
 async function getCanalTotalsCached(modulo, datemin, datemax, opts = {}) {
   const lite = !!opts.lite;
   const cacheKey = `${modulo}|${datemin}|${datemax}${lite ? '|lite' : ''}`;
+=======
+async function getCanalTotalsCached(modulo, datemin, datemax) {
+  const cacheKey = `${modulo}|${datemin}|${datemax}`;
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
   const cached = CANAL_TOTALS_CACHE.get(cacheKey);
   // TTL alinhado com o endpoint /canal-totals: 1h pra realtime, 24h passado.
   // Sem isso, helper considerava cache fresh até 24h mesmo em mês corrente —
@@ -11958,7 +11988,10 @@ router.post(
         devolucao_returns: Math.round(devolucao_returns * 100) / 100,
         franquia_excluida: Math.round(franquia_excluida * 100) / 100,
         liquid_floored: liq_floored, // true se líquido ≤ 0 e expomos bruto (UI pode mostrar nota)
+<<<<<<< HEAD
         mode: liteMode ? 'lite' : 'full', // lite = sem credev em payments (rápido); full = oficial completo
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
         per_seller,
         source: liteMode
           ? 'totvs_gross + movement_returns (LITE — sem credev em payments)'
@@ -12119,15 +12152,23 @@ router.post(
       );
     }
 
+<<<<<<< HEAD
     // Cache check (com bypass via ?nocache=true)
     const noCache =
       req.query?.nocache === 'true' || req.body?.nocache === true;
+=======
+    // Cache check
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
     const stCacheKey = `${modulo || 'all'}|${datemin}|${datemax}`;
     const stTodayIso = new Date().toISOString().split('T')[0];
     const stIsRealtime = datemax >= stTodayIso;
     const stCacheTTL = stIsRealtime ? SELLERS_TOTALS_TTL : SELLERS_TOTALS_TTL_PAST;
     const stCached = SELLERS_TOTALS_CACHE.get(stCacheKey);
+<<<<<<< HEAD
     if (!noCache && stCached && Date.now() - stCached.ts < stCacheTTL) {
+=======
+    if (stCached && Date.now() - stCached.ts < stCacheTTL) {
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
       return successResponse(
         res,
         { ...stCached.data, cached: true },
@@ -12781,13 +12822,20 @@ router.post(
       req.query?.nocache === 'true' || req.body?.nocache === true;
     const cached = FATSEG_CACHE.get(cacheKey);
     const cacheAge = cached ? Date.now() - cached.ts : null;
+<<<<<<< HEAD
     if (!noCache && cached && cacheAge < cacheTTL) {
+=======
+    if (cached && cacheAge < cacheTTL) {
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
       return successResponse(
         res,
         { ...cached.data, cached: true },
         'OK (cache)',
       );
     }
+    // Stale fallback: se a refetch falhar, vamos retornar essa cache antiga.
+    // Marca no res.locals pra usar no catch global da rota (se chegar lá).
+    const hasStale = cached && cacheAge < FATSEG_STALE_TTL;
 
     // ─── Coalescing anti-sobrecarga TOTVS ────────────────────────────────────
     // Se 2+ usuários abrem a página de Forecast ao mesmo tempo com o mesmo
@@ -13679,6 +13727,7 @@ router.post(
       console.warn(
         `[fat-seg] usando STALE cache de ${Math.floor(cacheAge / 1000)}s — TOTVS instável`,
       );
+<<<<<<< HEAD
       // Resolve coalescing com dados stale pra outros callers em wait
       fulfillInflight({
         ...cached.data,
@@ -13686,6 +13735,8 @@ router.post(
         stale: true,
         stale_age_seconds: Math.floor(cacheAge / 1000),
       });
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
       return successResponse(
         res,
         {
@@ -13915,6 +13966,7 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+<<<<<<< HEAD
 // POST /api/crm/credev-por-vendedor
 //   Credev (vale-troca usado em PAGAMENTO) por vendedor, DIRETO do TOTVS
 //   (fiscal/v2/invoices Output com expand=payments,items). É só o credev — bem
@@ -14144,6 +14196,8 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+=======
+>>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 // POST /api/crm/clear-fatseg-cache
 //      Limpa cache em memória do /faturamento-por-segmento e /canal-totals.
 // ---------------------------------------------------------------------------
