@@ -1969,7 +1969,176 @@ router.get(
           uniqueMap.set(row.code, row);
         }
       }
-      const clientes = Array.from(uniqueMap.values());
+      let clientes = Array.from(uniqueMap.values());
+
+      // ── Fallback TOTVS: busca direta quando não há resultado no Supabase ──
+      // Aplicado apenas para buscas por código ou CPF/CNPJ (clientes recém-cadastrados
+      // ainda não sincronizados na tabela pes_pessoa, sincronizada a cada 24h).
+      if (clientes.length === 0 && (code || cnpj)) {
+        try {
+          console.log(
+            `🔄 Fallback TOTVS: buscando por ${code ? 'código' : 'CPF/CNPJ'} direto na API TOTVS`,
+          );
+          const tokenData = await getToken();
+          if (tokenData?.access_token) {
+            const callTotvs = (endpoint, payload, token) =>
+              axios.post(endpoint, payload, {
+                headers: {
+                  'Content-Type': 'application/json',
+                  Accept: 'application/json',
+                  Authorization: `Bearer ${token}`,
+                },
+                timeout: 30000,
+              });
+
+            const withRefresh = async (endpoint, payload) => {
+              try {
+                return await callTotvs(
+                  endpoint,
+                  payload,
+                  tokenData.access_token,
+                );
+              } catch (err) {
+                if (err.response?.status === 401) {
+                  const refreshed = await getToken(true);
+                  return callTotvs(endpoint, payload, refreshed.access_token);
+                }
+                throw err;
+              }
+            };
+
+            // Mapeia item TOTVS para o shape de pes_pessoa usado pelo frontend
+            const mapTotvsItem = (item, tipoPessoa) => ({
+              code: item.code,
+              cd_empresacad: item.branchInsertCode ?? item.branchCode ?? null,
+              nm_pessoa: item.name || null,
+              fantasy_name: item.fantasyName || null,
+              cpf: tipoPessoa === 'J' ? item.cnpj || null : item.cpf || null,
+              tipo_pessoa: tipoPessoa,
+              telefone:
+                item.phones?.find((p) => p.isDefault)?.number ||
+                item.phones?.[0]?.number ||
+                null,
+              email:
+                item.emails?.find((e) => e.isDefault)?.address ||
+                item.emails?.[0]?.address ||
+                null,
+              is_customer: item.isCustomer ?? null,
+              customer_status: item.customerStatus || null,
+              person_status: item.status || null,
+            });
+
+            let totvsItems = [];
+
+            if (code) {
+              // Busca por código: tenta PJ e PF em paralelo
+              const codeNum = parseInt(String(code).replace(/\D/g, ''), 10);
+              const payload = {
+                filter: { personCodeList: [codeNum] },
+                page: 1,
+                pageSize: 5,
+              };
+              const pjEndpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+              const pfEndpoint = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+              const [pjRes, pfRes] = await Promise.allSettled([
+                withRefresh(pjEndpoint, payload),
+                withRefresh(pfEndpoint, payload),
+              ]);
+
+              if (pjRes.status === 'fulfilled') {
+                totvsItems.push(
+                  ...(pjRes.value.data?.items || []).map((i) =>
+                    mapTotvsItem(i, 'J'),
+                  ),
+                );
+              }
+              if (pfRes.status === 'fulfilled') {
+                totvsItems.push(
+                  ...(pfRes.value.data?.items || []).map((i) =>
+                    mapTotvsItem(i, 'F'),
+                  ),
+                );
+              }
+            } else if (cnpj) {
+              const cnpjLimpo = cnpj.replace(/[^\d]/g, '');
+              const isPF = cnpjLimpo.length === 11;
+              const isPJ = cnpjLimpo.length === 14;
+
+              if (isPF) {
+                // CPF: filtro direto por cpfList
+                const payload = {
+                  filter: { cpfList: [cnpjLimpo] },
+                  page: 1,
+                  pageSize: 10,
+                };
+                const resp = await withRefresh(
+                  `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+                  payload,
+                );
+                totvsItems = (resp.data?.items || []).map((i) =>
+                  mapTotvsItem(i, 'F'),
+                );
+              } else if (isPJ) {
+                // CNPJ: API PJ não suporta cnpjList — pagina e filtra localmente
+                let currentPage = 1;
+                let hasMore = true;
+                const MAX_PAGES = 30;
+                while (
+                  hasMore &&
+                  currentPage <= MAX_PAGES &&
+                  totvsItems.length === 0
+                ) {
+                  const payload = {
+                    filter: {},
+                    page: currentPage,
+                    pageSize: 500,
+                    order: 'personCode',
+                  };
+                  const resp = await withRefresh(
+                    `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+                    payload,
+                  );
+                  const pageItems = resp.data?.items || [];
+                  hasMore = resp.data?.hasNext || false;
+                  const matches = pageItems.filter(
+                    (item) =>
+                      String(item.cnpj || '').replace(/\D/g, '') === cnpjLimpo,
+                  );
+                  totvsItems.push(...matches.map((i) => mapTotvsItem(i, 'J')));
+                  console.log(
+                    `📄 Fallback PJ página ${currentPage}: ${pageItems.length} itens, ${matches.length} match(es)`,
+                  );
+                  currentPage++;
+                }
+              }
+            }
+
+            if (totvsItems.length > 0) {
+              console.log(
+                `✅ Fallback TOTVS: ${totvsItems.length} resultado(s) encontrado(s) direto da API`,
+              );
+              return successResponse(
+                res,
+                {
+                  clientes: totvsItems,
+                  total: totvsItems.length,
+                  fonte: 'totvs',
+                },
+                `${totvsItems.length} cliente(s) encontrado(s) direto do TOTVS`,
+              );
+            }
+
+            console.log('ℹ️ Fallback TOTVS: nenhum resultado encontrado');
+          }
+        } catch (fallbackError) {
+          console.warn(
+            '⚠️ Fallback TOTVS falhou (retornando resultado vazio):',
+            fallbackError.message,
+          );
+        }
+      }
+      // ── Fim do fallback TOTVS ─────────────────────────────────────────────
 
       console.log(
         `🔍 Busca por nome: "${nome || ''}" / fantasia: "${fantasia || ''}" → ${clientes.length} resultados`,
