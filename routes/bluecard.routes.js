@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 // BlueCard — leads capturados pela LP pública /lp/bluecard
 //   POST /api/bluecard/leads        (público, sem auth) — salva lead
 //   GET  /api/bluecard/leads        (admin) — lista leads com filtros
@@ -324,87 +323,5 @@ router.delete('/leads/:id', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   return res.json({ ok: true });
 });
-=======
-// ============================================================
-// BLUECARD — Rotas
-// Leads capturados via landing page /lp/bluecard
-// ============================================================
-import express from 'express';
-import supabase from '../config/supabase.js';
-import {
-  asyncHandler,
-  successResponse,
-  errorResponse,
-} from '../utils/errorHandler.js';
-
-const router = express.Router();
-
-// ──────────────────────────────────────────────────────────────
-// POST /api/bluecard/leads
-// Recebe um lead da LP e salva no Supabase
-// ──────────────────────────────────────────────────────────────
-router.post(
-  '/leads',
-  asyncHandler(async (req, res) => {
-    const { nome, telefone, email, loja, mensagem } = req.body;
-
-    if (!nome || !telefone) {
-      return errorResponse(res, 'nome e telefone são obrigatórios', 400);
-    }
-
-    const { data, error } = await supabase
-      .from('bluecard_leads')
-      .insert([
-        {
-          nome: String(nome).trim(),
-          telefone: String(telefone).replace(/\D/g, ''),
-          email: email ? String(email).trim().toLowerCase() : null,
-          loja: loja || null,
-          mensagem: mensagem || null,
-          criado_em: new Date().toISOString(),
-        },
-      ])
-      .select()
-      .single();
-
-    if (error) {
-      console.error('[bluecard] Erro ao inserir lead:', error.message);
-      return errorResponse(res, 'Erro ao registrar lead', 500);
-    }
-
-    return successResponse(res, { lead: data }, 'Lead registrado com sucesso');
-  }),
-);
-
-// ──────────────────────────────────────────────────────────────
-// GET /api/bluecard/leads
-// Lista todos os leads (uso interno)
-// ──────────────────────────────────────────────────────────────
-router.get(
-  '/leads',
-  asyncHandler(async (req, res) => {
-    const { loja, limit = 100, offset = 0 } = req.query;
-
-    let query = supabase
-      .from('bluecard_leads')
-      .select('*')
-      .order('criado_em', { ascending: false })
-      .range(Number(offset), Number(offset) + Number(limit) - 1);
-
-    if (loja) {
-      query = query.eq('loja', loja);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('[bluecard] Erro ao buscar leads:', error.message);
-      return errorResponse(res, 'Erro ao buscar leads', 500);
-    }
-
-    return successResponse(res, { leads: data, total: data.length });
-  }),
-);
->>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
 export default router;

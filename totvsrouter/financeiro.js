@@ -1876,15 +1876,19 @@ router.post(
           const stageVal =
             inst.Stage ?? inst.stage ?? inst.stageType ?? 'InvoiceNotConfered';
 
-          // Remover chaves antigas
+          // Remover chaves antigas e campos null/undefined que causam erro
+          // de conversão no TOTVS (ex: bearerCode: null → Int32 error)
           const clean = {};
           for (const [k, v] of Object.entries(inst)) {
             if (LEGACY_KEYS.has(k)) continue;
+            if (v === null || v === undefined) continue; // omite nulls
             clean[k] = v;
           }
 
           return {
             ...clean,
+            // bearerCode padrão 1020 quando não informado
+            bearerCode: clean.bearerCode ?? 1020,
             // Datas normalizadas
             dueDate: normalizeDate(clean.dueDate),
             issueDate: normalizePastDate(clean.issueDate),

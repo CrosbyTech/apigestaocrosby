@@ -19,12 +19,9 @@ import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
 import bluecardRoutes from './routes/bluecard.routes.js';
-<<<<<<< HEAD
 import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
 import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js';
 import faturamentoTransacaoRoutes from './routes/faturamentoTransacao.routes.js';
-=======
->>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
@@ -35,22 +32,6 @@ import { installTotvsTracker } from './services/totvsAxiosInterceptor.js';
 
 // Instala interceptor que rastreia chamadas TOTVS (antes de qualquer rota)
 installTotvsTracker();
-
-// ─── Safety net global ─────────────────────────────────────────────────
-// Evita que erros não-tratados (ex: pg.Pool 'error', websocket reconnect,
-// timer rejeitado) DERRUBEM o processo Node inteiro. Em produção, queremos
-// log + continuar — não crashar e perder todas as requests em vôo.
-process.on('uncaughtException', (err, origin) => {
-  console.error(
-    `🚨 [uncaughtException] ${origin}:`,
-    err?.message || err,
-    err?.stack?.split('\n').slice(0, 3).join('\n') || '',
-  );
-});
-process.on('unhandledRejection', (reason, promise) => {
-  const msg = reason instanceof Error ? reason.message : String(reason);
-  console.error(`🚨 [unhandledRejection]`, msg);
-});
 
 // ─── Safety net global ─────────────────────────────────────────────────
 // Evita que erros não-tratados (ex: pg.Pool 'error', websocket reconnect,
@@ -6421,17 +6402,11 @@ router.get(
 
       // Fallback: se busca por code não achou no cache, tenta direto no TOTVS
       if (code && clientes.length === 0) {
-        console.log(
-          `⚠️ Código ${code} não encontrado no cache. Buscando no TOTVS...`,
-        );
+        console.log(`⚠️ Código ${code} não encontrado no cache. Buscando no TOTVS...`);
         try {
           const codeInt = parseInt(code, 10);
           const tokenData = await getToken();
-          const totvsFilter = {
-            filter: { personCodeList: [codeInt] },
-            page: 1,
-            pageSize: 10,
-          };
+          const totvsFilter = { filter: { personCodeList: [codeInt] }, page: 1, pageSize: 10 };
           const totvsHeaders = {
             'Content-Type': 'application/json',
             Accept: 'application/json',
@@ -6440,31 +6415,18 @@ router.get(
           const totvsOpts = { headers: totvsHeaders, timeout: 15000 };
 
           const [pjResp, pfResp] = await Promise.allSettled([
-            axios.post(
-              `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-              totvsFilter,
-              totvsOpts,
-            ),
-            axios.post(
-              `${TOTVS_BASE_URL}/person/v2/individuals/search`,
-              totvsFilter,
-              totvsOpts,
-            ),
+            axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, totvsFilter, totvsOpts),
+            axios.post(`${TOTVS_BASE_URL}/person/v2/individuals/search`, totvsFilter, totvsOpts),
           ]);
 
-          const { mapPersonToRow, upsertBatch } =
-            await import('./utils/syncPesPessoa.js');
+          const { mapPersonToRow, upsertBatch } = await import('./utils/syncPesPessoa.js');
 
           const totvsRows = [];
           if (pjResp.status === 'fulfilled') {
-            (pjResp.value.data?.items || []).forEach((item) =>
-              totvsRows.push(mapPersonToRow(item, 'PJ')),
-            );
+            (pjResp.value.data?.items || []).forEach((item) => totvsRows.push(mapPersonToRow(item, 'PJ')));
           }
           if (pfResp.status === 'fulfilled') {
-            (pfResp.value.data?.items || []).forEach((item) =>
-              totvsRows.push(mapPersonToRow(item, 'PF')),
-            );
+            (pfResp.value.data?.items || []).forEach((item) => totvsRows.push(mapPersonToRow(item, 'PF')));
           }
 
           const found = totvsRows.filter((r) => r.code === codeInt);
@@ -6483,16 +6445,12 @@ router.get(
               customer_status: r.customer_status,
               person_status: r.person_status,
             }));
-            console.log(
-              `✅ TOTVS fallback: código ${code} encontrado (${clientes.length} registro(s))`,
-            );
+            console.log(`✅ TOTVS fallback: código ${code} encontrado (${clientes.length} registro(s))`);
           } else {
             console.log(`❌ TOTVS fallback: código ${code} não encontrado`);
           }
         } catch (fallbackErr) {
-          console.warn(
-            `⚠️ Fallback TOTVS falhou para code ${code}: ${fallbackErr.message}`,
-          );
+          console.warn(`⚠️ Fallback TOTVS falhou para code ${code}: ${fallbackErr.message}`);
         }
       }
 
@@ -7367,12 +7325,9 @@ import {
   iniciarJobForecastWhatsapp,
   executarForecastWhatsapp,
 } from './jobs/forecast-whatsapp.job.js';
-<<<<<<< HEAD
 import { iniciarFaturamentoHistoricoJob } from './jobs/faturamento-historico.job.js';
 import { iniciarTransacaoHistoricoSync } from './jobs/transacao-historico-sync.job.js';
 import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js';
-=======
->>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 
 // =============================================================================
 // SERVER SETUP
@@ -7484,12 +7439,9 @@ app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, 
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
-<<<<<<< HEAD
 app.use('/api/expedicao-showroom', expedicaoShowroomRoutes); // Expedição Showroom — controle envios
 app.use('/api/faturamento-historico', faturamentoHistoricoRoutes); // Faturamento histórico diário por canal
 app.use('/api/faturamento-transacao', faturamentoTransacaoRoutes); // Faturamento histórico por NF (transação)
-=======
->>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
 app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
 app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
@@ -7519,12 +7471,9 @@ app.listen(PORT, async () => {
   iniciarJobFaturamentoDiario();
   iniciarJobForecastRefYoy();
   iniciarJobForecastWhatsapp();
-<<<<<<< HEAD
   iniciarFaturamentoHistoricoJob();
   iniciarTransacaoHistoricoSync();
   iniciarPessoasBluecredSync();
-=======
->>>>>>> 3619129b (atualizacoes de solicitações de pagamento)
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();

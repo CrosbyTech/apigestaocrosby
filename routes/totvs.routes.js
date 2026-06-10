@@ -5655,36 +5655,16 @@ router.post(
       // DEBUG: inspecionar expense dos primeiros itens
       const debugSample = filteredItems.slice(0, 3);
       console.log('🔬 DEBUG expenseCodeList recebido:', expenseCodeList);
-      console.log(
-        '🔬 DEBUG expense dos 3 primeiros itens:',
-        JSON.stringify(
-          debugSample.map((i) => ({
-            expense: i.expense,
-            keys: Object.keys(i),
-          })),
-          null,
-          2,
-        ).slice(0, 1500),
-      );
+      console.log('🔬 DEBUG expense dos 3 primeiros itens:', JSON.stringify(debugSample.map((i) => ({ expense: i.expense, keys: Object.keys(i) })), null, 2).slice(0, 1500));
 
       // Filtro por código de despesa (expenseCodeList) — aplicado antes do map para reduzir trabalho
-      if (
-        expenseCodeList &&
-        Array.isArray(expenseCodeList) &&
-        expenseCodeList.length > 0
-      ) {
-        const codesSet = new Set(
-          expenseCodeList.map((c) => parseInt(c)).filter((c) => !isNaN(c)),
-        );
+      if (expenseCodeList && Array.isArray(expenseCodeList) && expenseCodeList.length > 0) {
+        const codesSet = new Set(expenseCodeList.map((c) => parseInt(c)).filter((c) => !isNaN(c)));
         filteredItems = filteredItems.filter((item) => {
           if (!item.expense || item.expense.length === 0) return false;
-          return item.expense.some((exp) =>
-            codesSet.has(parseInt(exp.expenseCode)),
-          );
+          return item.expense.some((exp) => codesSet.has(parseInt(exp.expenseCode)));
         });
-        console.log(
-          `🔍 Filtro expenseCodeList (${expenseCodeList.length} códigos): ${filteredItems.length} itens restantes`,
-        );
+        console.log(`🔍 Filtro expenseCodeList (${expenseCodeList.length} códigos): ${filteredItems.length} itens restantes`);
       }
 
       // Filtro de pagamento
@@ -5694,9 +5674,7 @@ router.post(
         } else if (filtroPagamento === 'NAO_PAGO') {
           filteredItems = filteredItems.filter((item) => !item.settlementDate);
         }
-        console.log(
-          `🔍 Filtro filtroPagamento (${filtroPagamento}): ${filteredItems.length} itens restantes`,
-        );
+        console.log(`🔍 Filtro filtroPagamento (${filtroPagamento}): ${filteredItems.length} itens restantes`);
       }
 
       // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)
@@ -6366,11 +6344,7 @@ router.get(
         try {
           const codeInt = parseInt(code, 10);
           const tokenData = await getToken();
-          const totvsFilter = {
-            filter: { personCodeList: [codeInt] },
-            page: 1,
-            pageSize: 10,
-          };
+          const totvsFilter = { filter: { personCodeList: [codeInt] }, page: 1, pageSize: 10 };
           const totvsHeaders = {
             'Content-Type': 'application/json',
             Accept: 'application/json',
@@ -6379,20 +6353,11 @@ router.get(
           const totvsOpts = { headers: totvsHeaders, timeout: 15000 };
 
           const [pjResp, pfResp] = await Promise.allSettled([
-            axios.post(
-              `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-              totvsFilter,
-              totvsOpts,
-            ),
-            axios.post(
-              `${TOTVS_BASE_URL}/person/v2/individuals/search`,
-              totvsFilter,
-              totvsOpts,
-            ),
+            axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, totvsFilter, totvsOpts),
+            axios.post(`${TOTVS_BASE_URL}/person/v2/individuals/search`, totvsFilter, totvsOpts),
           ]);
 
-          const { mapPersonToRow, upsertBatch } =
-            await import('../utils/syncPesPessoa.js');
+          const { mapPersonToRow, upsertBatch } = await import('../utils/syncPesPessoa.js');
 
           const totvsRows = [];
           if (pjResp.status === 'fulfilled') {
