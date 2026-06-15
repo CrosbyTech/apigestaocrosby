@@ -1,7 +1,0 @@
-<<<<<<< HEAD
-2026/06/10-11:45:53.115 1d34 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Sync Data\LevelDB since it was missing.
-2026/06/10-11:45:53.150 1d34 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Sync Data\LevelDB/MANIFEST-000001
-=======
-2026/06/15-10:56:42.384 8170 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Sync Data\LevelDB since it was missing.
-2026/06/15-10:56:42.424 8170 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Sync Data\LevelDB/MANIFEST-000001
->>>>>>> 8dc700ba (expedicao)
