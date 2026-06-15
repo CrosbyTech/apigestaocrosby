@@ -28,8 +28,10 @@ export const FORECAST_EXCLUSOES = [
 ];
 
 // Ops por canal (espelha CANAL_CONFIG do crm.routes.js)
+// ⚠️ Op 7279 é compartilhada (franquia/business/revenda). Aparece em FRANQUIA
+// e BUSINESS — exclusões filtram por personCode (cliente), então não duplica.
 const CANAL_OPS = {
-  franquia: [7234, 7240, 7802, 9124, 7259],
+  franquia: [7234, 7240, 7802, 9124, 7259, 7279],
   multimarcas: [7235, 7241, 9127, 200],
   business: [7237, 7269, 7279, 7277],
 };

@@ -5867,7 +5867,7 @@ async function carregarErpBackground(cacheKey, meses, modulo, dias = 0) {
       21, // TOTVS interno + credev item-level
       7245,
       7244,
-      7240,
+      // 7240 removida: é VENDA FRANQUIA PROMOÇÃO (saída), não devolução
       7790,
       1214,
       20, // ops TOTVS revenda devolução
@@ -8826,8 +8826,9 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
     const tokenData = await getToken();
     const accessToken = tokenData?.access_token;
     if (accessToken) {
+      // 7240 (VENDA FRANQUIA PROMOÇÃO) NÃO entra aqui — é saída, não devolução.
       const DEVOL_OPS_LIQUIDO_TOTVS = new Set([
-        1202, 1204, 1411, 1410, 2202, 2411, 1950, 21, 7245, 7244, 7240, 7790,
+        1202, 1204, 1411, 1410, 2202, 2411, 1950, 21, 7245, 7244, 7790,
         1214, 20,
       ]);
 
@@ -9188,7 +9189,7 @@ const analyticsHandler = asyncHandler(async (req, res) => {
     21, // TOTVS interno + credev item-level
     7245,
     7244,
-    7240,
+    // 7240 removida: é VENDA FRANQUIA PROMOÇÃO (saída), não devolução
     7790,
     1214,
     20, // ops TOTVS revenda devolução
@@ -11632,7 +11633,7 @@ router.post(
         21, // TOTVS interno + credev item-level
         7245,
         7244,
-        7240,
+        // 7240 removida: é VENDA FRANQUIA PROMOÇÃO (saída), não devolução
         7790,
         1214,
         20, // ops TOTVS revenda devolução
@@ -12401,6 +12402,8 @@ router.post(
       } else {
         seg = OP_SEGMENTO_MAP[nf.operation_code];
       }
+      // Op 7279 sobrescreve por dealer (compartilhada entre canais)
+      if (Number(nf.operation_code) === 7279) seg = resolveCanal7279(dealerReal);
       if (!seg) continue;
       if (seg === 'franquia') continue;
       if (seg === 'varejo' && !VAREJO_BRANCH_CODES.has(nf.branch_code))
@@ -12734,9 +12737,24 @@ const OP_SEGMENTO_MAP = {
   // Business
   7237: 'business',
   7269: 'business',
-  7279: 'business',
+  7279: 'business', // ⚠️ overridado por resolveCanal7279() — depende do dealer
   7277: 'business',
 };
+
+// Op 7279 é COMPARTILHADA entre canais. Gestor definiu (2026-06):
+//   dealer 40 → franquia · 20 → business · 161/241/165 → revenda · outros → revenda
+// Resolve_canal_7279 sobrescreve OP_SEGMENTO_MAP[7279] sempre que processamos NF-a-NF.
+const OP_7279_DEALER_CANAL = new Map([
+  [40, 'franquia'],
+  [20, 'business'],
+  [161, 'revenda'],
+  [241, 'revenda'],
+  [165, 'revenda'],
+]);
+function resolveCanal7279(dealer) {
+  if (dealer == null) return 'revenda';
+  return OP_7279_DEALER_CANAL.get(Number(dealer)) || 'revenda';
+}
 
 // Cache em memória do faturamento por segmento (TOTVS)
 // Datas passadas: TTL 30min | data atual: TTL 3min
@@ -13045,6 +13063,8 @@ router.post(
       } else {
         seg = OP_SEGMENTO_MAP[operationCode];
       }
+      // Op 7279 sobrescreve por dealer (compartilhada entre canais)
+      if (Number(operationCode) === 7279) seg = resolveCanal7279(dealerReal);
       if (!seg) continue;
 
       // Filtros por segmento
@@ -13970,8 +13990,9 @@ router.post(
         const tokenData = await getToken();
         const accessToken = tokenData?.access_token;
         if (!accessToken) throw new Error('Token TOTVS indisponível');
+        // 7240 NÃO entra aqui — é VENDA FRANQUIA PROMOÇÃO (saída), não devolução.
         const DEVOL_OPS = new Set([
-          1202, 1204, 1411, 1410, 2202, 2411, 1950, 21, 7245, 7244, 7240,
+          1202, 1204, 1411, 1410, 2202, 2411, 1950, 21, 7245, 7244,
           7790, 1214, 20,
         ]);
         const fmEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
@@ -14482,6 +14503,8 @@ router.post(
       } else {
         seg = OP_SEGMENTO_MAP[operationCode];
       }
+      // Op 7279 sobrescreve por dealer (compartilhada entre canais)
+      if (Number(operationCode) === 7279) seg = resolveCanal7279(dealerReal);
       if (!seg) continue;
 
       // Filtros por segmento (mesma lógica do faturamento-por-segmento)

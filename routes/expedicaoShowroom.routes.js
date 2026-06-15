@@ -19,7 +19,7 @@ const TOTVS_BASE_URL =
 const OPERATIONS = [7254, 7007, 7255, 7234, 7240, 7259];
 const STATUS_VALIDOS = new Set(['enviado_blue', 'recebido_blue', 'enviado_cliente']);
 const TRANSPORTADORAS_VALIDAS = new Set([
-  'latam', 'azul', 'correios', 'retirada', 'taxista', 'paulao',
+  'latam', 'azul', 'correios', 'retirada', 'taxista', 'paulao', 'bee', 'uber',
 ]);
 
 // ─────────────────────────────────────────────────────────────────
@@ -236,7 +236,7 @@ router.post('/sync-totvs', async (req, res) => {
 //   query: ?status= &transportadora= &busca= &limit= &offset=
 // ─────────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
-  const { status, transportadora, busca } = req.query;
+  const { status, transportadora, busca, data_inicio, data_fim } = req.query;
   const limit = Math.min(parseInt(req.query.limit || '500', 10) || 500, 2000);
   const offset = parseInt(req.query.offset || '0', 10) || 0;
   let q = supabase
@@ -245,8 +245,11 @@ router.get('/', async (req, res) => {
     .order('issue_date', { ascending: false })
     .order('invoice_code', { ascending: false })
     .range(offset, offset + limit - 1);
-  if (status) q = q.eq('status', status);
+  if (status === '__sem_status__') q = q.is('status', null);
+  else if (status) q = q.eq('status', status);
   if (transportadora) q = q.eq('transportadora', transportadora);
+  if (data_inicio) q = q.gte('issue_date', data_inicio);
+  if (data_fim) q = q.lte('issue_date', data_fim);
   if (busca) {
     const safe = String(busca).replace(/[%_]/g, '');
     q = q.or(

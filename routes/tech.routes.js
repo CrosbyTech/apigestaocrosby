@@ -630,4 +630,303 @@ router.delete(
   }),
 );
 
+// ──────────────────────────────────────────────────────────────
+// COTAÇÃO DE COMPRAS — 1 item/cotação, N fornecedores
+// ──────────────────────────────────────────────────────────────
+
+const COTACAO_STATUS = new Set([
+  'rascunho', 'cotando', 'escolhido', 'comprado', 'cancelado',
+]);
+const COTACAO_URGENCIA = new Set(['baixa', 'normal', 'alta']);
+const COTACAO_TIPO = new Set(['online', 'presencial']);
+const COTACAO_CATEGORIA = new Set([
+  'compras', 'patrimonio', 'uso_consumo', 'tecnologia',
+]);
+const COTACAO_BUCKET = 'tech-cotacoes-anexos';
+
+// GET /api/tech/cotacoes — lista (filtros: status, urgencia, categoria, q)
+router.get(
+  '/cotacoes',
+  asyncHandler(async (req, res) => {
+    const { status, urgencia, categoria, q } = req.query;
+    let query = supabase
+      .from('tech_cotacoes')
+      .select(`
+        *,
+        fornecedores:tech_cotacoes_fornecedores!cotacao_id(id, fornecedor_nome, valor_unitario, frete, taxas, tipo_compra)
+      `)
+      .order('criado_em', { ascending: false });
+    if (status) query = query.eq('status', status);
+    if (urgencia) query = query.eq('urgencia', urgencia);
+    if (categoria) query = query.eq('categoria', categoria);
+    if (q) {
+      query = query.or(
+        `titulo.ilike.%${q}%,descricao.ilike.%${q}%,solicitante.ilike.%${q}%`,
+      );
+    }
+    const { data, error } = await query;
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { cotacoes: data || [], total: (data || []).length });
+  }),
+);
+
+// GET /api/tech/cotacoes/:id — detalhe (cotação + fornecedores)
+router.get(
+  '/cotacoes/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return errorResponse(res, 'id inválido', 400);
+    const { data: cot, error: e1 } = await supabase
+      .from('tech_cotacoes')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (e1) return errorResponse(res, e1.message, 500);
+    if (!cot) return errorResponse(res, 'Cotação não encontrada', 404);
+    const { data: forn, error: e2 } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .select('*')
+      .eq('cotacao_id', id)
+      .order('valor_unitario', { ascending: true });
+    if (e2) return errorResponse(res, e2.message, 500);
+    return successResponse(res, { ...cot, fornecedores: forn || [] });
+  }),
+);
+
+// POST /api/tech/cotacoes — cria
+router.post(
+  '/cotacoes',
+  asyncHandler(async (req, res) => {
+    const {
+      titulo, descricao, quantidade, unidade,
+      categoria, solicitante, urgencia, data_necessidade, observacao,
+    } = req.body || {};
+    if (!titulo || !String(titulo).trim()) {
+      return errorResponse(res, 'titulo é obrigatório', 400);
+    }
+    if (urgencia && !COTACAO_URGENCIA.has(urgencia)) {
+      return errorResponse(res, 'urgencia inválida', 400);
+    }
+    if (categoria && !COTACAO_CATEGORIA.has(categoria)) {
+      return errorResponse(res, 'categoria inválida', 400);
+    }
+    const userLogin = req.headers['x-user-login'] || req.headers['x-user'] || null;
+    const payload = {
+      titulo: String(titulo).trim(),
+      descricao: descricao || null,
+      quantidade: Number(quantidade) > 0 ? Number(quantidade) : 1,
+      unidade: unidade || 'un',
+      categoria: categoria || 'compras',
+      status: 'rascunho',
+      solicitante: solicitante || null,
+      urgencia: urgencia || 'normal',
+      data_necessidade: data_necessidade || null,
+      observacao: observacao || null,
+      criado_por: userLogin,
+    };
+    const { data, error } = await supabase
+      .from('tech_cotacoes')
+      .insert(payload)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, data, 'Cotação criada');
+  }),
+);
+
+// PATCH /api/tech/cotacoes/:id — edita (incluindo status e fornecedor_escolhido_id)
+router.patch(
+  '/cotacoes/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return errorResponse(res, 'id inválido', 400);
+    const body = req.body || {};
+    if (body.status && !COTACAO_STATUS.has(body.status)) {
+      return errorResponse(res, 'status inválido', 400);
+    }
+    if (body.urgencia && !COTACAO_URGENCIA.has(body.urgencia)) {
+      return errorResponse(res, 'urgencia inválida', 400);
+    }
+    if (body.categoria && !COTACAO_CATEGORIA.has(body.categoria)) {
+      return errorResponse(res, 'categoria inválida', 400);
+    }
+    const allowed = [
+      'titulo', 'descricao', 'quantidade', 'unidade', 'categoria', 'status',
+      'fornecedor_escolhido_id', 'solicitante', 'urgencia',
+      'data_necessidade', 'observacao',
+    ];
+    const update = {};
+    for (const k of allowed) if (k in body) update[k] = body[k];
+    if (Object.keys(update).length === 0) {
+      return errorResponse(res, 'nenhum campo válido para atualizar', 400);
+    }
+    // Se marcou escolhido, força status escolhido (a menos que mande explícito)
+    if (update.fornecedor_escolhido_id && !update.status) {
+      update.status = 'escolhido';
+    }
+    const { data, error } = await supabase
+      .from('tech_cotacoes')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+    if (!data) return errorResponse(res, 'Cotação não encontrada', 404);
+    return successResponse(res, data, 'Cotação atualizada');
+  }),
+);
+
+// DELETE /api/tech/cotacoes/:id — remove (cascade nos fornecedores)
+router.delete(
+  '/cotacoes/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return errorResponse(res, 'id inválido', 400);
+    // Apaga anexos do storage antes de deletar
+    const { data: forn } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .select('anexo_path')
+      .eq('cotacao_id', id);
+    const paths = (forn || []).map((f) => f.anexo_path).filter(Boolean);
+    if (paths.length > 0) {
+      await supabase.storage.from(COTACAO_BUCKET).remove(paths);
+    }
+    const { error } = await supabase.from('tech_cotacoes').delete().eq('id', id);
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { id, deleted: true });
+  }),
+);
+
+// ─── Fornecedores ─────────────────────────────────────────────
+
+// POST /api/tech/cotacoes/:id/fornecedores — adiciona
+router.post(
+  '/cotacoes/:id/fornecedores',
+  asyncHandler(async (req, res) => {
+    const cotacao_id = parseInt(req.params.id, 10);
+    if (!cotacao_id) return errorResponse(res, 'cotacao_id inválido', 400);
+    const {
+      fornecedor_nome, fornecedor_contato, tipo_compra,
+      link, endereco, valor_unitario, frete, taxas,
+      prazo_entrega, condicao_pagamento, garantia,
+      anexo_path, anexo_nome, observacao,
+    } = req.body || {};
+    if (!fornecedor_nome || !String(fornecedor_nome).trim()) {
+      return errorResponse(res, 'fornecedor_nome é obrigatório', 400);
+    }
+    const tipo = tipo_compra || 'online';
+    if (!COTACAO_TIPO.has(tipo)) {
+      return errorResponse(res, 'tipo_compra inválido', 400);
+    }
+    const payload = {
+      cotacao_id,
+      fornecedor_nome: String(fornecedor_nome).trim(),
+      fornecedor_contato: fornecedor_contato || null,
+      tipo_compra: tipo,
+      link: link || null,
+      endereco: endereco || null,
+      valor_unitario: Number(valor_unitario) || 0,
+      frete: Number(frete) || 0,
+      taxas: Number(taxas) || 0,
+      prazo_entrega: prazo_entrega || null,
+      condicao_pagamento: condicao_pagamento || null,
+      garantia: garantia || null,
+      anexo_path: anexo_path || null,
+      anexo_nome: anexo_nome || null,
+      observacao: observacao || null,
+    };
+    const { data, error } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .insert(payload)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+    // Cotação sai de rascunho automaticamente quando recebe 1º fornecedor
+    await supabase
+      .from('tech_cotacoes')
+      .update({ status: 'cotando' })
+      .eq('id', cotacao_id)
+      .eq('status', 'rascunho');
+    return successResponse(res, data, 'Fornecedor adicionado');
+  }),
+);
+
+// PATCH /api/tech/cotacoes/fornecedores/:id — edita
+router.patch(
+  '/cotacoes/fornecedores/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return errorResponse(res, 'id inválido', 400);
+    const body = req.body || {};
+    if (body.tipo_compra && !COTACAO_TIPO.has(body.tipo_compra)) {
+      return errorResponse(res, 'tipo_compra inválido', 400);
+    }
+    const allowed = [
+      'fornecedor_nome', 'fornecedor_contato', 'tipo_compra',
+      'link', 'endereco', 'valor_unitario', 'frete', 'taxas',
+      'prazo_entrega', 'condicao_pagamento', 'garantia',
+      'anexo_path', 'anexo_nome', 'observacao',
+    ];
+    const update = {};
+    for (const k of allowed) if (k in body) update[k] = body[k];
+    if (Object.keys(update).length === 0) {
+      return errorResponse(res, 'nenhum campo válido para atualizar', 400);
+    }
+    const { data, error } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .update(update)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+    if (!data) return errorResponse(res, 'Fornecedor não encontrado', 404);
+    return successResponse(res, data, 'Fornecedor atualizado');
+  }),
+);
+
+// DELETE /api/tech/cotacoes/fornecedores/:id — remove
+router.delete(
+  '/cotacoes/fornecedores/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return errorResponse(res, 'id inválido', 400);
+    // Apaga anexo do storage antes
+    const { data: f } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .select('anexo_path')
+      .eq('id', id)
+      .maybeSingle();
+    if (f?.anexo_path) {
+      await supabase.storage.from(COTACAO_BUCKET).remove([f.anexo_path]);
+    }
+    const { error } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .delete()
+      .eq('id', id);
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { id, deleted: true });
+  }),
+);
+
+// GET /api/tech/cotacoes/anexo/:fornecedorId — gera signed URL p/ download
+router.get(
+  '/cotacoes/anexo/:fornecedorId',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.fornecedorId, 10);
+    if (!id) return errorResponse(res, 'id inválido', 400);
+    const { data: f, error: e1 } = await supabase
+      .from('tech_cotacoes_fornecedores')
+      .select('anexo_path, anexo_nome')
+      .eq('id', id)
+      .maybeSingle();
+    if (e1) return errorResponse(res, e1.message, 500);
+    if (!f?.anexo_path) return errorResponse(res, 'Sem anexo', 404);
+    const { data: signed, error: e2 } = await supabase.storage
+      .from(COTACAO_BUCKET)
+      .createSignedUrl(f.anexo_path, 60 * 5); // 5 min
+    if (e2) return errorResponse(res, e2.message, 500);
+    return successResponse(res, { url: signed.signedUrl, nome: f.anexo_nome });
+  }),
+);
+
 export default router;

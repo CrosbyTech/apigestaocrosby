@@ -57,6 +57,21 @@ const RE_BRANCH_CODES = new Set([11, 111]);
 const INBOUND_DAVID_DEALERS = new Set([26, 69]);
 const INBOUND_RAFAEL_DEALER = 21;
 
+// Op 7279 é COMPARTILHADA entre canais — a classificação real depende do dealer.
+// Gestor definiu (2026-06): dealer 40=franquia · 20=business · 161/241/165=revenda
+// Demais dealers em op 7279 caem em revenda (fallback seguro).
+const OP_7279_DEALER_CANAL = new Map([
+  [40, 'franquia'],
+  [20, 'business'],
+  [161, 'revenda'],
+  [241, 'revenda'],
+  [165, 'revenda'],
+]);
+function resolveCanal7279(dealer) {
+  if (dealer == null) return 'revenda';
+  return OP_7279_DEALER_CANAL.get(Number(dealer)) || 'revenda';
+}
+
 // Extrai o dealerCode predominante dos items da NF (cada item.products[] tem dealerCode).
 // Retorna o dealer com mais produtos. Null se não conseguir.
 function getDominantDealer(nf) {
@@ -88,16 +103,21 @@ function mapNfToTransacao(nf, personCanalMap = null, branchNameMap = null) {
 
   // Classificação (mesma ordem do fat-seg do crm.routes.js):
   //   1) Ricardo Eletro: filiais 11 ou 111 (prioridade total)
-  //   2) Inbound David: dominantDealer ∈ {26, 69}
-  //   3) Inbound Rafael: dominantDealer === 21
-  //   4) OP_SEGMENTO_MAP[operation_code]
-  //   5) (devoluções) lookup canal predominante do cliente
-  //   6) null → transferência interna, NÃO contabiliza
+  //   2) Op 7279 → classificação especial por dealer (gestor 2026-06)
+  //   3) Inbound David: dominantDealer ∈ {26, 69}
+  //   4) Inbound Rafael: dominantDealer === 21
+  //   5) OP_SEGMENTO_MAP[operation_code]
+  //   6) (devoluções) lookup canal predominante do cliente
+  //   7) null → transferência interna, NÃO contabiliza
   let canal = null;
+  let dealer = null;
   if (branchCode != null && RE_BRANCH_CODES.has(branchCode)) {
     canal = 'ricardoeletro';
+  } else if (operation_code === 7279) {
+    dealer = getDominantDealer(nf);
+    canal = resolveCanal7279(dealer);
   } else {
-    const dealer = getDominantDealer(nf);
+    dealer = getDominantDealer(nf);
     if (dealer != null && INBOUND_DAVID_DEALERS.has(dealer)) {
       canal = 'inbound_david';
     } else if (dealer === INBOUND_RAFAEL_DEALER) {

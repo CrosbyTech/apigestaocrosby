@@ -258,15 +258,36 @@ router.get('/dashboard', async (req, res) => {
       return res.status(400).json({ error: 'datemin e datemax obrigatórios' });
     }
 
-    // Helper pra chamar fat-seg
-    const fetchFatSeg = async (dmin, dmax) => {
-      const r = await axios.post(
-        `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento`,
-        { datemin: dmin, datemax: dmax },
-        { timeout: 240000 },
-      );
-      return r.data?.data || r.data || {};
+    // SEMPRE usa a TABELA faturamento_diario_canal (atualizada pelo cron
+    // diariamente via TOTVS). Dado D-1 mas instantâneo em qualquer range.
+    const dMin = new Date(datemin + 'T00:00:00Z');
+    const dMax = new Date(datemax + 'T00:00:00Z');
+    const rangeDays = Math.ceil((dMax - dMin) / 86400000) + 1;
+
+    // Helper pra agregar do Supabase
+    const fetchFromDb = async (dmin, dmax) => {
+      const supabase = (await import('../config/supabase.js')).default;
+      const { data, error } = await supabase
+        .from('faturamento_diario_canal')
+        .select('canal, valor, valor_bruto, credev')
+        .gte('data', dmin)
+        .lte('data', dmax);
+      if (error) throw new Error('DB: ' + error.message);
+      const segmentos = {};
+      const credev_por_segmento = {};
+      let total_liquido = 0;
+      let credev_total = 0;
+      for (const r of data || []) {
+        const c = r.canal;
+        segmentos[c] = (segmentos[c] || 0) + Number(r.valor || 0);
+        credev_por_segmento[c] = (credev_por_segmento[c] || 0) + Number(r.credev || 0);
+        total_liquido += Number(r.valor || 0);
+        credev_total += Number(r.credev || 0);
+      }
+      return { segmentos, credev_por_segmento, total_liquido, credev_total };
     };
+
+    const fetchRange = fetchFromDb;
 
     // Helper pra estruturar resposta canal-totals → {canal, valor, percentual}
     const buildRanking = (segmentos, credevPorSegmento) => {
@@ -284,31 +305,33 @@ router.get('/dashboard', async (req, res) => {
     };
 
     // Range principal
-    const main = await fetchFatSeg(datemin, datemax);
+    const main = await fetchRange(datemin, datemax);
     const segmentos = main.segmentos || {};
     const credev_por_segmento = main.credev_por_segmento || {};
     const totalLiquido = Number(main.total_liquido ?? main.total ?? 0);
     const totalCredev = Number(main.credev_total ?? 0);
     const totalBruto = totalLiquido + totalCredev;
 
-    // Mini-períodos (em relação a HOJE)
+    // Mini-períodos (em relação a HOJE) — usa DB se range principal usa DB
+    // (já que dados estão lá), senão via fat-seg
     const hoje = new Date();
     const ymd = (d) => d.toISOString().slice(0, 10);
     const ontemD = new Date(hoje); ontemD.setUTCDate(ontemD.getUTCDate() - 1);
     const seteDiasD = new Date(hoje); seteDiasD.setUTCDate(seteDiasD.getUTCDate() - 7);
     const mesIni = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth(), 1));
 
-    // Roda 3 mini-períodos em paralelo (todos via fat-seg)
+    // Mini-períodos sempre via DB (instantâneo, ranges pequenos)
     const [esteMesD, ultimos7D, ontemDt] = await Promise.all([
-      fetchFatSeg(ymd(mesIni), ymd(hoje)).catch(() => ({})),
-      fetchFatSeg(ymd(seteDiasD), ymd(hoje)).catch(() => ({})),
-      fetchFatSeg(ymd(ontemD), ymd(ontemD)).catch(() => ({})),
+      fetchFromDb(ymd(mesIni), ymd(hoje)).catch(() => ({})),
+      fetchFromDb(ymd(seteDiasD), ymd(hoje)).catch(() => ({})),
+      fetchFromDb(ymd(ontemD), ymd(ontemD)).catch(() => ({})),
     ]);
 
     return res.json({
       ok: true,
       datemin, datemax,
-      source: 'crm/faturamento-por-segmento',
+      source: 'faturamento_diario_canal (DB · D-1)',
+      range_days: rangeDays,
       n_nfs: null, // fat-seg agrega, não retorna NFs individuais
       kpis: {
         vl_fat: Math.round(totalBruto * 100) / 100,

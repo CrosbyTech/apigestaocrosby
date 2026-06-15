@@ -28,7 +28,11 @@ const CANAIS_FAT_SEG = [
 const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Chama /api/crm/faturamento-por-segmento e retorna o `segmentos` (líquido).
+ * Chama /api/crm/faturamento-por-segmento e retorna líquido + credev por canal.
+ * Retorna { segmentos, credev_por_segmento, partial }.
+ * `partial=true` significa que o endpoint detectou credev incompleto (canal-totals
+ * deu timeout ou retornou suspeito). Quando partial=true, NÃO salvamos no banco
+ * pra evitar sobrescrever dados bons com credev zerado.
  */
 async function fetchFatSeg(date) {
   const url = `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento`;
@@ -38,7 +42,11 @@ async function fetchFatSeg(date) {
     { timeout: 300000 },
   );
   const data = r.data?.data || r.data;
-  return data?.segmentos || {};
+  return {
+    segmentos: data?.segmentos || {},
+    credev_por_segmento: data?.credev_por_segmento || {},
+    partial: data?.partial === true,
+  };
 }
 
 /**
@@ -49,17 +57,27 @@ export async function popularDiaFaturamento(date, { origem = 'auto-cron', atuali
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
     throw new Error(`data inválida: ${date}`);
   }
-  const segmentos = await fetchFatSeg(date);
+  const { segmentos, credev_por_segmento, partial } = await fetchFatSeg(date);
+
+  // Se fat-seg retornou parcial (credev incompleto), NÃO escreve no banco —
+  // evita sobrescrever dados bons com credev zerado. Próximo cron tenta de novo.
+  if (partial) {
+    console.warn(`[faturamento-historico] ⚠️ ${date} retornou PARCIAL (credev incompleto). Pulando — vai tentar de novo no próximo cron.`);
+    return { date, canais_salvos: 0, total: 0, segmentos, partial: true };
+  }
 
   const rows = [];
   for (const canal of CANAIS_FAT_SEG) {
     const valor = Number(segmentos[canal] || 0);
-    // Só insere/atualiza se TEM valor (evita sujar a tabela com 0s)
-    if (valor <= 0) continue;
+    const credev = Number(credev_por_segmento[canal] || 0);
+    // Só insere/atualiza se TEM valor OU credev (evita sujar a tabela com 0s)
+    if (valor <= 0 && credev <= 0) continue;
     rows.push({
       data: date,
       canal,
       valor: Math.round(valor * 100) / 100,
+      credev: Math.round(credev * 100) / 100,
+      valor_bruto: Math.round((valor + credev) * 100) / 100,
       origem,
       observacao: `Auto via /faturamento-por-segmento`,
       atualizado_em: new Date().toISOString(),

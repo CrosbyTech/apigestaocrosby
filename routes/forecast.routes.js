@@ -189,8 +189,10 @@ const EXCLUSOES_CACHE_TTL_REALTIME = 60 * 60 * 1000; // 1h
 const EXCLUSOES_CACHE_TTL_PAST = 24 * 60 * 60 * 1000; // 24h pra meses passados
 
 // Ops por canal (espelha CANAL_CONFIG do crm.routes.js)
+// ⚠️ Op 7279 é compartilhada (franquia/business/revenda). Aparece em FRANQUIA
+// e BUSINESS — o canal real é resolvido por dealer no fat-seg (resolveCanal7279).
 const CANAL_OPS = {
-  franquia: [7234, 7240, 7802, 9124, 7259],
+  franquia: [7234, 7240, 7802, 9124, 7259, 7279],
   multimarcas: [7235, 7241, 9127, 200],
   business: [7237, 7269, 7279, 7277],
 };
@@ -1654,15 +1656,16 @@ const COMPARATIVO_CANAIS = [
   }, // B2M = Multimarcas + Inbound David + Inbound Rafael
   { key: 'revenda', label: 'B2R' },
   { key: 'varejo', label: 'B2C' },
-  { key: 'ricardoeletro', label: 'Ricardo Eletro' },
+  { key: 'ricardoeletro', label: 'Ricardo Eletro', is_new: true }, // canal NOVO em 2026
   {
-    key: 'fabrica',
-    label: 'Fábrica (Kleiton)',
-    sources: ['showroom', 'novidadesfranquia'],
-  }, // ops 7254, 7007, 7255
-  { key: 'franquia', label: 'Franquia' }, // Antes "B2L" — renomeado pra ficar consistente com Promessa Mensal/Semanal
-  { key: 'business', label: 'Business' }, // Ops 7237, 7269, 7279, 7277 — venda corporativa
-  { key: 'bazar', label: 'Bazar' },
+    key: 'franquia',
+    label: 'Franquia',
+    // Antes "B2L". Em 2025 a referência cadastrada de `franquia` já incluía
+    // showroom e novidadesfranquia (ops 7254/7007/7255). Pra comparativo ficar
+    // justo em 2026, somamos esses 3 canais aqui — mesma lógica do B2M.
+    sources: ['franquia', 'showroom', 'novidadesfranquia'],
+  },
+  { key: 'bazar', label: 'Bazar', is_new: true }, // canal NOVO em 2026
 ];
 
 // Helper: lê valores de referência fixos para um ano/mês.
@@ -1769,9 +1772,7 @@ router.get(
 
     // Ano anterior vem da tabela de REFERÊNCIA (valores fixos cadastrados).
     // Ano atual vem do TOTVS (real do mês corrente).
-    // BlueCard: ano anterior e atual vêm direto do ClickUp (dado histórico
-    // presente lá; se a lista ainda não existia no período, retorna 0).
-    const [refAnt, segAtualReal, bcAtual, bcAnt] = await Promise.all([
+    const [refAnt, segAtualReal] = await Promise.all([
       getRefValues(anoAnt, mes),
       periodAtualReal
         ? getFaturamentoPorSegmento(
@@ -1779,15 +1780,6 @@ router.get(
             periodAtualReal.datemax,
           )
         : Promise.resolve(null),
-      periodAtualReal
-        ? fetchBlueCardSentCount(
-            periodAtualReal.datemin,
-            periodAtualReal.datemax,
-          )
-        : Promise.resolve(0),
-      periodAntAcum
-        ? fetchBlueCardSentCount(periodAntAcum.datemin, periodAntAcum.datemax)
-        : Promise.resolve(0),
     ]);
 
     // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05)
@@ -1825,6 +1817,7 @@ router.get(
       return {
         canal_key: c.key,
         nome: c.label,
+        is_new: c.is_new === true,
         fat_ano_anterior_full: Number(fat2024.toFixed(2)),
         fat_ano_anterior_acumulado: Number(fat2024Acum.toFixed(2)),
         fat_ano_atual_real: Number(fat2025Real.toFixed(2)),
@@ -1860,28 +1853,6 @@ router.get(
             ).toFixed(2),
           )
         : 0;
-
-    // ─── BlueCard — quantidade de cartões enviados (ano vs ano) ────────────
-    // Para o "full" do ano anterior, usamos o mês inteiro do ano passado.
-    const bcAntFull = await fetchBlueCardSentCount(
-      periodAntFull.datemin,
-      periodAntFull.datemax,
-    );
-    const bcDiferenca = bcAnt - bcAtual;
-    const bcComparativoPct =
-      bcAnt > 0 ? (bcAtual / bcAnt - 1) * 100 : bcAtual > 0 ? 100 : 0;
-    canaisOut.push({
-      canal_key: 'bluecard',
-      nome: 'BlueCard',
-      is_quantity: true,
-      unit: 'cartões',
-      fat_ano_anterior_full: bcAntFull,
-      fat_ano_anterior_acumulado: bcAnt,
-      fat_ano_atual_real: bcAtual,
-      diferenca: bcDiferenca,
-      comparativo_pct: Number(bcComparativoPct.toFixed(2)),
-      dia_acumulado_ref: diaAcum,
-    });
 
     return successResponse(res, {
       ano_atual: anoAtual,

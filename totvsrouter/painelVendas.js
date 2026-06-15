@@ -1726,8 +1726,10 @@ const COMPRAS_FRANQUIAS_TTL_PAST = 12 * 60 * 60 * 1000;
 //   2. Agrega por personCode (= cliente franquia)
 //   3. Enriquece com fantasy_name + nm_pessoa via pes_pessoa
 // =============================================================================
-// Ops de compra franquia ATUAL (2026+): 7234, 7240, 7802, 9124, 7259
-const FRANQUIA_OP_CODES = [7234, 7240, 7802, 9124, 7259];
+// Ops de compra franquia ATUAL (2026+): 7234, 7240, 7802, 9124, 7259, 7279
+// 7279 adicionada em 2026-06: op compartilhada (franquia=dealer 40, business=20, revenda=161/241/165).
+// Como compras-franquias filtra por personCode (cliente franquia), pegar tudo é correto.
+const FRANQUIA_OP_CODES = [7234, 7240, 7802, 9124, 7259, 7279];
 // Ops adicionais usadas APENAS em anos anteriores (matriz antiga). Somadas
 // às atuais quando busca dados LY (não usadas em 2026 para evitar varejo).
 const FRANQUIA_OP_CODES_LY_EXTRA = [

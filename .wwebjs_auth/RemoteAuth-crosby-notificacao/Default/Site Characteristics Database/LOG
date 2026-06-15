@@ -1,2 +1,7 @@
+<<<<<<< HEAD
 2026/06/10-11:45:53.135 9bc Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Site Characteristics Database since it was missing.
 2026/06/10-11:45:53.164 9bc Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Site Characteristics Database/MANIFEST-000001
+=======
+2026/06/15-10:56:42.438 8170 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Site Characteristics Database since it was missing.
+2026/06/15-10:56:42.481 8170 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Site Characteristics Database/MANIFEST-000001
+>>>>>>> 8dc700ba (expedicao)
