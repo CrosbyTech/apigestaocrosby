@@ -8646,6 +8646,8 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
   // dealer na NF), pra comparar com a atribuição atual (NF inteira → principal).
   const rateioByDealer = {};
   const manualTxAttributed = new Set();
+  // Clientes distintos atendidos por vendedor (personCode da NF)
+  const customersByDealer = {}; // dealerCode → Set<personCode>
   for (const nf of invItems) {
     if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted')
       continue;
@@ -8710,6 +8712,7 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
         itens_qty: 0,
         itens_qty_gross: 0,
         credev_itens_qty: 0,
+        customers_qty: 0, // clientes distintos atendidos no período
         tm: 0,
         pa: 0,
         pmpv: 0,
@@ -8724,6 +8727,13 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
     merged[k].invoice_qty += 1;
     merged[k].invoice_qty_gross += 1;
     merged[k].itens_qty_gross += nfQty;
+
+    // Acumula clientes distintos atendidos por esse vendedor
+    const pc = parseInt(nf.personCode);
+    if (pc) {
+      if (!customersByDealer[k]) customersByDealer[k] = new Set();
+      customersByDealer[k].add(pc);
+    }
 
     // ─── DIAGNÓSTICO: rateio por vendedor ────────────────────────────────
     // Distribui o total da NF proporcional ao netValue de cada dealer (item).
@@ -8752,6 +8762,7 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
   for (const k of Object.keys(merged)) {
     merged[k].invoice_value_rateio =
       Math.round((rateioByDealer[k] || 0) * 100) / 100;
+    merged[k].customers_qty = (customersByDealer[k]?.size) || 0;
   }
   // Aplica peças finais por dealer (do itensQtyByDealer)
   for (const [dc, qty] of Object.entries(itensQtyByDealer)) {
@@ -9004,8 +9015,12 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
       //      não faz sentido reatribuir.
       //   c) Total de órfãos > limiar mínimo (R$10) — evita acionar o fetch
       //      pesado pra uma devolução de R$5 perdida.
+      // Canais "fechados" (lista de vendedores OU exclusão explícita) merecem
+      // ratear credev órfão por vendedor. Multimarcas tem excludeSellers (não
+      // sellers), então a condição original deixava órfãos sem atribuição.
       const canalUsaPerSeller =
-        Array.isArray(cfg.sellers) && cfg.sellers.length > 0;
+        (Array.isArray(cfg.sellers) && cfg.sellers.length > 0) ||
+        (Array.isArray(cfg.excludeSellers) && cfg.excludeSellers.length > 0);
       const totalOrfaos = orphanReturns.reduce((s, x) => s + x.v, 0);
       const valeBuscarMapa =
         orphanReturns.length > 0 && canalUsaPerSeller && totalOrfaos >= 10;
@@ -9032,6 +9047,11 @@ async function fetchCanalPerSellerLive({ datemin, datemax, modulo, cfg }) {
             }
             // Não-resolvidos: ficam fora do per_seller (continuam em
             // devolucao_returns do canal-total).
+            // Decisão: alinhar com painel TOTVS oficial que NÃO atribui
+            // devolução de cliente "geral" a vendedor específico. Vendedor
+            // vê só seu bruto de saída — credev fica no total do canal mas
+            // não polui o cálculo individual (rateio proporcional inflava
+            // injustamente quem vendeu mais).
           }
         }
       } else if (orphanReturns.length > 0) {
@@ -14165,6 +14185,201 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// POST /api/crm/clientes-por-vendedor
+//   Clientes distintos atendidos + número de NFs por vendedor, no período.
+//   Atribui ao dealer principal da NF (mesma lógica do canal-totals per_seller).
+//   Cache 1h realtime / 24h passado + coalescing.
+//   Body: { branchs: number[], operations?: number[], datemin, datemax }
+//   Retorna: { rows: { [seller_code]: { customers: number, nfs: number, valor: number } } }
+// ---------------------------------------------------------------------------
+const CLIENTES_VEND_CACHE = new Map();
+const CLIENTES_VEND_INFLIGHT = new Map();
+router.post(
+  '/clientes-por-vendedor',
+  asyncHandler(async (req, res) => {
+    let { branchs, operations, datemin, datemax, modulo } = req.body || {};
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+    if (modulo && (!branchs || !branchs.length)) {
+      const cfg = CANAL_CONFIG[modulo];
+      if (cfg) {
+        branchs = cfg.branchs;
+        operations = operations || cfg.operations;
+      }
+    }
+    const branchList = Array.isArray(branchs) ? branchs.map(Number).filter(Boolean) : [];
+    const opList = Array.isArray(operations) ? operations.map(Number).filter(Boolean) : [];
+    const wantDetalhe = req.query?.detalhe === 'true' || req.body?.detalhe === true;
+    const sellerFilter = req.body?.seller_code != null ? Number(req.body.seller_code) : null;
+    const cacheKey = `${branchList.join(',')}|${opList.join(',')}|${datemin}|${datemax}`;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const ttl = datemax < todayIso ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+
+    // Helper: aplica seller_code filter ao detalhe cacheado
+    const sliceDetalhe = (detalhe) => {
+      if (!detalhe) return {};
+      if (sellerFilter == null) return detalhe;
+      return { [String(sellerFilter)]: detalhe[String(sellerFilter)] || [] };
+    };
+
+    const cached = CLIENTES_VEND_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < ttl) {
+      return successResponse(
+        res,
+        wantDetalhe
+          ? { rows: cached.rows, detalhe: sliceDetalhe(cached.detalhe), cached: true }
+          : { rows: cached.rows, cached: true },
+      );
+    }
+    if (CLIENTES_VEND_INFLIGHT.has(cacheKey)) {
+      const result = await CLIENTES_VEND_INFLIGHT.get(cacheKey);
+      return successResponse(
+        res,
+        wantDetalhe
+          ? { rows: result.rows, detalhe: sliceDetalhe(result.detalhe), coalesced: true }
+          : { rows: result.rows, coalesced: true },
+      );
+    }
+
+    const _run = (async () => {
+      const tokenData = await getToken();
+      const accessToken = tokenData?.access_token;
+      if (!accessToken) throw new Error('Token TOTVS indisponível');
+      const invoicesEndpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      const fetchPage = async (page) =>
+        axios
+          .post(
+            invoicesEndpoint,
+            {
+              filter: {
+                branchCodeList: branchList,
+                ...(opList.length > 0 ? { operationCodeList: opList } : {}),
+                operationType: 'Output',
+                startIssueDate: `${datemin}T00:00:00`,
+                endIssueDate: `${datemax}T23:59:59`,
+              },
+              expand: 'items',
+              page,
+              pageSize: 100,
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+              },
+              httpsAgent: totvsHttpsAgent,
+              timeout: 120000,
+            },
+          )
+          .then((r) => r.data)
+          .catch(() => ({ items: [] }));
+      const first = await fetchPage(1);
+      const invItems = [...(first?.items || [])];
+      const totalPages =
+        first?.totalPages || (first?.totalItems ? Math.ceil(first.totalItems / 100) : 1);
+      if (totalPages > 1) {
+        const rem = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+        for (let i = 0; i < rem.length; i += 3) {
+          const results = await Promise.all(rem.slice(i, i + 3).map(fetchPage));
+          for (const pd of results) invItems.push(...(pd?.items || []));
+        }
+      }
+      const byDealerCustomers = {}; // dealer → Set<personCode>
+      const byDealerNFs = {}; // dealer → count
+      const byDealerValor = {}; // dealer → soma totalValue
+      // Detalhe: dealer → Map<personCode, { nome, nfs, valor, ultima_data }>
+      const byDealerDetalhe = {};
+      for (const nf of invItems) {
+        if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+        const total = parseFloat(nf.totalValue) || 0;
+        if (total <= 0) continue;
+        // dealer principal = maior netValue
+        const byDealer = {};
+        for (const item of nf.items || [])
+          for (const p of item.products || []) {
+            const dc = parseInt(p.dealerCode);
+            if (dc) byDealer[dc] = (byDealer[dc] || 0) + (parseFloat(p.netValue) || 0);
+          }
+        let mainDealer = null, max = -1;
+        for (const [dc, nv] of Object.entries(byDealer)) {
+          if (nv > max) { max = nv; mainDealer = Number(dc); }
+        }
+        if (!mainDealer) continue;
+        const pc = parseInt(nf.personCode);
+        if (pc) {
+          if (!byDealerCustomers[mainDealer]) byDealerCustomers[mainDealer] = new Set();
+          byDealerCustomers[mainDealer].add(pc);
+        }
+        byDealerNFs[mainDealer] = (byDealerNFs[mainDealer] || 0) + 1;
+        byDealerValor[mainDealer] = (byDealerValor[mainDealer] || 0) + total;
+
+        // SEMPRE acumula detalhe (custo é mínimo durante o loop e permite
+        // cachear a lista completa — cliques no modal viram instantâneos).
+        if (pc) {
+          if (!byDealerDetalhe[mainDealer]) byDealerDetalhe[mainDealer] = new Map();
+          const m = byDealerDetalhe[mainDealer];
+          const cur = m.get(pc) || { person_code: pc, nome: '', nfs: 0, valor: 0, ultima_data: null };
+          cur.nome = nf.personName || cur.nome || `Cliente ${pc}`;
+          cur.nfs += 1;
+          cur.valor += total;
+          const dt = (nf.issueDate || '').slice(0, 10);
+          if (dt && (!cur.ultima_data || dt > cur.ultima_data)) cur.ultima_data = dt;
+          m.set(pc, cur);
+        }
+      }
+      const rows = {};
+      for (const dc of new Set([
+        ...Object.keys(byDealerCustomers),
+        ...Object.keys(byDealerNFs),
+      ])) {
+        rows[dc] = {
+          customers: byDealerCustomers[dc]?.size || 0,
+          nfs: byDealerNFs[dc] || 0,
+          valor: Math.round((byDealerValor[dc] || 0) * 100) / 100,
+        };
+      }
+      const detalhe = Object.fromEntries(
+        Object.entries(byDealerDetalhe).map(([dc, m]) => [
+          dc,
+          [...m.values()]
+            .map((c) => ({
+              ...c,
+              valor: Math.round(c.valor * 100) / 100,
+            }))
+            .sort((a, b) => b.valor - a.valor),
+        ]),
+      );
+      return { rows, detalhe };
+    })();
+
+    CLIENTES_VEND_INFLIGHT.set(cacheKey, _run);
+    try {
+      const result = await _run;
+      // Cacheia rows + detalhe completo. Cliques subsequentes (qualquer vendedor
+      // do mesmo período) batem cache e respondem em ms.
+      CLIENTES_VEND_CACHE.set(cacheKey, {
+        rows: result.rows,
+        detalhe: result.detalhe || {},
+        ts: Date.now(),
+      });
+      if (CLIENTES_VEND_CACHE.size > 100) {
+        const oldest = [...CLIENTES_VEND_CACHE.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+        CLIENTES_VEND_CACHE.delete(oldest[0]);
+      }
+      return successResponse(
+        res,
+        wantDetalhe
+          ? { rows: result.rows, detalhe: sliceDetalhe(result.detalhe) }
+          : { rows: result.rows },
+      );
+    } finally {
+      CLIENTES_VEND_INFLIGHT.delete(cacheKey);
+    }
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // POST /api/crm/clear-fatseg-cache
 //      Limpa cache em memória do /faturamento-por-segmento e /canal-totals.
 // ---------------------------------------------------------------------------
@@ -14183,10 +14398,19 @@ router.post(
         CANAL_TOTALS_CACHE.clear();
       } catch {}
     }
+    // Sempre limpa o cache de exclusões (rápido recriar e às vezes fica stale
+    // com valor 0 antigo escondendo R$ reais de Recife Mall etc.)
+    let exclusoesSize = 0;
+    try {
+      const { limparCacheExclusoes } = await import(
+        '../services/forecastExclusoes.js'
+      );
+      exclusoesSize = limparCacheExclusoes();
+    } catch {}
     return successResponse(
       res,
-      { cleared: { fatseg: fatSegSize, canalTotals: canalTotalsSize } },
-      `Cache limpo: ${fatSegSize} fatseg${fullClear ? ` + ${canalTotalsSize} canalTotals` : ' (canalTotals preservado)'}`,
+      { cleared: { fatseg: fatSegSize, canalTotals: canalTotalsSize, exclusoes: exclusoesSize } },
+      `Cache limpo: ${fatSegSize} fatseg${fullClear ? ` + ${canalTotalsSize} canalTotals` : ' (canalTotals preservado)'} + ${exclusoesSize} exclusoes`,
     );
   }),
 );
@@ -14441,9 +14665,73 @@ router.post(
     void opCodes; // mantido para evitar hoisting issues
 
     // ─── Busca TOTVS ────────────────────────────────────────────────────────
+    // Ricardo Eletro: fiscal/v2/invoices/search NÃO traz NFs br=111 op=512
+    // (bug interno TOTVS). Usamos fiscal-movement que retorna tudo.
+    // Itens convertidos pra formato compatível com a lógica abaixo.
+    const fetchFromFiscalMovement = async (branches, opCodes) => {
+      const fmEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+      const items = [];
+      let page = 1;
+      while (true) {
+        let resp;
+        try {
+          resp = await axios.post(
+            fmEndpoint,
+            {
+              filter: {
+                branchCodeList: branches,
+                startMovementDate: `${datemin}T00:00:00`,
+                endMovementDate: `${datemax}T23:59:59`,
+              },
+              page, pageSize: 100,
+            },
+            {
+              headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+              httpsAgent: totvsHttpsAgent, timeout: 60000,
+            },
+          );
+        } catch (e) {
+          console.warn(`[tx-canal/fm] pág ${page}: ${e.message}`);
+          break;
+        }
+        const pageItems = resp.data?.items || [];
+        // Filtra Sales + ops desejadas, ignora SaleReturns
+        for (const it of pageItems) {
+          const opCode = parseInt(it.operationCode);
+          if (it.operationModel !== 'Sales') continue;
+          if (opCodes && opCodes.length > 0 && !opCodes.includes(opCode)) continue;
+          // Adapta pro formato esperado pelo bloco de classificação
+          items.push({
+            invoiceCode: it.invoiceCode ?? `fm-${it.movementId ?? page}-${items.length}`,
+            transactionCode: it.transactionCode ?? null,
+            invoiceStatus: 'Issued',
+            branchCode: parseInt(it.branchCode),
+            personCode: parseInt(it.personCode),
+            personName: it.personName ?? null,
+            totalValue: parseFloat(it.netValue || it.grossValue || 0),
+            operationCode: opCode,
+            operationName: it.operationName ?? null,
+            issueDate: it.movementDate ?? null,
+            items: [],
+            payments: [],
+            _source: 'fiscal-movement',
+          });
+        }
+        if (pageItems.length < 100) break;
+        page++;
+      }
+      return items;
+    };
+
     let rawInvoices;
     try {
-      rawInvoices = await fetchPages(queryBranches, queryOpCodes);
+      if (canal === 'ricardoeletro') {
+        // Pra RE, fiscal-movement é mais completo que invoices/search.
+        const RE_OPS_ARRAY = [512, 5102, 7236, 200, 510, 521, 545, 548, 7237, 7269, 7277, 7279];
+        rawInvoices = await fetchFromFiscalMovement(queryBranches, RE_OPS_ARRAY);
+      } else {
+        rawInvoices = await fetchPages(queryBranches, queryOpCodes);
+      }
     } catch (err) {
       return errorResponse(
         res,

@@ -1,2 +1,7 @@
+<<<<<<< HEAD
 2026/06/15-11:52:28.708 23bc Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules since it was missing.
 2026/06/15-11:52:28.751 23bc Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules/MANIFEST-000001
+=======
+2026/06/16-11:59:33.072 3508 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules since it was missing.
+2026/06/16-11:59:33.109 3508 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Extension Rules/MANIFEST-000001
+>>>>>>> fbe1cb89 (bluecard)

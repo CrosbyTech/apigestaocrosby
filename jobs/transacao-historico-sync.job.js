@@ -50,8 +50,16 @@ const OP_SEGMENTO_MAP = {
   7255: 'novidadesfranquia',
 };
 
-// Ricardo Eletro: filiais dedicadas (11, 111)
+// Ricardo Eletro: filiais dedicadas (11, 111).
+// Ops B2C/marketplace que TOTVS reconhece como venda RE oficial.
+// Mesmo conjunto que CANAL_CONFIG.ricardoeletro.operations no crm.routes.js.
+// NFs de filial 11/111 com outras ops (ex: 7273 — venda atacado interna Blue House)
+// NÃO entram em RE — caem em null (transferência interna, ignorada).
 const RE_BRANCH_CODES = new Set([11, 111]);
+const RE_OPS = new Set([
+  512, 5102, 7236, 200, 510, 521, 545, 548,
+  7237, 7269, 7277, 7279,
+]);
 
 // Inbound David/Rafael: classificado pelo dominantDealer (vendedor predominante)
 const INBOUND_DAVID_DEALERS = new Set([26, 69]);
@@ -111,7 +119,13 @@ function mapNfToTransacao(nf, personCanalMap = null, branchNameMap = null) {
   //   7) null → transferência interna, NÃO contabiliza
   let canal = null;
   let dealer = null;
-  if (branchCode != null && RE_BRANCH_CODES.has(branchCode)) {
+  if (
+    branchCode != null &&
+    RE_BRANCH_CODES.has(branchCode) &&
+    // Só conta como RE se a op for venda B2C reconhecida OU for devolução.
+    // NFs de op fora da lista (ex: 7273 — venda atacado Blue House) não viram RE.
+    (RE_OPS.has(operation_code) || isDevolucao)
+  ) {
     canal = 'ricardoeletro';
   } else if (operation_code === 7279) {
     dealer = getDominantDealer(nf);
@@ -127,6 +141,13 @@ function mapNfToTransacao(nf, personCanalMap = null, branchNameMap = null) {
   if (!canal) canal = OP_SEGMENTO_MAP[operation_code];
   if (!canal && isDevolucao && personCanalMap && nf.person_code != null) {
     canal = personCanalMap.get(Number(nf.person_code));
+    // PROTEÇÃO: Ricardo Eletro só vale pra branches 11/111. Se o fallback
+    // sugeriu RE mas a NF não é dessas filiais, descarta (vira null →
+    // ignorada como transferência interna). Evita devoluções de qualquer
+    // filial caírem em RE só porque o cliente tem histórico em RE.
+    if (canal === 'ricardoeletro' && !RE_BRANCH_CODES.has(branchCode)) {
+      canal = null;
+    }
   }
   if (!canal) return null;
 

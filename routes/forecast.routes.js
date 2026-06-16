@@ -1251,6 +1251,8 @@ router.get(
             bruto: v.bruto,
             credev: v.credev,
             real: v.real,
+            clientes: v.clientes || 0,
+            nfs: v.nfs || 0,
             percentual:
               metaV > 0 ? Number(((v.real / metaV) * 100).toFixed(2)) : 0,
           };
@@ -1422,29 +1424,158 @@ async function getCredevVendedor(branchs, operations, datemin, datemax, tipo = '
 
 // Monta a lista de vendedores LÍQUIDA de um grupo: bruto (painel oficial) −
 // credev (canal-totals per_seller), filtrando só os vendedores do time (g.sellers).
+// Lê customers_qty + invoice_qty por vendedor a partir do canal-totals
+// (per_seller). Usa o cache existente (1h realtime / 24h passado), então
+// é praticamente instantâneo se canal-totals já foi pedido em qualquer
+// outro lugar (Forecast, Dashboard, etc.). Soma os vários canais do grupo
+// (ex: B2M = multimarcas + inbound_david + inbound_rafael).
+async function getClientesPorVendedorViaCanalTotals(metaCanais, datemin, datemax) {
+  const out = {}; // seller_code → { customers, nfs }
+  await Promise.all(
+    metaCanais.map(async (modulo) => {
+      try {
+        const r = await axios.post(
+          `${INTERNAL_API_BASE}/api/crm/canal-totals`,
+          { modulo, datemin: toYmd(datemin), datemax: toYmd(datemax) },
+          { timeout: 200000 },
+        );
+        const data = r.data?.data || r.data;
+        const perSeller = data?.per_seller || [];
+        for (const s of perSeller) {
+          const code = String(s.seller_code ?? '');
+          if (!code) continue;
+          if (!out[code]) out[code] = { customers: 0, nfs: 0 };
+          out[code].customers += Number(s.customers_qty || 0);
+          out[code].nfs += Number(s.invoice_qty || 0);
+        }
+      } catch (e) {
+        console.warn(`[getClientesPorVendedor canal ${modulo}] ${e.message}`);
+      }
+    }),
+  );
+  return out;
+}
+
+// GET /forecast/clientes-atendidos?canal=B2M&ano=2026&mes=6&seller_code=259
+// Retorna lista de clientes atendidos por um vendedor específico no período.
+router.get(
+  '/clientes-atendidos',
+  asyncHandler(async (req, res) => {
+    const canal = String(req.query.canal || '').toUpperCase();
+    const sellerCode = req.query.seller_code
+      ? Number(req.query.seller_code)
+      : null;
+    const ano = parseInt(req.query.ano, 10);
+    const mes = parseInt(req.query.mes, 10);
+    const semana = req.query.semana ? parseInt(req.query.semana, 10) : null;
+    const grupo = VEND_MENSAL_GROUPS.find((g) => g.code === canal);
+    if (!grupo) {
+      return errorResponse(res, `Canal inválido: ${canal}`, 400);
+    }
+    let datemin, datemax;
+    if (semana) {
+      const range = isoWeekRange(ano, semana);
+      datemin = range.data_inicio;
+      datemax = range.data_fim;
+    } else if (ano && mes) {
+      const start = new Date(Date.UTC(ano, mes - 1, 1));
+      const end = new Date(Date.UTC(ano, mes, 0));
+      const hoje = new Date();
+      const fim = end < hoje ? end : hoje;
+      datemin = start.toISOString().slice(0, 10);
+      datemax = fim.toISOString().slice(0, 10);
+    } else {
+      return errorResponse(res, 'ano+mes ou ano+semana obrigatórios', 400);
+    }
+    try {
+      const r = await axios.post(
+        `${INTERNAL_API_BASE}/api/crm/clientes-por-vendedor?detalhe=true`,
+        {
+          branchs: grupo.branchs,
+          operations: grupo.operations,
+          datemin,
+          datemax,
+          detalhe: true,
+          seller_code: sellerCode,
+        },
+        { timeout: 200000 },
+      );
+      const d = r.data?.data || r.data;
+      const detalhe = d?.detalhe || {};
+      const clientes = sellerCode
+        ? detalhe[String(sellerCode)] || []
+        : detalhe;
+      return successResponse(res, {
+        canal,
+        seller_code: sellerCode,
+        datemin,
+        datemax,
+        clientes,
+      });
+    } catch (e) {
+      return errorResponse(res, e.message, 500);
+    }
+  }),
+);
+
 async function buildVendedoresLiquido(g, datemin, datemax) {
-  // LÍQUIDO por vendedor = faturamento BRUTO (painel oficial, seller_sale_value)
-  // − credev (vale-troca, do canal-totals per_seller.credev_value).
-  const [sellers, credevMap] = await Promise.all([
+  // BRUTO por vendedor = fiscal/v2/invoices (totalValue por dealer principal).
+  // É a MESMA fonte do modal "Clientes atendidos" → garante consistência entre
+  // card e modal. Vem do /api/crm/clientes-por-vendedor (cache 1h).
+  // LÍQUIDO = bruto − credev (vale-troca/devolução, do /credev-por-vendedor).
+  const [sellersFallback, credevMap, customersData] = await Promise.all([
     getSellersOficial(g.branchs, g.operations, datemin, datemax),
     getCredevVendedor(g.branchs, g.operations, datemin, datemax, g.credevTipo),
+    (async () => {
+      try {
+        const r = await axios.post(
+          `${INTERNAL_API_BASE}/api/crm/clientes-por-vendedor`,
+          { branchs: g.branchs, operations: g.operations, datemin: toYmd(datemin), datemax: toYmd(datemax) },
+          { timeout: 240000 },
+        );
+        const d = r.data?.data || r.data;
+        return d?.rows || {};
+      } catch (e) {
+        console.warn(`[buildVendedoresLiquido ${g.code}] clientes-por-vendedor falhou: ${e.message}`);
+        return {};
+      }
+    })(),
   ]);
+  // Nomes via sellers-canal (fallback se canal-totals não trouxer)
+  const nameMap = {};
+  for (const s of sellersFallback || []) {
+    nameMap[String(s.seller_code)] = s.seller_name;
+  }
   const allow = new Set((g.sellers || []).map(Number));
-  return sellers
-    .filter((s) => allow.size === 0 || allow.has(Number(s.seller_code)))
-    .map((s) => {
-      const bruto = Number(s.value || 0);
-      const credev = Number(credevMap[String(s.seller_code)] || 0);
-      return {
-        seller_code: String(s.seller_code),
-        nome: s.seller_name || `Vend. ${s.seller_code}`,
-        bruto: Math.round(bruto * 100) / 100,
-        credev: Math.round(credev * 100) / 100,
-        real: Math.max(0, Math.round((bruto - credev) * 100) / 100),
-      };
-    })
-    .filter((v) => v.real > 0 || v.bruto > 0)
-    .sort((a, b) => b.real - a.real);
+  // Une todos os seller_codes vistos em ambas as fontes
+  const allCodes = new Set([
+    ...Object.keys(customersData),
+    ...sellersFallback.map((s) => String(s.seller_code)),
+  ]);
+  const list = [];
+  for (const code of allCodes) {
+    if (allow.size > 0 && !allow.has(Number(code))) continue;
+    const stats = customersData[code] || {};
+    // Bruto: prioriza fiscal/v2/invoices (mesma fonte do modal); fallback
+    // sale-panel se fiscal não tiver (canal sem NFs no período).
+    const brutoFiscal = Number(stats.valor || 0);
+    const brutoFallback = Number(
+      sellersFallback.find((s) => String(s.seller_code) === code)?.value || 0,
+    );
+    const bruto = brutoFiscal > 0 ? brutoFiscal : brutoFallback;
+    if (bruto <= 0) continue;
+    const credev = Number(credevMap[code] || 0);
+    list.push({
+      seller_code: code,
+      nome: nameMap[code] || `Vend. ${code}`,
+      bruto: Math.round(bruto * 100) / 100,
+      credev: Math.round(credev * 100) / 100,
+      real: Math.max(0, Math.round((bruto - credev) * 100) / 100),
+      clientes: Number(stats.customers || 0),
+      nfs: Number(stats.nfs || 0),
+    });
+  }
+  return list.sort((a, b) => b.real - a.real);
 }
 
 router.get(

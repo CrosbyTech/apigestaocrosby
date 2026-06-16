@@ -7328,6 +7328,7 @@ import {
 import { iniciarFaturamentoHistoricoJob } from './jobs/faturamento-historico.job.js';
 import { iniciarTransacaoHistoricoSync } from './jobs/transacao-historico-sync.job.js';
 import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js';
+import { iniciarCanalTotalsCacheJob } from './jobs/canal-totals-cache.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7474,6 +7475,7 @@ app.listen(PORT, async () => {
   iniciarFaturamentoHistoricoJob();
   iniciarTransacaoHistoricoSync();
   iniciarPessoasBluecredSync();
+  iniciarCanalTotalsCacheJob();
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();

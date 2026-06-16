@@ -7,6 +7,7 @@ import {
 } from '../utils/errorHandler.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL } from './totvsHelper.js';
+import { validarCPF, validarCNPJ } from '../utils/docValidator.js';
 
 const router = express.Router();
 
@@ -85,13 +86,14 @@ function handleTotvsError(res, error, payload) {
         data.detailedMessage ||
         msg;
     }
+    // Não devolve o payload completo no response — contém PII (CPF/CNPJ + dados
+    // pessoais) que podem vazar pra logs do browser. Mantemos só no console.
     return res.status(error.response.status || 400).json({
       success: false,
       message: msg,
       error: 'TOTVS_API_ERROR',
       details: data || null,
       status: error.response.status,
-      payload,
       timestamp: new Date().toISOString(),
     });
   }
@@ -130,6 +132,13 @@ router.post(
         'MISSING_BRANCH',
       );
     }
+    // Validação local de CPF (dígito verificador) — evita roundtrip ao TOTVS
+    // em casos de typo. Mensagem mais clara que o 400 genérico do TOTVS.
+    const cpfCheck = validarCPF(payload.cpf);
+    if (!cpfCheck.ok) {
+      return errorResponse(res, cpfCheck.error, 400, 'INVALID_CPF');
+    }
+    payload.cpf = cpfCheck.cpf; // garante só dígitos
     if (!payload.insertDate) {
       payload.insertDate = new Date().toISOString();
     }
@@ -174,6 +183,11 @@ router.post(
         'MISSING_BRANCH',
       );
     }
+    const cnpjCheck = validarCNPJ(payload.cnpj);
+    if (!cnpjCheck.ok) {
+      return errorResponse(res, cnpjCheck.error, 400, 'INVALID_CNPJ');
+    }
+    payload.cnpj = cnpjCheck.cnpj;
     if (!payload.insertDate) {
       payload.insertDate = new Date().toISOString();
     }

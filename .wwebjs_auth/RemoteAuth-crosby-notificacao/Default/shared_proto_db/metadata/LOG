@@ -1,2 +1,7 @@
+<<<<<<< HEAD
 2026/06/15-11:52:28.743 51b8 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db\metadata since it was missing.
 2026/06/15-11:52:28.757 51b8 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db\metadata/MANIFEST-000001
+=======
+2026/06/16-11:59:33.463 5544 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db\metadata since it was missing.
+2026/06/16-11:59:33.496 5544 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\shared_proto_db\metadata/MANIFEST-000001
+>>>>>>> fbe1cb89 (bluecard)

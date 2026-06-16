@@ -258,33 +258,51 @@ router.get('/dashboard', async (req, res) => {
       return res.status(400).json({ error: 'datemin e datemax obrigatórios' });
     }
 
-    // SEMPRE usa a TABELA faturamento_diario_canal (atualizada pelo cron
-    // diariamente via TOTVS). Dado D-1 mas instantâneo em qualquer range.
+    // SEMPRE usa a TABELA faturamento_transacao_historico (NF a NF, sync 2x/dia
+    // via cron 00:00 e 12:00 BRT). Cobre 11 canais (incluindo showroom/inbound/
+    // novidadesfranquia/ricardoeletro/business que o agregado diário não tinha).
+    // Dado D-1 mas instantâneo em qualquer range.
     const dMin = new Date(datemin + 'T00:00:00Z');
     const dMax = new Date(datemax + 'T00:00:00Z');
     const rangeDays = Math.ceil((dMax - dMin) / 86400000) + 1;
 
-    // Helper pra agregar do Supabase
+    // Helper pra agregar do Supabase a partir de faturamento_transacao_historico.
+    // Tabela cobre todos os 11 canais (showroom, novidades, inbound_david, etc.)
+    // — diferente de faturamento_diario_canal que só tem 4-5.
+    // Pagina em chunks de 1000. Pra ranges curtos (mês corrente) é rápido (~5k
+    // linhas). Pra ranges longos volta a ficar pesado — por isso o default da
+    // UI é "mês atual" e o /dashboard depende do cache pros canais principais.
+    // ⚠️ IGNORA credev (devoluções Input).
     const fetchFromDb = async (dmin, dmax) => {
       const supabase = (await import('../config/supabase.js')).default;
-      const { data, error } = await supabase
-        .from('faturamento_diario_canal')
-        .select('canal, valor, valor_bruto, credev')
-        .gte('data', dmin)
-        .lte('data', dmax);
-      if (error) throw new Error('DB: ' + error.message);
       const segmentos = {};
       const credev_por_segmento = {};
       let total_liquido = 0;
-      let credev_total = 0;
-      for (const r of data || []) {
-        const c = r.canal;
-        segmentos[c] = (segmentos[c] || 0) + Number(r.valor || 0);
-        credev_por_segmento[c] = (credev_por_segmento[c] || 0) + Number(r.credev || 0);
-        total_liquido += Number(r.valor || 0);
-        credev_total += Number(r.credev || 0);
+      const PAGE = 1000;
+      let offset = 0;
+      while (true) {
+        const { data, error } = await supabase
+          .from('faturamento_transacao_historico')
+          .select('canal, vl_fat')
+          .gte('data_transacao', dmin)
+          .lte('data_transacao', dmax)
+          .range(offset, offset + PAGE - 1);
+        if (error) throw new Error('DB: ' + error.message);
+        const rows = data || [];
+        if (rows.length === 0) break;
+        for (const r of rows) {
+          const c = r.canal;
+          if (!c) continue;
+          const v = Number(r.vl_fat || 0);
+          if (v <= 0) continue;
+          segmentos[c] = (segmentos[c] || 0) + v;
+          credev_por_segmento[c] = 0;
+          total_liquido += v;
+        }
+        if (rows.length < PAGE) break;
+        offset += PAGE;
       }
-      return { segmentos, credev_por_segmento, total_liquido, credev_total };
+      return { segmentos, credev_por_segmento, total_liquido, credev_total: 0 };
     };
 
     const fetchRange = fetchFromDb;
@@ -304,13 +322,44 @@ router.get('/dashboard', async (req, res) => {
         .sort((a, b) => b.valor - a.valor);
     };
 
-    // Range principal
-    const main = await fetchRange(datemin, datemax);
-    const segmentos = main.segmentos || {};
-    const credev_por_segmento = main.credev_por_segmento || {};
-    const totalLiquido = Number(main.total_liquido ?? main.total ?? 0);
-    const totalCredev = Number(main.credev_total ?? 0);
-    const totalBruto = totalLiquido + totalCredev;
+    // ─── Range principal: fat-seg (MESMA fonte do Forecast > Métricas por
+    //     Canal). Garante consistência total entre Dashboard Vendas e Forecast.
+    //     Fallback pra faturamento_transacao_historico só se fat-seg falhar.
+    const tMain0 = Date.now();
+    let segmentos = {};
+    let credev_por_segmento = {};
+    let totalLiquido = 0;
+    let totalCredev = 0;
+    let totalBruto = 0;
+    let usedSource = 'fat-seg';
+    try {
+      const axios = (await import('axios')).default;
+      const r = await axios.post(
+        `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true`,
+        { datemin, datemax, lite: true },
+        { timeout: 180000 },
+      );
+      const d = r.data?.data || r.data || {};
+      segmentos = d.segmentos || d.segmentos_bruto || {};
+      credev_por_segmento = d.credev_por_segmento || {};
+      totalLiquido = Number(d.total_liquido ?? d.total ?? 0);
+      totalCredev = Number(d.credev_total ?? 0);
+      totalBruto = totalLiquido + totalCredev;
+      console.log(
+        `[dashboard] fat-seg OK: ${Object.keys(segmentos).length} canais R$ ${totalLiquido.toFixed(2)} (${Date.now() - tMain0}ms · cached=${d.cached})`,
+      );
+    } catch (e) {
+      console.warn(
+        `[dashboard] fat-seg falhou (${e.message}) status=${e.response?.status} data=${JSON.stringify(e.response?.data || {}).slice(0, 200)} — fallback faturamento_transacao_historico`,
+      );
+      usedSource = 'faturamento_transacao_historico (fallback)';
+      const main = await fetchRange(datemin, datemax);
+      segmentos = main.segmentos || {};
+      credev_por_segmento = main.credev_por_segmento || {};
+      totalLiquido = Number(main.total_liquido ?? main.total ?? 0);
+      totalCredev = Number(main.credev_total ?? 0);
+      totalBruto = totalLiquido + totalCredev;
+    }
 
     // Mini-períodos (em relação a HOJE) — usa DB se range principal usa DB
     // (já que dados estão lá), senão via fat-seg
@@ -330,7 +379,7 @@ router.get('/dashboard', async (req, res) => {
     return res.json({
       ok: true,
       datemin, datemax,
-      source: 'faturamento_diario_canal (DB · D-1)',
+      source: usedSource,
       range_days: rangeDays,
       n_nfs: null, // fat-seg agrega, não retorna NFs individuais
       kpis: {

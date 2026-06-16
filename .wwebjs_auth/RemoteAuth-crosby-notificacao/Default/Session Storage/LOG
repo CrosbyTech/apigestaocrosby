@@ -1,2 +1,7 @@
+<<<<<<< HEAD
 2026/06/15-11:52:28.745 5280 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage since it was missing.
 2026/06/15-11:52:28.787 5280 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage/MANIFEST-000001
+=======
+2026/06/16-11:59:33.437 62dc Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage since it was missing.
+2026/06/16-11:59:33.484 62dc Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Session Storage/MANIFEST-000001
+>>>>>>> fbe1cb89 (bluecard)

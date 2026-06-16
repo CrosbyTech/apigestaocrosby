@@ -25,6 +25,20 @@ export const FORECAST_EXCLUSOES = [
     description:
       'CROSBY RECIFE MALL LTDA — virou loja própria em 21/05/2026, exclusão estendida pro mês inteiro de maio.',
   },
+  {
+    personCode: 29541,
+    canal: 'novidadesfranquia',
+    dateFrom: '2026-05-01',
+    description:
+      'CROSBY RECIFE MALL LTDA — exclui também ops novidades (7255) que entram no canal consolidado de Franquia.',
+  },
+  {
+    personCode: 29541,
+    canal: 'showroom',
+    dateFrom: '2026-05-01',
+    description:
+      'CROSBY RECIFE MALL LTDA — exclui também ops showroom (7254/7007).',
+  },
 ];
 
 // Ops por canal (espelha CANAL_CONFIG do crm.routes.js)
@@ -34,6 +48,8 @@ const CANAL_OPS = {
   franquia: [7234, 7240, 7802, 9124, 7259, 7279],
   multimarcas: [7235, 7241, 9127, 200],
   business: [7237, 7269, 7279, 7277],
+  novidadesfranquia: [7255],
+  showroom: [7254, 7007],
 };
 
 // Cache pra evitar re-calcular exclusão a cada request
@@ -155,22 +171,41 @@ export async function getExclusoesPorCanal(datemin, datemax) {
       } finally {
         EXCLUSOES_INFLIGHT.delete(cacheKey);
       }
-      EXCLUSOES_CACHE.set(cacheKey, { valor, ts: Date.now() });
-      if (EXCLUSOES_CACHE.size > 50) {
-        const oldest = [...EXCLUSOES_CACHE.entries()].sort(
-          (a, b) => a[1].ts - b[1].ts,
-        )[0];
-        EXCLUSOES_CACHE.delete(oldest[0]);
+      // NÃO cacheia valor=0 quando o período é realtime — pode ser TOTVS
+      // que respondeu vazio (timeout/falha) ou cliente ainda não comprou hoje.
+      // Cachear 0 por 1h "esconde" a exclusão real durante esse tempo.
+      // Pra períodos passados, 0 é confiável (cacheia 24h).
+      const shouldCache = valor > 0 || isPast;
+      if (shouldCache) {
+        EXCLUSOES_CACHE.set(cacheKey, { valor, ts: Date.now() });
+        if (EXCLUSOES_CACHE.size > 50) {
+          const oldest = [...EXCLUSOES_CACHE.entries()].sort(
+            (a, b) => a[1].ts - b[1].ts,
+          )[0];
+          EXCLUSOES_CACHE.delete(oldest[0]);
+        }
       }
       if (valor > 0) {
         console.log(
           `[forecast/exclusoes] ${ex.canal} − R$${valor.toFixed(2)} (personCode=${ex.personCode}, ${dfrom}..${datemax_ymd}) — ${ex.description?.slice(0, 50)}`,
+        );
+      } else if (!isPast) {
+        console.log(
+          `[forecast/exclusoes] ${ex.canal} 0 (realtime, sem cache — recalculará no próximo acesso)`,
         );
       }
     }
     result.set(ex.canal, (result.get(ex.canal) || 0) + valor);
   }
   return result;
+}
+
+// Limpa o cache das exclusões. Usado pra forçar recálculo imediato sem
+// esperar TTL (ex: após corrigir bug que cacheou valor errado).
+export function limparCacheExclusoes() {
+  const n = EXCLUSOES_CACHE.size;
+  EXCLUSOES_CACHE.clear();
+  return n;
 }
 
 // Aplica exclusões em um Map<canal, valor> (segMap). Modifica IN-PLACE.
