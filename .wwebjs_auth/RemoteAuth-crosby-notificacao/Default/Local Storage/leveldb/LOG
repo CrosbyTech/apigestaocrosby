@@ -1,7 +1,0 @@
-<<<<<<< HEAD
-2026/06/15-11:52:28.686 21f4 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Local Storage\leveldb since it was missing.
-2026/06/15-11:52:28.748 21f4 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Local Storage\leveldb/MANIFEST-000001
-=======
-2026/06/16-11:59:32.999 5544 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Local Storage\leveldb since it was missing.
-2026/06/16-11:59:33.036 5544 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\Local Storage\leveldb/MANIFEST-000001
->>>>>>> fbe1cb89 (bluecard)
