@@ -348,6 +348,8 @@ router.patch('/leads/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'id inválido' });
 
+  // Whitelist de campos editáveis. Inclui dados pessoais (nome, contatos,
+  // endereço) pra permitir corrigir typos antes do sync TOTVS.
   const allowed = [
     'status',
     'observacao',
@@ -356,10 +358,37 @@ router.patch('/leads/:id', async (req, res) => {
     'totvs_person_code',
     'totvs_synced_at',
     'totvs_sync_error',
+    // Dados do lead (editáveis pelo admin)
+    'nome',
+    'whatsapp',
+    'email',
+    'cpf',
+    'empresa',
+    'instagram',
+    'data_nasc',
+    'cep',
+    'endereco',
+    'numero',
+    'complemento',
+    'indicado_por',
+    'cvv',
   ];
   const patch = {};
   for (const k of allowed) {
-    if (k in req.body) patch[k] = req.body[k];
+    if (k in req.body) {
+      let val = req.body[k];
+      // Normalização leve por campo
+      if (typeof val === 'string') val = val.trim() || null;
+      // CPF/whatsapp/CEP: só dígitos
+      if (['cpf', 'whatsapp', 'cep'].includes(k) && typeof val === 'string') {
+        val = val.replace(/\D/g, '') || null;
+      }
+      // Email lowercase
+      if (k === 'email' && typeof val === 'string') {
+        val = val.toLowerCase();
+      }
+      patch[k] = val;
+    }
   }
   // Auto-stamps em status críticos do pipeline ClickUp
   const STATUS_CONTATO = ['1_msg_enviada', 'info_completas']; // primeiros contatos

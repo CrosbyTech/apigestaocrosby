@@ -29,8 +29,10 @@ const SLEEP = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Chama /api/crm/faturamento-por-segmento e retorna líquido + credev por canal.
- * Retorna { segmentos, credev_por_segmento } — antes só retornava o líquido,
- * o que zerava as colunas credev/valor_bruto da tabela.
+ * Retorna { segmentos, credev_por_segmento, partial }.
+ * `partial=true` significa que o endpoint detectou credev incompleto (canal-totals
+ * deu timeout ou retornou suspeito). Quando partial=true, NÃO salvamos no banco
+ * pra evitar sobrescrever dados bons com credev zerado.
  */
 async function fetchFatSeg(date) {
   const url = `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento`;
@@ -43,6 +45,7 @@ async function fetchFatSeg(date) {
   return {
     segmentos: data?.segmentos || {},
     credev_por_segmento: data?.credev_por_segmento || {},
+    partial: data?.partial === true,
   };
 }
 
@@ -54,7 +57,14 @@ export async function popularDiaFaturamento(date, { origem = 'auto-cron', atuali
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
     throw new Error(`data inválida: ${date}`);
   }
-  const { segmentos, credev_por_segmento } = await fetchFatSeg(date);
+  const { segmentos, credev_por_segmento, partial } = await fetchFatSeg(date);
+
+  // Se fat-seg retornou parcial (credev incompleto), NÃO escreve no banco —
+  // evita sobrescrever dados bons com credev zerado. Próximo cron tenta de novo.
+  if (partial) {
+    console.warn(`[faturamento-historico] ⚠️ ${date} retornou PARCIAL (credev incompleto). Pulando — vai tentar de novo no próximo cron.`);
+    return { date, canais_salvos: 0, total: 0, segmentos, partial: true };
+  }
 
   const rows = [];
   for (const canal of CANAIS_FAT_SEG) {

@@ -19,6 +19,7 @@ import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
 import bluecardRoutes from './routes/bluecard.routes.js';
+import wixRoutes from './routes/wix.routes.js';
 import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
 import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js';
 import faturamentoTransacaoRoutes from './routes/faturamentoTransacao.routes.js';
@@ -7329,6 +7330,7 @@ import { iniciarFaturamentoHistoricoJob } from './jobs/faturamento-historico.job
 import { iniciarTransacaoHistoricoSync } from './jobs/transacao-historico-sync.job.js';
 import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js';
 import { iniciarCanalTotalsCacheJob } from './jobs/canal-totals-cache.job.js';
+import { iniciarCronWixSync } from './jobs/wix-sync.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7440,6 +7442,7 @@ app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, 
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
+app.use('/api/wix', wixRoutes); // Wix — sync de pedidos do e-commerce
 app.use('/api/expedicao-showroom', expedicaoShowroomRoutes); // Expedição Showroom — controle envios
 app.use('/api/faturamento-historico', faturamentoHistoricoRoutes); // Faturamento histórico diário por canal
 app.use('/api/faturamento-transacao', faturamentoTransacaoRoutes); // Faturamento histórico por NF (transação)
@@ -7476,6 +7479,7 @@ app.listen(PORT, async () => {
   iniciarTransacaoHistoricoSync();
   iniciarPessoasBluecredSync();
   iniciarCanalTotalsCacheJob();
+  iniciarCronWixSync();
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();
