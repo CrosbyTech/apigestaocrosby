@@ -2050,4 +2050,159 @@ router.get(
   }),
 );
 
+// =============================================
+// TEMPLATE STATS — cache por template (whatsapp_template_stats)
+// =============================================
+
+async function montarStatsDoTemplate({ account, tpl, startUnix, endUnix, periodStart, periodEnd, catPricing }) {
+  let metaSent = 0, metaDelivered = 0, metaRead = 0, metaClicked = 0, metaReplied = 0;
+  if (tpl.id) {
+    const CHUNK_SEC = 20 * 24 * 3600;
+    const chunks = [];
+    let cursor = startUnix;
+    while (cursor < endUnix) {
+      const chunkEnd = Math.min(cursor + CHUNK_SEC, endUnix);
+      chunks.push([cursor, chunkEnd]);
+      cursor = chunkEnd + 1;
+    }
+    const respostas = await Promise.all(
+      chunks.map(async ([chS, chE]) => {
+        const url = `/${account.waba_id}?fields=template_analytics.start(${chS}).end(${chE})`
+          + `.granularity(DAILY).metric_types(['SENT','DELIVERED','READ','CLICKED','REPLIED'])`
+          + `.template_ids(['${tpl.id}'])`;
+        try {
+          const r = await graphRequest(url, account.access_token);
+          return (r?.template_analytics?.data || []).flatMap((d) => d.data_points || []);
+        } catch (e) { return []; }
+      }),
+    );
+    for (const pts of respostas) {
+      for (const p of pts) {
+        metaSent += Number(p.sent || 0);
+        metaDelivered += Number(p.delivered || 0);
+        metaRead += Number(p.read || 0);
+        metaReplied += Number(p.replied || 0);
+        if (Array.isArray(p.clicked)) metaClicked += p.clicked.reduce((s, c) => s + Number(c.count || 0), 0);
+      }
+    }
+  }
+  const { data: localRows } = await supabase
+    .from('message_queue').select('status')
+    .eq('account_id', account.waba_id).eq('template_name', tpl.name)
+    .gte('scheduled_at', periodStart).lte('scheduled_at', periodEnd);
+  let localReplied = 0;
+  for (const r of localRows || []) if (r.status === 'replied') localReplied++;
+  const category = (tpl.category || '').toUpperCase();
+  const catData = catPricing.get(category);
+  const unit = catData && catData.vol > 0 ? catData.cost / catData.vol : 0;
+  const cost = unit * metaSent;
+  return {
+    waba_id: account.waba_id, template_id: tpl.id, template_name: tpl.name,
+    template_category: category || null, template_language: tpl.language || null, template_status: tpl.status || null,
+    period_start: periodStart, period_end: periodEnd,
+    sent: metaSent, delivered: metaDelivered, read: metaRead, clicked: metaClicked,
+    replied: Math.max(metaReplied, localReplied),
+    cost_usd: Math.round(cost * 10000) / 10000,
+    unit_cost_usd: Math.round(unit * 1000000) / 1000000,
+    last_synced_at: new Date().toISOString(),
+  };
+}
+
+router.post('/template-stats/sync', asyncHandler(async (req, res) => {
+  const { waba_id, start, end } = req.body || {};
+  const now = new Date();
+  const periodEnd = end ? new Date(`${end}T23:59:59Z`).toISOString() : now.toISOString();
+  const periodStart = start ? new Date(`${start}T00:00:00Z`).toISOString() : new Date(now.getTime() - 30 * 86400000).toISOString();
+  const startUnix = Math.floor(new Date(periodStart).getTime() / 1000);
+  const endUnix = Math.floor(new Date(periodEnd).getTime() / 1000);
+  let query = supabase.from('whatsapp_accounts').select('*');
+  if (waba_id) query = query.eq('waba_id', waba_id);
+  const { data: contas, error: contasErr } = await query;
+  if (contasErr) return errorResponse(res, contasErr.message, 500, 'DB_ERROR');
+  if (!contas?.length) return errorResponse(res, 'Nenhuma conta encontrada', 404, 'NOT_FOUND');
+  const resumo = [];
+  for (const account of contas) {
+    const catPricing = new Map();
+    try {
+      const pricingFields = `pricing_analytics.start(${startUnix}).end(${endUnix}).granularity(DAILY).dimensions(['PRICING_CATEGORY'])`;
+      const pricingRes = await graphRequest(`/${account.waba_id}?fields=${pricingFields}`, account.access_token);
+      const pts = (pricingRes?.pricing_analytics?.data || []).flatMap((d) => d.data_points || []);
+      for (const p of pts) {
+        const k = String(p.pricing_category || '').toUpperCase();
+        if (!catPricing.has(k)) catPricing.set(k, { vol: 0, cost: 0 });
+        const s = catPricing.get(k);
+        s.vol += Number(p.volume || 0); s.cost += Number(p.cost || 0);
+      }
+    } catch {}
+    const templates = [];
+    let nextUrl = `/${account.waba_id}/message_templates?limit=200`;
+    let safety = 0;
+    while (nextUrl && safety++ < 20) {
+      try {
+        const r = await graphRequest(nextUrl, account.access_token);
+        for (const t of r?.data || []) templates.push(t);
+        const next = r?.paging?.next;
+        if (next && next.startsWith('http')) { const u = new URL(next); nextUrl = u.pathname + u.search; }
+        else nextUrl = null;
+      } catch { break; }
+    }
+    let inseridos = 0;
+    for (const tpl of templates) {
+      try {
+        const row = await montarStatsDoTemplate({ account, tpl, startUnix, endUnix, periodStart, periodEnd, catPricing });
+        const { error: upErr } = await supabase.from('whatsapp_template_stats').upsert(row, { onConflict: 'waba_id,template_id' });
+        if (!upErr) inseridos++;
+      } catch {}
+    }
+    resumo.push({ account: account.name, waba_id: account.waba_id, templates_total: templates.length, templates_atualizados: inseridos });
+  }
+  successResponse(res, { period_start: periodStart, period_end: periodEnd, contas: resumo }, 'Sync concluído');
+}));
+
+router.get('/template-stats', asyncHandler(async (req, res) => {
+  const { waba_id, category, grupo, canal_venda, order } = req.query;
+  let q = supabase.from('whatsapp_template_stats').select('*');
+  if (waba_id) q = q.eq('waba_id', waba_id);
+  if (category) q = q.eq('template_category', String(category).toUpperCase());
+  if (grupo) q = q.eq('grupo', String(grupo).toLowerCase());
+  const orderCol = ['sent', 'delivered', 'read', 'replied', 'cost_usd', 'last_synced_at'].includes(order) ? order : 'sent';
+  q = q.order(orderCol, { ascending: false });
+  const { data, error } = await q;
+  if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+  const { data: accs } = await supabase.from('whatsapp_accounts').select('waba_id, name, canal_venda');
+  const accMap = new Map((accs || []).map((a) => [a.waba_id, a]));
+  let enriched = (data || []).map((r) => ({ ...r, account_name: accMap.get(r.waba_id)?.name || null, canal_venda: accMap.get(r.waba_id)?.canal_venda || null }));
+  if (canal_venda) enriched = enriched.filter((r) => (r.canal_venda || '').toLowerCase() === String(canal_venda).toLowerCase());
+  successResponse(res, enriched, `${enriched.length} templates`);
+}));
+
+router.patch('/template-stats/:id/grupo', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return errorResponse(res, 'id inválido', 400, 'VALIDATION');
+  let { grupo } = req.body || {};
+  grupo = grupo == null ? null : String(grupo).trim().toLowerCase() || null;
+  const { data, error } = await supabase.from('whatsapp_template_stats').update({ grupo }).eq('id', id).select('id, template_name, grupo').single();
+  if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+  successResponse(res, data, `Grupo atualizado pra "${grupo || 'sem grupo'}"`);
+}));
+
+router.get('/template-stats/contas', asyncHandler(async (req, res) => {
+  const { canal_venda } = req.query;
+  let q = supabase.from('whatsapp_accounts').select('waba_id, name, canal_venda, phone_id, nr_telefone').order('name');
+  if (canal_venda) q = q.eq('canal_venda', String(canal_venda).toLowerCase());
+  const { data, error } = await q;
+  if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+  successResponse(res, data, `${data.length} contas`);
+}));
+
+router.get('/template-stats/grupos', asyncHandler(async (req, res) => {
+  const { waba_id } = req.query;
+  let q = supabase.from('whatsapp_template_stats').select('grupo').not('grupo', 'is', null);
+  if (waba_id) q = q.eq('waba_id', waba_id);
+  const { data, error } = await q;
+  if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+  const grupos = Array.from(new Set((data || []).map((r) => r.grupo).filter(Boolean))).sort();
+  successResponse(res, grupos, `${grupos.length} grupos`);
+}));
+
 export default router;

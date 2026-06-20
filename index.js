@@ -5482,6 +5482,7 @@ router.post(
         supplierCodeList,
         duplicateCodeList,
         documentTypeList,
+        portadorCodeList,
       } = req.body;
 
       if (!dt_inicio || !dt_fim) {
@@ -5717,6 +5718,34 @@ router.post(
       }
 
       // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)
+      // Expandir para uma linha por entrada de despesa (expense)
+
+      // Filtro por portador (bearerCode) — aplicado nos dados brutos antes do map
+      if (
+        portadorCodeList &&
+        Array.isArray(portadorCodeList) &&
+        portadorCodeList.length > 0
+      ) {
+        const portadoresSet = new Set(
+          portadorCodeList.map((p) => parseInt(p)).filter((p) => !isNaN(p)),
+        );
+        console.log(
+          `🔬 DEBUG portadores ANTES do filtro (amostra 10):`,
+          filteredItems
+            .slice(0, 10)
+            .map((i) => ({
+              nr_duplicata: i.duplicateCode,
+              bearerCode: i.bearerCode,
+            })),
+        );
+        filteredItems = filteredItems.filter((item) =>
+          portadoresSet.has(parseInt(item.bearerCode)),
+        );
+        console.log(
+          `🔍 Filtro portadorCodeList (${portadorCodeList.join(',')}): ${filteredItems.length} itens restantes`,
+        );
+      }
+
       // Expandir para uma linha por entrada de despesa (expense)
       const mappedItems = filteredItems.flatMap((item) => {
         const expenses =
@@ -6403,11 +6432,17 @@ router.get(
 
       // Fallback: se busca por code não achou no cache, tenta direto no TOTVS
       if (code && clientes.length === 0) {
-        console.log(`⚠️ Código ${code} não encontrado no cache. Buscando no TOTVS...`);
+        console.log(
+          `⚠️ Código ${code} não encontrado no cache. Buscando no TOTVS...`,
+        );
         try {
           const codeInt = parseInt(code, 10);
           const tokenData = await getToken();
-          const totvsFilter = { filter: { personCodeList: [codeInt] }, page: 1, pageSize: 10 };
+          const totvsFilter = {
+            filter: { personCodeList: [codeInt] },
+            page: 1,
+            pageSize: 10,
+          };
           const totvsHeaders = {
             'Content-Type': 'application/json',
             Accept: 'application/json',
@@ -6416,18 +6451,31 @@ router.get(
           const totvsOpts = { headers: totvsHeaders, timeout: 15000 };
 
           const [pjResp, pfResp] = await Promise.allSettled([
-            axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, totvsFilter, totvsOpts),
-            axios.post(`${TOTVS_BASE_URL}/person/v2/individuals/search`, totvsFilter, totvsOpts),
+            axios.post(
+              `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+              totvsFilter,
+              totvsOpts,
+            ),
+            axios.post(
+              `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+              totvsFilter,
+              totvsOpts,
+            ),
           ]);
 
-          const { mapPersonToRow, upsertBatch } = await import('./utils/syncPesPessoa.js');
+          const { mapPersonToRow, upsertBatch } =
+            await import('./utils/syncPesPessoa.js');
 
           const totvsRows = [];
           if (pjResp.status === 'fulfilled') {
-            (pjResp.value.data?.items || []).forEach((item) => totvsRows.push(mapPersonToRow(item, 'PJ')));
+            (pjResp.value.data?.items || []).forEach((item) =>
+              totvsRows.push(mapPersonToRow(item, 'PJ')),
+            );
           }
           if (pfResp.status === 'fulfilled') {
-            (pfResp.value.data?.items || []).forEach((item) => totvsRows.push(mapPersonToRow(item, 'PF')));
+            (pfResp.value.data?.items || []).forEach((item) =>
+              totvsRows.push(mapPersonToRow(item, 'PF')),
+            );
           }
 
           const found = totvsRows.filter((r) => r.code === codeInt);
@@ -6446,12 +6494,16 @@ router.get(
               customer_status: r.customer_status,
               person_status: r.person_status,
             }));
-            console.log(`✅ TOTVS fallback: código ${code} encontrado (${clientes.length} registro(s))`);
+            console.log(
+              `✅ TOTVS fallback: código ${code} encontrado (${clientes.length} registro(s))`,
+            );
           } else {
             console.log(`❌ TOTVS fallback: código ${code} não encontrado`);
           }
         } catch (fallbackErr) {
-          console.warn(`⚠️ Fallback TOTVS falhou para code ${code}: ${fallbackErr.message}`);
+          console.warn(
+            `⚠️ Fallback TOTVS falhou para code ${code}: ${fallbackErr.message}`,
+          );
         }
       }
 
