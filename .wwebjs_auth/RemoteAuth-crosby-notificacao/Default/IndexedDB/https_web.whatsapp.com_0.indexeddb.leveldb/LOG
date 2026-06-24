@@ -1,2 +1,5 @@
 2026/06/24-16:24:58.458 9078 Creating DB C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb since it was missing.
 2026/06/24-16:24:58.483 9078 Reusing MANIFEST C:\Users\teccr\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/06/24-17:38:27.248 3d1c Level-0 table #5: started
+2026/06/24-17:38:27.301 3d1c Level-0 table #5: 1077017 bytes OK
+2026/06/24-17:38:27.308 3d1c Delete type=0 #3

@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import multer from 'multer';
 import supabase from '../config/supabase.js';
+import supabaseFiscal from '../config/supabaseFiscal.js';
 import {
   asyncHandler,
   successResponse,
@@ -48,6 +49,162 @@ async function graphRequest(path, accessToken, options = {}) {
     throw err;
   }
   return data;
+}
+
+// =============================================
+// Helper: busca contatos INATIVOS via Supabase
+// =============================================
+// "Inativo" = comprou em [dataInicio, dataFim] mas NÃO comprou após dataFim.
+// Roda 100% no Supabase (notas_fiscais + pes_pessoa) — sem TOTVS, sub-segundo.
+async function fetchContatosInativosSupabase({ dataInicio, dataFim, operacao, branchHint }) {
+  const t0 = Date.now();
+
+  // 1) Monta filtros de operação/filial (mesma lógica do path TOTVS)
+  const opCodesRaw = operacao?.codigos_operacao || operacao?.cd_operacao;
+  let operationCodes = [];
+  if (opCodesRaw) {
+    const codes = Array.isArray(opCodesRaw)
+      ? opCodesRaw
+      : String(opCodesRaw).split(',').map((s) => s.trim()).filter(Boolean);
+    operationCodes = codes.map((c) => Number(c)).filter((n) => Number.isFinite(n));
+  }
+
+  const buildBaseQuery = (start, end) => {
+    let q = supabaseFiscal
+      .from('notas_fiscais')
+      .select('person_code, total_value, issue_date', { count: 'exact' })
+      .eq('operation_type', 'Output')
+      .not('invoice_status', 'in', '(Canceled,Deleted)')
+      .gte('issue_date', start)
+      .lte('issue_date', end)
+      .not('person_code', 'is', null);
+    if (operationCodes.length > 0) {
+      q = q.in('operation_code', operationCodes);
+    } else if (branchHint) {
+      // Sem operationCodes: filtra branch_code por canal
+      if (branchHint.isRevenda || branchHint.isVarejo) {
+        q = q.lte('branch_code', 5999);
+      } else if (branchHint.isMultimarcas) {
+        q = q.gte('branch_code', 6000);
+      }
+    }
+    return q;
+  };
+
+  // 2) Paginação: pega TODAS as NFs em [dataInicio, dataFim]
+  async function fetchAllNFs(start, end) {
+    const all = [];
+    const PAGE = 1000;
+    let from = 0;
+    while (true) {
+      const { data, error } = await buildBaseQuery(start, end)
+        .order('issue_date', { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`Supabase NF: ${error.message}`);
+      if (!data || data.length === 0) break;
+      all.push(...data);
+      if (data.length < PAGE) break;
+      from += PAGE;
+      if (from > 200000) break; // safety: 200k NFs max
+    }
+    return all;
+  }
+
+  // 3) Compradores no período do filtro
+  const nfsPeriodo = await fetchAllNFs(dataInicio, dataFim);
+  const periodoStats = new Map(); // person_code -> { totalValue, count, lastDate }
+  for (const nf of nfsPeriodo) {
+    const pc = Number(nf.person_code);
+    if (!Number.isFinite(pc)) continue;
+    const cur = periodoStats.get(pc) || { totalValue: 0, count: 0, lastDate: nf.issue_date };
+    cur.totalValue += Number(nf.total_value || 0);
+    cur.count++;
+    if (nf.issue_date > cur.lastDate) cur.lastDate = nf.issue_date;
+    periodoStats.set(pc, cur);
+  }
+
+  // 4) Compradores ATIVOS (compraram depois de dataFim) — excluir
+  const hoje = new Date().toISOString().slice(0, 10);
+  const dataAposFim = new Date(`${dataFim}T00:00:00Z`);
+  dataAposFim.setUTCDate(dataAposFim.getUTCDate() + 1);
+  const startAtivos = dataAposFim.toISOString().slice(0, 10);
+  const nfsAtivos = await fetchAllNFs(startAtivos, hoje);
+  const ativos = new Set(nfsAtivos.map((n) => Number(n.person_code)));
+
+  const inativosCodes = [];
+  for (const pc of periodoStats.keys()) {
+    if (!ativos.has(pc)) inativosCodes.push(pc);
+  }
+  console.log(
+    `[inativos] periodo=${periodoStats.size} | ativos_excluidos=${periodoStats.size - inativosCodes.length} | inativos=${inativosCodes.length} | ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+  );
+
+  if (inativosCodes.length === 0) {
+    return { contacts: [], ticketMedio: 0 };
+  }
+
+  // 5) Busca telefones em pes_pessoa (chunks de 500 pra cabe na URL)
+  const CHUNK = 500;
+  const pessoas = [];
+  for (let i = 0; i < inativosCodes.length; i += CHUNK) {
+    const slice = inativosCodes.slice(i, i + CHUNK);
+    const { data, error } = await supabase
+      .from('pes_pessoa')
+      .select('code, cpf, nm_pessoa, phones')
+      .in('code', slice);
+    if (error) {
+      console.warn(`[inativos] pes_pessoa chunk ${i}: ${error.message}`);
+      continue;
+    }
+    pessoas.push(...(data || []));
+  }
+  const pessoasMap = new Map(pessoas.map((p) => [Number(p.code), p]));
+
+  // 6) Monta contacts (só quem tem telefone válido)
+  const contacts = [];
+  let totalValueAll = 0;
+  for (const pc of inativosCodes) {
+    const p = pessoasMap.get(pc);
+    if (!p) continue;
+    const phones = Array.isArray(p.phones) ? p.phones : [];
+    // Prioriza: WHATSAPP > default > celular (11 dígitos) > qualquer
+    let phone = '';
+    const candidates = [...phones].sort((a, b) => {
+      const score = (x) => {
+        let s = 0;
+        if (x.typeName?.toUpperCase() === 'WHATSAPP') s += 100;
+        if (x.isDefault) s += 50;
+        const n = String(x.number || '').replace(/\D/g, '');
+        if (n.length === 11) s += 20; // celular
+        return s;
+      };
+      return score(b) - score(a);
+    });
+    for (const ph of candidates) {
+      const raw = String(ph.number || '').replace(/\D/g, '');
+      if (raw.length >= 10) {
+        phone = raw.startsWith('55') ? raw : `55${raw}`;
+        break;
+      }
+    }
+    if (!phone) continue;
+    const stats = periodoStats.get(pc);
+    totalValueAll += stats.totalValue;
+    contacts.push({
+      cd_pessoa: pc,
+      name: p.nm_pessoa || '',
+      cpf_cnpj: p.cpf || '',
+      nr_telefone: phone,
+      totalValue: stats.totalValue,
+      invoiceCount: stats.count,
+      ultimaCompra: stats.lastDate,
+    });
+  }
+  const ticketMedio = contacts.length > 0 ? totalValueAll / contacts.length : 0;
+  console.log(
+    `[inativos] contatos_com_telefone=${contacts.length}/${inativosCodes.length} | ticketMedio=${ticketMedio.toFixed(2)} | ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+  );
+  return { contacts, ticketMedio };
 }
 
 // =============================================
@@ -1073,7 +1230,7 @@ router.get(
 router.post(
   '/totvs-contacts',
   asyncHandler(async (req, res) => {
-    const { operacao, data_inicio, data_fim, empresas } = req.body;
+    const { operacao, data_inicio, data_fim, empresas, modo } = req.body;
 
     if (!operacao || !data_inicio || !data_fim) {
       return errorResponse(
@@ -1082,6 +1239,33 @@ router.post(
         400,
         'VALIDATION',
       );
+    }
+
+    const opName = (operacao.nome || '').toLowerCase();
+    const isRevenda = opName.includes('revenda');
+    const isMultimarcas = opName.includes('multimarc');
+    const isVarejo = opName.includes('varejo');
+
+    // ===== MODO INATIVOS: roda no Supabase (sem TOTVS) =====
+    // Cliente "inativo" = comprou em [data_inicio, data_fim] mas NÃO comprou
+    // entre data_fim e hoje. Janela típica do front: -365d até -61d.
+    if (modo === 'inativos') {
+      try {
+        const result = await fetchContatosInativosSupabase({
+          dataInicio: data_inicio,
+          dataFim: data_fim,
+          operacao,
+          branchHint: { isRevenda, isMultimarcas, isVarejo },
+        });
+        return successResponse(
+          res,
+          { data: result.contacts, ticketMedio: result.ticketMedio },
+          `${result.contacts.length} contatos inativos`,
+        );
+      } catch (e) {
+        logger.error(`[totvs-contacts inativos] ${e.message}`);
+        return errorResponse(res, `Inativos: ${e.message}`, 500, 'INATIVOS_ERROR');
+      }
     }
 
     const tokenData = await getToken();
@@ -1094,11 +1278,6 @@ router.post(
       );
     }
     const token = tokenData.access_token;
-
-    const opName = (operacao.nome || '').toLowerCase();
-    const isRevenda = opName.includes('revenda');
-    const isMultimarcas = opName.includes('multimarc');
-    const isVarejo = opName.includes('varejo');
     let branchCodes = (empresas || []).map(Number).filter(Number.isFinite);
 
     // Fallback: se nenhuma filial veio do front, busca lista do TOTVS e filtra
@@ -1582,6 +1761,46 @@ export async function processCampaignQueue(campaignId, account) {
     if (!processCampaignQueue._tmplMetaCache) processCampaignQueue._tmplMetaCache = new Map();
     const tmplCache = processCampaignQueue._tmplMetaCache;
 
+    // Cache de media_id por URL de imagem (válido por ~30 dias pra Meta)
+    if (!processCampaignQueue._mediaCache) processCampaignQueue._mediaCache = new Map();
+    const mediaCache = processCampaignQueue._mediaCache;
+
+    // Helper: baixa imagem da URL e faz upload pra /media, retorna media_id
+    async function uploadImageToMedia(imageUrl) {
+      if (mediaCache.has(imageUrl)) return mediaCache.get(imageUrl);
+      try {
+        // 1) Baixa a imagem
+        const imgResp = await fetch(imageUrl);
+        if (!imgResp.ok) throw new Error(`download ${imgResp.status}`);
+        const buf = Buffer.from(await imgResp.arrayBuffer());
+        const ct = imgResp.headers.get('content-type') || 'image/jpeg';
+
+        // 2) Faz upload pra /media
+        // Endpoint Meta: POST /{phone_id}/media com multipart form
+        // Usa FormData (Node 18+ tem global)
+        const form = new FormData();
+        const blob = new Blob([buf], { type: ct });
+        form.append('messaging_product', 'whatsapp');
+        form.append('type', ct);
+        form.append('file', blob, `card.${ct.split('/')[1] || 'jpg'}`);
+
+        const upResp = await fetch(`https://graph.facebook.com/v22.0/${account.phone_id}/media`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${account.access_token}` },
+          body: form,
+        });
+        const upData = await upResp.json();
+        if (!upResp.ok || !upData?.id) {
+          throw new Error(upData?.error?.message || `upload ${upResp.status}`);
+        }
+        mediaCache.set(imageUrl, upData.id);
+        return upData.id;
+      } catch (e) {
+        console.warn(`[upload-media] falhou: ${e.message}`);
+        return null;
+      }
+    }
+
     // Helper: pega metadados do template (header + carousel) pra montar payload de envio
     async function getTemplateMeta(tmplName) {
       if (tmplCache.has(tmplName)) return tmplCache.get(tmplName);
@@ -1652,20 +1871,28 @@ export async function processCampaignQueue(campaignId, account) {
           });
         }
 
-        // CARROSSEL: cada card precisa de header com sua imagem
+        // CARROSSEL: Meta exige media_id (não aceita link). Upload pra /media e cacheia.
         if (tmplMeta.isCarousel && tmplMeta.cardImages.length > 0) {
-          components.push({
-            type: 'carousel',
-            cards: tmplMeta.cardImages.map((url, idx) => ({
+          const mediaIds = await Promise.all(
+            tmplMeta.cardImages.map((url) => uploadImageToMedia(url)),
+          );
+          const cardsArr = [];
+          for (let idx = 0; idx < mediaIds.length; idx++) {
+            const mid = mediaIds[idx];
+            if (!mid) {
+              throw new Error(`upload card ${idx} falhou`);
+            }
+            cardsArr.push({
               card_index: idx,
               components: [
                 {
                   type: 'header',
-                  parameters: [{ type: 'image', image: { link: url } }],
+                  parameters: [{ type: 'image', image: { id: mid } }],
                 },
               ],
-            })),
-          });
+            });
+          }
+          components.push({ type: 'carousel', cards: cardsArr });
         }
 
         const sendResult = await graphRequest(
