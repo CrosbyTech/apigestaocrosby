@@ -7388,6 +7388,10 @@ import {
   syncPesPessoaDelta,
   syncPesPessoaFull,
 } from './jobs/pes-pessoa-sync.job.js';
+import {
+  iniciarJobConversaoTemplate,
+  executarConversaoTemplate,
+} from './jobs/template-conversao.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7541,6 +7545,52 @@ app.listen(PORT, async () => {
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();
   iniciarJobPesPessoaSync();
+  iniciarJobConversaoTemplate();
+
+  // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
+  (async () => {
+    try {
+      const { default: supabase } = await import('./config/supabase.js');
+      const { count } = await supabase
+        .from('message_queue')
+        .update({ status: 'pending' }, { count: 'exact' })
+        .in('status', ['processing', 'retrying']);
+      if (count > 0) {
+        console.log(`🔄 [boot] ${count} mensagens travadas resetadas pra pending — worker vai retomar`);
+        // Dispara worker pra cada campanha distinta com pendentes
+        const { data: campanhas } = await supabase
+          .from('message_queue')
+          .select('campaign_id, account_id')
+          .eq('status', 'pending')
+          .limit(2000);
+        const seen = new Set();
+        for (const m of campanhas || []) {
+          if (seen.has(m.campaign_id)) continue;
+          seen.add(m.campaign_id);
+          const { data: account } = await supabase
+            .from('whatsapp_accounts').select('*').eq('id', m.account_id).single();
+          if (!account) continue;
+          const { processCampaignQueue } = await import('./routes/meta.routes.js').catch(() => ({}));
+          if (processCampaignQueue) {
+            processCampaignQueue(m.campaign_id, account).catch((e) =>
+              console.warn(`[boot resume] campaign ${m.campaign_id}: ${e.message}`),
+            );
+          }
+        }
+        if (seen.size > 0) console.log(`🚀 [boot] retomando ${seen.size} campanhas`);
+      }
+    } catch (e) {
+      console.warn(`[boot resume] erro: ${e.message}`);
+    }
+  })();
+});
+
+// Endpoint manual pra disparar conversão
+app.post('/api/forecast/sync-template-conversao', async (req, res) => {
+  executarConversaoTemplate().catch((e) =>
+    console.error('[template-conversao] manual erro:', e.message),
+  );
+  res.json({ success: true, message: 'Conversão de templates disparada em background' });
 });
 
 // Endpoints manuais para disparar sync de pes_pessoa
