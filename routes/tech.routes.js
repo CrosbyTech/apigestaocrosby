@@ -929,4 +929,194 @@ router.get(
   }),
 );
 
+// ============================================================
+// CLIENTES POR FILIAL (BRANCH)
+// POST /api/tech/clientes-por-empresa
+// Body: { branch_code, search?, page?, pageSize? }
+// Retorna clientes que compraram nessa filial (a partir de notas_fiscais)
+// ============================================================
+router.post(
+  '/clientes-por-empresa',
+  asyncHandler(async (req, res) => {
+    const { branch_code, search, page = 1, pageSize = 50 } = req.body || {};
+    if (!branch_code) {
+      return errorResponse(res, 'branch_code obrigatório', 400, 'MISSING_BRANCH');
+    }
+
+    const brCode = Number(branch_code);
+    if (!Number.isFinite(brCode)) {
+      return errorResponse(res, 'branch_code inválido', 400, 'INVALID_BRANCH');
+    }
+
+    const { createClient } = await import('@supabase/supabase-js');
+    const supabaseFiscal = createClient(
+      process.env.SUPABASE_FISCAL_URL,
+      process.env.SUPABASE_FISCAL_KEY,
+    );
+
+    // Busca NFs da filial (histórico completo)
+    const buscarTodas = async () => {
+      const PAGE = 1000;
+      const linhas = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabaseFiscal
+          .from('notas_fiscais')
+          .select('person_code, person_name, dealer_code, total_value, issue_date, operation_type, operation_code')
+          .eq('branch_code', brCode)
+          .neq('invoice_status', 'Canceled')
+          .neq('invoice_status', 'Deleted')
+          .range(from, from + PAGE - 1);
+        if (error || !data?.length) break;
+        linhas.push(...data);
+        if (data.length < PAGE) break;
+      }
+      return linhas;
+    };
+
+    const todasNFs = await buscarTodas();
+
+    // Resolve nome dos vendedores
+    const dealerNames = new Map();
+    const allDealers = new Set();
+    for (const nf of todasNFs) if (nf.dealer_code != null) allDealers.add(Number(nf.dealer_code));
+    if (allDealers.size > 0) {
+      try {
+        const { data: vs } = await supabase
+          .from('v_vendedores_integracao')
+          .select('totvs_id, nome_vendedor')
+          .in('totvs_id', [...allDealers]);
+        for (const v of vs || []) {
+          if (v?.totvs_id != null) dealerNames.set(Number(v.totvs_id), v.nome_vendedor || `Vend. ${v.totvs_id}`);
+        }
+      } catch {}
+    }
+
+    // Agrega por cliente
+    const porCliente = new Map();
+    const dealerCount = new Map();
+    for (const nf of todasNFs) {
+      const pc = Number(nf.person_code);
+      if (!Number.isFinite(pc)) continue;
+      const v = Number(nf.total_value || 0);
+      const cur = porCliente.get(pc) || {
+        person_code: pc,
+        person_name: nf.person_name || `Cliente ${pc}`,
+        total_value: 0,
+        num_nfs: 0,
+        first_purchase: nf.issue_date,
+        last_purchase: nf.issue_date,
+      };
+      if (nf.operation_type === 'Output') {
+        cur.total_value += v;
+        cur.num_nfs += 1;
+      } else if (nf.operation_type === 'Input') {
+        cur.total_value -= v;
+      }
+      if (nf.issue_date < cur.first_purchase) cur.first_purchase = nf.issue_date;
+      if (nf.issue_date > cur.last_purchase) cur.last_purchase = nf.issue_date;
+      if (nf.person_name && !cur.person_name.startsWith('Cliente ')) cur.person_name = nf.person_name;
+      porCliente.set(pc, cur);
+      if (nf.dealer_code != null) {
+        const key = `${pc}|${nf.dealer_code}`;
+        dealerCount.set(key, (dealerCount.get(key) || 0) + 1);
+      }
+    }
+
+    for (const [pc, c] of porCliente.entries()) {
+      let bestDealer = null; let bestCount = 0;
+      for (const [key, cnt] of dealerCount.entries()) {
+        const [pcKey, dc] = key.split('|');
+        if (Number(pcKey) !== pc) continue;
+        if (cnt > bestCount) { bestCount = cnt; bestDealer = Number(dc); }
+      }
+      c.vendedor_code = bestDealer;
+      c.vendedor_nome = bestDealer != null ? (dealerNames.get(bestDealer) || `Vend. ${bestDealer}`) : null;
+      c.total_value = Math.round(c.total_value * 100) / 100;
+    }
+
+    // Lookup telefones via pes_pessoa
+    const pessoaCodes = [...porCliente.keys()];
+    if (pessoaCodes.length > 0) {
+      try {
+        const CHUNK = 800;
+        for (let i = 0; i < pessoaCodes.length; i += CHUNK) {
+          const batch = pessoaCodes.slice(i, i + CHUNK);
+          const { data: pessoas } = await supabase
+            .from('pes_pessoa')
+            .select('code, telefone, email, uf, addresses, phones, cpf, fantasy_name, nm_pessoa')
+            .in('code', batch);
+          for (const p of pessoas || []) {
+            const cur = porCliente.get(Number(p.code));
+            if (cur) {
+              let tel = p.telefone || null;
+              if (!tel && Array.isArray(p.phones) && p.phones.length > 0) {
+                tel = p.phones[0]?.number || null;
+              }
+              cur.telefone = tel;
+              cur.email = p.email || null;
+              cur.cpf_cnpj = p.cpf || null;
+              cur.razao_social = p.nm_pessoa || null;
+              let uf = p.uf || null;
+              if (!uf && Array.isArray(p.addresses) && p.addresses.length > 0) {
+                uf = p.addresses[0]?.stateAbbreviation || p.addresses[0]?.uf || null;
+              }
+              cur.uf = uf;
+              if (Array.isArray(p.addresses) && p.addresses.length > 0) {
+                const addr = p.addresses[0];
+                cur.city = addr?.cityName || addr?.city || null;
+              }
+            }
+          }
+        }
+      } catch (e) { console.warn(`[clientes-por-empresa] pes_pessoa: ${e.message}`); }
+    }
+
+    let contatos = [...porCliente.values()];
+
+    // Filtro busca
+    if (search && String(search).trim()) {
+      const q = String(search).trim().toLowerCase();
+      contatos = contatos.filter((c) =>
+        String(c.person_name || '').toLowerCase().includes(q)
+        || String(c.person_code).includes(q)
+        || String(c.telefone || '').includes(q)
+        || String(c.cpf_cnpj || '').includes(q),
+      );
+    }
+
+    // Lista de UFs/vendedores pra filtros
+    const ufsSet = new Set();
+    const vendsMap = new Map();
+    for (const c of contatos) {
+      if (c.uf) ufsSet.add(c.uf);
+      if (c.vendedor_code != null) vendsMap.set(c.vendedor_code, c.vendedor_nome);
+    }
+
+    contatos.sort((a, b) => b.total_value - a.total_value);
+
+    const total = contatos.length;
+    const pageNum = Math.max(1, Number(page) || 1);
+    const psize = Math.min(500, Math.max(10, Number(pageSize) || 50));
+    const start = (pageNum - 1) * psize;
+    const paginados = contatos.slice(start, start + psize);
+
+    return successResponse(
+      res,
+      {
+        contatos: paginados,
+        total,
+        page: pageNum,
+        pageSize: psize,
+        branch_code: brCode,
+        ufs: [...ufsSet].sort(),
+        vendedores: [...vendsMap.entries()]
+          .map(([code, nome]) => ({ code, nome }))
+          .sort((a, b) => String(a.nome).localeCompare(String(b.nome))),
+        nf_total: todasNFs.length,
+      },
+      `${total} clientes na filial ${brCode}`,
+    );
+  }),
+);
+
 export default router;

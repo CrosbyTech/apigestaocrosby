@@ -3575,7 +3575,7 @@ router.post(
 router.post(
   '/contatos-canal',
   asyncHandler(async (req, res) => {
-    const { canal, search, page = 1, pageSize = 50 } = req.body || {};
+    const { canal, search, sellerCode, uf, page = 1, pageSize = 50 } = req.body || {};
     if (!canal) return errorResponse(res, 'canal obrigatório', 400, 'MISSING_CANAL');
 
     const CFG = {
@@ -3619,6 +3619,34 @@ router.post(
       process.env.SUPABASE_FISCAL_KEY,
     );
 
+    // ── 1ª fonte: pes_pessoa.classifications (cadastro TOTVS — autoritativo) ──
+    // Mapeia canal → typeCode/typeName/val a procurar nas classifications da pessoa.
+    const CANAL_CLASS_MATCH = {
+      multimarcas:        (c) => c.typeCode === 5 || (c.typeCode === 20 && /multimarc/i.test(c.name)),
+      multimarcas_global: (c) => c.typeCode === 5 || (c.typeCode === 20 && /multimarc/i.test(c.name)),
+      revenda:            (c) => c.typeCode === 7 || (c.typeCode === 20 && /revend/i.test(c.name)),
+      varejo:             (c) => c.typeCode === 4 || (c.typeCode === 20 && /varejo/i.test(c.name)),
+      inbound_david:      (c) => c.typeCode === 5 || (c.typeCode === 20 && /multimarc/i.test(c.name)),
+      inbound_rafael:     (c) => c.typeCode === 5 || (c.typeCode === 20 && /multimarc/i.test(c.name)),
+    };
+    const matcher = CANAL_CLASS_MATCH[canal];
+    const codesViaClass = new Set();
+    if (matcher) {
+      try {
+        const { data: pessoas } = await supabase
+          .from('pes_pessoa')
+          .select('code, classifications')
+          .eq('tipo_pessoa', 'PJ')
+          .not('classifications', 'is', null)
+          .not('classifications', 'eq', '[]');
+        for (const p of pessoas || []) {
+          const cls = Array.isArray(p.classifications) ? p.classifications : [];
+          if (cls.some(matcher)) codesViaClass.add(Number(p.code));
+        }
+        console.log(`[contatos-canal ${canal}] ${codesViaClass.size} pessoas via classifications`);
+      } catch (e) { console.warn(`[contatos-canal] class lookup: ${e.message}`); }
+    }
+
     // Busca TODAS as NFs do canal (sem filtro de data — histórico completo)
     const buscarTodas = async () => {
       const PAGE = 1000;
@@ -3644,7 +3672,7 @@ router.post(
 
     const todasNFs = await buscarTodas();
 
-    // Resolve nome dos vendedores
+    // Resolve nome dos vendedores via 2 fontes (v_vendedores_integracao + TOTVS sellers/search)
     const dealerNames = new Map();
     const allDealers = new Set();
     for (const nf of todasNFs) if (nf.dealer_code != null) allDealers.add(Number(nf.dealer_code));
@@ -3658,6 +3686,17 @@ router.post(
           if (v?.totvs_id != null) dealerNames.set(Number(v.totvs_id), v.nome_vendedor || `Vend. ${v.totvs_id}`);
         }
       } catch {}
+      // Para dealers que não estão em v_vendedores_integracao, busca no cache global
+      // populado por callTotvsSellersSearch (sale-panel/sellers).
+      const missing = [...allDealers].filter((d) => !dealerNames.has(d));
+      if (missing.length > 0) {
+        try {
+          const cache = await getDealerNamesCacheGlobal();
+          for (const d of missing) {
+            if (cache.has(d)) dealerNames.set(d, cache.get(d));
+          }
+        } catch (e) { console.warn(`[contatos-canal] cache global dealers: ${e.message}`); }
+      }
     }
 
     // Agrega por cliente
@@ -3705,6 +3744,36 @@ router.post(
       c.total_value = Math.round(c.total_value * 100) / 100;
     }
 
+    // Adiciona pessoas via classifications que NÃO têm NF (cadastro só, nunca compraram)
+    if (codesViaClass.size > 0) {
+      const novoCodes = [...codesViaClass].filter((c) => !porCliente.has(c));
+      if (novoCodes.length > 0) {
+        try {
+          const CHUNK = 800;
+          for (let i = 0; i < novoCodes.length; i += CHUNK) {
+            const batch = novoCodes.slice(i, i + CHUNK);
+            const { data: pessoas } = await supabase
+              .from('pes_pessoa')
+              .select('code, fantasy_name, nm_pessoa')
+              .in('code', batch);
+            for (const p of pessoas || []) {
+              porCliente.set(Number(p.code), {
+                person_code: Number(p.code),
+                person_name: p.fantasy_name || p.nm_pessoa || `Cliente ${p.code}`,
+                total_value: 0,
+                num_nfs: 0,
+                first_purchase: null,
+                last_purchase: null,
+                vendedor_code: null,
+                vendedor_nome: null,
+              });
+            }
+          }
+          console.log(`[contatos-canal ${canal}] +${novoCodes.length} pessoas via classifications (sem NF)`);
+        } catch (e) { console.warn(`[contatos-canal] classifications-only erro: ${e.message}`); }
+      }
+    }
+
     // Lookup telefones via pes_pessoa (Supabase main)
     // Schema real: telefone, email, uf, addresses (JSONB com city)
     const pessoaCodes = [...porCliente.keys()];
@@ -3727,11 +3796,16 @@ router.post(
               }
               cur.telefone = tel;
               cur.email = p.email || null;
-              cur.uf = p.uf || null;
-              // Cidade vem de addresses[0].city ou similar
+              // UF: prefere campo direto, senão addresses[0].stateAbbreviation
+              let uf = p.uf || null;
+              if (!uf && Array.isArray(p.addresses) && p.addresses.length > 0) {
+                uf = p.addresses[0]?.stateAbbreviation || p.addresses[0]?.uf || null;
+              }
+              cur.uf = uf;
+              // Cidade vem de addresses[0].cityName ou city
               if (Array.isArray(p.addresses) && p.addresses.length > 0) {
                 const addr = p.addresses[0];
-                cur.city = addr?.city || addr?.cityName || null;
+                cur.city = addr?.cityName || addr?.city || null;
               } else {
                 cur.city = null;
               }
@@ -3752,6 +3826,32 @@ router.post(
       });
     }
 
+    // Lista de vendedores disponíveis (pra montar o dropdown no front)
+    const vendedoresMap = new Map();
+    const ufsSet = new Set();
+    for (const c of contatos) {
+      if (c.vendedor_code != null) {
+        vendedoresMap.set(c.vendedor_code, c.vendedor_nome || `Vend. ${c.vendedor_code}`);
+      }
+      if (c.uf) ufsSet.add(String(c.uf).toUpperCase().trim());
+    }
+    const vendedoresList = [...vendedoresMap.entries()]
+      .map(([code, nome]) => ({ code, nome }))
+      .sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+    const ufsList = [...ufsSet].sort();
+
+    // Filtro por vendedor (server-side)
+    if (sellerCode != null && sellerCode !== '' && sellerCode !== 'all') {
+      const sc = Number(sellerCode);
+      contatos = contatos.filter((c) => Number(c.vendedor_code) === sc);
+    }
+
+    // Filtro por UF (server-side)
+    if (uf && uf !== '' && uf !== 'all') {
+      const ufUp = String(uf).toUpperCase().trim();
+      contatos = contatos.filter((c) => String(c.uf || '').toUpperCase().trim() === ufUp);
+    }
+
     contatos.sort((a, b) => b.total_value - a.total_value);
 
     const total = contatos.length;
@@ -3768,6 +3868,8 @@ router.post(
         page: pageNum,
         pageSize: psize,
         canal,
+        vendedores: vendedoresList,
+        ufs: ufsList,
       },
       `${total} contatos no canal ${canal}`,
     );
@@ -9427,6 +9529,47 @@ const NON_VAREJO_BRANCH_INFO = {
   99: { name: 'BLUE HOUSE', short: 'BLU' },
   2: { name: 'JOÃO PESSOA', short: 'JPA' },
 };
+
+// ─── Cache global de nomes de vendedores (dealer_code → seller_name) ─────
+// Popula chamando TOTVS sale-panel/sellers/search com payload amplo
+// (todas branches B2M/B2R/Varejo, últimos 12 meses). Cache 6h.
+// Usado como fallback quando v_vendedores_integracao não tem o dealer.
+const DEALER_NAMES_CACHE = { data: null, ts: 0 };
+const DEALER_CACHE_TTL = 6 * 60 * 60 * 1000;
+async function getDealerNamesCacheGlobal() {
+  if (DEALER_NAMES_CACHE.data && Date.now() - DEALER_NAMES_CACHE.ts < DEALER_CACHE_TTL) {
+    return DEALER_NAMES_CACHE.data;
+  }
+  const map = new Map();
+  const branches = [99, 2, 5, 55, 65, 75, 87, 88, 90, 93, 94, 95, 97, 98, 200];
+  const datemax = new Date().toISOString().slice(0, 10);
+  const datemin = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+  for (const br of branches) {
+    try {
+      const data = await callTotvsSellersSearch({
+        branchs: [br], operations: null, datemin, datemax,
+      });
+      for (const row of data?.dataRow || []) {
+        const code = Number(row.seller_code ?? row.sellerCode ?? row.code);
+        const name = row.seller_name ?? row.sellerName ?? row.name;
+        if (Number.isFinite(code) && name) {
+          // Capitaliza primeiro nome
+          const raw = String(name).trim().toLowerCase()
+            .split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          map.set(code, raw);
+        }
+      }
+    } catch (e) {
+      console.warn(`[dealer-names-cache] br ${br}: ${e.message}`);
+    }
+  }
+  // Overrides manuais (TOTVS não retorna ou retorna feio)
+  if (!map.has(50)) map.set(50, 'GERAL');
+  DEALER_NAMES_CACHE.data = map;
+  DEALER_NAMES_CACHE.ts = Date.now();
+  console.log(`[dealer-names-cache] populado com ${map.size} dealers`);
+  return map;
+}
 
 // ─── Mapa histórico cliente → vendedor (último que vendeu) ─────────────────
 // Usado para atribuir corretamente devoluções (SaleReturns) onde o TOTVS

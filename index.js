@@ -7383,6 +7383,11 @@ import { iniciarTransacaoHistoricoSync } from './jobs/transacao-historico-sync.j
 import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js';
 import { iniciarCanalTotalsCacheJob } from './jobs/canal-totals-cache.job.js';
 import { iniciarCronWixSync } from './jobs/wix-sync.job.js';
+import {
+  iniciarJobPesPessoaSync,
+  syncPesPessoaDelta,
+  syncPesPessoaFull,
+} from './jobs/pes-pessoa-sync.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -7535,6 +7540,21 @@ app.listen(PORT, async () => {
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();
+  iniciarJobPesPessoaSync();
+});
+
+// Endpoints manuais para disparar sync de pes_pessoa
+app.post('/api/forecast/sync-pes-pessoa', async (req, res) => {
+  const { mode = 'delta', hoursBack = 48 } = req.body || {};
+  // Não aguarda — roda em background
+  if (mode === 'full') {
+    syncPesPessoaFull().catch((e) => console.error('[sync-pes-pessoa full] erro:', e.message));
+  } else {
+    syncPesPessoaDelta(Number(hoursBack) || 48).catch((e) =>
+      console.error('[sync-pes-pessoa delta] erro:', e.message),
+    );
+  }
+  res.json({ success: true, message: `Sync pes_pessoa ${mode} disparado em background`, mode, hoursBack });
 });
 
 export default app;
