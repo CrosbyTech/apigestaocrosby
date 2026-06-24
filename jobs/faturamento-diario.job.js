@@ -26,6 +26,30 @@ const parseFloatOrNull = (v) => {
   return isNaN(n) ? null : n;
 };
 
+// Extrai o dealerCode predominante dos items da NF (cada item.products[] tem dealerCode).
+// CRÍTICO: sem isso, o Supabase fica sem o vendedor → toda métrica por dealer fica errada.
+function getDominantDealer(nf) {
+  const items = Array.isArray(nf?.items) ? nf.items : [];
+  if (items.length === 0) return null;
+  const cnt = new Map();
+  for (const it of items) {
+    const products = Array.isArray(it?.products) ? it.products : [];
+    for (const p of products) {
+      const dc = p?.dealerCode ?? p?.sellerCode;
+      if (dc == null) continue;
+      const n = Number(dc);
+      if (!Number.isFinite(n)) continue;
+      cnt.set(n, (cnt.get(n) || 0) + 1);
+    }
+  }
+  if (cnt.size === 0) return null;
+  let best = null, max = 0;
+  for (const [k, v] of cnt.entries()) {
+    if (v > max) { max = v; best = k; }
+  }
+  return best;
+}
+
 // ─── Busca todas as páginas de um range ───────────────────────────────────────
 async function fetchAllPages(
   branchCodeList,
@@ -135,6 +159,8 @@ function mapNfToRow(nf) {
     document_type_code: parseIntOrNull(nf.documentType),
     operation_type: nf.operationType ?? null,
     operation_code: parseIntOrNull(nf.operationCode),
+    // dealer_code é GENERATED no Supabase (calculado de items[].products[].dealerCode).
+    // NÃO inserir explicitamente — Postgres rejeita.
     operation_name: nf.operatioName ?? nf.operationName ?? null,
     inclusion_component_code: nf.inclusionComponentCode ?? null,
     peripheral_pdv_code: nf.peripheralPdvCode ?? null,
@@ -288,15 +314,44 @@ export async function executarFaturamentoDiario(opts = {}) {
   return result;
 }
 
-// ─── Agendamento: todo dia às 1:30 AM (Brasília) ─────────────────────────────
+// ─── Agendamento ─────────────────────────────────────────────────────────────
+// Anti-sobrecarga TOTVS: mutex global previne sync sobreposto. Se um sync já
+// estiver em execução quando o próximo cron disparar, é pulado (não enfileira).
+// Frequência calibrada pra não esbarrar em rate-limit TOTVS:
+//   1) 02:00 BRT diário — sync 2 dias (noturno completo, hora morta)
+//   2) 09h, 12h, 15h, 18h, 21h BRT — sync hoje (5 atualizações/dia em pontos
+//      estratégicos do horário comercial)
+let SYNC_IN_PROGRESS = false;
+async function runSync(label, opts) {
+  if (SYNC_IN_PROGRESS) {
+    console.log(`⏭️  [faturamento-diario ${label}] PULADO — sync anterior ainda em execução`);
+    return;
+  }
+  SYNC_IN_PROGRESS = true;
+  const t0 = Date.now();
+  try {
+    const r = await executarFaturamentoDiario(opts);
+    const dur = ((Date.now() - t0) / 1000).toFixed(1);
+    if (r?.ok) console.log(`✅ [faturamento-diario ${label}] ${r.totalUpserted} NFs em ${dur}s`);
+  } catch (e) {
+    console.warn(`[faturamento-diario ${label}] erro: ${e.message}`);
+  } finally {
+    SYNC_IN_PROGRESS = false;
+  }
+}
 export function iniciarJobFaturamentoDiario() {
-  // Expressão cron: minuto=30, hora=1, qualquer dia
-  const task = cron.schedule('30 1 * * *', executarFaturamentoDiario, {
-    timezone: 'America/Sao_Paulo',
-  });
+  // 1) Noturno: 02:00 BRT — sync 2 dias (recupera NFs retroativas)
+  cron.schedule('0 2 * * *', () => {
+    const hoje = new Date().toISOString().slice(0, 10);
+    const ontem = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    return runSync('noturno', { datemin: ontem, datemax: hoje });
+  }, { timezone: 'America/Sao_Paulo' });
+  console.log('⏰ [faturamento-diario] Noturno (2 dias) agendado para 02:00 BRT');
 
-  console.log(
-    '⏰ [faturamento-diario] Job agendado para 01:30 (America/Sao_Paulo) todos os dias',
-  );
-  return task;
+  // 2) Comercial: 9h, 12h, 15h, 18h, 21h BRT — sync HOJE apenas (rápido)
+  cron.schedule('0 9,12,15,18,21 * * *', () => {
+    const hoje = new Date().toISOString().slice(0, 10);
+    return runSync('comercial', { datemin: hoje, datemax: hoje });
+  }, { timezone: 'America/Sao_Paulo' });
+  console.log('⏰ [faturamento-diario] Comercial agendado: 09h, 12h, 15h, 18h, 21h BRT (5x/dia)');
 }

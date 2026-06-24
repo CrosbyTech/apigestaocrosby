@@ -1550,7 +1550,10 @@ router.post(
       // Paginacao automatica
       while (hasNext) {
         try {
-          const nextResponse = await doRequest(token, buildPayload(currentPage));
+          const nextResponse = await doRequest(
+            token,
+            buildPayload(currentPage),
+          );
           const nextItems =
             nextResponse.data?.items || nextResponse.data?.data || [];
           allItems = [...allItems, ...nextItems];
@@ -1566,9 +1569,7 @@ router.post(
       // Excluir Credev (Crédito de Devolução): movimentos do tipo Input não devem
       // contar como faturamento — são devoluções, não receita real.
       const totalBefore = allItems.length;
-      allItems = allItems.filter(
-        (item) => item.operationType !== 'Input',
-      );
+      allItems = allItems.filter((item) => item.operationType !== 'Input');
       const removedCredev = totalBefore - allItems.length;
       if (removedCredev > 0) {
         console.log(
@@ -2707,6 +2708,120 @@ router.post(
       },
       `${totalUpserted} nota(s) fiscal(is) salva(s) com sucesso (${rows.length - uniqueRows.length} duplicata(s) ignorada(s))`,
     );
+  }),
+);
+
+/**
+ * @route GET /totvs/transactions
+ * @desc Busca transações (general/v2/transactions) na API TOTVS Moda.
+ *       Proxy seguro: o token é gerenciado pelo backend.
+ * @query BranchCode (opcional) - Código da filial
+ * @query TransactionCode (obrigatório) - Código da transação
+ * @query TransactionDate (opcional) - Data da transação (YYYY-MM-DD)
+ * @query Expand (opcional) - Campos a expandir
+ */
+router.get(
+  '/transactions',
+  asyncHandler(async (req, res) => {
+    const { TransactionCode } = req.query;
+
+    if (!TransactionCode) {
+      return errorResponse(
+        res,
+        'O parâmetro TransactionCode é obrigatório',
+        400,
+        'MISSING_TRANSACTION_CODE',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const params = new URLSearchParams();
+      if (req.query.BranchCode)
+        params.append('BranchCode', req.query.BranchCode);
+      params.append('TransactionCode', TransactionCode);
+      if (req.query.TransactionDate)
+        params.append('TransactionDate', req.query.TransactionDate);
+      if (req.query.Expand) params.append('Expand', req.query.Expand);
+
+      const endpoint = `${TOTVS_BASE_URL}/general/v2/transactions?${params.toString()}`;
+      console.log('🧾 [Transactions] Buscando transação TOTVS:', endpoint);
+
+      const doRequest = async (accessToken) =>
+        axios.get(endpoint, {
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          httpsAgent,
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (err) {
+        if (err.response?.status === 401) {
+          console.log('🔄 [Transactions] Token inválido. Renovando...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw err;
+        }
+      }
+
+      console.log(
+        `✅ [Transactions] Transação ${TransactionCode} obtida com sucesso`,
+      );
+      return successResponse(
+        res,
+        response.data,
+        'Transação obtida com sucesso',
+      );
+    } catch (error) {
+      console.error('❌ [Transactions] Erro ao buscar transação TOTVS:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+
+      if (error.response) {
+        const msg =
+          error.response.data?.message ||
+          error.response.data?.error ||
+          (typeof error.response.data === 'string'
+            ? error.response.data
+            : null) ||
+          'Erro ao buscar transação na API TOTVS';
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: msg,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data,
+        });
+      }
+
+      if (error.request) {
+        return errorResponse(
+          res,
+          'Não foi possível conectar à API TOTVS',
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw new Error(`Erro ao buscar transação: ${error.message}`);
+    }
   }),
 );
 

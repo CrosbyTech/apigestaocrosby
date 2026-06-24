@@ -7925,4 +7925,216 @@ router.post(
   }),
 );
 
+/**
+ * @route GET /totvs/transactions
+ * @desc Busca transações (geral/v2/transactions) na API TOTVS Moda.
+ *       Proxy seguro: o token é gerenciado pelo backend, nunca exposto ao browser.
+ * @query BranchCode (opcional) - Código da filial
+ * @query TransactionCode (obrigatório) - Código da transação
+ * @query TransactionDate (opcional) - Data da transação (YYYY-MM-DD)
+ * @query Expand (opcional) - Campos a expandir (ex: itemPromotionalEngines, originDestination)
+ */
+router.get(
+  '/transactions',
+  asyncHandler(async (req, res) => {
+    const { TransactionCode } = req.query;
+
+    if (!TransactionCode) {
+      return errorResponse(
+        res,
+        'O parâmetro TransactionCode é obrigatório',
+        400,
+        'MISSING_TRANSACTION_CODE',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      // Repassar todos os query params recebidos para a API TOTVS
+      const params = new URLSearchParams();
+      if (req.query.BranchCode)
+        params.append('BranchCode', req.query.BranchCode);
+      params.append('TransactionCode', TransactionCode);
+      if (req.query.TransactionDate)
+        params.append('TransactionDate', req.query.TransactionDate);
+      if (req.query.Expand) params.append('Expand', req.query.Expand);
+
+      const endpoint = `${TOTVS_BASE_URL}/general/v2/transactions?${params.toString()}`;
+      console.log('🧾 [Transactions] Buscando transação TOTVS:', endpoint);
+
+      const doRequest = async (accessToken) =>
+        axios.get(endpoint, {
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          httpsAgent,
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 [Transactions] Token inválido. Renovando...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      console.log(
+        `✅ [Transactions] Transação ${TransactionCode} obtida com sucesso`,
+      );
+      successResponse(res, response.data, 'Transação obtida com sucesso');
+    } catch (error) {
+      console.error('❌ [Transactions] Erro ao buscar transação TOTVS:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+
+      if (error.response) {
+        const errorMessage =
+          error.response.data?.message ||
+          error.response.data?.error ||
+          (typeof error.response.data === 'string'
+            ? error.response.data
+            : null) ||
+          'Erro ao buscar transação na API TOTVS';
+
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message: errorMessage,
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data,
+        });
+      }
+
+      if (error.request) {
+        return errorResponse(
+          res,
+          'Não foi possível conectar à API TOTVS',
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw new Error(`Erro ao buscar transação: ${error.message}`);
+    }
+  }),
+);
+
+/**
+ * @route POST /totvs/accounts-receivable/search
+ * @desc Busca documentos de contas a receber na API TOTVS Moda.
+ *       Proxy: /api/totvsmoda/accounts-receivable/v2/documents/search
+ * @body { filter: { customerCodeList, startIssueDate, endIssueDate, branchCodeList, ... }, page, pageSize, expand }
+ */
+router.post(
+  '/accounts-receivable/search',
+  asyncHandler(async (req, res) => {
+    const { filter, page = 0, pageSize = 100, expand, order } = req.body;
+
+    if (!filter) {
+      return errorResponse(
+        res,
+        'O campo filter é obrigatório',
+        400,
+        'MISSING_FILTER',
+      );
+    }
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      const endpoint = `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`;
+      const body = { filter, page, pageSize };
+      if (expand) body.expand = expand;
+      if (order) body.order = order;
+
+      console.log('🧾 [AccountsReceivable] Buscando documentos:', JSON.stringify(body));
+
+      const doRequest = async (accessToken) =>
+        axios.post(endpoint, body, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          httpsAgent,
+          timeout: 30000,
+        });
+
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 [AccountsReceivable] Token inválido. Renovando...');
+          const newTokenData = await getToken(true);
+          response = await doRequest(newTokenData.access_token);
+        } else {
+          throw error;
+        }
+      }
+
+      console.log(
+        `✅ [AccountsReceivable] ${response.data?.totalItems ?? response.data?.items?.length ?? 0} documentos encontrados`,
+      );
+      successResponse(res, response.data, 'Documentos obtidos com sucesso');
+    } catch (error) {
+      console.error('❌ [AccountsReceivable] Erro:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message:
+            error.response.data?.message ||
+            error.response.data?.error ||
+            'Erro ao buscar documentos na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          timestamp: new Date().toISOString(),
+          details: error.response.data,
+        });
+      }
+
+      if (error.request) {
+        return errorResponse(
+          res,
+          'Não foi possível conectar à API TOTVS',
+          503,
+          'TOTVS_CONNECTION_ERROR',
+        );
+      }
+
+      throw new Error(`Erro ao buscar documentos: ${error.message}`);
+    }
+  }),
+);
+
 export default router;

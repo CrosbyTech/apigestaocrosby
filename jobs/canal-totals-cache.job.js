@@ -39,14 +39,18 @@ const CANAIS = [
   'showroom', 'novidadesfranquia', 'ricardoeletro',
 ];
 
-// Chama UM /faturamento-por-segmento pra o período inteiro e retorna TODOS canais.
-// Bem mais eficiente que 11 chamadas /canal-totals + valores corretos (per-NF).
+// Chama /canais-totals-all (TOTVS direto via canal-totals) pra TODOS canais.
+// Antes usávamos /faturamento-por-segmento, mas ele lê do Supabase
+// `notas_fiscais` que tem lag de sincronização → cache ficava desatualizado
+// (ex: David ontem R$ 8.333 mas mes-atual R$ 3.892 porque NFs de ontem
+// ainda não tinham sido replicadas pro Supabase no momento do cron).
+// Tradeoff: TOTVS direto é 5-10x mais lento mas dados sempre frescos.
 async function fetchAllCanais(datemin, datemax) {
   try {
     const r = await axios.post(
-      `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true`,
+      `${INTERNAL_API_BASE}/api/crm/canais-totals-all?lite=true`,
       { datemin, datemax, lite: true },
-      { timeout: 300000 },
+      { timeout: 900000 }, // até 15min (TOTVS analytics é lento pra ranges grandes)
     );
     const d = r.data?.data || r.data || {};
     const segmentos = d.segmentos || {};
@@ -56,10 +60,10 @@ async function fetchAllCanais(datemin, datemax) {
   }
 }
 
-// 1 chamada a /faturamento-por-segmento traz TODOS canais — mais eficiente
-// e os valores batem com a aba "Métricas por Canal" do Forecast.
+// 1 chamada a /canais-totals-all bate em TOTVS direto (em batches de 4).
+// Valores 100% atualizados, sem lag de replicação Supabase.
 async function popularCachePeriodo({ key, datemin, datemax }) {
-  console.log(`[canal-totals-cache] ▶ ${key} (${datemin} → ${datemax}) — via /faturamento-por-segmento`);
+  console.log(`[canal-totals-cache] ▶ ${key} (${datemin} → ${datemax}) — via /canais-totals-all (TOTVS direto)`);
   const res = await fetchAllCanais(datemin, datemax);
   if (!res.ok) {
     console.warn(`[canal-totals-cache] ${key} falhou: ${res.erro}`);
