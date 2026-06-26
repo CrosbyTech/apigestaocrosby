@@ -26,6 +26,7 @@ import faturamentoTransacaoRoutes from './routes/faturamentoTransacao.routes.js'
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
+import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
 import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
@@ -7509,6 +7510,7 @@ app.use('/api/faturamento-historico', faturamentoHistoricoRoutes); // Faturament
 app.use('/api/faturamento-transacao', faturamentoTransacaoRoutes); // Faturamento histórico por NF (transação)
 app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
 app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
+app.use('/api/conciliacao-stone', conciliacaoStoneRoutes); // Conciliação Stone (cartões)
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 
 // Error handling middleware

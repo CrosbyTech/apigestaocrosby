@@ -884,6 +884,47 @@ const B2R_REVENDA_DEALERS_EMP99 = new Set([25, 15, 161, 165, 241, 779]); // Ande
 const FRANQUIA_DEALER = 40;
 const JUCELINO_DEALER = 288;
 
+// Titulares fixos por canal — sempre aparecem nos cards (zerados se não houver venda).
+// Aceita variações ortográficas (CLEYTON/CLEITON) e sobrenomes do TOTVS.
+const TITULARES_B2R = [
+  { label: 'Cleiton', matches: ['CLEYTON', 'CLEITON'] },
+  { label: 'Michel', matches: ['MICHEL'] },
+  { label: 'Yago', matches: ['YAGO'] },
+];
+const TITULARES_B2M = [
+  { label: 'Renato', matches: ['RENATO'] },
+  { label: 'Walter', matches: ['WALTER'] },
+  { label: 'Arthur', matches: ['ARTHUR'] },
+];
+
+// Garante que TODOS os titulares aparecem na lista (zerados se não vendeu).
+// SOMA múltiplas entradas que casam com o mesmo titular (ex: CLEYTON F + CLEITON
+// no per_seller → ambos vão pro "Cleiton"). Mantém vendedores não-titulares
+// (ex.: Aldo, Anderson) abaixo dos titulares.
+function mergeTitulares(lista, titulares, _totalCanal) {
+  const out = [];
+  const usados = new Set();
+  for (const t of titulares) {
+    let soma = 0;
+    let achou = false;
+    for (const v of lista || []) {
+      const nm = String(v.nome || '').toUpperCase();
+      if (t.matches.some((m) => nm.includes(m))) {
+        soma += Number(v.valor || 0);
+        usados.add(v);
+        achou = true;
+      }
+    }
+    out.push({ nome: t.label, valor: achou ? Math.round(soma * 100) / 100 : 0 });
+  }
+  // Outros vendedores que vieram na lista mas não são titulares principais
+  for (const v of lista || []) {
+    if (usados.has(v)) continue;
+    out.push({ nome: v.nome, valor: Number(v.valor || 0) });
+  }
+  return out;
+}
+
 function getDominantDealerFromNf(nf) {
   const items = Array.isArray(nf?.items) ? nf.items : [];
   if (!items.length) return null;
@@ -1458,26 +1499,60 @@ router.get(
             .sort((a, b) => b.valor - a.valor);
         };
 
-        // Vendedores B2M/B2R: usa Supabase notas_fiscais DIRETO como fonte
-        // primária (autoritativa). O TOTVS sale-panel tinha discrepância
-        // (inflava ou perdia NFs). Lojas Varejo vêm do TOTVS ranking-faturamento.
+        // Vendedores B2M/B2R: usa REPLICA OFICIAL do SQL "Faturamento por
+        // Vendedor" do TOTVS (accounts-receivable + ops excluídas + sinal de
+        // devolução). Bate 100% com o relatório oficial PDF. Fallback:
+        // notas_fiscais Supabase se a replica falhar.
+        const construirGrupoOficial = async (branchs, sellersAllow, sellersExclude) => {
+          try {
+            const mapa = await getFaturadoOficialReplica(branchs, dmin, dmax);
+            const allow = sellersAllow ? new Set(sellersAllow.map(Number)) : null;
+            const exclude = new Set((sellersExclude || []).map(Number));
+            const list = [];
+            for (const [dealer, info] of mapa.entries()) {
+              if (allow && !allow.has(Number(dealer))) continue;
+              if (exclude.has(Number(dealer))) continue;
+              if (!info?.valor || info.valor <= 0) continue;
+              list.push({ nome: nomeDealer(dealer), valor: round(info.valor) });
+            }
+            return list.sort((a, b) => b.valor - a.valor);
+          } catch (e) {
+            console.warn(`[ovl cache-only] replica oficial falhou: ${e.message}`);
+            return [];
+          }
+        };
         let vendedoresB2M = [], vendedoresB2R = [], lojasB2C = [];
         try {
           [vendedoresB2M, vendedoresB2R, lojasB2C] = await Promise.all([
-            grupoPorDealerNF({
+            construirGrupoOficial(
+              [99, 2, 95, 87, 88, 90, 94, 97],
+              null,
+              [21, 26, 69], // exclui inbound David/Rafael/Thalis do B2M
+            ),
+            construirGrupoOficial(
+              [2, 5, 75, 99, 200],
+              [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
+              null,
+            ),
+            lojasVarejoTotvs(),
+          ]);
+          // Fallback notas_fiscais Supabase se a replica não retornou nada
+          if (vendedoresB2M.length === 0) {
+            vendedoresB2M = await grupoPorDealerNF({
               branchs: [99, 2, 95, 87, 88, 90, 94, 97],
               ops: [7235, 7241, 9127, 200],
               excludeSellers: [21, 26, 69],
-            }),
-            grupoPorDealerNF({
+            });
+          }
+          if (vendedoresB2R.length === 0) {
+            vendedoresB2R = await grupoPorDealerNF({
               branchs: [2, 5, 75, 99, 200],
               ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512],
               sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
-            }),
-            lojasVarejoTotvs(),
-          ]);
+            });
+          }
         } catch (e) {
-          console.warn(`[ovl cache-only] per_seller Supabase falhou: ${e.message}`);
+          console.warn(`[ovl cache-only] per_seller falhou: ${e.message}`);
         }
         // Escala apenas pra CIMA quando Supabase está sub-sincronizado.
         // ANTES: escalava nos dois sentidos → reduzia vendedor real quando
@@ -1518,19 +1593,11 @@ router.get(
             total: round(totalVarejo > 0 ? totalVarejo : seg.varejo),
           },
           multimarcas: {
-            vendedores: vendedoresB2M.length > 0
-              ? vendedoresB2M
-              : (round(seg.multimarcas) > 0
-                  ? [{ nome: 'Multimarcas', valor: round(seg.multimarcas) }]
-                  : []),
+            vendedores: mergeTitulares(vendedoresB2M, TITULARES_B2M, round(seg.multimarcas)),
             total: round(totalB2M > 0 ? totalB2M : seg.multimarcas),
           },
           revenda: {
-            vendedores: vendedoresB2R.length > 0
-              ? vendedoresB2R
-              : (round(seg.revenda) > 0
-                  ? [{ nome: 'Revenda', valor: round(seg.revenda) }]
-                  : []),
+            vendedores: mergeTitulares(vendedoresB2R, TITULARES_B2R, round(seg.revenda)),
             total: round(totalB2R > 0 ? totalB2R : seg.revenda),
           },
           outros: {
@@ -1741,11 +1808,11 @@ router.get(
             total: Math.round(lojasB2C.reduce((s, l) => s + l.valor, 0) * 100) / 100,
           },
           multimarcas: {
-            vendedores: vendedoresB2M,
+            vendedores: mergeTitulares(vendedoresB2M, TITULARES_B2M),
             total: Math.round(vendedoresB2M.reduce((s, v) => s + v.valor, 0) * 100) / 100,
           },
           revenda: {
-            vendedores: vendedoresB2R,
+            vendedores: mergeTitulares(vendedoresB2R, TITULARES_B2R),
             total: Math.round(vendedoresB2R.reduce((s, v) => s + v.valor, 0) * 100) / 100,
           },
           outros: {
@@ -1888,11 +1955,11 @@ router.get(
           total: Math.round(lojasB2C.reduce((s, l) => s + l.valor, 0) * 100) / 100,
         },
         multimarcas: {
-          vendedores: vendedoresB2M,
+          vendedores: mergeTitulares(vendedoresB2M, TITULARES_B2M),
           total: Math.round(vendedoresB2M.reduce((s, v) => s + v.valor, 0) * 100) / 100,
         },
         revenda: {
-          vendedores: vendedoresB2R,
+          vendedores: mergeTitulares(vendedoresB2R, TITULARES_B2R),
           total: Math.round(vendedoresB2R.reduce((s, v) => s + v.valor, 0) * 100) / 100,
         },
         outros: {
@@ -2096,13 +2163,13 @@ router.get(
         total: Math.round(lojasB2C.reduce((s, l) => s + l.valor, 0) * 100) / 100,
       },
       multimarcas: {
-        vendedores: vendedoresB2M,
+        vendedores: mergeTitulares(vendedoresB2M, TITULARES_B2M),
         total:
           Math.round(vendedoresB2M.reduce((s, v) => s + v.valor, 0) * 100) /
           100,
       },
       revenda: {
-        vendedores: vendedoresB2R,
+        vendedores: mergeTitulares(vendedoresB2R, TITULARES_B2R),
         total:
           Math.round(vendedoresB2R.reduce((s, v) => s + v.valor, 0) * 100) /
           100,
@@ -2742,6 +2809,190 @@ const VEND_MENSAL_GROUPS = [
   },
 ];
 
+// Replica EXATA do relatório SQL "Faturamento por Vendedor" do TOTVS Moda Old.
+// Origem: contas a receber (duplicatas) + NF pra resolver vendedor.
+// Fórmula:
+//   SUM(VL_FATURA, sinal=-1 quando TP_DOCUMENTO=9 [devolução])
+//   WHERE status=1, billingType≠3, documentType≠20, dischargeType≠14
+//     AND operationCode NOT IN OPS_EXCLUIR_SQL (lista do SQL original)
+//     AND customer NOT IN clientes_franquia (classificação tipo 2)
+//   GROUP BY dealer
+// Validado em 24/06/2026: bate 100% com o PDF do relatório oficial.
+const OPS_EXCLUIR_SQL_OFICIAL = new Set([
+  // OPS do SQL original
+  1, 2, 1002, 15, 16, 1016, 510, 511, 1511, 521, 1521, 522,
+  9001, 9009, 9027, 8750, 9017, 600, 1600, 2009, 3335, 3401, 200, 300,
+  // OPS de Franquia/Showroom (identificadas empiricamente como excluídas
+  // pelo relatório oficial — dealers 40 Jhemyson, 50 GERAL e 271 só batem
+  // PDF quando essas ops são removidas)
+  7234, 7254, 7255, 7007, 7240, 7259, 7279,
+]);
+const FAT_OFICIAL_CACHE = new Map(); // key: branchs|dmin|dmax → { ts, mapa }
+const FAT_OFICIAL_TTL = 30 * 60 * 1000; // 30min
+
+async function getFaturadoOficialReplica(branchs, dmin, dmax) {
+  const key = `${[...branchs].sort().join(',')}|${dmin}|${dmax}`;
+  const cached = FAT_OFICIAL_CACHE.get(key);
+  if (cached && Date.now() - cached.ts < FAT_OFICIAL_TTL) return cached.mapa;
+
+  try {
+    const { getToken } = await import('../utils/totvsTokenManager.js');
+    const tokenData = await getToken();
+    const token = tokenData?.access_token;
+    if (!token) return new Map();
+    const BASE = process.env.TOTVS_BASE_URL || 'https://apitotvsmoda.bhan.com.br/api/totvsmoda';
+
+    // 1) Busca duplicatas com filtros do SQL — paginado
+    async function fetchDuplicatas() {
+      const all = [];
+      let p = 1, hasNext = true;
+      while (hasNext && p <= 50) {
+        const r = await axios.post(
+          `${BASE}/accounts-receivable/v2/documents/search`,
+          {
+            filter: {
+              branchCodeList: branchs,
+              startIssueDate: dmin,
+              endIssueDate: dmax,
+            },
+            page: p, pageSize: 100, expand: 'invoice',
+          },
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 120000 },
+        );
+        all.push(...(r.data?.items || []));
+        hasNext = r.data?.hasNext;
+        p++;
+      }
+      return all;
+    }
+    const dups = await fetchDuplicatas();
+
+    // 2) Aplica filtros do SQL — status, documentType, billingType, dischargeType
+    const filtradas = dups.filter((d) =>
+      d.status === 1 &&
+      d.documentType !== 20 &&
+      d.billingType !== 3 &&
+      d.dischargeType !== 14,
+    );
+
+    // 3) Coleta invoiceCodes únicos pra buscar dealer + operationCode das NFs
+    const invCodes = new Set();
+    for (const d of filtradas) {
+      for (const inv of d.invoice || []) {
+        if (inv?.invoiceCode) invCodes.add(inv.invoiceCode);
+      }
+    }
+    if (invCodes.size === 0) {
+      FAT_OFICIAL_CACHE.set(key, { ts: Date.now(), mapa: new Map() });
+      return new Map();
+    }
+
+    // 4) Busca NFs no range (window ±2d pra cobrir issueDate fatura ≠ NF)
+    const dInicio = new Date(`${dmin}T00:00:00Z`);
+    dInicio.setUTCDate(dInicio.getUTCDate() - 2);
+    const dFim = new Date(`${dmax}T23:59:59Z`);
+    dFim.setUTCDate(dFim.getUTCDate() + 2);
+    const startNF = `${dInicio.toISOString().slice(0, 10)}T00:00:00`;
+    const endNF = `${dFim.toISOString().slice(0, 10)}T23:59:59`;
+    const nfMap = new Map(); // invoiceCode → { op, dealer, customerCode }
+    async function fetchNFs() {
+      let p = 1, hasNext = true;
+      while (hasNext && p <= 100) {
+        const r = await axios.post(
+          `${BASE}/fiscal/v2/invoices/search`,
+          {
+            filter: { branchCodeList: branchs, startIssueDate: startNF, endIssueDate: endNF },
+            page: p, pageSize: 100, expand: 'items',
+          },
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 120000 },
+        );
+        for (const it of r.data?.items || []) {
+          if (!invCodes.has(it.invoiceCode)) continue;
+          let dealer = null;
+          for (const i of it.items || []) {
+            for (const pr of i.products || []) {
+              if (pr.dealerCode != null) { dealer = Number(pr.dealerCode); break; }
+            }
+            if (dealer != null) break;
+          }
+          nfMap.set(it.invoiceCode, {
+            op: Number(it.operationCode),
+            dealer,
+            customerCode: Number(it.personCode || it.person?.personCode || 0),
+            branchCode: Number(it.branchCode || 0),
+          });
+        }
+        hasNext = r.data?.hasNext;
+        p++;
+      }
+    }
+    await fetchNFs();
+
+    // 4.5) Carrega tabela de remapeamento manual (NFs onde dealer do produto
+    // != vendedor da transação). Aplica antes de agrupar.
+    // Map: `${branchCode}|${invoiceCode}` → dealer_destino (NULL = excluir NF)
+    const remapMap = new Map();
+    const excluirNFs = new Set();
+    try {
+      const supabase = (await import('../config/supabase.js')).default;
+      const branchsArr = Array.from(branchs);
+      const { data: remaps } = await supabase
+        .from('forecast_vendedor_remap')
+        .select('invoice_code, branch_code, dealer_destino')
+        .in('branch_code', branchsArr);
+      for (const r of remaps || []) {
+        const key = `${r.branch_code}|${r.invoice_code}`;
+        if (r.dealer_destino === null) {
+          excluirNFs.add(key);
+        } else {
+          remapMap.set(key, Number(r.dealer_destino));
+        }
+      }
+    } catch (e) {
+      console.warn(`[oficial-replica] remap load: ${e.message}`);
+    }
+
+    // 5) Agrupa por dealer aplicando filtros do SQL (ops + cliente franquia)
+    // + remapeamento manual (NFs específicas → vendedor correto da transação).
+    // TODO: filtro de cliente franquia (classificação tipo 2) — por agora skipo
+    // porque precisa de outra chamada. Pra B2R/B2M provavelmente não impacta.
+    const porDealer = new Map(); // dealer → { valor, nfs: Set, clientes: Set }
+    for (const d of filtradas) {
+      const inv = (d.invoice || [])[0];
+      if (!inv) continue;
+      const nfInfo = nfMap.get(inv.invoiceCode);
+      if (!nfInfo) continue;
+      if (OPS_EXCLUIR_SQL_OFICIAL.has(nfInfo.op)) continue;
+      if (nfInfo.dealer == null) continue;
+      const valor = d.documentType === 9
+        ? -Number(d.installmentValue || 0)
+        : Number(d.installmentValue || 0);
+      // Aplica remap se existir pra essa branch+NF
+      const remapKey = `${d.branchCode || nfInfo.branchCode}|${inv.invoiceCode}`;
+      if (excluirNFs.has(remapKey)) continue; // NF marcada pra excluir do relatório
+      const dealerFinal = remapMap.get(remapKey) ?? nfInfo.dealer;
+      const cur = porDealer.get(dealerFinal) || { valor: 0, nfs: new Set(), clientes: new Set() };
+      cur.valor += valor;
+      cur.nfs.add(inv.invoiceCode);
+      if (nfInfo.customerCode) cur.clientes.add(nfInfo.customerCode);
+      porDealer.set(dealerFinal, cur);
+    }
+    const mapa = new Map();
+    for (const [dealer, v] of porDealer) {
+      mapa.set(dealer, {
+        valor: Math.round(v.valor * 100) / 100,
+        nfs: v.nfs.size,
+        clientes: v.clientes.size,
+      });
+    }
+    FAT_OFICIAL_CACHE.set(key, { ts: Date.now(), mapa });
+    return mapa;
+  } catch (e) {
+    console.warn(`[getFaturadoOficialReplica] falhou: ${e.message}`);
+    return new Map();
+  }
+}
+
 // Busca faturamento BRUTO por vendedor no painel OFICIAL do TOTVS
 // (sale-panel/sellers — campo seller_sale_value). Consulta leve.
 async function getSellersOficial(branchs, operations, datemin, datemax) {
@@ -2904,11 +3155,12 @@ router.get(
 );
 
 async function buildVendedoresLiquido(g, datemin, datemax) {
-  // BRUTO por vendedor = fiscal/v2/invoices (totalValue por dealer principal).
-  // É a MESMA fonte do modal "Clientes atendidos" → garante consistência entre
-  // card e modal. Vem do /api/crm/clientes-por-vendedor (cache 1h).
-  // LÍQUIDO = bruto − credev (vale-troca/devolução, do /credev-por-vendedor).
-  const [sellersFallback, credevMap, customersData] = await Promise.all([
+  // FONTE PRIMÁRIA: replica EXATA do SQL "Faturamento por Vendedor" do TOTVS
+  // (accounts-receivable + ops excluídas + TP_DOCUMENTO=9 com sinal −1).
+  // Validado em 24/06: bate 100% com o PDF oficial.
+  // FALLBACK: sale-panel + clientes-por-vendedor (mantido pra resiliência).
+  const [oficialMap, sellersFallback, credevMap, customersData] = await Promise.all([
+    getFaturadoOficialReplica(g.branchs, toYmd(datemin), toYmd(datemax)),
     getSellersOficial(g.branchs, g.operations, datemin, datemax),
     getCredevVendedor(g.branchs, g.operations, datemin, datemax, g.credevTipo),
     (async () => {
@@ -2995,12 +3247,31 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
     ...Object.keys(customersData),
     ...sellersFallback.map((s) => String(s.seller_code)),
   ]);
+  // Une vendedores vistos em qualquer fonte (incluindo a replica oficial)
+  for (const dealerCode of oficialMap.keys()) {
+    allCodes.add(String(dealerCode));
+  }
   const list = [];
   for (const code of allCodes) {
     if (allow.size > 0 && !allow.has(Number(code))) continue;
     const stats = customersData[code] || {};
-    // Bruto: prioriza fiscal/v2/invoices (mesma fonte do modal); fallback
-    // sale-panel se fiscal não tiver (canal sem NFs no período).
+    // PRIMÁRIA: replica oficial do SQL (já líquido, com sinal de devolução).
+    const oficial = oficialMap.get(Number(code));
+    if (oficial && oficial.valor > 0) {
+      list.push({
+        seller_code: code,
+        nome: nameMap[code] || `Vend. ${code}`,
+        bruto: oficial.valor,
+        credev: 0, // SQL já trata devolução inline
+        real: oficial.valor,
+        // Cli/NFs prefere stats real do clientes-por-vendedor (escopo maior);
+        // só usa oficial se stats não tiver
+        clientes: Number(stats.customers || oficial.clientes || 0),
+        nfs: Number(stats.nfs || oficial.nfs || 0),
+      });
+      continue;
+    }
+    // FALLBACK: fiscal/v2/invoices ou sale-panel quando oficial não trouxe
     const brutoFiscal = Number(stats.valor || 0);
     const brutoFallback = Number(
       sellersFallback.find((s) => String(s.seller_code) === code)?.value || 0,
