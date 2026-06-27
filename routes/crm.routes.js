@@ -13353,9 +13353,14 @@ router.post(
                 // { dataRow:[...sellers...], invoiceQuantity, invoiceValue, itemQuantity }
                 // Empacotamos manualmente como branch object.
                 if (r && Array.isArray(r.dataRow)) {
+                  // VAREJO_STORE_MAP tem os nomes oficiais (João Pessoa, Midway etc).
+                  // TOTVS às vezes retorna branch_name vazio, então cai pra esse mapa
+                  // antes do fallback genérico "Filial X". Sem isso o front filtra fora
+                  // qualquer loja com nome não-reconhecido (ex: filial 2 → João Pessoa).
+                  const knownName = VAREJO_STORE_MAP[b]?.name;
                   return [{
                     branch_code: b,
-                    branch_name: r.branch_name || `Filial ${b}`,
+                    branch_name: r.branch_name || knownName || `Filial ${b}`,
                     dataRow: r.dataRow,
                     invoiceQuantity: r.invoiceQuantity || 0,
                     invoiceValue: r.invoiceValue || 0,

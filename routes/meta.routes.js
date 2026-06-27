@@ -1572,22 +1572,41 @@ router.post(
       return true;
     });
 
-    // Enfileirar na message_queue
-    const rows = contactsUnicos.map((c) => ({
-      account_id: account.id,
-      campaign_id: campaignId,
-      campaign_name: campaignName,
-      phone_number: c.phone,
-      contact_name: c.name || null,
-      template_name: template_name,
-      template_language: language || 'pt_BR',
-      template_category: 'MARKETING',
-      template_variables: c.variables || {},
-      status: 'pending',
-      priority: 100,
-      scheduled_at: new Date().toISOString(),
-      dedupe_key: `${campaignId}:${c.phone}`,
-    }));
+    // Helper: primeiro nome capitalizado, fallback "Você" — pra preencher {{1}}
+    // automaticamente caso o template tenha variável e o front não tenha passado.
+    const primeiroNome = (full) => {
+      const s = String(full || '').trim();
+      if (!s) return 'Você';
+      const first = s.split(/\s+/)[0];
+      if (!first || first.length < 2) return 'Você';
+      return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+    };
+
+    // Enfileirar na message_queue. Persiste contact_external_id (= person_code
+    // do TOTVS) pra cruzar venda depois. Se variables vier vazio, popula {{1}}
+    // com o primeiro nome do contato (evita erro 132000 "missing parameter"
+    // pra templates com variável de nome).
+    const rows = contactsUnicos.map((c) => {
+      const vars = c.variables && Object.keys(c.variables).length > 0
+        ? c.variables
+        : { '1': primeiroNome(c.name) };
+      return {
+        account_id: account.id,
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        phone_number: c.phone,
+        contact_name: c.name || null,
+        contact_external_id: c.person_code ? String(c.person_code) : null,
+        template_name: template_name,
+        template_language: language || 'pt_BR',
+        template_category: 'MARKETING',
+        template_variables: vars,
+        status: 'pending',
+        priority: 100,
+        scheduled_at: new Date().toISOString(),
+        dedupe_key: `${campaignId}:${c.phone}`,
+      };
+    });
 
     // Inserir em lotes de 500. Dedupe já garantida em contactsUnicos (Set por phone),
     // então INSERT simples não vai colidir dentro da mesma campanha (campaign_id novo).
