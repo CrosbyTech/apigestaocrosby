@@ -2911,6 +2911,91 @@ router.post(
       credev_total += cr;
     }
 
+    // ─── Override Inbound David/Rafael via replica oficial (filial 99) ──
+    // O canal_totals_cache vem do sale-panel TOTVS que tem latência. A replica
+    // (accounts-receivable + invoices) bate 100% com relatório "0326 VENDAS
+    // POR VENDEDOR FINANCEIRO". David (26) e Rafael (21) operam só na 99 (atacado),
+    // então chamamos só essa branch — multi-branch tem cap de 5000 docs e trunca.
+    try {
+      const { getFaturadoOficialReplica } = await import('./forecast.routes.js');
+      const mapaOficial99 = await getFaturadoOficialReplica([99], datemin, datemax);
+      const valor = (dealer) => Number(mapaOficial99.get(dealer)?.valor || 0);
+      const davidLiq = valor(26) + valor(69);
+      const rafaelLiq = valor(21);
+      if (davidLiq > 0) {
+        const old = segmentos.inbound_david || 0;
+        total += davidLiq - old;
+        segmentos.inbound_david = davidLiq;
+        console.log(`[canais-all] override inbound_david: cache=R$${old.toFixed(2)} → oficial=R$${davidLiq.toFixed(2)}`);
+      }
+      if (rafaelLiq > 0) {
+        const old = segmentos.inbound_rafael || 0;
+        total += rafaelLiq - old;
+        segmentos.inbound_rafael = rafaelLiq;
+        console.log(`[canais-all] override inbound_rafael: cache=R$${old.toFixed(2)} → oficial=R$${rafaelLiq.toFixed(2)}`);
+      }
+    } catch (e) {
+      console.warn(`[canais-all override] ${e.message}`);
+    }
+
+    // ─── Override Business: op 7279 é FRETE, não venda Business ──────────
+    // A op 7279 é usada por todos os canais (frete). Antes virava "Business"
+    // no canal_totals_cache porque a config TOTVS sale-panel mapeia 7279 → business.
+    // Solução: zerar business + redistribuir NFs op 7279 pros canais reais
+    // baseado no dealer (Jhemyson 40 → franquia, B2R sellers → revenda, etc.).
+    try {
+      const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+      // Sellers por canal (espelha config CRM)
+      const SELLERS_REVENDA = new Set([25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044]);
+      const SELLERS_MULTIMARCAS = new Set([65, 177, 259]); // B2M titulares (não inbound)
+      const DEALER_JHEMYSON = 40; // Franquia
+      const DEALER_BUSINESS = 20;
+
+      const { data: nfsFrete } = await sbf
+        .from('notas_fiscais')
+        .select('dealer_code, total_value, invoice_status, operation_type')
+        .gte('issue_date', datemin).lte('issue_date', datemax)
+        .in('operation_code', [7279]);
+      const validFrete = (nfsFrete || []).filter(
+        (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted' && n.operation_type === 'Output',
+      );
+
+      const moverPara = { revenda: 0, franquia: 0, multimarcas: 0, business_real: 0 };
+      for (const n of validFrete) {
+        const dealer = Number(n.dealer_code);
+        const valor = Number(n.total_value || 0);
+        if (dealer === DEALER_BUSINESS) moverPara.business_real += valor;
+        else if (dealer === DEALER_JHEMYSON) moverPara.franquia += valor;
+        else if (SELLERS_REVENDA.has(dealer)) moverPara.revenda += valor;
+        else if (SELLERS_MULTIMARCAS.has(dealer)) moverPara.multimarcas += valor;
+        // Senão: descarta (dealer desconhecido — não atribui)
+      }
+
+      // Zera business e mantém só o que é DEALER 20 real
+      const oldBus = segmentos.business || 0;
+      const newBus = moverPara.business_real;
+      total += newBus - oldBus;
+      segmentos.business = newBus;
+      console.log(`[canais-all] override business (frete 7279): cache=R$${oldBus.toFixed(2)} → real(dealer 20)=R$${newBus.toFixed(2)}`);
+
+      // Redistribui pros canais reais
+      if (moverPara.franquia > 0) {
+        // Só soma se o cache não tem essa NF já contabilizada — pra evitar
+        // duplicação, o sale-panel TOTVS pode já estar incluindo. Conservador:
+        // só registra log, NÃO soma (canal_totals_cache geralmente captura
+        // tudo do dealer 40 na franquia).
+        console.log(`[canais-all] frete 7279 → franquia (Jhemyson): R$${moverPara.franquia.toFixed(2)} já em canal_totals_cache da franquia (não soma)`);
+      }
+      if (moverPara.revenda > 0) {
+        console.log(`[canais-all] frete 7279 → revenda: R$${moverPara.revenda.toFixed(2)} já em canal_totals_cache da revenda (não soma)`);
+      }
+      if (moverPara.multimarcas > 0) {
+        console.log(`[canais-all] frete 7279 → multimarcas: R$${moverPara.multimarcas.toFixed(2)} já em canal_totals_cache (não soma)`);
+      }
+    } catch (e) {
+      console.warn(`[canais-all override business] ${e.message}`);
+    }
+
     // ─── Fallback credev via notas_fiscais Supabase ──────────────────────
     // Se cache não tem credev preenchido, soma devoluções (Input) com ops
     // de devolução conhecidas em qualquer canal. Query única, ~200ms.

@@ -1267,4 +1267,278 @@ router.delete(
   }),
 );
 
+// ============================================================
+// VOUCHERS — Criação em lote pra clientes do TOTVS
+// POST /api/tech/vouchers/totvs-contacts
+//   body: { operacao, data_inicio, data_fim, empresas? }
+//   reusa o mesmo fluxo do Crosby Bot pra buscar contatos do TOTVS
+//
+// POST /api/tech/vouchers/create-batch
+//   body: {
+//     branchCodeRegistration, voucherType, prefixCode, printTemplateCode,
+//     startDate, endDate, percentage, voucherBranches[], customerCodes[]
+//   }
+//   pra cada customer: cria voucher (voucher/v2/create) + associa ao
+//   cliente (voucher/v2/customer/create). Retorna array com resultado.
+// ============================================================
+
+router.post(
+  '/vouchers/totvs-contacts',
+  asyncHandler(async (req, res) => {
+    // Proxy pro endpoint existente de contatos TOTVS (reusa lógica do Crosby Bot)
+    const axios = (await import('axios')).default;
+    const INTERNAL =
+      process.env.INTERNAL_API_BASE
+      || (process.env.PORT ? `http://localhost:${process.env.PORT}` : 'http://localhost:4001');
+    try {
+      const r = await axios.post(
+        `${INTERNAL}/api/meta/totvs-contacts`,
+        req.body,
+        { timeout: 300000 },
+      );
+      return res.status(r.status).json(r.data);
+    } catch (e) {
+      const status = e.response?.status || 500;
+      return res.status(status).json(e.response?.data || { success: false, message: e.message });
+    }
+  }),
+);
+
+router.post(
+  '/vouchers/create-batch',
+  asyncHandler(async (req, res) => {
+    const {
+      branchCodeRegistration,
+      voucherType = 1,
+      prefixCode,
+      printTemplateCode = 1,
+      startDate,
+      endDate,
+      percentage,
+      voucherBranches,
+      customerCodes,
+    } = req.body || {};
+
+    // Validação
+    if (!branchCodeRegistration || !prefixCode || !startDate || !endDate) {
+      return errorResponse(
+        res,
+        'branchCodeRegistration, prefixCode, startDate e endDate obrigatórios',
+        400,
+        'VALIDATION',
+      );
+    }
+    if (!percentage || Number(percentage) <= 0 || Number(percentage) > 100) {
+      return errorResponse(res, 'percentage deve estar entre 1 e 100', 400, 'BAD_PERCENT');
+    }
+    if (!Array.isArray(customerCodes) || customerCodes.length === 0) {
+      return errorResponse(res, 'customerCodes (array) obrigatório', 400, 'NO_CUSTOMERS');
+    }
+    if (customerCodes.length > 5000) {
+      return errorResponse(res, 'máximo 5000 clientes por batch', 400, 'TOO_MANY');
+    }
+
+    const { getToken } = await import('../utils/totvsTokenManager.js');
+    const axios = (await import('axios')).default;
+
+    const tokenData = await getToken();
+    let token = tokenData?.access_token;
+    if (!token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_OFF');
+    }
+
+    const BASE_API = process.env.TOTVS_BASE_URL || 'https://apitotvsmoda.bhan.com.br/api/totvsmoda';
+    // O endpoint "customer/create" no n8n usa um host diferente
+    // (www30.bhan.com.br:9443). A API moderna deve aceitar o mesmo BASE.
+    const BASE_CUSTOMER = process.env.TOTVS_VOUCHER_BASE_URL || BASE_API;
+
+    const branchsArr = Array.isArray(voucherBranches) && voucherBranches.length > 0
+      ? voucherBranches.map((b) => ({ branchCode: Number(b) }))
+      : [{ branchCode: Number(branchCodeRegistration) }];
+
+    const results = [];
+    let sucessos = 0;
+    let falhas = 0;
+    const CONCURRENCY = 4; // evita afogar o TOTVS
+
+    async function processarCliente(customerCode) {
+      const code = Number(customerCode);
+      if (!Number.isFinite(code)) {
+        return { customerCode, success: false, error: 'customerCode inválido' };
+      }
+      // 1) Cria voucher mestre
+      const createPayload = {
+        branchCodeRegistration: Number(branchCodeRegistration),
+        voucherType: Number(voucherType),
+        prefixCode: String(prefixCode),
+        printTemplateCode: Number(printTemplateCode),
+        status: 1,
+        startDate,
+        endDate,
+        percentage: Number(percentage),
+        branchs: branchsArr,
+        items: [{ customerCode: code }],
+      };
+      let voucherNumber, voucherCode;
+      try {
+        const r = await axios.post(
+          `${BASE_API}/voucher/v2/create`,
+          createPayload,
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
+        );
+        const d = r.data || {};
+        voucherNumber = d.voucherNumber || d.number || d.id || d.voucherCode || null;
+        voucherCode = d.voucherCode || d.code || null;
+        if (voucherNumber == null) {
+          return { customerCode: code, success: false, error: 'voucherNumber não retornado', raw: d };
+        }
+      } catch (e) {
+        // Tenta refresh token se 401
+        if (e.response?.status === 401) {
+          try {
+            const nt = await getToken(true);
+            token = nt?.access_token || token;
+            const r = await axios.post(
+              `${BASE_API}/voucher/v2/create`,
+              createPayload,
+              { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
+            );
+            const d = r.data || {};
+            voucherNumber = d.voucherNumber || d.number || d.id || null;
+            voucherCode = d.voucherCode || d.code || null;
+          } catch (e2) {
+            return {
+              customerCode: code,
+              success: false,
+              error: e2.response?.data?.message || e2.message,
+              stage: 'create',
+            };
+          }
+        } else {
+          return {
+            customerCode: code,
+            success: false,
+            error: e.response?.data?.message || e.message,
+            stage: 'create',
+          };
+        }
+      }
+
+      // 2) Associa voucher ao cliente
+      const assocPayload = {
+        branchCodeRegistration: Number(branchCodeRegistration),
+        voucherNumberBase: Number(voucherNumber),
+        customerCodeList: [code],
+      };
+      try {
+        await axios.post(
+          `${BASE_CUSTOMER}/voucher/v2/customer/create`,
+          assocPayload,
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
+        );
+        return { customerCode: code, success: true, voucherNumber, voucherCode };
+      } catch (e) {
+        // Voucher foi criado mas associação falhou — relata pra investigar
+        return {
+          customerCode: code,
+          success: false,
+          voucherNumber,
+          voucherCode,
+          error: e.response?.data?.message || e.message,
+          stage: 'associate',
+        };
+      }
+    }
+
+    // Processa em lotes paralelos
+    for (let i = 0; i < customerCodes.length; i += CONCURRENCY) {
+      const slice = customerCodes.slice(i, i + CONCURRENCY);
+      const batchResults = await Promise.all(slice.map(processarCliente));
+      for (const r of batchResults) {
+        results.push(r);
+        if (r.success) sucessos++; else falhas++;
+      }
+    }
+
+    // Persiste batch no Supabase pra histórico
+    let batchId = null;
+    try {
+      const { data: ins, error: insErr } = await supabase
+        .from('voucher_batches')
+        .insert({
+          branch_code_registration: Number(branchCodeRegistration),
+          voucher_type: Number(voucherType),
+          prefix_code: String(prefixCode),
+          print_template_code: Number(printTemplateCode),
+          start_date: startDate,
+          end_date: endDate,
+          percentage: Number(percentage),
+          voucher_branches: branchsArr.map((b) => b.branchCode),
+          origem: req.body?.origem || 'totvs',
+          total_clientes: customerCodes.length,
+          sucessos,
+          falhas,
+          resultados: results,
+          created_by: req.headers['x-user-email'] || null,
+        })
+        .select('id, created_at')
+        .single();
+      if (insErr) {
+        console.warn(`[vouchers/create-batch] insert historico falhou: ${insErr.message}`);
+      } else {
+        batchId = ins?.id || null;
+      }
+    } catch (e) {
+      console.warn(`[vouchers/create-batch] historico exception: ${e.message}`);
+    }
+
+    return successResponse(
+      res,
+      {
+        batchId,
+        total: customerCodes.length,
+        sucessos,
+        falhas,
+        results,
+      },
+      `${sucessos} vouchers gerados, ${falhas} falhas`,
+    );
+  }),
+);
+
+// GET /api/tech/vouchers/batches?limit=100
+//   lista batches recentes (sem o JSON pesado de resultados)
+router.get(
+  '/vouchers/batches',
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(500, Math.max(10, Number(req.query.limit) || 100));
+    const { data, error } = await supabase
+      .from('voucher_batches')
+      .select(
+        'id, branch_code_registration, prefix_code, start_date, end_date, percentage, origem, total_clientes, sucessos, falhas, created_by, created_at',
+      )
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) return errorResponse(res, error.message, 500, 'QUERY_ERROR');
+    return successResponse(res, data || [], `${(data || []).length} batches`);
+  }),
+);
+
+// GET /api/tech/vouchers/batches/:id
+//   detalhe do batch (inclui resultados completos)
+router.get(
+  '/vouchers/batches/:id',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return errorResponse(res, 'id inválido', 400, 'BAD_ID');
+    const { data, error } = await supabase
+      .from('voucher_batches')
+      .select('*')
+      .eq('id', id)
+      .single();
+    if (error) return errorResponse(res, error.message, 404, 'NOT_FOUND');
+    return successResponse(res, data, 'OK');
+  }),
+);
+
 export default router;

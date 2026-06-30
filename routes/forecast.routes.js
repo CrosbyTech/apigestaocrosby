@@ -901,6 +901,9 @@ const TITULARES_B2M = [
 // SOMA múltiplas entradas que casam com o mesmo titular (ex: CLEYTON F + CLEITON
 // no per_seller → ambos vão pro "Cleiton"). Mantém vendedores não-titulares
 // (ex.: Aldo, Anderson) abaixo dos titulares.
+// Guard `usados` antes de somar evita double-count quando duas grafias do mesmo
+// nome casam com mais de um titular (ex.: 'CLEYTON' no matches do A e 'CLEY'
+// no matches do B → primeiro titular consome a entry, demais a ignoram).
 function mergeTitulares(lista, titulares, _totalCanal) {
   const out = [];
   const usados = new Set();
@@ -908,6 +911,7 @@ function mergeTitulares(lista, titulares, _totalCanal) {
     let soma = 0;
     let achou = false;
     for (const v of lista || []) {
+      if (usados.has(v)) continue;
       const nm = String(v.nome || '').toUpperCase();
       if (t.matches.some((m) => nm.includes(m))) {
         soma += Number(v.valor || 0);
@@ -1309,68 +1313,58 @@ router.get(
             console.warn(`[ovl cache-only] Jhemyson fallback notas_fiscais falhou: ${e.message}`);
           }
         }
-        if (jhemValor != null && jhemValor > 0) {
-          console.log(`[ovl cache-only] franquia: canal=R$${(seg.franquia || 0).toFixed(2)} → Jhemyson=R$${jhemValor.toFixed(2)}`);
-          seg.franquia = jhemValor;
-        }
+        // Override Jhemyson DESATIVADO: ele inflava seg.franquia além do
+        // canal_totals_cache.franquia oficial (R$ 128k vs R$ 83k). O cache
+        // é a fonte de verdade — mantemos. jhemValor ainda é usado mais
+        // adiante como valor exibido pro vendedor Jhemyson individualmente
+        // (sem alterar o total do canal franquia).
 
         // ── Override Inbound David/Rafael: recalcula via Supabase fiscal ────
         // O canal_totals_cache vem do TOTVS sale-panel que tem latência e
         // perde NFs recentes. notas_fiscais é a fonte autoritativa.
+        // Retorna { ok: true, valor } em sucesso (mesmo se 0) ou { ok: false }
+        // em falha de query. Distinguir "0 legítimo" de "0 por erro" evita
+        // manter cache_totals inflado quando a query Supabase quebra.
         const recalcInboundSupabase = async (label, sellerCodes) => {
           try {
-            const { data: nfs } = await supabaseFiscal
+            const { data: nfs, error } = await supabaseFiscal
               .from('notas_fiscais')
               .select('total_value, invoice_status, operation_type')
               .gte('issue_date', dmin).lte('issue_date', dmax)
               .in('dealer_code', sellerCodes)
               .in('operation_code', [7235, 7241, 9127])
-              .in('branch_code', [99, 2, 95, 87, 88, 90, 94, 97]);
+              .in('branch_code', B2M_OVERRIDE_BRANCHES);
+            if (error) {
+              console.warn(`[ovl cache-only] ${label} recalc falhou (query error): ${error.message}`);
+              return { ok: false };
+            }
             const valid = (nfs || []).filter(
               (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
             );
             const out = valid.filter((n) => n.operation_type === 'Output').reduce((s, n) => s + Number(n.total_value || 0), 0);
             const inp = valid.filter((n) => n.operation_type === 'Input').reduce((s, n) => s + Number(n.total_value || 0), 0);
-            return Math.max(0, out - inp);
+            return { ok: true, valor: Math.max(0, out - inp) };
           } catch (e) {
-            console.warn(`[ovl cache-only] ${label} recalc falhou: ${e.message}`);
-            return 0;
+            console.warn(`[ovl cache-only] ${label} recalc falhou (exception): ${e.message}`);
+            return { ok: false };
           }
         };
-        const davidNF = await recalcInboundSupabase('David', [26, 69]);
-        if (davidNF > 0) {
-          console.log(`[ovl cache-only] inbound_david: cache=R$${(seg.inbound_david || 0).toFixed(2)} → Supabase=R$${davidNF.toFixed(2)}`);
-          seg.inbound_david = davidNF;
+        const davidR = await recalcInboundSupabase('David', [26, 69]);
+        if (davidR.ok) {
+          console.log(`[ovl cache-only] inbound_david: cache=R$${(seg.inbound_david || 0).toFixed(2)} → Supabase=R$${davidR.valor.toFixed(2)}`);
+          seg.inbound_david = davidR.valor;
         }
-        const rafaelNF = await recalcInboundSupabase('Rafael', [21]);
-        if (rafaelNF > 0) {
-          console.log(`[ovl cache-only] inbound_rafael: cache=R$${(seg.inbound_rafael || 0).toFixed(2)} → Supabase=R$${rafaelNF.toFixed(2)}`);
-          seg.inbound_rafael = rafaelNF;
+        const rafaelR = await recalcInboundSupabase('Rafael', [21]);
+        if (rafaelR.ok) {
+          console.log(`[ovl cache-only] inbound_rafael: cache=R$${(seg.inbound_rafael || 0).toFixed(2)} → Supabase=R$${rafaelR.valor.toFixed(2)}`);
+          seg.inbound_rafael = rafaelR.valor;
         }
 
-        // ── Override Multimarcas: recalcula via Supabase fiscal ────────────
-        // Mesma lógica — canal_totals_cache vem do sale-panel inflado.
-        try {
-          const { data: mmNFs } = await supabaseFiscal
-            .from('notas_fiscais')
-            .select('total_value, invoice_status, operation_type, dealer_code')
-            .gte('issue_date', dmin).lte('issue_date', dmax)
-            .in('operation_code', [7235, 7241, 9127, 200])
-            .in('branch_code', [99, 2, 95, 87, 88, 90, 94, 97])
-            .not('dealer_code', 'in', '(21,26,69)');
-          const validMM = (mmNFs || []).filter(
-            (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
-          );
-          const outMM = validMM.filter((n) => n.operation_type === 'Output').reduce((s, n) => s + Number(n.total_value || 0), 0);
-          const inMM = validMM.filter((n) => n.operation_type === 'Input').reduce((s, n) => s + Number(n.total_value || 0), 0);
-          const mmLiq = Math.max(0, outMM - inMM);
-          if (mmLiq > 0) {
-            console.log(`[ovl cache-only] multimarcas: cache=R$${(seg.multimarcas || 0).toFixed(2)} → Supabase=R$${mmLiq.toFixed(2)}`);
-            seg.multimarcas = mmLiq;
-          }
-        } catch (e) {
-          console.warn(`[ovl cache-only] multimarcas recalc falhou: ${e.message}`);
-        }
+        // Override de Multimarcas removido: notas_fiscais Supabase usa só ops
+        // [7235, 7241, 9127, 200] que é mais restrito que o sale-panel TOTVS
+        // (canal_totals_cache.multimarcas). Resultado: deflacionava o valor
+        // pra R$ 100k quando o oficial é R$ 154k. Como o cache canal_totals_cache
+        // já bate com o relatório TOTVS oficial, mantemos ele direto.
 
         // ── Per-seller breakdown via notas_fiscais (B2M e B2R) ────────────
         // Mapping dinâmico dealer_code → nome via view v_vendedores_integracao.
@@ -1446,14 +1440,24 @@ router.get(
                 (fatByCode.get(code) || 0) + Number(row.invoice_value || 0),
               );
             }
-            return Object.entries(VAREJO_LOJAS)
+            const lojas = Object.entries(VAREJO_LOJAS)
               .map(([code, loja]) => ({
                 nome: loja.name,
                 uf: loja.uf,
                 valor: round(fatByCode.get(Number(code)) || 0),
               }))
-              .filter((l) => l.valor > 0)
-              .sort((a, b) => b.valor - a.valor);
+              .filter((l) => l.valor > 0);
+            // Ranking-faturamento retorna BRUTO (sem subtrair credev/vale-troca).
+            // Pra alinhar com o canal_totals_cache LÍQUIDO, rateia o credev
+            // proporcionalmente entre as lojas. Se cache não tiver, usa BRUTO.
+            const varejoLiqCache = Number(seg.varejo || 0);
+            const totalBruto = lojas.reduce((s, l) => s + l.valor, 0);
+            if (varejoLiqCache > 0 && totalBruto > varejoLiqCache) {
+              const ratio = varejoLiqCache / totalBruto;
+              for (const l of lojas) l.valor = round(l.valor * ratio);
+              console.log(`[ovl cache-only] rateio credev varejo: bruto R$${totalBruto.toFixed(2)} → líquido R$${varejoLiqCache.toFixed(2)} (ratio ${ratio.toFixed(3)})`);
+            }
+            return lojas.sort((a, b) => b.valor - a.valor);
           } catch (e) {
             console.warn(`[ovl cache-only/totvs] ranking-faturamento falhou: ${e.message}`);
             return [];
@@ -1469,8 +1473,8 @@ router.get(
           while (true) {
             let q = supabaseFiscal
               .from('notas_fiscais')
-              .select('dealer_code, total_value, invoice_status')
-              .eq('operation_type', 'Output')
+              .select('dealer_code, total_value, invoice_status, operation_type')
+              .in('operation_type', ['Output', 'Input'])
               .gte('issue_date', dmin).lte('issue_date', dmax)
               .in('branch_code', cfg.branchs)
               .in('operation_code', cfg.ops)
@@ -1491,7 +1495,8 @@ router.get(
           const porDealer = new Map();
           for (const n of valid) {
             const k = Number(n.dealer_code);
-            porDealer.set(k, (porDealer.get(k) || 0) + Number(n.total_value || 0));
+            const sinal = n.operation_type === 'Input' ? -1 : 1;
+            porDealer.set(k, (porDealer.get(k) || 0) + sinal * Number(n.total_value || 0));
           }
           return [...porDealer.entries()]
             .map(([code, val]) => ({ nome: nomeDealer(code), valor: round(val) }))
@@ -1503,13 +1508,29 @@ router.get(
         // Vendedor" do TOTVS (accounts-receivable + ops excluídas + sinal de
         // devolução). Bate 100% com o relatório oficial PDF. Fallback:
         // notas_fiscais Supabase se a replica falhar.
-        const construirGrupoOficial = async (branchs, sellersAllow, sellersExclude) => {
+        const construirGrupoOficial = async (branchs, sellersAllow, sellersExclude, opsAllow = null) => {
           try {
-            const mapa = await getFaturadoOficialReplica(branchs, dmin, dmax);
+            // getFaturadoOficialReplica tem cap de 5000 docs por chamada
+            // (50 páginas × 100 docs). Multi-branch trunca — chamamos POR
+            // branch em paralelo e mesclamos os mapas. Cada branch isolada
+            // costuma caber em <5000 docs.
+            const mapasPorBranch = await Promise.all(
+              branchs.map((b) => getFaturadoOficialReplica([b], dmin, dmax, opsAllow)),
+            );
+            const mapaConsolidado = new Map();
+            for (const mapa of mapasPorBranch) {
+              for (const [dealer, info] of mapa.entries()) {
+                const prev = mapaConsolidado.get(dealer) || { valor: 0, nfs: 0, clientes: 0 };
+                prev.valor += Number(info?.valor || 0);
+                prev.nfs += Number(info?.nfs || 0);
+                prev.clientes += Number(info?.clientes || 0);
+                mapaConsolidado.set(dealer, prev);
+              }
+            }
             const allow = sellersAllow ? new Set(sellersAllow.map(Number)) : null;
             const exclude = new Set((sellersExclude || []).map(Number));
             const list = [];
-            for (const [dealer, info] of mapa.entries()) {
+            for (const [dealer, info] of mapaConsolidado.entries()) {
               if (allow && !allow.has(Number(dealer))) continue;
               if (exclude.has(Number(dealer))) continue;
               if (!info?.valor || info.valor <= 0) continue;
@@ -1525,21 +1546,25 @@ router.get(
         try {
           [vendedoresB2M, vendedoresB2R, lojasB2C] = await Promise.all([
             construirGrupoOficial(
-              [99, 2, 95, 87, 88, 90, 94, 97],
+              B2M_OVERRIDE_BRANCHES,
               null,
-              [21, 26, 69], // exclui inbound David/Rafael/Thalis do B2M
+              [21, 26, 69], // exclui inbound David/Rafael/Thalis
+              // Filtra só ops B2M (atacado) — sem isso, vendedores de Varejo
+              // das filiais 95/87/88/90/94/97 (lojas físicas) vazam pra B2M.
+              [7235, 7241, 9127],
             ),
             construirGrupoOficial(
               [2, 5, 75, 99, 200],
               [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
               null,
+              [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512], // ops B2R
             ),
             lojasVarejoTotvs(),
           ]);
           // Fallback notas_fiscais Supabase se a replica não retornou nada
           if (vendedoresB2M.length === 0) {
             vendedoresB2M = await grupoPorDealerNF({
-              branchs: [99, 2, 95, 87, 88, 90, 94, 97],
+              branchs: B2M_OVERRIDE_BRANCHES,
               ops: [7235, 7241, 9127, 200],
               excludeSellers: [21, 26, 69],
             });
@@ -1554,17 +1579,14 @@ router.get(
         } catch (e) {
           console.warn(`[ovl cache-only] per_seller falhou: ${e.message}`);
         }
-        // Escala apenas pra CIMA quando Supabase está sub-sincronizado.
-        // ANTES: escalava nos dois sentidos → reduzia vendedor real quando
-        // canal_totals < soma Supabase, mostrando valor MENOR que o real.
-        // AGORA: só infla se canal_totals > soma Supabase (sub-sync); deixa
-        // valor real intocado se Supabase já tem mais (cenário esperado).
+        // Escala BIDIRECIONAL pra alinhar soma de vendedores com canal_totals
+        // cache (fonte oficial do "Por Canal"). Sem isso, MD mostra total
+        // diferente do "Por Canal" — confunde diretoria. Mantém proporção
+        // entre vendedores intacta.
         const escalarParaTotal = (lista, totalAlvo) => {
           if (!lista.length || !totalAlvo) return lista;
           const somaAtual = lista.reduce((s, v) => s + v.valor, 0);
           if (somaAtual <= 0 || Math.abs(totalAlvo - somaAtual) < 1) return lista;
-          // Só escala se vai INFLAR (Supabase tem menos que o canal-totals)
-          if (totalAlvo <= somaAtual) return lista;
           const fator = totalAlvo / somaAtual;
           return lista.map((v) => ({ ...v, valor: round(v.valor * fator) }));
         };
@@ -1863,15 +1885,9 @@ router.get(
           else if (card.code === 'B2M') vendedoresB2M = lista;
         }
       } else if (periodoLabel === 'semana') {
-        const ano = new Date().getUTCFullYear();
-        const semana = (() => {
-          const d = new Date();
-          const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-          const dayNr = (target.getUTCDay() + 6) % 7;
-          target.setUTCDate(target.getUTCDate() - dayNr + 3);
-          const jan4 = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
-          return 1 + Math.round(((target - jan4) / 86400000 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
-        })();
+        // ano e semana DEVEM vir do mesmo cálculo ISO — em 01-03/jan a ISO week
+        // pode estar no ano anterior (ex.: 01/01/2027 = semana 53 de 2026).
+        const { ano, semana } = getIsoWeek(new Date());
         const [resSemanal, resVendedores] = await Promise.all([
           axios.get(`${INTERNAL_API_BASE}/api/forecast/promessa-semanal`,
             { params: { ano, semana, until_today: 'false' }, timeout: 240000 }).catch(() => null),
@@ -2779,6 +2795,11 @@ const SPECIAL_OPERATIONS_99 = [
   5919, // adicionada em 2026-06 — entra no Forecast (Métricas Diárias) por vendedor
 ];
 
+// Filiais do escopo Multimarcas (Inbound David/Rafael + seg.multimarcas).
+// 99 = atacado SP · 2/200 = atacado JPA/PB · 95/87/88/90/94/97 = outras
+// filiais que vendem atacado. Usado nos overrides via Supabase fiscal.
+const B2M_OVERRIDE_BRANCHES = [99, 2, 95, 87, 88, 90, 94, 97];
+
 // Grupos de canais da tabela mensal (todos os vendedores de cada grupo)
 const VEND_MENSAL_GROUPS = [
   {
@@ -2830,8 +2851,12 @@ const OPS_EXCLUIR_SQL_OFICIAL = new Set([
 const FAT_OFICIAL_CACHE = new Map(); // key: branchs|dmin|dmax → { ts, mapa }
 const FAT_OFICIAL_TTL = 30 * 60 * 1000; // 30min
 
-async function getFaturadoOficialReplica(branchs, dmin, dmax) {
-  const key = `${[...branchs].sort().join(',')}|${dmin}|${dmax}`;
+// opsAllow: Set opcional. Se passado, restringe ao subconjunto de ops daquele
+// canal (ex.: [7235, 7241, 9127] pra B2M). Sem isso, vendedores de outros
+// canais que operam nas mesmas branches "vazam" pro resultado.
+export async function getFaturadoOficialReplica(branchs, dmin, dmax, opsAllow = null) {
+  const opsKey = opsAllow ? [...opsAllow].sort().join(',') : '*';
+  const key = `${[...branchs].sort().join(',')}|${dmin}|${dmax}|${opsKey}`;
   const cached = FAT_OFICIAL_CACHE.get(key);
   if (cached && Date.now() - cached.ts < FAT_OFICIAL_TTL) return cached.mapa;
 
@@ -2957,12 +2982,16 @@ async function getFaturadoOficialReplica(branchs, dmin, dmax) {
     // TODO: filtro de cliente franquia (classificação tipo 2) — por agora skipo
     // porque precisa de outra chamada. Pra B2R/B2M provavelmente não impacta.
     const porDealer = new Map(); // dealer → { valor, nfs: Set, clientes: Set }
+    const opsAllowSet = opsAllow ? new Set([...opsAllow].map(Number)) : null;
     for (const d of filtradas) {
       const inv = (d.invoice || [])[0];
       if (!inv) continue;
       const nfInfo = nfMap.get(inv.invoiceCode);
       if (!nfInfo) continue;
       if (OPS_EXCLUIR_SQL_OFICIAL.has(nfInfo.op)) continue;
+      // Filtro de ops do canal (B2M = [7235, 7241, 9127], B2R = [7236, ...]).
+      // Sem ele, NFs de Varejo das filiais 95/87/88/90/94/97 vazam pra B2M.
+      if (opsAllowSet && !opsAllowSet.has(Number(nfInfo.op))) continue;
       if (nfInfo.dealer == null) continue;
       const valor = d.documentType === 9
         ? -Number(d.installmentValue || 0)
@@ -3055,40 +3084,6 @@ async function getCredevVendedor(branchs, operations, datemin, datemax, tipo = '
       console.warn(`[getCredevVendedor ${ch.start}~${ch.end}] falhou: ${e?.message}`);
     }
   }
-  return out;
-}
-
-// Monta a lista de vendedores LÍQUIDA de um grupo: bruto (painel oficial) −
-// credev (canal-totals per_seller), filtrando só os vendedores do time (g.sellers).
-// Lê customers_qty + invoice_qty por vendedor a partir do canal-totals
-// (per_seller). Usa o cache existente (1h realtime / 24h passado), então
-// é praticamente instantâneo se canal-totals já foi pedido em qualquer
-// outro lugar (Forecast, Dashboard, etc.). Soma os vários canais do grupo
-// (ex: B2M = multimarcas + inbound_david + inbound_rafael).
-async function getClientesPorVendedorViaCanalTotals(metaCanais, datemin, datemax) {
-  const out = {}; // seller_code → { customers, nfs }
-  await Promise.all(
-    metaCanais.map(async (modulo) => {
-      try {
-        const r = await axios.post(
-          `${INTERNAL_API_BASE}/api/crm/canal-totals`,
-          { modulo, datemin: toYmd(datemin), datemax: toYmd(datemax) },
-          { timeout: 200000 },
-        );
-        const data = r.data?.data || r.data;
-        const perSeller = data?.per_seller || [];
-        for (const s of perSeller) {
-          const code = String(s.seller_code ?? '');
-          if (!code) continue;
-          if (!out[code]) out[code] = { customers: 0, nfs: 0 };
-          out[code].customers += Number(s.customers_qty || 0);
-          out[code].nfs += Number(s.invoice_qty || 0);
-        }
-      } catch (e) {
-        console.warn(`[getClientesPorVendedor canal ${modulo}] ${e.message}`);
-      }
-    }),
-  );
   return out;
 }
 
@@ -3284,7 +3279,9 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
       nome: nameMap[code] || `Vend. ${code}`,
       bruto: Math.round(bruto * 100) / 100,
       credev: Math.round(credev * 100) / 100,
-      real: Math.max(0, Math.round((bruto - credev) * 100) / 100),
+      // Permite negativo: vendedor com credev > bruto = devoluções > faturamento.
+      // Relatório TOTVS oficial aceita negativo; cortar em 0 mascara prejuízo.
+      real: Math.round((bruto - credev) * 100) / 100,
       clientes: Number(stats.customers || 0),
       nfs: Number(stats.nfs || 0),
     });
@@ -4620,6 +4617,273 @@ router.get(
       .limit(limit);
     if (error) return errorResponse(res, error.message, 500);
     return successResponse(res, { log: data || [], count: data?.length || 0 });
+  }),
+);
+
+// ============================================================
+// ORÇAMENTO TRIMESTRAL POR CANAL — forecast_budget_trimestral
+// Cadastro de budget (tráfego + marketing) e meta de faturamento
+// por canal × trimestre. Usado pelo card "Orçamento Marketing"
+// no Forecast e pela aba "Orçamento" de planejamento.
+// ============================================================
+
+// Trimestre derivado de uma data ISO (YYYY-MM-DD)
+const trimestreFromIso = (iso) => {
+  const d = new Date(String(iso) + 'T00:00:00');
+  const m = d.getMonth() + 1;
+  return Math.ceil(m / 3);
+};
+
+// GET /forecast/budget?ano=2026&trimestre=2
+// GET /forecast/budget?ano=2026               (lista todos os trimestres)
+// GET /forecast/budget?datemin=…&datemax=…   (deriva trimestre da data)
+router.get(
+  '/budget',
+  asyncHandler(async (req, res) => {
+    let ano = req.query.ano ? Number(req.query.ano) : null;
+    let trimestre = req.query.trimestre ? Number(req.query.trimestre) : null;
+    if (!ano && req.query.datemin) {
+      const d = new Date(String(req.query.datemin) + 'T00:00:00');
+      ano = d.getFullYear();
+      trimestre = trimestreFromIso(req.query.datemin);
+    }
+    if (!ano) ano = new Date().getFullYear();
+
+    let q = supabase
+      .from('forecast_budget_trimestral')
+      .select('*')
+      .eq('ano', ano)
+      .order('trimestre', { ascending: true })
+      .order('canal', { ascending: true });
+    if (trimestre) q = q.eq('trimestre', trimestre);
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { rows: data || [], ano, trimestre });
+  }),
+);
+
+// POST /forecast/budget — upsert (ano, trimestre, canal)
+//   body: { ano, trimestre, canal, canal_label?, budget_trafego, budget_marketing, meta_faturamento?, observacao? }
+router.post(
+  '/budget',
+  asyncHandler(async (req, res) => {
+    const {
+      ano, trimestre, canal, canal_label,
+      budget_trafego, budget_marketing, meta_faturamento, observacao,
+    } = req.body || {};
+    if (!ano || !trimestre || !canal) {
+      return errorResponse(res, 'ano, trimestre, canal são obrigatórios', 400);
+    }
+    const trim = Number(trimestre);
+    if (trim < 1 || trim > 4) return errorResponse(res, 'trimestre deve ser 1-4', 400);
+
+    const row = {
+      ano: Number(ano),
+      trimestre: trim,
+      canal: String(canal),
+      canal_label: canal_label || null,
+      budget_trafego: Number(budget_trafego || 0),
+      budget_marketing: Number(budget_marketing || 0),
+      meta_faturamento: Number(meta_faturamento || 0),
+      observacao: observacao || null,
+      updated_by: req.headers['x-user-email'] || null,
+    };
+    const { data, error } = await supabase
+      .from('forecast_budget_trimestral')
+      .upsert(row, { onConflict: 'ano,trimestre,canal' })
+      .select('*')
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, data, 'Orçamento salvo');
+  }),
+);
+
+// DELETE /forecast/budget/:id
+router.delete(
+  '/budget/:id',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return errorResponse(res, 'id inválido', 400);
+    const { error } = await supabase
+      .from('forecast_budget_trimestral')
+      .delete()
+      .eq('id', id);
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { id }, 'Removido');
+  }),
+);
+
+// GET /forecast/budget/summary?datemin=…&datemax=…
+// Retorna o orçamento do trimestre que CONTÉM o range pedido + gasto real
+// (Wpp+Ads) calculado do TRIMESTRE INTEIRO até hoje, não só do período
+// selecionado — senão a comparação fica errada (budget abr+mai+jun vs
+// gasto só jun dá saldo positivo falso).
+router.get(
+  '/budget/summary',
+  asyncHandler(async (req, res) => {
+    const dmin = String(req.query.datemin || '');
+    const dmax = String(req.query.datemax || '');
+    if (!dmin || !dmax) return errorResponse(res, 'datemin e datemax obrigatórios', 400);
+    const ano = new Date(dmin + 'T00:00:00').getFullYear();
+    const trimestre = trimestreFromIso(dmin);
+
+    const { data: rows, error } = await supabase
+      .from('forecast_budget_trimestral')
+      .select('*')
+      .eq('ano', ano)
+      .eq('trimestre', trimestre)
+      .order('canal');
+    if (error) return errorResponse(res, error.message, 500);
+
+    const total = (rows || []).reduce(
+      (acc, r) => {
+        acc.budget_trafego += Number(r.budget_trafego || 0);
+        acc.budget_marketing += Number(r.budget_marketing || 0);
+        acc.meta_faturamento += Number(r.meta_faturamento || 0);
+        return acc;
+      },
+      { budget_trafego: 0, budget_marketing: 0, meta_faturamento: 0 },
+    );
+    total.budget_total = total.budget_trafego + total.budget_marketing;
+
+    // ── Range do trimestre INTEIRO + Quebra por mês ──
+    // Q1 = jan-mar, Q2 = abr-jun, Q3 = jul-set, Q4 = out-dez
+    const mesInicio = (trimestre - 1) * 3; // 0,3,6,9
+    const ymd = (d) => d.toISOString().slice(0, 10);
+    const hojeIso = ymd(new Date());
+    // 3 meses do trimestre: cada um com range (1º → último dia, mas truncado em hoje)
+    const NOMES_MES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+                       'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+    const meses = [];
+    for (let i = 0; i < 3; i++) {
+      const m = mesInicio + i;
+      const ini = ymd(new Date(Date.UTC(ano, m, 1)));
+      const fim = ymd(new Date(Date.UTC(ano, m + 1, 0)));
+      // Se mês ainda não começou (futuro), pula
+      if (ini > hojeIso) continue;
+      const fimReal = fim < hojeIso ? fim : hojeIso;
+      meses.push({
+        mes_num: m + 1, // 1-12
+        mes_label: NOMES_MES[m],
+        datemin: ini,
+        datemax: fimReal,
+      });
+    }
+    const trimInicioIso = meses[0]?.datemin || ymd(new Date(Date.UTC(ano, mesInicio, 1)));
+    const trimFimReal = meses[meses.length - 1]?.datemax || trimInicioIso;
+
+    // Busca gasto por MÊS em paralelo (3 chamadas wpp + 3 chamadas ads)
+    const buscarMes = async (m) => {
+      const out = {
+        ...m,
+        gasto_wpp: 0,
+        gasto_ads: 0,
+        gasto_wpp_by_canal: {},
+        gasto_ads_by_canal: {},
+      };
+      try {
+        const [wppR, adsR] = await Promise.allSettled([
+          axios.post(`${INTERNAL_API_BASE}/api/meta/conversation-costs`,
+            { startDate: m.datemin, endDate: m.datemax },
+            { timeout: 120000 }),
+          axios.post(`${INTERNAL_API_BASE}/api/meta/ads-spend`,
+            { startDate: m.datemin, endDate: m.datemax },
+            { timeout: 120000 }),
+        ]);
+        if (wppR.status === 'fulfilled') {
+          const d = wppR.value?.data?.data || wppR.value?.data || {};
+          const t = d.totals || {};
+          out.gasto_wpp = Number(t.costBRL ?? ((t.cost ?? 0) * 5.8)) || 0;
+          for (const [k, v] of Object.entries(d.by_canal || {})) {
+            out.gasto_wpp_by_canal[k] = Number(v.costBRL ?? ((v.cost ?? 0) * 5.8)) || 0;
+          }
+        }
+        if (adsR.status === 'fulfilled') {
+          const d = adsR.value?.data?.data || adsR.value?.data || {};
+          out.gasto_ads = Number(d.totals?.spend || 0);
+          out.gasto_ads_by_canal = Object.fromEntries(
+            Object.entries(d.by_canal || {}).map(([k, v]) => [k, Number(v?.spend || 0)]),
+          );
+        }
+      } catch (e) {
+        console.warn(`[budget/summary] gasto ${m.mes_label} falhou: ${e.message}`);
+      }
+      return out;
+    };
+
+    const mesesResult = await Promise.all(meses.map(buscarMes));
+
+    // Agrega totais do trimestre (soma dos meses)
+    let gasto_wpp = 0;
+    let gasto_ads = 0;
+    const gasto_wpp_by_canal = {};
+    const gasto_ads_by_canal = {};
+    for (const m of mesesResult) {
+      gasto_wpp += m.gasto_wpp;
+      gasto_ads += m.gasto_ads;
+      for (const [k, v] of Object.entries(m.gasto_wpp_by_canal)) {
+        gasto_wpp_by_canal[k] = (gasto_wpp_by_canal[k] || 0) + v;
+      }
+      for (const [k, v] of Object.entries(m.gasto_ads_by_canal)) {
+        gasto_ads_by_canal[k] = (gasto_ads_by_canal[k] || 0) + v;
+      }
+    }
+
+    // Anexa gasto por canal — total + por mês
+    const canaisComGasto = (rows || []).map((r) => ({
+      ...r,
+      gasto_wpp: gasto_wpp_by_canal[r.canal] || 0,
+      gasto_ads: gasto_ads_by_canal[r.canal] || 0,
+      por_mes: mesesResult.map((m) => ({
+        mes_num: m.mes_num,
+        mes_label: m.mes_label,
+        gasto_wpp: m.gasto_wpp_by_canal[r.canal] || 0,
+        gasto_ads: m.gasto_ads_by_canal[r.canal] || 0,
+      })),
+    }));
+
+    total.gasto_wpp = gasto_wpp;
+    total.gasto_ads = gasto_ads;
+    total.gasto_total = gasto_wpp + gasto_ads;
+    total.saldo = total.budget_total - total.gasto_total;
+
+    return successResponse(res, {
+      ano, trimestre,
+      canais: canaisComGasto,
+      total,
+      // Resumo por mês (totais)
+      meses: mesesResult.map((m) => ({
+        mes_num: m.mes_num,
+        mes_label: m.mes_label,
+        datemin: m.datemin,
+        datemax: m.datemax,
+        gasto_wpp: m.gasto_wpp,
+        gasto_ads: m.gasto_ads,
+        gasto_total: m.gasto_wpp + m.gasto_ads,
+      })),
+      periodo_trimestre: { datemin: trimInicioIso, datemax: trimFimReal },
+      periodo_selecionado: { datemin: dmin, datemax: dmax },
+    });
+  }),
+);
+
+// GET /forecast/_debug-replica?branchs=99&dmin=2026-06-01&dmax=2026-06-30
+router.get(
+  '/_debug-replica',
+  asyncHandler(async (req, res) => {
+    const branchs = String(req.query.branchs || '99').split(',').map(Number);
+    const dmin = String(req.query.dmin || '');
+    const dmax = String(req.query.dmax || '');
+    if (!dmin || !dmax) return errorResponse(res, 'dmin/dmax obrigatórios', 400);
+    const mapa = await getFaturadoOficialReplica(branchs, dmin, dmax);
+    const rows = [];
+    let total = 0;
+    for (const [dealer, info] of mapa.entries()) {
+      rows.push({ dealer, valor: info.valor, nfs: info.nfs, clientes: info.clientes });
+      total += info.valor;
+    }
+    rows.sort((a, b) => b.valor - a.valor);
+    return successResponse(res, { branchs, dmin, dmax, total, count: rows.length, rows });
   }),
 );
 

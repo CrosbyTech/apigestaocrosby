@@ -1464,6 +1464,70 @@ router.post(
     const contacts = Object.values(contactsMap).filter((c) => c.nr_telefone);
     const ticketMedio = contacts.length > 0 ? totalValue / contacts.length : 0;
 
+    // Enriquecimento: pra Varejo (PFs), o expand=person do invoices não traz
+    // nome/CPF — vem vazio. Busca em /person/v2/individuals/search por
+    // personCodeList em chunks pra preencher os faltantes.
+    try {
+      const semNome = contacts.filter((c) => !c.name || !c.cpf_cnpj);
+      if (semNome.length > 0) {
+        const codes = [...new Set(semNome.map((c) => Number(c.cd_pessoa)).filter(Boolean))];
+        const CHUNK = 100;
+        const nomeMap = new Map(); // personCode -> { name, cpfCnpj }
+        for (let i = 0; i < codes.length; i += CHUNK) {
+          const slice = codes.slice(i, i + CHUNK);
+          try {
+            const r = await axios.post(
+              `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+              { filter: { personCodeList: slice }, page: 1, pageSize: slice.length },
+              { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
+            );
+            for (const it of r.data?.items || []) {
+              nomeMap.set(Number(it.code), {
+                name: it.name || it.fantasyName || '',
+                cpfCnpj: it.cpf || it.cnpj || it.cpfCnpj || '',
+              });
+            }
+          } catch (e) {
+            console.warn(`[totvs-contacts enrich PF] chunk ${i}: ${e.message}`);
+          }
+        }
+        // PJs também — fallback pra legal-entities pra códigos que ainda faltam
+        const aindaSemNome = semNome
+          .map((c) => Number(c.cd_pessoa))
+          .filter((code) => !nomeMap.get(code)?.name);
+        for (let i = 0; i < aindaSemNome.length; i += CHUNK) {
+          const slice = aindaSemNome.slice(i, i + CHUNK);
+          try {
+            const r = await axios.post(
+              `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+              { filter: { legalEntityCodeList: slice }, page: 1, pageSize: slice.length },
+              { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
+            );
+            for (const it of r.data?.items || []) {
+              const prev = nomeMap.get(Number(it.code)) || {};
+              nomeMap.set(Number(it.code), {
+                name: prev.name || it.fantasyName || it.name || '',
+                cpfCnpj: prev.cpfCnpj || it.cnpj || it.cpfCnpj || '',
+              });
+            }
+          } catch (e) {
+            console.warn(`[totvs-contacts enrich PJ] chunk ${i}: ${e.message}`);
+          }
+        }
+        // Aplica enrichment
+        for (const c of contacts) {
+          const info = nomeMap.get(Number(c.cd_pessoa));
+          if (info) {
+            if (!c.name && info.name) c.name = info.name;
+            if (!c.cpf_cnpj && info.cpfCnpj) c.cpf_cnpj = info.cpfCnpj;
+          }
+        }
+        console.log(`[totvs-contacts] enriched ${nomeMap.size}/${semNome.length} contatos`);
+      }
+    } catch (e) {
+      console.warn(`[totvs-contacts enrich] ${e.message}`);
+    }
+
     successResponse(
       res,
       { data: contacts, ticketMedio },
@@ -1847,11 +1911,16 @@ export async function processCampaignQueue(campaignId, account) {
             cardImages.push(url);
           }
         }
+        // Conta quantas variáveis {{N}} o BODY do template tem
+        // (usado pra decidir se vamos mandar parâmetro de body ou não)
+        const bodyComp = comps.find((c) => c.type === 'BODY');
+        const bodyVarCount = (bodyComp?.text?.match(/\{\{\d+\}\}/g) || []).length;
         const meta = {
           headerFormat: header?.format || null,
           headerUrl,
           isCarousel: !!carousel,
           cardImages,
+          bodyVarCount,
         };
         tmplCache.set(tmplName, meta);
         return meta;
@@ -1870,20 +1939,37 @@ export async function processCampaignQueue(campaignId, account) {
 
         const tmplMeta = await getTemplateMeta(msg.template_name);
 
-        // HEADER (template texto/mídia simples)
+        // HEADER (template texto/mídia simples) — Meta exige media_id quando
+        // a URL é do scontent.whatsapp.net (handle do upload original do
+        // template). Tenta usar link primeiro; se for URL do whatsapp.net,
+        // faz upload pra /media e usa o id retornado.
         if (!tmplMeta.isCarousel && tmplMeta.headerFormat === 'IMAGE' && tmplMeta.headerUrl) {
+          let imageRef;
+          const url = tmplMeta.headerUrl;
+          if (url.includes('scontent.whatsapp.net') || url.includes('whatsapp.net')) {
+            const mid = await uploadImageToMedia(url);
+            if (mid) {
+              imageRef = { id: mid };
+            } else {
+              imageRef = { link: url };
+            }
+          } else {
+            imageRef = { link: url };
+          }
           components.push({
             type: 'header',
-            parameters: [
-              { type: 'image', image: { link: tmplMeta.headerUrl } },
-            ],
+            parameters: [{ type: 'image', image: imageRef }],
           });
         }
 
-        if (varKeys.length > 0) {
+        // Só inclui BODY com parâmetros se o TEMPLATE tem {{N}} no body.
+        // Antes mandava sempre que template_variables fosse não-vazio, o que
+        // causava erro 132000 em templates de texto fixo (ex: sabado_70).
+        if (varKeys.length > 0 && (tmplMeta.bodyVarCount || 0) > 0) {
+          const N = Math.min(varKeys.length, tmplMeta.bodyVarCount);
           components.push({
             type: 'body',
-            parameters: varKeys.map((k) => ({
+            parameters: varKeys.slice(0, N).map((k) => ({
               type: 'text',
               text: vars[k] || '',
             })),

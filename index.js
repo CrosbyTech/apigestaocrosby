@@ -7383,6 +7383,7 @@ import { iniciarFaturamentoHistoricoJob } from './jobs/faturamento-historico.job
 import { iniciarTransacaoHistoricoSync } from './jobs/transacao-historico-sync.job.js';
 import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js';
 import { iniciarCanalTotalsCacheJob } from './jobs/canal-totals-cache.job.js';
+import { iniciarForecastPerSellerCacheJob } from './jobs/forecast-per-seller-cache.job.js';
 import { iniciarCronWixSync } from './jobs/wix-sync.job.js';
 import {
   iniciarJobPesPessoaSync,
@@ -7542,6 +7543,7 @@ app.listen(PORT, async () => {
   iniciarTransacaoHistoricoSync();
   iniciarPessoasBluecredSync();
   iniciarCanalTotalsCacheJob();
+  iniciarForecastPerSellerCacheJob();
   iniciarCronWixSync();
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
