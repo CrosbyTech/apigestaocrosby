@@ -348,10 +348,12 @@ export function iniciarJobFaturamentoDiario() {
   }, { timezone: 'America/Sao_Paulo' });
   console.log('⏰ [faturamento-diario] Noturno (2 dias) agendado para 02:00 BRT');
 
-  // 2) Comercial: 9h, 12h, 15h, 18h, 21h BRT — sync HOJE apenas (rápido)
-  cron.schedule('0 9,12,15,18,21 * * *', () => {
+  // 2) Comercial: a cada 30min entre 06:00 e 23:30 BRT — sync HOJE apenas
+  // (rápido, ~11s). Frequente porque `/faturamento-por-segmento` agora lê
+  // direto do Supabase e o dashboard precisa estar próximo do TOTVS live.
+  cron.schedule('*/30 6-23 * * *', () => {
     const hoje = new Date().toISOString().slice(0, 10);
     return runSync('comercial', { datemin: hoje, datemax: hoje });
   }, { timezone: 'America/Sao_Paulo' });
-  console.log('⏰ [faturamento-diario] Comercial agendado: 09h, 12h, 15h, 18h, 21h BRT (5x/dia)');
+  console.log('⏰ [faturamento-diario] Comercial agendado: a cada 30min entre 06:00-23:30 BRT');
 }

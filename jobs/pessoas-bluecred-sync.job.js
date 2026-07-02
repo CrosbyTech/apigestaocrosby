@@ -71,14 +71,27 @@ export async function executarSyncBluecred() {
     ['PJ', fetchPagePJ],
   ]) {
     let totalLidos = 0;
+    let paginasPuladas = 0;
     for (let page = 1; page <= MAX_PAGES; page++) {
-      let data;
-      try {
-        data = await fetcher({ token, page, pageSize: PAGE_SIZE });
-      } catch (e) {
-        console.warn(`[pessoas-bluecred-sync ${label}] página ${page} falhou: ${e.message}`);
-        break;
+      let data = null;
+      // Retry com backoff: 3 tentativas antes de PULAR a página (não abortar).
+      // Antes o código dava `break` no 1º erro — perdia milhares de clientes
+      // porque falha transiente TOTVS matava o loop inteiro.
+      for (let tentativa = 1; tentativa <= 3; tentativa++) {
+        try {
+          data = await fetcher({ token, page, pageSize: PAGE_SIZE });
+          break;
+        } catch (e) {
+          if (tentativa === 3) {
+            console.warn(`[pessoas-bluecred-sync ${label}] página ${page} FALHOU após 3 tentativas: ${e.message}. Pulando.`);
+            paginasPuladas++;
+            data = null;
+          } else {
+            await SLEEP(2000 * tentativa); // backoff 2s, 4s
+          }
+        }
       }
+      if (!data) continue; // pula página e vai pra próxima em vez de abortar
       const items = data?.items || [];
       if (items.length === 0) break;
       totalLidos += items.length;
@@ -103,7 +116,7 @@ export async function executarSyncBluecred() {
       if (items.length < PAGE_SIZE) break;
       await SLEEP(200); // anti-rate-limit
     }
-    console.log(`[pessoas-bluecred-sync ${label}] OK: ${totalLidos} clientes lidos`);
+    console.log(`[pessoas-bluecred-sync ${label}] OK: ${totalLidos} clientes lidos (${paginasPuladas} páginas puladas)`);
   }
 
   // Upsert no Supabase

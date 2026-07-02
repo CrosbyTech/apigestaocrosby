@@ -794,44 +794,27 @@ export async function getLastSyncLog() {
   }
 }
 
-// Cron diário (03:00 America/Sao_Paulo) — usa node-cron via setInterval simples
-// pra não exigir dependência nova. Calcula próxima 03:00 e dispara.
-let CRON_TIMER = null;
-function msUntilNext(hour = 3, minute = 0, tz = 'America/Sao_Paulo') {
-  const now = new Date();
-  const local = new Date(now.toLocaleString('en-US', { timeZone: tz }));
-  const target = new Date(local);
-  target.setHours(hour, minute, 0, 0);
-  if (target <= local) target.setDate(target.getDate() + 1);
-  // Diferença entre target (no fuso BRT) e local (mesmo fuso) é a mesma de
-  // now → momento alvo absoluto (já q ambos são representados no mesmo fuso).
-  return target.getTime() - local.getTime();
-}
-
+// Cron diário via node-cron — sobrevive a restarts do backend (o schedule
+// anterior usava setTimeout que se perdia toda vez que o backend reiniciava,
+// resultando em ~5 dias sem sync em 2026-07-01).
+import cron from 'node-cron';
+let cronAgendado = false;
 export function iniciarCronUazapiSync() {
-  if (CRON_TIMER) {
-    clearTimeout(CRON_TIMER);
-    CRON_TIMER = null;
-  }
-  const schedule = () => {
-    const wait = msUntilNext(3, 0);
-    const next = new Date(Date.now() + wait);
-    console.log(
-      `⏰ [uazapi-sync] Próxima execução: ${next.toISOString()} (em ${Math.round(wait / 60000)} min)`,
-    );
-    CRON_TIMER = setTimeout(async () => {
+  if (cronAgendado) return;
+  cronAgendado = true;
+  cron.schedule(
+    '0 3 * * *',
+    async () => {
       try {
-        console.log('▶️  [uazapi-sync] Iniciando cron diário...');
+        console.log('▶️  [uazapi-sync] Iniciando cron diário (03:00 BRT)...');
         const r = await runUazapiSync({ triggeredBy: 'cron' });
         console.log('✅ [uazapi-sync] Cron concluído:', r);
       } catch (e) {
         console.error('❌ [uazapi-sync] Cron falhou:', e.message);
-      } finally {
-        schedule(); // agenda próximo
       }
-    }, wait);
-  };
-  schedule();
+    },
+    { timezone: 'America/Sao_Paulo' },
+  );
   console.log('⏰ [uazapi-sync] Cron agendado: todo dia às 03:00 (America/Sao_Paulo)');
 }
 

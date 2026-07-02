@@ -353,19 +353,18 @@ const CANAIS = [
 // ──────────────────────────────────────────────────────────────
 // BlueCard — canal QUANTITATIVO (n.º de cartões enviados)
 // ──────────────────────────────────────────────────────────────
-// Lista ClickUp "Gestão Cartões" — filtro por status="enviado" e
-// custom field "Envio do Cartão" (date) dentro do período.
+// Contagem BlueCard = leads com status='enviado' na tabela local
+// `bluecard_leads` (Supabase), filtrados por `atualizado_em` dentro do
+// período (proxy pra data de envio — o trigger touch atualiza a coluna
+// toda vez que o status muda pra enviado). Antes usava ClickUp API.
 // IMPORTANTE: BlueCard usa unidade "cartões" (não R$). Não entra no
 // total monetário dos endpoints — é exibido em linha separada com
 // flag `is_quantity: true`.
-const BLUECARD_LIST_ID = process.env.BLUECARD_LIST_ID || '901109156287';
-const BLUECARD_ENVIO_FIELD_ID = 'bccdf561-eb70-4b9c-aa1d-7298b6e892e1';
 const BLUECARD_STATUS = 'enviado';
 
 // Cache: chave "datemin|datemax" → { count, ts }
 const BLUECARD_CACHE = new Map();
 const BLUECARD_TTL_MS = 5 * 60 * 1000; // 5 min
-let _bluecardNoKeyWarned = false;
 
 async function fetchBlueCardSentCount(datemin, datemax) {
   if (!datemin || !datemax) return 0;
@@ -373,58 +372,18 @@ async function fetchBlueCardSentCount(datemin, datemax) {
   const cached = BLUECARD_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.ts < BLUECARD_TTL_MS) return cached.count;
 
-  const apiKey = process.env.CLICKUP_API_KEY || '';
-  if (!apiKey) {
-    if (!_bluecardNoKeyWarned) {
-      console.warn('[bluecard] CLICKUP_API_KEY ausente — retornando 0');
-      _bluecardNoKeyWarned = true;
-    }
-    // cacheia por TTL para evitar checagem constante
-    BLUECARD_CACHE.set(cacheKey, { count: 0, ts: Date.now() });
-    return 0;
-  }
-
-  // janela inclusiva em UTC
-  const dMs = new Date(`${datemin}T00:00:00Z`).getTime();
-  const aMs = new Date(`${datemax}T23:59:59Z`).getTime();
-
   let count = 0;
-  let page = 0;
-  const MAX_PAGES = 100; // 100 × 100 = 10k cartões enviados (caso extremo)
-  while (page < MAX_PAGES) {
-    let tasks;
-    try {
-      const r = await axios.get(
-        `https://api.clickup.com/api/v2/list/${BLUECARD_LIST_ID}/task`,
-        {
-          params: {
-            subtasks: true,
-            include_closed: true,
-            page,
-            'statuses[]': BLUECARD_STATUS,
-          },
-          headers: { Authorization: apiKey },
-          timeout: 60000,
-        },
-      );
-      tasks = r.data?.tasks || [];
-    } catch (e) {
-      console.warn(`[bluecard] fetch página ${page} falhou: ${e.message}`);
-      break;
-    }
-    if (tasks.length === 0) break;
-    for (const t of tasks) {
-      const cf = (t.custom_fields || []).find(
-        (f) => f.id === BLUECARD_ENVIO_FIELD_ID,
-      );
-      const raw = cf?.value;
-      if (!raw) continue;
-      const ms = Number(raw);
-      if (!Number.isFinite(ms)) continue;
-      if (ms >= dMs && ms <= aMs) count += 1;
-    }
-    if (tasks.length < 100) break;
-    page += 1;
+  try {
+    const { count: c, error } = await supabase
+      .from('bluecard_leads')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', BLUECARD_STATUS)
+      .gte('atualizado_em', `${datemin}T00:00:00`)
+      .lte('atualizado_em', `${datemax}T23:59:59`);
+    if (error) console.warn(`[bluecard] Supabase query falhou: ${error.message}`);
+    else count = c || 0;
+  } catch (e) {
+    console.warn(`[bluecard] fetch falhou: ${e.message}`);
   }
 
   BLUECARD_CACHE.set(cacheKey, { count, ts: Date.now() });
@@ -753,32 +712,56 @@ router.get(
 router.get(
   '/ontem-canal',
   asyncHandler(async (req, res) => {
-    const hoje = new Date();
-    // Ontem útil: D-1, pulando domingo (vira sábado)
-    const ontem = new Date(hoje);
-    ontem.setUTCDate(ontem.getUTCDate() - 1);
-    while (ontem.getUTCDay() === 0) {
+    // ?data=YYYY-MM-DD sobrescreve o "ontem útil" default. Permite navegação
+    // manual pra qualquer dia via UI (Métricas Diárias).
+    const dataParam = String(req.query.data || '').trim();
+    const dataValida = /^\d{4}-\d{2}-\d{2}$/.test(dataParam) ? dataParam : null;
+    let diaIso;
+    if (dataValida) {
+      diaIso = dataValida;
+    } else {
+      const hoje = new Date();
+      const ontem = new Date(hoje);
       ontem.setUTCDate(ontem.getUTCDate() - 1);
+      while (ontem.getUTCDay() === 0) {
+        ontem.setUTCDate(ontem.getUTCDate() - 1);
+      }
+      diaIso = ontem.toISOString().slice(0, 10);
     }
-    const diaIso = ontem.toISOString().slice(0, 10);
 
+    // Fonte: /faturamento-por-segmento (fat-seg) — lê Supabase notas_fiscais
+    // (rápido, ~4s). Substituiu /canais-totals-all (TOTVS live, 30-60s).
+    // Reutiliza mesma classificação canal-por-canal do restante do Forecast,
+    // garantindo consistência entre Métricas Diárias e Métricas por Canal.
     let segs = {};
+    let sourceLabel = 'supabase-fat-seg';
     try {
       const r = await axios.post(
-        `${INTERNAL_API_BASE}/api/crm/canais-totals-all?lite=true&nocache=true`,
-        { datemin: diaIso, datemax: diaIso, lite: true },
-        { timeout: 180000 },
+        `${INTERNAL_API_BASE}/api/crm/faturamento-por-segmento?lite=true&nocache=true`,
+        { datemin: diaIso, datemax: diaIso, lite: true, nocache: true },
+        { timeout: 120000 },
       );
       const d = r.data?.data || r.data || {};
-      segs = d.segmentos || {};
+      segs = d.segmentos || d.segmentos_bruto || {};
     } catch (e) {
-      console.warn(`[forecast/ontem-canal] TOTVS falhou: ${e.message}`);
-      return errorResponse(
-        res,
-        `TOTVS indisponível: ${e.message}`,
-        503,
-        'TOTVS_UNAVAILABLE',
-      );
+      console.warn(`[forecast/ontem-canal] fat-seg falhou (${e.message}) — fallback canais-totals-all`);
+      try {
+        const r = await axios.post(
+          `${INTERNAL_API_BASE}/api/crm/canais-totals-all?lite=true&nocache=true`,
+          { datemin: diaIso, datemax: diaIso, lite: true },
+          { timeout: 180000 },
+        );
+        const d = r.data?.data || r.data || {};
+        segs = d.segmentos || {};
+        sourceLabel = 'totvs-sale-panel-fallback';
+      } catch (e2) {
+        return errorResponse(
+          res,
+          `Fontes indisponíveis: ${e2.message}`,
+          503,
+          'SOURCES_UNAVAILABLE',
+        );
+      }
     }
 
     // Canal virtual "fabrica" = showroom + novidadesfranquia
@@ -816,7 +799,7 @@ router.get(
       dia_anterior: diaIso,
       canais,
       total: { fat_dia_anterior: Math.round(total * 100) / 100 },
-      source: 'totvs-sale-panel-direct',
+      source: sourceLabel,
     });
   }),
 );
@@ -839,7 +822,6 @@ const VAREJO_LOJAS = {
   94: { name: 'Patos',           uf: 'PB' },
   95: { name: 'Midway',          uf: 'RN' },
   97: { name: 'Teresina',        uf: 'PI' },
-  98: { name: 'Shopping Recife', uf: 'PE' },
 };
 
 // ─── Helper: per_seller via NFs (transações reais) ───────────────────
@@ -1167,6 +1149,16 @@ router.get(
       dmin = String(req.query.datemin);
       dmax = String(req.query.datemax);
       periodoLabel = req.query.periodo || 'custom';
+      // Guarda contra range invertido — retorna vazio explicitamente em vez
+      // de silenciar (evita bug tipo "01/07→30/06" que dava 0 sem erro).
+      if (dmin > dmax) {
+        return errorResponse(
+          res,
+          `Range inválido: datemin (${dmin}) > datemax (${dmax})`,
+          400,
+          'INVALID_RANGE',
+        );
+      }
     } else {
       // "Ontem" = 1 dia útil (D-1, pulando domingo)
       const ontem = new Date(hoje);
@@ -1262,57 +1254,32 @@ router.get(
           return { nome, canal, valor: v };
         };
 
-        // ── Override Jhemyson: filtra só dealer=40 ──────────────────────
-        // O canal franquia inclui Jhemyson (40) + Jucelino (288) + outras NFs.
-        // Mas o usuário quer ver APENAS as vendas do Jhemyson (dealer 40).
-        // 1ª tentativa: canal-totals?modulo=franquia per_seller dealer=40
-        // 2ª (fallback): notas_fiscais dealer_code=40 ops franquia (Supabase fiscal)
+        // ── Jhemyson (dealer 40) direto do Supabase notas_fiscais ──────────
+        // PRIMÁRIO: Supabase (rápido, sincronizado a cada 30min).
+        // Fallback: canal-totals TOTVS live só se o Supabase vier vazio.
         let jhemValor = null;
         try {
-          const r = await axios.post(
-            `${INTERNAL_API_BASE}/api/crm/canal-totals?lite=true`,
-            { datemin: dmin, datemax: dmax, modulo: 'franquia', lite: true },
-            { timeout: 30000 },
+          const { data: nfs } = await supabaseFiscal
+            .from('notas_fiscais')
+            .select('total_value, invoice_status, operation_type')
+            .gte('issue_date', dmin).lte('issue_date', dmax)
+            .eq('dealer_code', 40)
+            .in('operation_code', [7234, 7240, 7802, 9124, 7259]);
+          const valid = (nfs || []).filter(
+            (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
           );
-          const d = r.data?.data || r.data || {};
-          const jhem = (d.per_seller || []).find(
-            (s) => Number(s.seller_code) === 40,
-          );
-          if (jhem) {
-            const bruto = Number(jhem.invoice_value || 0);
-            const credev = Number(jhem.credev_value || 0);
-            jhemValor = Math.max(0, bruto - credev);
-          }
+          const out = valid
+            .filter((n) => n.operation_type === 'Output')
+            .reduce((s, n) => s + Number(n.total_value || 0), 0);
+          const inp = valid
+            .filter((n) => n.operation_type === 'Input')
+            .reduce((s, n) => s + Number(n.total_value || 0), 0);
+          const liquidoNF = Math.max(0, out - inp);
+          if (liquidoNF > 0) jhemValor = liquidoNF;
         } catch (e) {
-          console.warn(`[ovl cache-only] Jhemyson via canal-totals falhou: ${e.message}`);
+          console.warn(`[ovl cache-only] Jhemyson Supabase falhou: ${e.message}`);
         }
-        // Fallback: notas_fiscais Supabase (rápido)
-        if (jhemValor == null || jhemValor === 0) {
-          try {
-            const { data: nfs } = await supabaseFiscal
-              .from('notas_fiscais')
-              .select('total_value, invoice_status, operation_type')
-              .gte('issue_date', dmin).lte('issue_date', dmax)
-              .eq('dealer_code', 40)
-              .in('operation_code', [7234, 7240, 7802, 9124, 7259]);
-            const valid = (nfs || []).filter(
-              (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
-            );
-            const out = valid
-              .filter((n) => n.operation_type === 'Output')
-              .reduce((s, n) => s + Number(n.total_value || 0), 0);
-            const inp = valid
-              .filter((n) => n.operation_type === 'Input')
-              .reduce((s, n) => s + Number(n.total_value || 0), 0);
-            const liquidoNF = Math.max(0, out - inp);
-            if (liquidoNF > 0) {
-              jhemValor = liquidoNF;
-              console.log(`[ovl cache-only] Jhemyson via notas_fiscais (fallback): R$${liquidoNF.toFixed(2)}`);
-            }
-          } catch (e) {
-            console.warn(`[ovl cache-only] Jhemyson fallback notas_fiscais falhou: ${e.message}`);
-          }
-        }
+        // Sem fallback TOTVS pra Jhemyson: 0 vem legítimo do Supabase.
         // Override Jhemyson DESATIVADO: ele inflava seg.franquia além do
         // canal_totals_cache.franquia oficial (R$ 128k vs R$ 83k). O cache
         // é a fonte de verdade — mantemos. jhemValor ainda é usado mais
@@ -1447,16 +1414,10 @@ router.get(
                 valor: round(fatByCode.get(Number(code)) || 0),
               }))
               .filter((l) => l.valor > 0);
-            // Ranking-faturamento retorna BRUTO (sem subtrair credev/vale-troca).
-            // Pra alinhar com o canal_totals_cache LÍQUIDO, rateia o credev
-            // proporcionalmente entre as lojas. Se cache não tiver, usa BRUTO.
-            const varejoLiqCache = Number(seg.varejo || 0);
-            const totalBruto = lojas.reduce((s, l) => s + l.valor, 0);
-            if (varejoLiqCache > 0 && totalBruto > varejoLiqCache) {
-              const ratio = varejoLiqCache / totalBruto;
-              for (const l of lojas) l.valor = round(l.valor * ratio);
-              console.log(`[ovl cache-only] rateio credev varejo: bruto R$${totalBruto.toFixed(2)} → líquido R$${varejoLiqCache.toFixed(2)} (ratio ${ratio.toFixed(3)})`);
-            }
+            // Usa BRUTO do ranking-faturamento (Saída - Entrada), mesmo
+            // valor que o Painel Vendas TOTVS oficial exibe. Não rateamos
+            // credev porque o TOTVS não considera credev/vale-troca como
+            // desconto de faturamento — só como forma de pagamento.
             return lojas.sort((a, b) => b.valor - a.valor);
           } catch (e) {
             console.warn(`[ovl cache-only/totvs] ranking-faturamento falhou: ${e.message}`);
@@ -1542,52 +1503,154 @@ router.get(
             return [];
           }
         };
+        // ── Lojas Varejo direto do Supabase (Painel Vendas-like) ───────────
+        // Antes puxava via TOTVS ranking-faturamento (lento). Agora agrega
+        // Output − Input das ops varejo por branch_code em notas_fiscais.
+        const lojasVarejoSupabase = async () => {
+          try {
+            const branchCodes = Object.keys(VAREJO_LOJAS).map(Number);
+            let allRows = []; let from = 0;
+            while (true) {
+              const { data, error } = await supabaseFiscal
+                .from('notas_fiscais')
+                .select('branch_code, total_value, invoice_status, operation_type')
+                .gte('issue_date', dmin).lte('issue_date', dmax)
+                .in('branch_code', branchCodes)
+                .in('operation_code', [545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1, 5919])
+                .range(from, from + 999);
+              if (error || !data?.length) break;
+              allRows.push(...data);
+              if (data.length < 1000) break;
+              from += 1000;
+            }
+            const valid = allRows.filter(
+              (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
+            );
+            const porBranch = new Map();
+            for (const n of valid) {
+              const b = Number(n.branch_code);
+              const sinal = n.operation_type === 'Input' ? -1 : 1;
+              porBranch.set(b, (porBranch.get(b) || 0) + sinal * Number(n.total_value || 0));
+            }
+            return [...porBranch.entries()]
+              .map(([code, valor]) => ({
+                nome: VAREJO_LOJAS[code]?.name || `Filial ${code}`,
+                uf: VAREJO_LOJAS[code]?.uf || null,
+                valor: round(valor),
+              }))
+              .filter((l) => l.valor > 0)
+              .sort((a, b) => b.valor - a.valor);
+          } catch (e) {
+            console.warn(`[ovl cache-only] lojasVarejoSupabase falhou: ${e.message}`);
+            return [];
+          }
+        };
+
         let vendedoresB2M = [], vendedoresB2R = [], lojasB2C = [];
         try {
+          // 100% Supabase notas_fiscais (rápido, atualizado a cada 30min).
+          // Sem fallback TOTVS — dado 0 legítimo NÃO deve disparar TOTVS lento
+          // (timeout 30s pra confirmar vazio custa 30s por canal). O sync fiscal
+          // já garante estar em dia; se algo tiver 0 é porque realmente é 0
+          // no dia (ex: início de mês, feriado, canal sem venda).
           [vendedoresB2M, vendedoresB2R, lojasB2C] = await Promise.all([
-            construirGrupoOficial(
-              B2M_OVERRIDE_BRANCHES,
-              null,
-              [21, 26, 69], // exclui inbound David/Rafael/Thalis
-              // Filtra só ops B2M (atacado) — sem isso, vendedores de Varejo
-              // das filiais 95/87/88/90/94/97 (lojas físicas) vazam pra B2M.
-              [7235, 7241, 9127],
-            ),
-            construirGrupoOficial(
-              [2, 5, 75, 99, 200],
-              [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
-              null,
-              [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512], // ops B2R
-            ),
-            lojasVarejoTotvs(),
-          ]);
-          // Fallback notas_fiscais Supabase se a replica não retornou nada
-          if (vendedoresB2M.length === 0) {
-            vendedoresB2M = await grupoPorDealerNF({
+            grupoPorDealerNF({
               branchs: B2M_OVERRIDE_BRANCHES,
               ops: [7235, 7241, 9127, 200],
               excludeSellers: [21, 26, 69],
-            });
-          }
-          if (vendedoresB2R.length === 0) {
-            vendedoresB2R = await grupoPorDealerNF({
+            }),
+            grupoPorDealerNF({
               branchs: [2, 5, 75, 99, 200],
-              ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512],
+              ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279],
               sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
-            });
-          }
+            }),
+            lojasVarejoSupabase(),
+          ]);
         } catch (e) {
           console.warn(`[ovl cache-only] per_seller falhou: ${e.message}`);
         }
-        // Escala BIDIRECIONAL pra alinhar soma de vendedores com canal_totals
-        // cache (fonte oficial do "Por Canal"). Sem isso, MD mostra total
-        // diferente do "Por Canal" — confunde diretoria. Mantém proporção
-        // entre vendedores intacta.
+        // ── Snapshot mensal (forecast_canal_snapshot) — override final ──
+        // Quando range é mês INTEIRO e existe snapshot pra aquele canal+mês,
+        // usa o valor oficial. Mantém consistência entre Métricas Diretoria,
+        // Por Canal e Métricas por Canal.
+        try {
+          const [yMin, mMin, dMin_] = dmin.split('-');
+          const [yMax, mMax, dMax_] = dmax.split('-');
+          const sameYM = yMin === yMax && mMin === mMax;
+          const lastDay = new Date(Number(yMin), Number(mMin), 0).getDate();
+          const isMonthRange = sameYM && dMin_ === '01' && Number(dMax_) === lastDay;
+          if (isMonthRange) {
+            const period_key = `${yMin}-${mMin}`;
+            const { data: snaps } = await supabase
+              .from('forecast_canal_snapshot')
+              .select('canal, valor_oficial')
+              .eq('period_type', 'mensal')
+              .eq('period_key', period_key)
+              .eq('ativo', true);
+            for (const s of snaps || []) {
+              const before = Number(seg[s.canal] || 0);
+              const novo = Number(s.valor_oficial);
+              if (Number.isFinite(novo)) {
+                seg[s.canal] = novo;
+                console.log(`[ovl cache-only] snapshot ${period_key} ${s.canal}: R$${before.toFixed(2)} → R$${novo.toFixed(2)}`);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`[ovl cache-only] snapshot lookup falhou: ${e.message}`);
+        }
+
+        // ── Override seg.revenda quando NÃO há snapshot: usa mesma fórmula
+        // do /canais-totals-all (bruto Supabase − credev payments). Cache
+        // canal_totals_cache de dias soltos costuma vir com valores
+        // subestimados (ex: R$ 99,75 quando o real é R$ 2.767,35 do dia).
+        // Se sobrou snapshot, respeita ele; senão calcula do zero.
+        try {
+          const REV_SELLERS_LIQ = [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044];
+          const brutoRevenda = vendedoresB2R.reduce((s, v) => s + v.valor, 0);
+          if (brutoRevenda > 0) {
+            // Subtrai credev payments dos sellers B2R
+            let credevRev = 0;
+            try {
+              const cr = await axios.post(
+                `${INTERNAL_API_BASE}/api/crm/credev-por-vendedor`,
+                { datemin: dmin, datemax: dmax, modulo: 'revenda', tipo: 'payments' },
+                { timeout: 30000 },
+              );
+              const credevMap = (cr.data?.data || cr.data)?.credev || {};
+              for (const [code, val] of Object.entries(credevMap)) {
+                if (REV_SELLERS_LIQ.includes(Number(code))) credevRev += Number(val || 0);
+              }
+            } catch (e) {
+              console.warn(`[ovl cache-only] credev revenda falhou: ${e.message}`);
+            }
+            const liqRev = Math.max(0, brutoRevenda - credevRev);
+            // Só sobrescreve se seg.revenda parecer stale (>2x diferença do bruto Supabase)
+            // OU se snapshot NÃO foi aplicado (seg == valor antigo do cache).
+            const stale = !seg.revenda || Math.abs((seg.revenda || 0) - liqRev) > Math.max(50, liqRev * 0.5);
+            if (stale && liqRev > 0) {
+              console.log(`[ovl cache-only] revenda live-recalc: cache=R$${(seg.revenda || 0).toFixed(2)} → bruto R$${brutoRevenda.toFixed(2)} − credev R$${credevRev.toFixed(2)} = R$${liqRev.toFixed(2)}`);
+              seg.revenda = liqRev;
+            }
+          }
+        } catch (e) {
+          console.warn(`[ovl cache-only] override revenda falhou: ${e.message}`);
+        }
+
+        // Escala BIDIRECIONAL pra alinhar soma de vendedores com o canal
+        // (já contemplando snapshot). Mantém proporção entre vendedores.
+        // Guard: só escala se |diff| < 3x (evita deflar 30x se seg estiver
+        // muito errado — nesse caso prefere mostrar bruto real dos vendedores).
         const escalarParaTotal = (lista, totalAlvo) => {
           if (!lista.length || !totalAlvo) return lista;
           const somaAtual = lista.reduce((s, v) => s + v.valor, 0);
           if (somaAtual <= 0 || Math.abs(totalAlvo - somaAtual) < 1) return lista;
           const fator = totalAlvo / somaAtual;
+          // Rejeita fatores absurdos (< 0.5 ou > 2) — sinal de seg errado
+          if (fator < 0.5 || fator > 2) {
+            console.warn(`[ovl cache-only] escala rejeitada: fator=${fator.toFixed(3)} (alvo=${totalAlvo}, soma=${somaAtual})`);
+            return lista;
+          }
           return lista.map((v) => ({ ...v, valor: round(v.valor * fator) }));
         };
         vendedoresB2M = escalarParaTotal(vendedoresB2M, round(seg.multimarcas));
@@ -2253,6 +2316,80 @@ router.get(
   }),
 );
 
+// ═══════════════════════════════════════════════════════════════
+// GET /forecast/bluecred-transacoes?datemin=&datemax=&pagamento=
+// Lista as NFs (transações) dos clientes classificados BlueCred no
+// período. Query param `pagamento`:
+//   - 'faturado' → só payment_condition_name contendo 'FATURA'/'FATURADO'
+//   - 'a_vista'  → só 'A VISTA'
+//   - undefined  → todas
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/bluecred-transacoes',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax, pagamento } = req.query;
+    // 1) Pega person_codes BlueCred
+    const { data: bluecred, error: e1 } = await supabase
+      .from('pessoas_bluecred')
+      .select('person_code, person_name, cpf, tipo_pessoa');
+    if (e1) return errorResponse(res, e1.message, 500);
+    const codes = (bluecred || []).map((p) => p.person_code);
+    const nameMap = new Map((bluecred || []).map((p) => [p.person_code, p]));
+    if (codes.length === 0) {
+      return successResponse(res, { transacoes: [], total_clientes: 0, total_valor: 0 });
+    }
+    // 2) Busca NFs no fiscal
+    const { createClient } = await import('@supabase/supabase-js');
+    const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+    let q = sbf
+      .from('notas_fiscais')
+      .select(
+        'invoice_code, issue_date, total_value, operation_type, invoice_status, dealer_code, branch_code, payment_condition_code, payment_condition_name, person_code',
+      )
+      .in('person_code', codes)
+      .order('issue_date', { ascending: false });
+    if (datemin) q = q.gte('issue_date', datemin);
+    if (datemax) q = q.lte('issue_date', datemax);
+    const { data: nfs, error: e2 } = await q.limit(2000);
+    if (e2) return errorResponse(res, e2.message, 500);
+    // 3) Filtra canceladas/deletadas e aplica filtro de pagamento
+    const valid = (nfs || []).filter(
+      (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
+    );
+    let filtered = valid;
+    if (pagamento === 'faturado') {
+      filtered = valid.filter((n) => /FATURA/i.test(n.payment_condition_name || ''));
+    } else if (pagamento === 'a_vista') {
+      filtered = valid.filter((n) => /VISTA/i.test(n.payment_condition_name || ''));
+    }
+    // 4) Enriquece com nome do cliente
+    const transacoes = filtered.map((n) => ({
+      invoice_code: n.invoice_code,
+      issue_date: n.issue_date,
+      total_value: Number(n.total_value || 0),
+      operation_type: n.operation_type,
+      dealer_code: n.dealer_code,
+      branch_code: n.branch_code,
+      payment_condition_name: n.payment_condition_name,
+      payment_condition_code: n.payment_condition_code,
+      person_code: n.person_code,
+      person_name: nameMap.get(n.person_code)?.person_name || `Cód ${n.person_code}`,
+      cpf: nameMap.get(n.person_code)?.cpf || null,
+    }));
+    const total_valor = transacoes.reduce(
+      (s, t) => s + (t.operation_type === 'Output' ? t.total_value : -t.total_value),
+      0,
+    );
+    const clientesUnicos = new Set(transacoes.map((t) => t.person_code));
+    return successResponse(res, {
+      transacoes,
+      total_clientes: clientesUnicos.size,
+      total_valor: Math.round(total_valor * 100) / 100,
+      total_nfs: transacoes.length,
+    });
+  }),
+);
+
 // POST /forecast/bluecred-sync — dispara sync manual
 router.post(
   '/bluecred-sync',
@@ -2666,6 +2803,81 @@ function findSellerFat(perSeller, nome) {
   }
   return 0;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// GET /forecast/crescimento-anual
+// Agrega faturamento YTD por canal do ano corrente vs ano anterior
+// direto do Supabase notas_fiscais — rápido (<5s) e sem depender dos
+// overrides pesados de /canais-totals-all (que timeout em ranges grandes).
+// Query params (opcionais):
+//   - ano  (padrão: ano atual)
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/crescimento-anual',
+  asyncHandler(async (req, res) => {
+    const hoje = new Date();
+    const anoAtual = parseInt(req.query.ano, 10) || hoje.getFullYear();
+    const anoAnterior = anoAtual - 1;
+
+    const iniAtual = `${anoAtual}-01-01`;
+    const fimAtual = hoje.toISOString().slice(0, 10);
+    const iniAnterior = `${anoAnterior}-01-01`;
+    const diaMesAnt = new Date(anoAnterior, hoje.getMonth(), hoje.getDate());
+    const fimAnterior = diaMesAnt.toISOString().slice(0, 10);
+
+    // Query direta em notas_fiscais Supabase, classificando canal por OP+dealer.
+    const { createClient } = await import('@supabase/supabase-js');
+    const sbf = createClient(
+      process.env.SUPABASE_FISCAL_URL,
+      process.env.SUPABASE_FISCAL_KEY,
+    );
+
+    const agregarAno = async (dmin, dmax) => {
+      const segs = {};
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await sbf
+          .from('notas_fiscais')
+          .select('branch_code, operation_code, operation_type, invoice_status, total_value, items, person_code')
+          .gte('issue_date', dmin).lte('issue_date', dmax)
+          .range(from, from + PAGE - 1);
+        if (error) throw new Error(`Supabase: ${error.message}`);
+        if (!data?.length) break;
+        for (const nf of data) {
+          const status = String(nf.invoice_status || '').toLowerCase();
+          if (status === 'canceled' || status === 'deleted') continue;
+          const { canal } = classificarNfCanal(nf);
+          if (!canal) continue;
+          const sinal = nf.operation_type === 'Input' ? -1 : 1;
+          segs[canal] = (segs[canal] || 0) + sinal * Number(nf.total_value || 0);
+        }
+        if (data.length < PAGE) break;
+      }
+      // Só valores positivos
+      const out = {};
+      for (const [k, v] of Object.entries(segs)) {
+        if (v > 0) out[k] = Math.round(v * 100) / 100;
+      }
+      return out;
+    };
+
+    try {
+      const [segAtual, segAnterior] = await Promise.all([
+        agregarAno(iniAtual, fimAtual),
+        agregarAno(iniAnterior, fimAnterior),
+      ]);
+      return successResponse(res, {
+        ano_atual: anoAtual,
+        ano_anterior: anoAnterior,
+        periodo: { ini_atual: iniAtual, fim_atual: fimAtual, ini_anterior: iniAnterior, fim_anterior: fimAnterior },
+        segmentos_atual: segAtual,
+        segmentos_anterior: segAnterior,
+      });
+    } catch (e) {
+      return errorResponse(res, e.message, 500, 'CRESC_ERROR');
+    }
+  }),
+);
 
 router.get(
   '/promessa-vendedores',
@@ -3150,29 +3362,99 @@ router.get(
 );
 
 async function buildVendedoresLiquido(g, datemin, datemax) {
-  // FONTE PRIMÁRIA: replica EXATA do SQL "Faturamento por Vendedor" do TOTVS
-  // (accounts-receivable + ops excluídas + TP_DOCUMENTO=9 com sinal −1).
-  // Validado em 24/06: bate 100% com o PDF oficial.
-  // FALLBACK: sale-panel + clientes-por-vendedor (mantido pra resiliência).
-  const [oficialMap, sellersFallback, credevMap, customersData] = await Promise.all([
-    getFaturadoOficialReplica(g.branchs, toYmd(datemin), toYmd(datemax)),
-    getSellersOficial(g.branchs, g.operations, datemin, datemax),
-    getCredevVendedor(g.branchs, g.operations, datemin, datemax, g.credevTipo),
-    (async () => {
-      try {
-        const r = await axios.post(
-          `${INTERNAL_API_BASE}/api/crm/clientes-por-vendedor`,
-          { branchs: g.branchs, operations: g.operations, datemin: toYmd(datemin), datemax: toYmd(datemax) },
-          { timeout: 240000 },
-        );
-        const d = r.data?.data || r.data;
-        return d?.rows || {};
-      } catch (e) {
-        console.warn(`[buildVendedoresLiquido ${g.code}] clientes-por-vendedor falhou: ${e.message}`);
-        return {};
+  // FONTE PRIMÁRIA (2026-07): Supabase notas_fiscais direto — dealer,
+  // total_value, operation_type, person_code, invoice_code. Rápido (<2s)
+  // e bate com relatório oficial TOTVS. Substitui o replica accounts-
+  // receivable TOTVS que era lento (30-60s) e ficava travando quando
+  // o TOTVS ficava fora do ar.
+  //
+  // TOTVS live (getFaturadoOficialReplica + getSellersOficial + getCredevVendedor)
+  // usados APENAS como fallback se Supabase retornar vazio pro grupo.
+  const { createClient } = await import('@supabase/supabase-js');
+  const supabaseFiscal = createClient(
+    process.env.SUPABASE_FISCAL_URL,
+    process.env.SUPABASE_FISCAL_KEY,
+  );
+  const dmin = toYmd(datemin);
+  const dmax = toYmd(datemax);
+
+  // Query Supabase primária — filtros por branch + op + seller (se g.sellers)
+  const customersData = {};
+  const nameMap = {};
+  try {
+    const PAGE = 1000;
+    const porDealer = new Map();
+    for (let from = 0; ; from += PAGE) {
+      let q = supabaseFiscal
+        .from('notas_fiscais')
+        .select('dealer_code, total_value, invoice_status, operation_type, person_code, invoice_code')
+        .gte('issue_date', dmin).lte('issue_date', dmax)
+        .in('branch_code', g.branchs)
+        .in('operation_code', g.operations)
+        .range(from, from + PAGE - 1);
+      if (g.sellers?.length) q = q.in('dealer_code', g.sellers);
+      const { data, error } = await q;
+      if (error) {
+        console.warn(`[buildVendedoresLiquido ${g.code}] Supabase erro: ${error.message}`);
+        break;
       }
-    })(),
-  ]);
+      if (!data?.length) break;
+      for (const n of data) {
+        const status = String(n.invoice_status || '').toLowerCase();
+        if (status === 'canceled' || status === 'deleted') continue;
+        const dealer = Number(n.dealer_code);
+        if (!dealer) continue;
+        const cur = porDealer.get(dealer) || { bruto: 0, credev: 0, customers: new Set(), nfs: 0 };
+        const val = Number(n.total_value || 0);
+        if (n.operation_type === 'Input') {
+          cur.credev += val;
+        } else {
+          cur.bruto += val;
+          if (n.person_code) cur.customers.add(Number(n.person_code));
+          cur.nfs += 1;
+        }
+        porDealer.set(dealer, cur);
+      }
+      if (data.length < PAGE) break;
+    }
+    for (const [dealer, agg] of porDealer.entries()) {
+      const liquido = agg.bruto - agg.credev;
+      customersData[String(dealer)] = {
+        valor: liquido,
+        bruto: agg.bruto,
+        credev: agg.credev,
+        customers: agg.customers.size,
+        nfs: agg.nfs,
+      };
+    }
+    // Mapping dealer → nome via v_vendedores_integracao (Supabase main)
+    const { data: vends } = await supabase
+      .from('v_vendedores_integracao')
+      .select('totvs_id, nome_vendedor');
+    for (const v of vends || []) {
+      if (v.totvs_id != null && v.nome_vendedor) {
+        nameMap[String(v.totvs_id)] = v.nome_vendedor;
+      }
+    }
+  } catch (e) {
+    console.warn(`[buildVendedoresLiquido ${g.code}] Supabase falhou (${e.message}) — fallback TOTVS`);
+  }
+
+  // Fallback TOTVS live só se Supabase vazio pro grupo inteiro
+  const supabaseVazio = Object.keys(customersData).length === 0;
+  let oficialMap = new Map(), sellersFallback = [], credevMap = {};
+  if (supabaseVazio) {
+    console.warn(`[buildVendedoresLiquido ${g.code}] Supabase vazio — usando TOTVS live`);
+    try {
+      [oficialMap, sellersFallback, credevMap] = await Promise.all([
+        getFaturadoOficialReplica(g.branchs, dmin, dmax),
+        getSellersOficial(g.branchs, g.operations, datemin, datemax),
+        getCredevVendedor(g.branchs, g.operations, datemin, datemax, g.credevTipo),
+      ]);
+    } catch (e) {
+      console.warn(`[buildVendedoresLiquido ${g.code}] fallback TOTVS falhou: ${e.message}`);
+    }
+  }
 
   // ── Override B2M: dealers David (26), Rafael (21), Thalis (69) vêm
   // direto de notas_fiscais Supabase porque o sale-panel/fiscal-invoices
@@ -3231,10 +3513,11 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
       console.warn(`[buildVendedoresLiquido ${g.code}] override inbound falhou: ${e.message}`);
     }
   }
-  // Nomes via sellers-canal (fallback se canal-totals não trouxer)
-  const nameMap = {};
+  // Nomes: complementa nameMap (populado do Supabase) com sellers-canal
   for (const s of sellersFallback || []) {
-    nameMap[String(s.seller_code)] = s.seller_name;
+    if (!nameMap[String(s.seller_code)]) {
+      nameMap[String(s.seller_code)] = s.seller_name;
+    }
   }
   const allow = new Set((g.sellers || []).map(Number));
   // Une todos os seller_codes vistos em ambas as fontes
@@ -3250,40 +3533,50 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
   for (const code of allCodes) {
     if (allow.size > 0 && !allow.has(Number(code))) continue;
     const stats = customersData[code] || {};
-    // PRIMÁRIA: replica oficial do SQL (já líquido, com sinal de devolução).
+    // PRIMÁRIA Supabase: stats já tem bruto/credev/liquido calculados.
+    if (stats.bruto != null) {
+      const bruto = Number(stats.bruto || 0);
+      const credev = Number(stats.credev || 0);
+      const real = bruto - credev;
+      if (bruto <= 0 && credev <= 0) continue;
+      list.push({
+        seller_code: code,
+        nome: nameMap[code] || `Vend. ${code}`,
+        bruto: Math.round(bruto * 100) / 100,
+        credev: Math.round(credev * 100) / 100,
+        real: Math.round(real * 100) / 100,
+        clientes: Number(stats.customers || 0),
+        nfs: Number(stats.nfs || 0),
+      });
+      continue;
+    }
+    // FALLBACK TOTVS: replica oficial ou sale-panel + credev
     const oficial = oficialMap.get(Number(code));
     if (oficial && oficial.valor > 0) {
       list.push({
         seller_code: code,
         nome: nameMap[code] || `Vend. ${code}`,
         bruto: oficial.valor,
-        credev: 0, // SQL já trata devolução inline
+        credev: 0,
         real: oficial.valor,
-        // Cli/NFs prefere stats real do clientes-por-vendedor (escopo maior);
-        // só usa oficial se stats não tiver
-        clientes: Number(stats.customers || oficial.clientes || 0),
-        nfs: Number(stats.nfs || oficial.nfs || 0),
+        clientes: Number(oficial.clientes || 0),
+        nfs: Number(oficial.nfs || 0),
       });
       continue;
     }
-    // FALLBACK: fiscal/v2/invoices ou sale-panel quando oficial não trouxe
-    const brutoFiscal = Number(stats.valor || 0);
     const brutoFallback = Number(
       sellersFallback.find((s) => String(s.seller_code) === code)?.value || 0,
     );
-    const bruto = brutoFiscal > 0 ? brutoFiscal : brutoFallback;
-    if (bruto <= 0) continue;
+    if (brutoFallback <= 0) continue;
     const credev = Number(credevMap[code] || 0);
     list.push({
       seller_code: code,
       nome: nameMap[code] || `Vend. ${code}`,
-      bruto: Math.round(bruto * 100) / 100,
+      bruto: Math.round(brutoFallback * 100) / 100,
       credev: Math.round(credev * 100) / 100,
-      // Permite negativo: vendedor com credev > bruto = devoluções > faturamento.
-      // Relatório TOTVS oficial aceita negativo; cortar em 0 mascara prejuízo.
-      real: Math.round((bruto - credev) * 100) / 100,
-      clientes: Number(stats.customers || 0),
-      nfs: Number(stats.nfs || 0),
+      real: Math.round((brutoFallback - credev) * 100) / 100,
+      clientes: 0,
+      nfs: 0,
     });
   }
   return list.sort((a, b) => b.real - a.real);
@@ -3963,6 +4256,31 @@ router.get(
       await Promise.all(overrides);
     } catch (err) {
       console.warn('[promessa-mensal] override revenda/multimarcas falhou:', err.message);
+    }
+
+    // ─── Snapshot oficial: vence tudo ──────────────────────────────────────
+    // fatMes já traz snapshot aplicado pelo fat-seg (linha ~15010), mas o
+    // override painel-vend acima SOBRESCREVE. Reaplica snapshot como palavra
+    // final pra garantir consistência com Por Canal / Métricas por Canal.
+    if (fatMes) {
+      try {
+        const { data: snaps } = await supabase
+          .from('forecast_canal_snapshot')
+          .select('canal, valor_oficial')
+          .eq('period_type', 'mensal')
+          .eq('period_key', mKey)
+          .eq('ativo', true);
+        for (const s of snaps || []) {
+          const before = Number(fatMes[s.canal] || 0);
+          const novo = Number(s.valor_oficial);
+          if (Number.isFinite(novo)) {
+            fatMes[s.canal] = novo;
+            console.log(`[promessa-mensal] snapshot ${mKey} ${s.canal}: R$${before.toFixed(2)} → R$${novo.toFixed(2)}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[promessa-mensal] snapshot lookup falhou: ${e.message}`);
+      }
     }
 
     const canaisOut = CANAIS.map((c) => {
@@ -4886,5 +5204,139 @@ router.get(
     return successResponse(res, { branchs, dmin, dmax, total, count: rows.length, rows });
   }),
 );
+
+// ═════════════════════════════════════════════════════════════════════
+// AJUSTES CREDEV ↔ ADIANTAMENTO
+// Vendedor marca NFs de devolução (credev) como "adiantamento" (aguardando
+// entrega). NFs marcadas NÃO são subtraídas do faturamento em nenhum card
+// do Forecast (canais-totals-all, ontem-vendedor-loja, per_seller, etc).
+// ═════════════════════════════════════════════════════════════════════
+
+// Ops que geram credev/devolução (usadas pra listar candidatas)
+const CREDEV_OPS = [7244, 7245, 1214, 7790, 66, 555, 1152, 360, 20, 5153, 5152];
+
+// GET /forecast/credev-ajustes/candidatos?datemin=YYYY-MM-DD&datemax=YYYY-MM-DD
+// Retorna NFs de credev/devolução do período + marcações existentes.
+router.get(
+  '/credev-ajustes/candidatos',
+  asyncHandler(async (req, res) => {
+    const dmin = String(req.query.datemin || '');
+    const dmax = String(req.query.datemax || '');
+    if (!dmin || !dmax) return errorResponse(res, 'datemin e datemax obrigatórios', 400);
+    const { createClient } = await import('@supabase/supabase-js');
+    const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+    const { data: nfs, error } = await sbf
+      .from('notas_fiscais')
+      .select('invoice_code, branch_code, dealer_code, person_code, total_value, invoice_status, operation_code, issue_date')
+      .gte('issue_date', dmin).lte('issue_date', dmax)
+      .in('operation_code', CREDEV_OPS);
+    if (error) return errorResponse(res, error.message, 500);
+    const validas = (nfs || []).filter(
+      (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
+    );
+    // Marcações existentes (ajustes)
+    const { data: ajustes } = await supabase
+      .from('forecast_credev_ajustes')
+      .select('invoice_code, branch_code, is_adiantamento, obs, marcado_por, marcado_em');
+    const ajusteMap = new Map();
+    for (const a of ajustes || []) {
+      ajusteMap.set(`${a.invoice_code}|${a.branch_code}`, a);
+    }
+    // Enriquece com nome do cliente (pes_pessoa Supabase — cache local).
+    // Consulta em chunks de 500 pra ficar rápido mesmo com centenas de códigos.
+    const personCodes = [...new Set(validas.map((n) => n.person_code).filter(Boolean))];
+    const nameMap = new Map();
+    for (let i = 0; i < personCodes.length; i += 500) {
+      const chunk = personCodes.slice(i, i + 500);
+      const { data: pessoas } = await supabase
+        .from('pes_pessoa')
+        .select('code, nm_pessoa, fantasy_name')
+        .in('code', chunk);
+      for (const p of pessoas || []) {
+        nameMap.set(Number(p.code), p.nm_pessoa || p.fantasy_name || null);
+      }
+    }
+    const rows = validas.map((n) => {
+      const k = `${n.invoice_code}|${n.branch_code}`;
+      const a = ajusteMap.get(k);
+      return {
+        invoice_code: n.invoice_code,
+        branch_code: n.branch_code,
+        dealer_code: n.dealer_code,
+        person_code: n.person_code,
+        person_name: nameMap.get(Number(n.person_code)) || null,
+        total_value: Number(n.total_value || 0),
+        operation_code: n.operation_code,
+        issue_date: n.issue_date,
+        is_adiantamento: !!a?.is_adiantamento,
+        obs: a?.obs || null,
+        marcado_por: a?.marcado_por || null,
+        marcado_em: a?.marcado_em || null,
+      };
+    });
+    return successResponse(res, { rows, total: rows.length });
+  }),
+);
+
+// POST /forecast/credev-ajustes
+// Body: { invoice_code, branch_code, is_adiantamento, obs?, marcado_por? }
+// Upsert (marca ou desmarca) uma NF como adiantamento.
+router.post(
+  '/credev-ajustes',
+  asyncHandler(async (req, res) => {
+    const { invoice_code, branch_code, is_adiantamento, obs, marcado_por } = req.body || {};
+    if (!invoice_code || branch_code == null) {
+      return errorResponse(res, 'invoice_code e branch_code obrigatórios', 400);
+    }
+    const row = {
+      invoice_code: Number(invoice_code),
+      branch_code: Number(branch_code),
+      is_adiantamento: !!is_adiantamento,
+      obs: obs || null,
+      marcado_por: marcado_por || req.headers['x-user-email'] || null,
+      marcado_em: new Date().toISOString(),
+    };
+    const { data, error } = await supabase
+      .from('forecast_credev_ajustes')
+      .upsert(row, { onConflict: 'invoice_code,branch_code' })
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, data, 'Marcação salva');
+  }),
+);
+
+// DELETE /forecast/credev-ajustes/:invoice_code/:branch_code
+router.delete(
+  '/credev-ajustes/:invoice_code/:branch_code',
+  asyncHandler(async (req, res) => {
+    const invoice_code = Number(req.params.invoice_code);
+    const branch_code = Number(req.params.branch_code);
+    const { error } = await supabase
+      .from('forecast_credev_ajustes')
+      .delete()
+      .eq('invoice_code', invoice_code)
+      .eq('branch_code', branch_code);
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { invoice_code, branch_code }, 'Marcação removida');
+  }),
+);
+
+// Helper interno: retorna Set com "invoice_code|branch_code" das NFs marcadas
+// como adiantamento. Usado por outros endpoints pra descontar do credev.
+// Cache 5min pra não bater no Supabase toda chamada.
+const _adiantMap = new Map(); // key: 'ALL' → { ts, set }
+const ADIANT_TTL_MS = 5 * 60 * 1000;
+export async function getNFsAdiantamento() {
+  const cached = _adiantMap.get('ALL');
+  if (cached && Date.now() - cached.ts < ADIANT_TTL_MS) return cached.set;
+  const { data } = await supabase
+    .from('forecast_credev_ajustes')
+    .select('invoice_code, branch_code, is_adiantamento')
+    .eq('is_adiantamento', true);
+  const set = new Set((data || []).map((r) => `${r.invoice_code}|${r.branch_code}`));
+  _adiantMap.set('ALL', { ts: Date.now(), set });
+  return set;
+}
 
 export default router;

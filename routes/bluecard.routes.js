@@ -129,6 +129,131 @@ router.post('/leads', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
+// POST /api/bluecard/leads/importar — bulk import (admin)
+// Recebe: { rows: [{ nome, whatsapp, email?, cpf?, empresa?, instagram?,
+//                    data_nasc?, cep?, ... }, ...], status?: '1_msg_enviada' }
+// Status default: '1_msg_enviada' (1ª Mensagem Enviada).
+// Deduplica por CPF/whatsapp: se lead já existe, skip com report.
+// Retorna: { inseridos, ignorados_duplicados, erros: [{ linha, motivo }] }
+// ─────────────────────────────────────────────────────────────────────
+router.post('/leads/importar', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const rows = Array.isArray(b.rows) ? b.rows : [];
+    const statusPadrao = clean(b.status) || '1_msg_enviada';
+    if (rows.length === 0) return res.status(400).json({ error: 'Nenhuma linha para importar' });
+    if (rows.length > 2000) return res.status(400).json({ error: 'Máximo 2000 linhas por importação' });
+
+    // 1) Levanta CPFs + whatsapps já cadastrados pra dedup
+    const cpfsIn = rows.map((r) => cleanCPF(r.cpf)).filter(Boolean);
+    const wppsIn = rows.map((r) => cleanPhone(r.whatsapp)).filter(Boolean);
+    const cpfsExistentes = new Set();
+    const wppsExistentes = new Set();
+    if (cpfsIn.length > 0) {
+      for (let i = 0; i < cpfsIn.length; i += 500) {
+        const chunk = cpfsIn.slice(i, i + 500);
+        const { data } = await supabase
+          .from('bluecard_leads')
+          .select('cpf')
+          .in('cpf', chunk);
+        for (const r of data || []) cpfsExistentes.add(r.cpf);
+      }
+    }
+    if (wppsIn.length > 0) {
+      for (let i = 0; i < wppsIn.length; i += 500) {
+        const chunk = wppsIn.slice(i, i + 500);
+        const { data } = await supabase
+          .from('bluecard_leads')
+          .select('whatsapp')
+          .in('whatsapp', chunk);
+        for (const r of data || []) wppsExistentes.add(r.whatsapp);
+      }
+    }
+
+    // 2) Prepara rows válidas
+    const toInsert = [];
+    const erros = [];
+    let ignoradosDuplicados = 0;
+    let idx = 0;
+    for (const r of rows) {
+      idx += 1;
+      const nome = clean(r.nome);
+      const whatsapp = cleanPhone(r.whatsapp);
+      const cpf = cleanCPF(r.cpf);
+      const email = clean(r.email, 255)?.toLowerCase() || null;
+      if (!nome) { erros.push({ linha: idx, motivo: 'nome vazio' }); continue; }
+      if (!whatsapp || whatsapp.length < 10) { erros.push({ linha: idx, motivo: 'whatsapp inválido' }); continue; }
+      // Dedup: existe ou já foi adicionado neste batch
+      if (cpf && cpfsExistentes.has(cpf)) { ignoradosDuplicados += 1; continue; }
+      if (whatsapp && wppsExistentes.has(whatsapp)) { ignoradosDuplicados += 1; continue; }
+      if (cpf) cpfsExistentes.add(cpf);
+      if (whatsapp) wppsExistentes.add(whatsapp);
+      // Email é obrigatório na LP, mas na importação aceitamos vazio → placeholder
+      const emailFinal = email && isEmail(email) ? email : `import-${Date.now()}-${idx}@bluecard.local`;
+      const cvv = await gerarCVVUnico();
+      const row = {
+        nome,
+        whatsapp,
+        email: emailFinal,
+        cpf: cpf || `IMPORT-${Date.now()}-${idx}`.slice(0, 14),
+        empresa: clean(r.empresa),
+        instagram: clean(r.instagram, 100),
+        data_nasc: clean(r.data_nasc, 20),
+        cidade: clean(r.cidade, 100),
+        cep: clean((r.cep || '').replace(/\D/g, ''), 8),
+        endereco: clean(r.endereco, 500),
+        numero: clean(r.numero, 20),
+        complemento: clean(r.complemento, 200),
+        indicado_por: clean(r.indicado_por, 100),
+        origem: clean(r.origem) || 'import',
+        status: statusPadrao,
+      };
+      if (cvv) row.cvv = cvv;
+      toInsert.push(row);
+    }
+
+    // 3) Insere em chunks de 100
+    let inseridos = 0;
+    for (let i = 0; i < toInsert.length; i += 100) {
+      const chunk = toInsert.slice(i, i + 100);
+      let { data, error } = await supabase.from('bluecard_leads').insert(chunk).select('id');
+      // Retry sem cvv se coluna não existir
+      if (error && /column .*cvv.* does not exist/i.test(error.message)) {
+        for (const r of chunk) delete r.cvv;
+        const retry = await supabase.from('bluecard_leads').insert(chunk).select('id');
+        data = retry.data;
+        error = retry.error;
+      }
+      // Retry sem cidade se coluna não existir (migration pendente)
+      if (error && /column .*cidade.* does not exist/i.test(error.message)) {
+        for (const r of chunk) delete r.cidade;
+        const retry = await supabase.from('bluecard_leads').insert(chunk).select('id');
+        data = retry.data;
+        error = retry.error;
+      }
+      if (error) {
+        console.error('[bluecard/importar] chunk falhou:', error.message);
+        erros.push({ linha: `chunk ${i}-${i + chunk.length}`, motivo: error.message });
+        continue;
+      }
+      inseridos += (data || []).length;
+    }
+
+    return res.json({
+      ok: true,
+      recebidos: rows.length,
+      inseridos,
+      ignorados_duplicados: ignoradosDuplicados,
+      erros,
+      status_aplicado: statusPadrao,
+    });
+  } catch (e) {
+    console.error('[bluecard/importar]', e);
+    return res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
 // GET /api/bluecard/leads — listagem (admin)
 //   query: ?status=novo|contatado|qualificado|convertido|descartado
 //          ?busca=texto    (nome, email, cpf, whatsapp)
