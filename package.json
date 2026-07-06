@@ -27,6 +27,7 @@
     "extratos:bradesco": "node scripts/run-bradesco.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
     "@supabase/supabase-js": "^2.98.0",
     "axios": "^1.6.8",
     "compression": "^1.7.4",

@@ -697,9 +697,15 @@ router.post('/webhook', asyncHandler(async (req, res) => {
   // Sempre responde 200 rapidamente (Meta exige <20s)
   res.status(200).send('OK');
 
+  const body = req.body;
+  const eventsToLog = [];
+
   try {
-    const body = req.body;
-    if (body?.object !== 'whatsapp_business_account') return;
+    if (body?.object !== 'whatsapp_business_account') {
+      console.log(`[meta-webhook] payload nao-WABA ignorado (object=${body?.object})`);
+      return;
+    }
+    console.log(`[meta-webhook] recebeu ${(body.entry || []).length} entries`);
 
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
@@ -707,36 +713,58 @@ router.post('/webhook', asyncHandler(async (req, res) => {
         const statuses = value.statuses || [];
         const messages = value.messages || []; // respostas do usuário
 
-        // STATUSES (delivered/read/failed)
+        // STATUSES (delivered/read/failed) — inclui campo timestamp
         for (const st of statuses) {
           const metaId = st.id;       // wamid.xxx
-          const status = st.status;   // 'delivered' | 'read' | 'failed'
+          const status = st.status;   // 'delivered' | 'read' | 'failed' | 'sent'
           const recipient = st.recipient_id;
           if (!metaId) continue;
 
-          // Atualiza message_queue (busca por meta_message_id se gravado, senão por phone+template recente)
-          const novoStatus = ['delivered', 'read', 'failed'].includes(status) ? status : null;
+          const err = st.errors?.[0] || null;
+          const errCode = err?.code ? Number(err.code) : null;
+          const errMsg = err?.message || err?.error_data?.details || null;
+
+          // Log raw pra debug — SEMPRE grava, mesmo se update falha
+          eventsToLog.push({
+            object_type: body.object,
+            entry_id: entry.id || null,
+            change_field: change.field || null,
+            meta_message_id: metaId,
+            status,
+            recipient_id: recipient || null,
+            error_code: errCode,
+            error_message: errMsg?.slice(0, 500) || null,
+            raw: st,
+          });
+
+          const novoStatus = ['sent', 'delivered', 'read', 'failed'].includes(status) ? status : null;
           if (!novoStatus) continue;
 
-          // message_queue usa o id da mensagem se tivermos gravado — caso contrário busca por phone
-          const updateMq = await supabase
-            .from('message_queue')
-            .update({
-              status: novoStatus,
-              ...(status === 'failed' && st.errors?.[0]?.message
-                ? { last_error: st.errors[0].message?.slice(0, 500) }
-                : {}),
-            })
-            .eq('meta_message_id', metaId);
+          const ts = st.timestamp ? new Date(Number(st.timestamp) * 1000).toISOString() : null;
+          const timestampField =
+            status === 'delivered' ? 'delivered_at'
+            : status === 'read' ? 'read_at'
+            : null;
 
-          // template_disparos
+          const mqUpdate = {
+            status: novoStatus,
+            ...(timestampField && ts ? { [timestampField]: ts } : {}),
+            ...(status === 'failed' && errMsg ? { last_error: errMsg.slice(0, 500) } : {}),
+            ...(errCode != null ? { error_code: errCode } : {}),
+          };
+          const { error: mqErr, count: mqCount } = await supabase
+            .from('message_queue')
+            .update(mqUpdate, { count: 'exact' })
+            .eq('meta_message_id', metaId);
+          if (mqErr) console.warn(`[meta-webhook] update message_queue: ${mqErr.message}`);
+          else if (!mqCount) console.warn(`[meta-webhook] wamid nao encontrado em message_queue: ${metaId}`);
+
+          // template_disparos (sem error_code — coluna nao existe la)
           await supabase
             .from('template_disparos')
             .update({
               status: novoStatus,
-              ...(status === 'failed' && st.errors?.[0]?.message
-                ? { error_message: st.errors[0].message?.slice(0, 500) }
-                : {}),
+              ...(status === 'failed' && errMsg ? { error_message: errMsg.slice(0, 500) } : {}),
             })
             .eq('meta_message_id', metaId);
         }
@@ -745,6 +773,19 @@ router.post('/webhook', asyncHandler(async (req, res) => {
         for (const msg of messages) {
           const from = msg.from; // telefone do remetente (cliente)
           if (!from) continue;
+
+          eventsToLog.push({
+            object_type: body.object,
+            entry_id: entry.id || null,
+            change_field: change.field || null,
+            meta_message_id: msg.id || null,
+            status: 'replied',
+            recipient_id: from,
+            error_code: null,
+            error_message: null,
+            raw: msg,
+          });
+
           // Pega disparo mais recente pra esse telefone
           const { data: ultimos } = await supabase
             .from('template_disparos')
@@ -758,20 +799,36 @@ router.post('/webhook', asyncHandler(async (req, res) => {
               .from('template_disparos')
               .update({ status: 'replied' })
               .eq('id', ultimos[0].id);
-            // E na message_queue tbm
+          }
+
+          // message_queue — busca id via 2-step (order+limit nao funciona dentro de update)
+          const { data: mqLast } = await supabase
+            .from('message_queue')
+            .select('id')
+            .eq('phone_number', from)
+            .in('status', ['sent', 'delivered', 'read'])
+            .order('sent_at', { ascending: false })
+            .limit(1);
+          if (mqLast?.[0]) {
             await supabase
               .from('message_queue')
-              .update({ status: 'replied' })
-              .eq('phone_number', from)
-              .in('status', ['sent', 'delivered', 'read'])
-              .order('sent_at', { ascending: false })
-              .limit(1);
+              .update({ status: 'replied', replied_at: new Date().toISOString() })
+              .eq('id', mqLast[0].id);
           }
         }
       }
     }
   } catch (e) {
     console.warn(`[meta-webhook] erro processando: ${e.message}`);
+  }
+
+  // Log raw dos eventos (best-effort — falha aqui nao trava webhook)
+  if (eventsToLog.length > 0) {
+    try {
+      await supabase.from('meta_webhook_events').insert(eventsToLog);
+    } catch (e) {
+      console.warn(`[meta-webhook] falha ao logar eventos raw: ${e.message}`);
+    }
   }
 }));
 

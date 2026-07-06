@@ -16,6 +16,14 @@ import { getPool } from '../services/uazapiSync.js';
 
 const router = express.Router();
 
+// Data YYYY-MM-DD no fuso America/Sao_Paulo (BRT). new Date().toISOString()
+// vira o dia SEGUINTE entre 21h e 0h local — todo cálculo de hoje/ontem
+// do forecast precisa passar por aqui.
+function hojeBrt(offsetDias = 0) {
+  const d = new Date(Date.now() + offsetDias * 86400000);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(d);
+}
+
 // ──────────────────────────────────────────────────────────────
 // Envio de mensagem via instância "crosbybot" (UAzapi)
 // ──────────────────────────────────────────────────────────────
@@ -521,7 +529,7 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     // de manhã. Isso afeta o card "Faturamento de Ontem por Canal".
     const di = toYmd(datemin);
     const df = toYmd(datemax);
-    const hojeIso = new Date().toISOString().slice(0, 10);
+    const hojeIso = hojeBrt();
     const eumDiaSo = di === df;
     const diasAtras = Math.round(
       (new Date(hojeIso) - new Date(df)) / (1000 * 60 * 60 * 24),
@@ -720,7 +728,8 @@ router.get(
     if (dataValida) {
       diaIso = dataValida;
     } else {
-      const hoje = new Date();
+      // Ancora no dia BRT (meio-dia UTC evita edge de DST) e pula domingo
+      const hoje = new Date(`${hojeBrt()}T12:00:00Z`);
       const ontem = new Date(hoje);
       ontem.setUTCDate(ontem.getUTCDate() - 1);
       while (ontem.getUTCDay() === 0) {
@@ -969,8 +978,10 @@ function classificarNfCanal(nf) {
     } else if (bc === 2 && B2R_REVENDA_DEALERS_EMP2.has(dealer)) {
       // mantém revenda
     } else if (bc === 2) {
-      canal = 'varejo';
-      if (!VAREJO_BRANCH_CODES_TR.has(bc)) return { canal: null, dealer };
+      // Antes reclassificava como 'varejo' — bug: NF de op-revenda (7236) na
+      // emp 2 com dealer NAO-B2R virava faturamento varejo, inflando B2C.
+      // Descarta em vez de reclassificar (op nao pertence a varejo).
+      return { canal: null, dealer };
     } else if (!REVENDA_BRANCH_CODES_TR.has(bc)) {
       return { canal: null, dealer };
     }
@@ -996,6 +1007,7 @@ async function perSellerViaTransacoes(dmin, dmax, modulo) {
       .select('branch_code, operation_code, operation_type, invoice_status, total_value, items, person_code')
       .gte('issue_date', dmin)
       .lte('issue_date', dmax)
+      .order('invoice_code', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) {
       console.warn(`[perSellerViaTransacoes] supabaseFiscal: ${error.message}`);
@@ -1063,6 +1075,7 @@ async function totalsPorCanalViaTransacoes(dmin, dmax) {
       .select('branch_code, operation_code, operation_type, invoice_status, total_value, items, person_code')
       .gte('issue_date', dmin)
       .lte('issue_date', dmax)
+      .order('invoice_code', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) {
       console.warn(`[totalsPorCanalViaTransacoes] erro: ${error.message}`);
@@ -1142,7 +1155,8 @@ router.get(
   '/ontem-vendedor-loja',
   asyncHandler(async (req, res) => {
     console.log('🆕 [ovl] NOVA VERSÃO COM PROMESSA-VENDEDORES iniciada');
-    const hoje = new Date();
+    // Hoje ancorado no dia BRT (meio-dia UTC evita edge de DST)
+    const hoje = new Date(`${hojeBrt()}T12:00:00Z`);
     // Datas: usa ?datemin/?datemax se vier (mês/semana), senão ontem (D-1 útil).
     let dmin, dmax, periodoLabel;
     if (req.query.datemin && req.query.datemax) {
@@ -1171,8 +1185,11 @@ router.get(
     // Alias antigo do código: diaIso. Mantém comportamento.
     const diaIso = dmax; // pra single-seller usa o dia final do range
 
-    // Cache hit (TTL 30min). v11 = força refetch (per_seller veio vazio antes)
-    const cacheKey = `v13|${dmin}|${dmax}`;
+    // Cache hit (TTL 30min). v14 = chave inclui cacheOnly (caminhos cache-only
+    // e full usam fontes diferentes — não podem compartilhar cache/inflight).
+    const cacheOnly =
+      req.query.cacheOnly === '1' || req.query.cacheOnly === 'true';
+    const cacheKey = `v14|${cacheOnly ? 1 : 0}|${dmin}|${dmax}`;
     const noCache = req.query.nocache === '1' || req.query.nocache === 'true';
     if (!noCache) {
       const cached = OVL_CACHE.get(cacheKey);
@@ -1216,8 +1233,6 @@ router.get(
     //
     // Sem per-seller detalhe (1 linha agregada por canal). Resposta em ~1s.
     // Usuário pode forçar TOTVS via botão "Atualizar" (sem cacheOnly).
-    const cacheOnly =
-      req.query.cacheOnly === '1' || req.query.cacheOnly === 'true';
     if (cacheOnly) {
       try {
         const { default: supabase } = await import('../config/supabase.js');
@@ -1439,6 +1454,7 @@ router.get(
               .gte('issue_date', dmin).lte('issue_date', dmax)
               .in('branch_code', cfg.branchs)
               .in('operation_code', cfg.ops)
+              .order('invoice_code', { ascending: true })
               .range(from, from + 999);
             if (cfg.sellers) q = q.in('dealer_code', cfg.sellers);
             if (cfg.excludeSellers) {
@@ -1517,6 +1533,7 @@ router.get(
                 .gte('issue_date', dmin).lte('issue_date', dmax)
                 .in('branch_code', branchCodes)
                 .in('operation_code', [545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1, 5919])
+                .order('invoice_code', { ascending: true })
                 .range(from, from + 999);
               if (error || !data?.length) break;
               allRows.push(...data);
@@ -1570,16 +1587,20 @@ router.get(
           console.warn(`[ovl cache-only] per_seller falhou: ${e.message}`);
         }
         // ── Snapshot mensal (forecast_canal_snapshot) — override final ──
-        // Quando range é mês INTEIRO e existe snapshot pra aquele canal+mês,
-        // usa o valor oficial. Mantém consistência entre Métricas Diretoria,
-        // Por Canal e Métricas por Canal.
+        // Quando range é mês INTEIRO E o mês já FECHOU (< mês corrente),
+        // usa o valor oficial cadastrado. NUNCA sobrescreve mês corrente —
+        // snapshot pode ter valor de plano/preview e ignoraria o real do dia.
         try {
           const [yMin, mMin, dMin_] = dmin.split('-');
           const [yMax, mMax, dMax_] = dmax.split('-');
           const sameYM = yMin === yMax && mMin === mMax;
           const lastDay = new Date(Number(yMin), Number(mMin), 0).getDate();
           const isMonthRange = sameYM && dMin_ === '01' && Number(dMax_) === lastDay;
-          if (isMonthRange) {
+          const nowUtc = new Date();
+          const mesCorrente = nowUtc.getUTCFullYear() * 100 + (nowUtc.getUTCMonth() + 1);
+          const mesConsultado = Number(yMin) * 100 + Number(mMin);
+          const isMonthClosed = mesConsultado < mesCorrente;
+          if (isMonthRange && isMonthClosed) {
             const period_key = `${yMin}-${mMin}`;
             const { data: snaps } = await supabase
               .from('forecast_canal_snapshot')
@@ -1797,6 +1818,9 @@ router.get(
         const fetchPerSellerCanal = async (modulo) =>
           (await fetchCanalDireto(modulo)).per_seller;
         // PARALELIZA TUDO. Singles têm DUPLA fonte (segs + canal direto).
+        // Se canais-totals-all falhar, segs={} zera os totais — flag impede
+        // que o payload zerado seja cacheado por 30min.
+        let fontesFalharam = false;
         const [
           vendedoresB2M_oficial, vendedoresB2R_oficial, segs, varejoFat,
           psFranquia, psDavid, psRafael, psShowroom, psNovid,
@@ -1808,7 +1832,10 @@ router.get(
             `${INTERNAL_API_BASE}/api/crm/canais-totals-all?lite=true${noCache ? '&nocache=true' : ''}`,
             { datemin: dmin, datemax: dmax, lite: true, nocache: noCache },
             { timeout: 240000 },
-          ).then((r) => (r.data?.data || r.data || {}).segmentos || {}).catch(() => ({})),
+          ).then((r) => (r.data?.data || r.data || {}).segmentos || {}).catch(() => {
+            fontesFalharam = true;
+            return {};
+          }),
           fetchVarejoRanking(),
           fetchPerSellerCanal('franquia'),
           fetchPerSellerCanal('inbound_david'),
@@ -1905,7 +1932,13 @@ router.get(
             total: Math.round(vendedoresSingles.reduce((s, v) => s + v.valor, 0) * 100) / 100,
           },
         };
-        OVL_CACHE.set(cacheKey, { ts: Date.now(), data: responseData });
+        if (fontesFalharam) {
+          console.warn(
+            `[ontem-vendedor-loja] canais-totals-all falhou — NÃO cacheando ${cacheKey}`,
+          );
+        } else {
+          OVL_CACHE.set(cacheKey, { ts: Date.now(), data: responseData });
+        }
         try { _resolveInflight(responseData); } catch {}
         return successResponse(res, responseData);
       }
@@ -2341,17 +2374,27 @@ router.get(
     // 2) Busca NFs no fiscal
     const { createClient } = await import('@supabase/supabase-js');
     const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
-    let q = sbf
-      .from('notas_fiscais')
-      .select(
-        'invoice_code, issue_date, total_value, operation_type, invoice_status, dealer_code, branch_code, payment_condition_code, payment_condition_name, person_code',
-      )
-      .in('person_code', codes)
-      .order('issue_date', { ascending: false });
-    if (datemin) q = q.gte('issue_date', datemin);
-    if (datemax) q = q.lte('issue_date', datemax);
-    const { data: nfs, error: e2 } = await q.limit(2000);
-    if (e2) return errorResponse(res, e2.message, 500);
+    // Loop paginado (como os demais) — .limit(2000) truncava ranges grandes.
+    const nfs = [];
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      let q = sbf
+        .from('notas_fiscais')
+        .select(
+          'invoice_code, issue_date, total_value, operation_type, invoice_status, dealer_code, branch_code, payment_condition_code, payment_condition_name, person_code',
+        )
+        .in('person_code', codes)
+        .order('invoice_code', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (datemin) q = q.gte('issue_date', datemin);
+      if (datemax) q = q.lte('issue_date', datemax);
+      const { data: page, error: e2 } = await q;
+      if (e2) return errorResponse(res, e2.message, 500);
+      nfs.push(...(page || []));
+      if (!page || page.length < PAGE) break;
+    }
+    // Mantém ordenação original da resposta (mais recentes primeiro)
+    nfs.sort((a, b) => String(b.issue_date).localeCompare(String(a.issue_date)));
     // 3) Filtra canceladas/deletadas e aplica filtro de pagamento
     const valid = (nfs || []).filter(
       (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
@@ -2429,7 +2472,9 @@ router.get(
 router.get(
   '/promessa-semanal',
   asyncHandler(async (req, res) => {
-    const hoje = new Date();
+    // Hoje ancorado no dia BRT (meio-dia UTC evita edge de DST)
+    const hojeIso = hojeBrt();
+    const hoje = new Date(`${hojeIso}T12:00:00Z`);
     // Default: semana corrente (ISO em curso) — visão operacional do dia a dia
     const cur = getIsoWeek(hoje);
     const ano = parseInt(req.query.ano, 10) || cur.ano;
@@ -2493,7 +2538,6 @@ router.get(
     // Para o REAL acumulado:
     //  - default (untilToday=false): até ONTEM (D-1) — dados fechados
     //  - untilToday=true: até HOJE — visão ao vivo (TOTVS)
-    const hojeIso = hoje.toISOString().slice(0, 10);
     const refDate = untilToday ? hoje : ontemDiaAnterior;
     const refIso = untilToday ? hojeIso : diaAnteriorIso;
     const realDateMax = refDate < endDate ? refIso : data_fim;
@@ -2586,10 +2630,10 @@ router.get(
     try {
       const grupoB2R = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2R');
       const grupoB2M = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2M');
-      // Override SEMPRE até HOJE (não importa o flag until_today) — garante
-      // que o número bate com o "Faturado por Vendedor" do TOTVS ao vivo.
-      // Se o domingo da semana ainda não chegou, pega até hoje; senão até dom.
-      const overrideMax = hojeIso < data_fim ? hojeIso : data_fim;
+      // Override usa a MESMA janela do fatSemana (refIso quando until_today=false).
+      // Antes ia sempre até hojeIso, misturando janelas: revenda/multimarcas até
+      // hoje, varejo/franquia/inbound até ontem — total incoerente.
+      const overrideMax = refIso < data_fim ? refIso : data_fim;
       const overrides = [];
       if (grupoB2R) overrides.push(aplicarOverride(grupoB2R, 'revenda', datemin, overrideMax, fatSemana));
       if (grupoB2M) overrides.push(aplicarOverride(grupoB2M, 'multimarcas', datemin, overrideMax, fatSemana));
@@ -2815,14 +2859,18 @@ function findSellerFat(perSeller, nome) {
 router.get(
   '/crescimento-anual',
   asyncHandler(async (req, res) => {
-    const hoje = new Date();
-    const anoAtual = parseInt(req.query.ano, 10) || hoje.getFullYear();
+    // Hoje ancorado no dia BRT (meio-dia UTC evita edge de DST)
+    const hojeStr = hojeBrt();
+    const hoje = new Date(`${hojeStr}T12:00:00Z`);
+    const anoAtual = parseInt(req.query.ano, 10) || hoje.getUTCFullYear();
     const anoAnterior = anoAtual - 1;
 
     const iniAtual = `${anoAtual}-01-01`;
-    const fimAtual = hoje.toISOString().slice(0, 10);
+    const fimAtual = hojeStr;
     const iniAnterior = `${anoAnterior}-01-01`;
-    const diaMesAnt = new Date(anoAnterior, hoje.getMonth(), hoje.getDate());
+    const diaMesAnt = new Date(
+      Date.UTC(anoAnterior, hoje.getUTCMonth(), hoje.getUTCDate(), 12),
+    );
     const fimAnterior = diaMesAnt.toISOString().slice(0, 10);
 
     // Query direta em notas_fiscais Supabase, classificando canal por OP+dealer.
@@ -2840,6 +2888,7 @@ router.get(
           .from('notas_fiscais')
           .select('branch_code, operation_code, operation_type, invoice_status, total_value, items, person_code')
           .gte('issue_date', dmin).lte('issue_date', dmax)
+          .order('invoice_code', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw new Error(`Supabase: ${error.message}`);
         if (!data?.length) break;
@@ -2853,10 +2902,12 @@ router.get(
         }
         if (data.length < PAGE) break;
       }
-      // Só valores positivos
+      // Inclui todos os canais (mesmo negativos) — antes filtrava v>0 e canais
+      // com so devolucao no periodo sumiam do payload, confundindo com "sem
+      // dado sincronizado" no dashboard.
       const out = {};
       for (const [k, v] of Object.entries(segs)) {
-        if (v > 0) out[k] = Math.round(v * 100) / 100;
+        out[k] = Math.round(v * 100) / 100;
       }
       return out;
     };
@@ -3079,7 +3130,11 @@ export async function getFaturadoOficialReplica(branchs, dmin, dmax, opsAllow = 
     if (!token) return new Map();
     const BASE = process.env.TOTVS_BASE_URL || 'https://apitotvsmoda.bhan.com.br/api/totvsmoda';
 
-    // 1) Busca duplicatas com filtros do SQL — paginado
+    // Flag de truncamento: se algum cap de páginas for atingido o resultado é
+    // parcial — loga e NÃO persiste no FAT_OFICIAL_CACHE (30min de dado menor).
+    let truncado = false;
+
+    // 1) Busca duplicatas com filtros do SQL — paginado (cap 50 págs = 5000 docs)
     async function fetchDuplicatas() {
       const all = [];
       let p = 1, hasNext = true;
@@ -3099,6 +3154,12 @@ export async function getFaturadoOficialReplica(branchs, dmin, dmax, opsAllow = 
         all.push(...(r.data?.items || []));
         hasNext = r.data?.hasNext;
         p++;
+      }
+      if (hasNext) {
+        truncado = true;
+        console.warn(
+          `[getFaturadoOficialReplica] cap de 50 páginas de duplicatas atingido (${key}) — resultado TRUNCADO`,
+        );
       }
       return all;
     }
@@ -3120,7 +3181,7 @@ export async function getFaturadoOficialReplica(branchs, dmin, dmax, opsAllow = 
       }
     }
     if (invCodes.size === 0) {
-      FAT_OFICIAL_CACHE.set(key, { ts: Date.now(), mapa: new Map() });
+      if (!truncado) FAT_OFICIAL_CACHE.set(key, { ts: Date.now(), mapa: new Map() });
       return new Map();
     }
 
@@ -3161,6 +3222,12 @@ export async function getFaturadoOficialReplica(branchs, dmin, dmax, opsAllow = 
         }
         hasNext = r.data?.hasNext;
         p++;
+      }
+      if (hasNext) {
+        truncado = true;
+        console.warn(
+          `[getFaturadoOficialReplica] cap de 100 páginas de NFs atingido (${key}) — resultado TRUNCADO`,
+        );
       }
     }
     await fetchNFs();
@@ -3226,7 +3293,7 @@ export async function getFaturadoOficialReplica(branchs, dmin, dmax, opsAllow = 
         clientes: v.clientes.size,
       });
     }
-    FAT_OFICIAL_CACHE.set(key, { ts: Date.now(), mapa });
+    if (!truncado) FAT_OFICIAL_CACHE.set(key, { ts: Date.now(), mapa });
     return mapa;
   } catch (e) {
     console.warn(`[getFaturadoOficialReplica] falhou: ${e.message}`);
@@ -3391,6 +3458,7 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
         .gte('issue_date', dmin).lte('issue_date', dmax)
         .in('branch_code', g.branchs)
         .in('operation_code', g.operations)
+        .order('invoice_code', { ascending: true })
         .range(from, from + PAGE - 1);
       if (g.sellers?.length) q = q.in('dealer_code', g.sellers);
       const { data, error } = await q;
@@ -3593,7 +3661,6 @@ router.get(
 
     const mKey = monthKey(ano, mes);
     const cacheKey = `${mKey}|${untilToday}`;
-    const todayIso = hoje.toISOString().slice(0, 10);
 
     // Range efetivo do mês [01, min(fim do mês, ontem|hoje)]
     const monthStart = new Date(Date.UTC(ano, mes - 1, 1));
@@ -3624,7 +3691,11 @@ router.get(
       });
     }
 
-    const isPast = ymd(effEnd) < todayIso;
+    // Mês PASSADO → TTL 24h; mês corrente → TTL 1h. Comparar effEnd com hoje
+    // errava: no default (until_today=false) effEnd=ontem é sempre < hoje,
+    // então o mês corrente pegava TTL 24h e o card ficava velho após a virada.
+    const [nowY, nowM] = hojeBrt().split('-').map(Number);
+    const isPast = ano * 100 + mes < nowY * 100 + nowM;
     const ttl = isPast ? VEND_MENSAL_TTL_PAST : VEND_MENSAL_TTL_REALTIME;
     const cached = VEND_MENSAL_CACHE.get(cacheKey);
     if (cached && Date.now() - cached.ts < ttl) {
@@ -3803,24 +3874,106 @@ const COMPARATIVO_CANAIS = [
   { key: 'bazar', label: 'Bazar', is_new: true }, // canal NOVO em 2026
 ];
 
+// Helper: agrega segmentos por canal direto do Supabase notas_fiscais
+// (mesmo estratégia do /crescimento-anual). Usado quando forecast_comparativo_ref
+// não tem entrada pra ano/mês (ex: 2025 ainda não foi backfillado).
+async function getSegSupabaseRange(dmin, dmax) {
+  try {
+    const { createClient } = await import('@supabase/supabase-js');
+    const sbf = createClient(
+      process.env.SUPABASE_FISCAL_URL,
+      process.env.SUPABASE_FISCAL_KEY,
+    );
+    const segs = {};
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await sbf
+        .from('notas_fiscais')
+        .select('branch_code, operation_code, operation_type, invoice_status, total_value, items, person_code')
+        .gte('issue_date', dmin).lte('issue_date', dmax)
+        .order('invoice_code', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`Supabase: ${error.message}`);
+      if (!data?.length) break;
+      for (const nf of data) {
+        const status = String(nf.invoice_status || '').toLowerCase();
+        if (status === 'canceled' || status === 'deleted') continue;
+        const { canal } = classificarNfCanal(nf);
+        if (!canal) continue;
+        const sinal = nf.operation_type === 'Input' ? -1 : 1;
+        segs[canal] = (segs[canal] || 0) + sinal * Number(nf.total_value || 0);
+      }
+      if (data.length < PAGE) break;
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(segs)) {
+      // Mantem valor real (positivo ou negativo). Antes forcava >0 e canais
+      // com so devolucao no periodo sumiam do payload.
+      out[k] = Math.round(v * 100) / 100;
+    }
+    // Canais virtuais
+    out.fabrica = Number((out.showroom || 0) + (out.novidadesfranquia || 0));
+    return out;
+  } catch (e) {
+    console.warn(`[getSegSupabaseRange] falhou: ${e.message}`);
+    return null;
+  }
+}
+
 // Helper: lê valores de referência fixos para um ano/mês.
 // Canal virtual "fabrica" = showroom + novidadesfranquia (mesma agregação do
 // /faturamento-por-segmento). Ambos componentes precisam estar na tabela ref
 // (ou ao menos um deles); o que faltar é tratado como 0.
-async function getRefValues(ano, mes) {
+// Se a tabela ref não tiver dados pra ano/mês (ex: 2025), agrega direto do
+// Supabase notas_fiscais (mesmo classificador do /crescimento-anual).
+async function getRefValues(ano, mes, diaAcum = null) {
   const { data, error } = await supabase
     .from('forecast_comparativo_ref')
     .select('canal, valor_full, valor_acumulado, dia_acumulado')
     .eq('ano', ano)
     .eq('mes', mes);
-  if (error) return new Map();
   const m = new Map();
-  for (const r of data || []) {
-    m.set(String(r.canal).toLowerCase(), {
-      full: Number(r.valor_full || 0),
-      acumulado: Number(r.valor_acumulado || 0),
-      dia: r.dia_acumulado,
-    });
+  if (!error) {
+    for (const r of data || []) {
+      m.set(String(r.canal).toLowerCase(), {
+        full: Number(r.valor_full || 0),
+        acumulado: Number(r.valor_acumulado || 0),
+        dia: r.dia_acumulado,
+      });
+    }
+  }
+  // Fallback: se ref vazia, computa direto do Supabase notas_fiscais
+  if (m.size === 0) {
+    const lastDay = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
+    const fmt = (d) => `${ano}-${String(mes).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const dFull = { dmin: fmt(1), dmax: fmt(lastDay) };
+    const dAcum = diaAcum && diaAcum > 0
+      ? { dmin: fmt(1), dmax: fmt(Math.min(diaAcum, lastDay)) }
+      : null;
+    try {
+      const [segFull, segAcum] = await Promise.all([
+        getSegSupabaseRange(dFull.dmin, dFull.dmax),
+        dAcum ? getSegSupabaseRange(dAcum.dmin, dAcum.dmax) : Promise.resolve(null),
+      ]);
+      const allKeys = new Set([
+        ...Object.keys(segFull || {}),
+        ...Object.keys(segAcum || {}),
+      ]);
+      for (const k of allKeys) {
+        m.set(k, {
+          full: Number((segFull?.[k] || 0).toFixed(2)),
+          // segAcum existir mas não ter o canal = sem venda no acumulado (0);
+          // só herda o full quando NÃO houve consulta acumulada (dAcum null).
+          acumulado: Number(
+            (segAcum ? (segAcum[k] ?? 0) : (segFull?.[k] ?? 0)).toFixed(2),
+          ),
+          dia: diaAcum || null,
+        });
+      }
+      console.log(`[getRefValues] fallback Supabase notas_fiscais ${ano}/${mes} — ${m.size} canais`);
+    } catch (e) {
+      console.warn(`[getRefValues] fallback falhou: ${e.message}`);
+    }
   }
   // Canal virtual "fabrica" = showroom + novidadesfranquia
   if (!m.has('fabrica')) {
@@ -4007,7 +4160,7 @@ router.get(
     }
 
     const [refAnt, segAtualReal] = await Promise.all([
-      getRefValues(anoAnt, mes),
+      getRefValues(anoAnt, mes, diaAcum),
       periodAtualReal
         ? ehMesCorrente
           ? (await getSegViaCanaisTotals(
@@ -4050,12 +4203,41 @@ router.get(
     // FRANQUIA: subtração de credev agora é feita dentro do /fat-seg, não duplica aqui.
 
     const canaisOut = COMPARATIVO_CANAIS.map((c) => {
-      const ref = refAnt.get(c.key) || { full: 0, acumulado: 0, dia: null };
-      const fat2024 = ref.full;
-      const fat2024Acum = ref.acumulado;
+      // Ano anterior: se tem key virtual (b2m_total, franquia+sources), soma sources;
+      // senão usa a key direta. Isso é necessário porque quando refAnt vem do fallback
+      // Supabase, cada canal fica separado — a ref manual tinha alguns já agregados.
+      let fat2024 = 0, fat2024Acum = 0, refDia = null;
+      const refDireta = refAnt.get(c.key);
+      const hasSources = Array.isArray(c.sources) && c.sources.length > 0;
+      if (refDireta && (refDireta.full > 0 || refDireta.acumulado > 0) && !hasSources) {
+        fat2024 = refDireta.full;
+        fat2024Acum = refDireta.acumulado;
+        refDia = refDireta.dia;
+      } else if (hasSources) {
+        for (const src of c.sources) {
+          const r = refAnt.get(src);
+          if (r) {
+            fat2024 += Number(r.full || 0);
+            fat2024Acum += Number(r.acumulado || 0);
+            if (!refDia && r.dia) refDia = r.dia;
+          }
+        }
+        // Se ainda houver ref direta com valor (ref manual pré-agregada), prefere
+        // se for maior que a soma das sources (evita duplo-conta quando ref já
+        // incluía tudo).
+        if (refDireta && refDireta.full > fat2024) {
+          fat2024 = refDireta.full;
+          fat2024Acum = refDireta.acumulado;
+          refDia = refDireta.dia;
+        }
+      } else if (refDireta) {
+        fat2024 = refDireta.full;
+        fat2024Acum = refDireta.acumulado;
+        refDia = refDireta.dia;
+      }
       // Para canais virtuais (com `sources`), soma os canais da lista; senão usa key direta
       let fat2025Real;
-      if (Array.isArray(c.sources) && c.sources.length > 0) {
+      if (hasSources) {
         fat2025Real = c.sources.reduce(
           (s, src) => s + Number((segAtualReal || {})[src] || 0),
           0,
@@ -4063,7 +4245,9 @@ router.get(
       } else {
         fat2025Real = Number((segAtualReal || {})[c.key] || 0);
       }
-      const diferenca = fat2024Acum - fat2025Real;
+      // Sinal: positivo = ano ATUAL ganhou (mais faturamento que ano anterior).
+      // Consistente com comparativo_pct (positivo = crescimento).
+      const diferenca = fat2025Real - fat2024Acum;
       const comparativo =
         fat2024Acum > 0
           ? (fat2025Real / fat2024Acum - 1) * 100
@@ -4079,7 +4263,7 @@ router.get(
         fat_ano_atual_real: Number(fat2025Real.toFixed(2)),
         diferenca: Number(diferenca.toFixed(2)),
         comparativo_pct: Number(comparativo.toFixed(2)),
-        dia_acumulado_ref: ref.dia,
+        dia_acumulado_ref: refDia,
       };
     });
 
@@ -4097,7 +4281,7 @@ router.get(
       },
     );
     total.diferenca = Number(
-      (total.fat_ano_anterior_acumulado - total.fat_ano_atual_real).toFixed(2),
+      (total.fat_ano_atual_real - total.fat_ano_anterior_acumulado).toFixed(2),
     );
     total.comparativo_pct =
       total.fat_ano_anterior_acumulado > 0
@@ -4131,7 +4315,9 @@ router.get(
 router.get(
   '/promessa-mensal',
   asyncHandler(async (req, res) => {
-    const hoje = new Date();
+    // Hoje ancorado no dia BRT (meio-dia UTC evita edge de DST)
+    const hojeIso = hojeBrt();
+    const hoje = new Date(`${hojeIso}T12:00:00Z`);
     const ano = parseInt(req.query.ano, 10) || hoje.getUTCFullYear();
     const mes = parseInt(req.query.mes, 10) || hoje.getUTCMonth() + 1;
     // until_today=true → REAL acumulado vai até HOJE; senão até ONTEM (D-1, default)
@@ -4150,7 +4336,6 @@ router.get(
       ontem.setUTCDate(ontem.getUTCDate() - 1);
     }
     const ontemIso = ontem.toISOString().slice(0, 10);
-    const hojeIso = hoje.toISOString().slice(0, 10);
     // Data de referência: ontem (default) ou hoje (untilToday)
     const refIso = untilToday ? hojeIso : ontemIso;
 
@@ -4242,10 +4427,10 @@ router.get(
     try {
       const grupoB2R = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2R');
       const grupoB2M = VEND_MENSAL_GROUPS.find((g) => g.code === 'B2M');
-      // Override SEMPRE até HOJE (não importa o flag until_today) — garante
-      // que bate com o "Faturado por Vendedor" ao vivo.
-      const hojeIsoMes = hoje.toISOString().slice(0, 10);
-      const overrideMaxMes = hojeIsoMes < data_fim ? hojeIsoMes : data_fim;
+      // Override usa a MESMA janela do fatMes (refIso quando until_today=false).
+      // Antes ia sempre até hojeIso, misturando janelas: revenda/multimarcas
+      // até hoje, varejo/franquia/inbound até ontem — total incoerente.
+      const overrideMaxMes = refIso < data_fim ? refIso : data_fim;
       const overrides = [];
       if (grupoB2R && fatMes) overrides.push(aplicarOverrideMes(grupoB2R, 'revenda', data_inicio, overrideMaxMes, fatMes));
       if (grupoB2M && fatMes) overrides.push(aplicarOverrideMes(grupoB2M, 'multimarcas', data_inicio, overrideMaxMes, fatMes));
@@ -4258,11 +4443,16 @@ router.get(
       console.warn('[promessa-mensal] override revenda/multimarcas falhou:', err.message);
     }
 
-    // ─── Snapshot oficial: vence tudo ──────────────────────────────────────
+    // ─── Snapshot oficial: vence tudo — SÓ pra mês FECHADO ─────────────────
     // fatMes já traz snapshot aplicado pelo fat-seg (linha ~15010), mas o
     // override painel-vend acima SOBRESCREVE. Reaplica snapshot como palavra
     // final pra garantir consistência com Por Canal / Métricas por Canal.
-    if (fatMes) {
+    // GUARD: NUNCA sobrescreve mês corrente — snapshot pode ter plano/preview
+    // e ignoraria o REAL do dia. Só aplica quando mesConsultado < mesCorrente.
+    const nowUtcSnap = new Date();
+    const mesCorrenteSnap = nowUtcSnap.getUTCFullYear() * 100 + (nowUtcSnap.getUTCMonth() + 1);
+    const mesConsultadoSnap = ano * 100 + mes;
+    if (fatMes && mesConsultadoSnap < mesCorrenteSnap) {
       try {
         const { data: snaps } = await supabase
           .from('forecast_canal_snapshot')
@@ -5225,13 +5415,25 @@ router.get(
     if (!dmin || !dmax) return errorResponse(res, 'datemin e datemax obrigatórios', 400);
     const { createClient } = await import('@supabase/supabase-js');
     const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
-    const { data: nfs, error } = await sbf
-      .from('notas_fiscais')
-      .select('invoice_code, branch_code, dealer_code, person_code, total_value, invoice_status, operation_code, issue_date')
-      .gte('issue_date', dmin).lte('issue_date', dmax)
-      .in('operation_code', CREDEV_OPS);
-    if (error) return errorResponse(res, error.message, 500);
-    const validas = (nfs || []).filter(
+    // Paginacao obrigatoria — Supabase corta em 1000. Mes inteiro em varejo
+    // passa facil de 1000 → ajustes de adiantamento nao aparecem, faturamento
+    // continua descontando errado.
+    const PAGE_CRED = 1000;
+    const nfs = [];
+    for (let from = 0; ; from += PAGE_CRED) {
+      const { data, error } = await sbf
+        .from('notas_fiscais')
+        .select('invoice_code, branch_code, dealer_code, person_code, total_value, invoice_status, operation_code, issue_date')
+        .gte('issue_date', dmin).lte('issue_date', dmax)
+        .in('operation_code', CREDEV_OPS)
+        .order('invoice_code', { ascending: true })
+        .range(from, from + PAGE_CRED - 1);
+      if (error) return errorResponse(res, error.message, 500);
+      if (!data?.length) break;
+      nfs.push(...data);
+      if (data.length < PAGE_CRED) break;
+    }
+    const validas = nfs.filter(
       (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
     );
     // Marcações existentes (ajustes)

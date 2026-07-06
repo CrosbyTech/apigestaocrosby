@@ -1282,6 +1282,7 @@ router.post(
           .not('invoice_status', 'eq', 'Canceled')
           .not('invoice_status', 'eq', 'Deleted')
           .in('person_code', chunk)
+          .order('invoice_code', { ascending: true })
           .range(offset, offset + PAGE - 1);
         if (error) {
           return errorResponse(res, error.message, 500, 'FISCAL_ERROR');
@@ -2727,6 +2728,7 @@ router.post(
           .from('notas_fiscais')
           .select('dealer_code, branch_code, total_value, invoice_status, operation_type')
           .gte('issue_date', datemin).lte('issue_date', datemax)
+          .order('invoice_code', { ascending: true })
           .range(from, from + 999);
         if (cfg.branchs?.length) q = q.in('branch_code', cfg.branchs);
         if (cfg.operations?.length) q = q.in('operation_code', cfg.operations);
@@ -2964,89 +2966,50 @@ router.post(
       console.warn(`[canais-all override varejo] ${e.message}`);
     }
 
-    // ─── Override Revenda: alinha com TOTVS 0326 (Vl. Faturado por vendedor)
-    // Bruto = notas_fiscais dos sellers B2R em ops [7236,9122,...,7279] filiais
-    // [2,5,75,99,200]. Líquido = bruto − credev payments (Cleiton, Michel, Yago).
-    // Junho/2026 Cleiton: bruto 681,94 + frete 30 = 711,94 = TOTVS. Michel
-    // 394,92 − credev 71,67 = 323,25 = TOTVS. Total bate exato.
+    // ─── Override Revenda: 100% Supabase, faturamento líquido puro
+    // Bruto = NFs Output (venda). Credev = NFs Input (devolução) NO PERÍODO.
+    // Não subtrai vale-troca aplicada como pagamento (essa é a definição do
+    // TOTVS 0326 e cria divergência com Promessa Vendedores, que usa Supabase).
+    // Alinhado com buildVendedoresLiquido (forecast) — os dois cards batem.
     try {
       const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
       const REV_OPS = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279];
       const REV_BRANCHS = [2, 5, 75, 99, 200];
       const REV_SELLERS = [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044];
-      const { data: nfs } = await sbf
-        .from('notas_fiscais')
-        .select('dealer_code, total_value, invoice_status, operation_type')
-        .gte('issue_date', datemin).lte('issue_date', datemax)
-        .in('operation_code', REV_OPS)
-        .in('branch_code', REV_BRANCHS)
-        .in('dealer_code', REV_SELLERS);
-      let bruto = 0;
-      for (const n of nfs || []) {
-        if (n.invoice_status === 'Canceled' || n.invoice_status === 'Deleted') continue;
-        const s = n.operation_type === 'Output' ? 1 : -1;
-        bruto += s * Number(n.total_value || 0);
-      }
-      // Credev payments — usa endpoint interno /credev-por-vendedor
-      const internalBase = `http://localhost:${process.env.PORT || 4100}`;
-      let credev = 0;
-      try {
-        const cr = await axios.post(
-          `${internalBase}/api/crm/credev-por-vendedor`,
-          { datemin, datemax, modulo: 'revenda', tipo: 'payments' },
-          { timeout: 60000 },
-        );
-        const credevMap = (cr.data?.data || cr.data)?.credev || {};
-        for (const [code, val] of Object.entries(credevMap)) {
-          if (REV_SELLERS.includes(Number(code))) credev += Number(val || 0);
+      // Paginacao obrigatoria — Supabase corta em 1000 rows sem .range().
+      // .order(invoice_code) garante ordem estavel entre paginas.
+      const PAGE_REV = 1000;
+      let bruto = 0, credev = 0;
+      for (let from = 0; ; from += PAGE_REV) {
+        const { data, error } = await sbf
+          .from('notas_fiscais')
+          .select('dealer_code, total_value, invoice_status, operation_type')
+          .gte('issue_date', datemin).lte('issue_date', datemax)
+          .in('operation_code', REV_OPS)
+          .in('branch_code', REV_BRANCHS)
+          .in('dealer_code', REV_SELLERS)
+          .order('invoice_code', { ascending: true })
+          .range(from, from + PAGE_REV - 1);
+        if (error) { console.warn(`[canais-all revenda] pagina ${from}: ${error.message}`); break; }
+        if (!data?.length) break;
+        for (const n of data) {
+          if (n.invoice_status === 'Canceled' || n.invoice_status === 'Deleted') continue;
+          const val = Number(n.total_value || 0);
+          if (n.operation_type === 'Input') credev += val;
+          else bruto += val;
         }
-      } catch (e) {
-        console.warn(`[canais-all] credev-por-vendedor revenda falhou: ${e.message}`);
+        if (data.length < PAGE_REV) break;
       }
       const liquido = Math.max(0, bruto - credev);
       if (bruto > 0) {
         const old = segmentos.revenda || 0;
         total += liquido - old;
         segmentos.revenda = Math.round(liquido * 100) / 100;
-        console.log(`[canais-all] override revenda: cache=R$${old.toFixed(2)} → bruto=R$${bruto.toFixed(2)} − credev=R$${credev.toFixed(2)} = R$${liquido.toFixed(2)}`);
+        credevPorCanal.revenda = Math.round(credev * 100) / 100;
+        console.log(`[canais-all] override revenda: cache=R$${old.toFixed(2)} → bruto=R$${bruto.toFixed(2)} − devolucao=R$${credev.toFixed(2)} = R$${liquido.toFixed(2)}`);
       }
     } catch (e) {
       console.warn(`[canais-all override revenda] ${e.message}`);
-    }
-
-    // ─── Snapshot oficial mensal (forecast_canal_snapshot) ────────────────
-    // Quando o range é mês INTEIRO (YYYY-MM-01 → último dia do mês) e existe
-    // linha em forecast_canal_snapshot pra aquele canal+mês, força o valor.
-    // Mesmo mecanismo que /faturamento-por-segmento (fat-seg) já aplica —
-    // aqui replica pra Por Canal, garantindo que TODAS as telas mensais
-    // mostrem o mesmo número por canal. Se o gestor atualizar snapshot, um
-    // único upsert reflete em Por Canal + Métricas por Canal + Promessa* etc.
-    try {
-      const dminParts = String(datemin).split('-');
-      const dmaxParts = String(datemax).split('-');
-      const sameYM = dminParts[0] === dmaxParts[0] && dminParts[1] === dmaxParts[1];
-      const lastDay = new Date(Number(dminParts[0]), Number(dminParts[1]), 0).getDate();
-      const isMonthRange = sameYM && dminParts[2] === '01' && Number(dmaxParts[2]) === lastDay;
-      if (isMonthRange) {
-        const period_key = `${dminParts[0]}-${dminParts[1]}`;
-        const { data: snaps } = await supabase
-          .from('forecast_canal_snapshot')
-          .select('canal, valor_oficial')
-          .eq('period_type', 'mensal')
-          .eq('period_key', period_key)
-          .eq('ativo', true);
-        for (const s of snaps || []) {
-          const before = Number(segmentos[s.canal] || 0);
-          const novo = Number(s.valor_oficial);
-          if (Number.isFinite(novo)) {
-            total += novo - before;
-            segmentos[s.canal] = novo;
-            console.log(`[canais-all] snapshot ${period_key} ${s.canal}: R$${before.toFixed(2)} → R$${novo.toFixed(2)}`);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn(`[canais-all snapshot] ${e.message}`);
     }
 
     // Dedup MM×Inbound REMOVIDO: o cron canal-totals-cache atualizou pra
@@ -3183,6 +3146,7 @@ router.post(
             .eq('operation_type', 'Input')
             .in('operation_code', DEVOL_OPS)
             .neq('invoice_status', 'Canceled').neq('invoice_status', 'Deleted')
+            .order('invoice_code', { ascending: true })
             .range(from, from + 999);
           if (error || !data?.length) break;
           totDev += data.reduce((s, r) => s + Number(r.total_value || 0), 0);
@@ -3293,6 +3257,7 @@ router.post(
           .in('operation_code', cfg.ops)
           .neq('invoice_status', 'Canceled')
           .neq('invoice_status', 'Deleted')
+          .order('invoice_code', { ascending: true })
           .range(from, from + PAGE - 1);
         if (cfg.branchs) q = q.in('branch_code', cfg.branchs);
         if (cfg.sellers) q = q.in('dealer_code', cfg.sellers);
@@ -3319,6 +3284,7 @@ router.post(
           .in('operation_code', cfg.devolucaoOps)
           .neq('invoice_status', 'Canceled')
           .neq('invoice_status', 'Deleted')
+          .order('invoice_code', { ascending: true })
           .range(from, from + PAGE - 1);
         if (cfg.branchs) q = q.in('branch_code', cfg.branchs);
         if (cfg.sellers) q = q.in('dealer_code', cfg.sellers);
@@ -3507,6 +3473,7 @@ router.post(
           .in('operation_code', cfg.ops)
           .neq('invoice_status', 'Canceled')
           .neq('invoice_status', 'Deleted')
+          .order('invoice_code', { ascending: true })
           .range(from, from + PAGE - 1);
         if (cfg.branchs?.length) q = q.in('branch_code', cfg.branchs);
         if (cfg.sellers?.length) q = q.in('dealer_code', cfg.sellers);
@@ -3684,6 +3651,7 @@ router.post(
           .in('operation_code', cfg.ops)
           .neq('invoice_status', 'Canceled')
           .neq('invoice_status', 'Deleted')
+          .order('invoice_code', { ascending: true })
           .range(from, from + PAGE - 1);
         if (cfg.branchs?.length) q = q.in('branch_code', cfg.branchs);
         if (cfg.sellers?.length) q = q.in('dealer_code', cfg.sellers);
@@ -3912,6 +3880,7 @@ router.post(
           .in('operation_code', cfg.ops)
           .neq('invoice_status', 'Canceled')
           .neq('invoice_status', 'Deleted')
+          .order('invoice_code', { ascending: true })
           .range(from, from + PAGE - 1);
         if (cfg.branchs?.length) q = q.in('branch_code', cfg.branchs);
         if (cfg.sellers?.length) q = q.in('dealer_code', cfg.sellers);
@@ -4789,6 +4758,7 @@ router.post(
           .not('invoice_status', 'eq', 'Deleted')
           .in('dealer_code', dealerIds)
           .lt('person_code', 100000000)
+          .order('invoice_code', { ascending: true })
           .range(offset, offset + PAGE - 1);
         if (error)
           return errorResponse(res, error.message, 500, 'FISCAL_ERROR');
@@ -14234,7 +14204,14 @@ router.post(
       req.query?.nocache === 'true' || req.body?.nocache === true;
     const cached = FATSEG_CACHE.get(cacheKey);
     const cacheAge = cached ? Date.now() - cached.ts : null;
-    if (!noCache && cached && cacheAge < cacheTTL) {
+    // expiresAt explícito tem precedência (respostas parciais gravam validade
+    // curta); fallback ts+TTL pra entradas antigas sem o campo.
+    const cacheValido = cached
+      ? (cached.expiresAt != null
+          ? Date.now() < cached.expiresAt
+          : cacheAge < cacheTTL)
+      : false;
+    if (!noCache && cacheValido) {
       return successResponse(
         res,
         { ...cached.data, cached: true },
@@ -14439,6 +14416,7 @@ router.post(
               .gte('issue_date', datemin).lte('issue_date', datemax)
               .in('operation_code', allOpCodes)
               .eq('operation_type', 'Output')
+              .order('invoice_code', { ascending: true })
               .range(from, from + 999);
             if (error) throw new Error(`Supabase notas_fiscais: ${error.message}`);
             const chunk = data || [];
@@ -14459,6 +14437,7 @@ router.post(
               .gte('issue_date', datemin).lte('issue_date', datemax)
               .in('branch_code', [11, 111])
               .eq('operation_type', 'Output')
+              .order('invoice_code', { ascending: true })
               .range(from, from + 999);
             if (error) throw new Error(`Supabase RE: ${error.message}`);
             const chunk = data || [];
@@ -15167,7 +15146,12 @@ router.post(
       const lastDay = new Date(Number(dminParts[0]), Number(dminParts[1]), 0).getDate();
       const isMonthRange =
         sameYM && dminParts[2] === '01' && Number(dmaxParts[2]) === lastDay;
-      if (isMonthRange) {
+      // GUARD: NUNCA aplica snapshot em mês corrente — pode ter valor de plano
+      // e ignoraria o REAL do mês em andamento (mesmo guard do /canais-totals-all).
+      const nowUtcSnap = new Date();
+      const mesCorrenteSnap = nowUtcSnap.getUTCFullYear() * 100 + (nowUtcSnap.getUTCMonth() + 1);
+      const mesConsultadoSnap = Number(dminParts[0]) * 100 + Number(dminParts[1]);
+      if (isMonthRange && mesConsultadoSnap < mesCorrenteSnap) {
         const period_key = `${dminParts[0]}-${dminParts[1]}`;
         const { data: snaps } = await supabase
           .from('forecast_canal_snapshot')
@@ -15200,14 +15184,24 @@ router.post(
         (c) => Number(credev_por_segmento[c] || 0) === 0,
       );
       if (canaisSemCredev.length > 0) {
-        const { data: devNFs } = await supabaseFiscal
-          .from('notas_fiscais')
-          .select('operation_code, branch_code, dealer_code, total_value, invoice_status')
-          .eq('operation_type', 'Input')
-          .gte('issue_date', datemin)
-          .lte('issue_date', datemax)
-          .limit(10000);
-        const valid = (devNFs || []).filter(
+        // Paginação obrigatória — .limit(10000) truncava silenciosamente em
+        // ranges longos, subestimando o credev. .order garante ordem estável.
+        const devNFs = [];
+        for (let from = 0; ; from += 1000) {
+          const { data, error } = await supabaseFiscal
+            .from('notas_fiscais')
+            .select('operation_code, branch_code, dealer_code, total_value, invoice_status')
+            .eq('operation_type', 'Input')
+            .gte('issue_date', datemin)
+            .lte('issue_date', datemax)
+            .order('invoice_code', { ascending: true })
+            .range(from, from + 999);
+          if (error) { console.warn(`[fat-seg credev-fallback] página ${from}: ${error.message}`); break; }
+          if (!data?.length) break;
+          devNFs.push(...data);
+          if (data.length < 1000) break;
+        }
+        const valid = devNFs.filter(
           (n) => n.invoice_status !== 'Canceled' && n.invoice_status !== 'Deleted',
         );
         for (const canal of canaisSemCredev) {
@@ -15292,13 +15286,20 @@ router.post(
     const PARTIAL_TTL = 10 * 60 * 1000; // 10min
     const incomplete = credevIncomplete || totvsIncomplete || overrideIncomplete;
     if (totalNFsProcessadas > 0 && !incomplete) {
-      FATSEG_CACHE.set(cacheKey, { data: responseData, ts: Date.now() });
+      FATSEG_CACHE.set(cacheKey, {
+        data: responseData,
+        ts: Date.now(),
+        expiresAt: Date.now() + cacheTTL,
+      });
     } else if (totalNFsProcessadas > 0 && incomplete) {
-      // Parcial — cacheia por 10min com flag
+      // Parcial — cacheia por 10min com flag. expiresAt EXPLÍCITO: o hack
+      // antigo de recuar o ts assumia TTL de leitura 1h, mas ranges passados
+      // leem com TTL 24h → parcial ficava servido ~23h.
       const partialData = { ...responseData, partial: true };
       FATSEG_CACHE.set(cacheKey, {
         data: partialData,
-        ts: Date.now() - (FATSEG_CACHE_TTL - PARTIAL_TTL), // ajusta ts pra TTL curto
+        ts: Date.now(),
+        expiresAt: Date.now() + PARTIAL_TTL,
       });
       console.warn(
         `[fat-seg] CACHEANDO PARCIAL ${cacheKey} (TTL 10min) — evita re-bater TOTVS enquanto recupera`,
@@ -15619,6 +15620,10 @@ router.post(
           7790, 1214, 20,
         ]);
         const fmEndpoint = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+        // Flag de falha: página que falhou vira {__failed} em vez de sumir —
+        // resultado com página perdida NÃO pode ser cacheado (credev=0 inflaria
+        // o líquido por até 24h).
+        let fmFalhou = false;
         const fetchFm = async (page) =>
           axios
             .post(
@@ -15642,7 +15647,7 @@ router.post(
               },
             )
             .then((r) => r.data)
-            .catch(() => ({ items: [] }));
+            .catch(() => { fmFalhou = true; return { items: [] }; });
         const first = await fetchFm(1);
         const fmItems = [...(first?.items || [])];
         const totalPages =
@@ -15676,12 +15681,16 @@ router.post(
           });
         }
         for (const k of Object.keys(credev)) credev[k] = Math.round(credev[k] * 100) / 100;
-        return { credev, detalhe };
+        return { credev, detalhe, __failed: fmFalhou };
       })();
       CREDEV_VEND_INFLIGHT.set(cacheKey, _runR);
       try {
         const result = await _runR;
-        CREDEV_VEND_CACHE.set(cacheKey, { credev: result.credev, ts: Date.now() });
+        if (result.__failed) {
+          console.warn(`[credev-por-vendedor returns] páginas TOTVS falharam — NÃO cacheando ${cacheKey}`);
+        } else {
+          CREDEV_VEND_CACHE.set(cacheKey, { credev: result.credev, ts: Date.now() });
+        }
         return successResponse(
           res,
           wantDetalhe ? { credev: result.credev, detalhe: result.detalhe } : { credev: result.credev },
@@ -15696,6 +15705,9 @@ router.post(
       const accessToken = tokenData?.access_token;
       if (!accessToken) throw new Error('Token TOTVS indisponível');
       const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      // Página que falha marca a flag — resultado incompleto não é cacheado
+      // (credev subestimado inflaria o líquido por até 24h).
+      let invFalhou = false;
       const fetchPage = async (page) =>
         axios
           .post(
@@ -15722,7 +15734,7 @@ router.post(
             },
           )
           .then((r) => r.data)
-          .catch(() => ({ items: [] }));
+          .catch(() => { invFalhou = true; return { items: [] }; });
       const first = await fetchPage(1);
       const invItems = [...(first?.items || [])];
       const totalPages =
@@ -15766,13 +15778,17 @@ router.post(
         });
       }
       for (const k of Object.keys(credev)) credev[k] = Math.round(credev[k] * 100) / 100;
-      return { credev, detalhe };
+      return { credev, detalhe, __failed: invFalhou };
     })();
 
     CREDEV_VEND_INFLIGHT.set(cacheKey, _run);
     try {
       const result = await _run;
-      CREDEV_VEND_CACHE.set(cacheKey, { credev: result.credev, ts: Date.now() });
+      if (result.__failed) {
+        console.warn(`[credev-por-vendedor payments] páginas TOTVS falharam — NÃO cacheando ${cacheKey}`);
+      } else {
+        CREDEV_VEND_CACHE.set(cacheKey, { credev: result.credev, ts: Date.now() });
+      }
       if (CREDEV_VEND_CACHE.size > 100) {
         const oldest = [...CREDEV_VEND_CACHE.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
         CREDEV_VEND_CACHE.delete(oldest[0]);
@@ -16627,6 +16643,7 @@ router.post(
         .gte('issue_date', datemin)
         .lte('issue_date', datemax)
         .lt('person_code', 100000000)
+        .order('invoice_code', { ascending: true })
         .range(offset, offset + PAGE - 1);
       if (error)
         return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');

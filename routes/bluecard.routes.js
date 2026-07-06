@@ -200,6 +200,7 @@ router.post('/leads/importar', async (req, res) => {
         instagram: clean(r.instagram, 100),
         data_nasc: clean(r.data_nasc, 20),
         cidade: clean(r.cidade, 100),
+        estado: clean(r.estado, 2)?.toUpperCase() || null,
         cep: clean((r.cep || '').replace(/\D/g, ''), 8),
         endereco: clean(r.endereco, 500),
         numero: clean(r.numero, 20),
@@ -227,6 +228,13 @@ router.post('/leads/importar', async (req, res) => {
       // Retry sem cidade se coluna não existir (migration pendente)
       if (error && /column .*cidade.* does not exist/i.test(error.message)) {
         for (const r of chunk) delete r.cidade;
+        const retry = await supabase.from('bluecard_leads').insert(chunk).select('id');
+        data = retry.data;
+        error = retry.error;
+      }
+      // Retry sem estado se coluna não existir (migration pendente)
+      if (error && /column .*estado.* does not exist/i.test(error.message)) {
+        for (const r of chunk) delete r.estado;
         const retry = await supabase.from('bluecard_leads').insert(chunk).select('id');
         data = retry.data;
         error = retry.error;

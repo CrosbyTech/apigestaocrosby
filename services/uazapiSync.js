@@ -644,7 +644,7 @@ async function getLastMessageTs(client, instanceId) {
 }
 
 // ─── orquestração ────────────────────────────────────────────────────
-export async function runUazapiSync({ triggeredBy = 'manual' } = {}) {
+export async function runUazapiSync({ triggeredBy = 'manual', onlyInstance = null } = {}) {
   if (!UAZ_BASE || !UAZ_ADMIN) {
     throw new Error('UAZAPI_BASE_URL / UAZAPI_ADMIN_TOKEN não configurados');
   }
@@ -660,7 +660,19 @@ export async function runUazapiSync({ triggeredBy = 'manual' } = {}) {
   try {
     // 1) instances
     console.log('[uazapi-sync] buscando instâncias...');
-    const insts = await fetchUazInstances();
+    let insts = await fetchUazInstances();
+    // Filtro opcional por nome (case-insensitive). Útil pra recarregar
+    // uma instância específica sem varrer todas as outras.
+    if (onlyInstance) {
+      const wanted = String(onlyInstance).toLowerCase();
+      insts = insts.filter(
+        (i) => String(i.name || '').toLowerCase() === wanted,
+      );
+      console.log(`[uazapi-sync] filtro onlyInstance="${onlyInstance}" → ${insts.length} instância(s)`);
+      if (insts.length === 0) {
+        throw new Error(`Instância "${onlyInstance}" não encontrada em ${UAZ_BASE}`);
+      }
+    }
     instCount = await upsertInstances(client, insts);
     console.log(`[uazapi-sync] ${instCount} instâncias upserted`);
 

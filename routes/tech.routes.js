@@ -929,6 +929,272 @@ router.get(
   }),
 );
 
+// ──────────────────────────────────────────────────────────────
+// COTAÇÃO — BUSCA COM IA (SerpAPI + Gemini)
+// ──────────────────────────────────────────────────────────────
+
+router.post(
+  '/cotacoes/:id/buscar-ia',
+  asyncHandler(async (req, res) => {
+    const cotacaoId = parseInt(req.params.id, 10);
+    if (!cotacaoId) return errorResponse(res, 'id inválido', 400);
+
+    const SERPAPI_KEY = process.env.SERPAPI_KEY;
+    const GEMINI_KEY = process.env.GEMINI_API_KEY;
+    if (!SERPAPI_KEY) return errorResponse(res, 'SERPAPI_KEY não configurada', 503, 'NO_SERPAPI');
+    if (!GEMINI_KEY) return errorResponse(res, 'GEMINI_API_KEY não configurada', 503, 'NO_GEMINI');
+
+    const { data: cot, error: e1 } = await supabase
+      .from('tech_cotacoes')
+      .select('id, titulo, descricao, quantidade, unidade')
+      .eq('id', cotacaoId)
+      .maybeSingle();
+    if (e1) return errorResponse(res, e1.message, 500);
+    if (!cot) return errorResponse(res, 'Cotação não encontrada', 404);
+
+    const searchQuery = `comprar ${cot.titulo}${cot.descricao ? ' ' + cot.descricao : ''}`;
+
+    // 1) Busca no Google Shopping via SerpAPI
+    const axios = (await import('axios')).default;
+    let shoppingResults = [];
+    let organicResults = [];
+    try {
+      const serpUrl = new URL('https://serpapi.com/search.json');
+      serpUrl.searchParams.set('q', searchQuery);
+      serpUrl.searchParams.set('engine', 'google_shopping');
+      serpUrl.searchParams.set('gl', 'br');
+      serpUrl.searchParams.set('hl', 'pt');
+      serpUrl.searchParams.set('location', 'Brazil');
+      serpUrl.searchParams.set('api_key', SERPAPI_KEY);
+      serpUrl.searchParams.set('num', '15');
+
+      const serpRes = await axios.get(serpUrl.toString(), { timeout: 30000 });
+      shoppingResults = serpRes.data?.shopping_results || [];
+    } catch (e) {
+      console.warn('[cotacao-ia] SerpAPI shopping falhou:', e.message);
+    }
+
+    // Busca orgânica (sempre — complementa o Shopping com lojas B2B)
+    try {
+      const serpUrl = new URL('https://serpapi.com/search.json');
+      serpUrl.searchParams.set('q', `${searchQuery} preço`);
+      serpUrl.searchParams.set('engine', 'google');
+      serpUrl.searchParams.set('gl', 'br');
+      serpUrl.searchParams.set('hl', 'pt');
+      serpUrl.searchParams.set('location', 'Brazil');
+      serpUrl.searchParams.set('api_key', SERPAPI_KEY);
+      serpUrl.searchParams.set('num', '10');
+
+      const serpRes = await axios.get(serpUrl.toString(), { timeout: 30000 });
+      organicResults = serpRes.data?.organic_results || [];
+    } catch (e) {
+      console.warn('[cotacao-ia] SerpAPI organic falhou:', e.message);
+    }
+
+    if (shoppingResults.length === 0 && organicResults.length === 0) {
+      return successResponse(res, { fornecedores: [], fonte: 'sem_resultados' }, 'Nenhum resultado encontrado');
+    }
+
+    // 1.5) Visita as páginas dos resultados orgânicos pra extrair preço real
+    //      (o snippet do Google raramente traz o preço)
+    const extrairTrechosPreco = (texto) => {
+      const trechos = [];
+      const regex = /R\$\s?[\d.,]+/g;
+      let m;
+      while ((m = regex.exec(texto)) && trechos.length < 6) {
+        const ini = Math.max(0, m.index - 60);
+        trechos.push(texto.slice(ini, m.index + m[0].length + 20).trim());
+      }
+      return trechos.length ? trechos.join(' | ') : null;
+    };
+
+    const extrairPrecosDaPagina = async (link) => {
+      try {
+        const r = await axios.get(link, {
+          timeout: 8000,
+          maxContentLength: 2_000_000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+            'Accept-Language': 'pt-BR,pt;q=0.9',
+          },
+          validateStatus: (s) => s === 200,
+        });
+        const html = String(r.data || '');
+        // Remove scripts/styles e tags, mantém texto
+        const texto = html
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ');
+        return extrairTrechosPreco(texto);
+      } catch {
+        return null;
+      }
+    };
+
+    const organicTop = organicResults.slice(0, 8);
+    const precosPaginas = await Promise.all(
+      organicTop.map((r) => (r.link ? extrairPrecosDaPagina(r.link) : Promise.resolve(null))),
+    );
+
+    // 1.6) Fallback Puppeteer: páginas que bloquearam o fetch simples
+    //      (Mercado Livre, Shopee etc. exigem browser real). Máx 4 páginas.
+    const pendentes = organicTop
+      .map((r, i) => ({ r, i }))
+      .filter(({ r, i }) => r.link && !precosPaginas[i])
+      .slice(0, 4);
+    if (pendentes.length > 0) {
+      let browser = null;
+      try {
+        const puppeteer = (await import('puppeteer')).default;
+        const fs = (await import('fs')).default;
+        // Resolve Chrome: env → puppeteer bundled → Chrome do sistema
+        let chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || null;
+        if (!chromePath || !fs.existsSync(chromePath)) {
+          try {
+            const bundled = puppeteer.executablePath();
+            chromePath = bundled && fs.existsSync(bundled) ? bundled : null;
+          } catch { chromePath = null; }
+        }
+        if (!chromePath) {
+          const candidatos = [
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+          ];
+          chromePath = candidatos.find((p) => fs.existsSync(p)) || null;
+        }
+        browser = await puppeteer.launch({
+          headless: 'new',
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+          ...(chromePath ? { executablePath: chromePath } : {}),
+        });
+        for (const { r, i } of pendentes) {
+          let page = null;
+          try {
+            page = await browser.newPage();
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36');
+            await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' });
+            await page.goto(r.link, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await new Promise((ok) => setTimeout(ok, 1500)); // JS de preço carregar
+            const texto = await page.evaluate(() => document.body?.innerText || '');
+            precosPaginas[i] = extrairTrechosPreco(texto.replace(/\s+/g, ' '));
+          } catch (e) {
+            console.warn(`[cotacao-ia] puppeteer falhou em ${r.link}: ${e.message}`);
+          } finally {
+            if (page) await page.close().catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.warn('[cotacao-ia] puppeteer indisponível:', e.message);
+      } finally {
+        if (browser) await browser.close().catch(() => {});
+      }
+    }
+
+    // 2) Monta contexto para a IA
+    const shoppingCtx = shoppingResults.slice(0, 12).map((r, i) => (
+      `[${i + 1}] "${r.title}" — ${r.extracted_price != null ? `R$ ${r.extracted_price}` : (r.price || 'Preço não informado')} — Loja: ${r.source || 'Desconhecida'} — Link: ${r.link || r.product_link || ''} — Frete: ${r.delivery || r.shipping || 'Não informado'}`
+    )).join('\n');
+
+    const organicCtx = organicTop.map((r, i) => (
+      `[O${i + 1}] "${r.title}" — ${r.snippet || ''} — Link: ${r.link || ''} — Fonte: ${r.source || r.displayed_link || ''}${precosPaginas[i] ? ` — PREÇOS ENCONTRADOS NA PÁGINA: ${precosPaginas[i]}` : ''}`
+    )).join('\n');
+
+    const prompt = `Você é um assistente de compras corporativas. Analise os resultados de busca abaixo e extraia os melhores fornecedores/ofertas para o item: "${cot.titulo}"${cot.descricao ? ` (${cot.descricao})` : ''}.
+
+RESULTADOS DO GOOGLE SHOPPING:
+${shoppingCtx || '(nenhum)'}
+
+RESULTADOS ORGÂNICOS:
+${organicCtx || '(nenhum)'}
+
+Extraia até 8 fornecedores. Para cada um, retorne um objeto JSON com:
+- fornecedor_nome: nome da loja/fornecedor
+- valor_unitario: preço unitário em reais (número, sem R$)
+- frete: custo do frete em reais (número). Use 0 se grátis ou não informado.
+- prazo_entrega: prazo estimado (ex: "3-5 dias úteis"). Use "" se não souber.
+- link: URL do produto
+- tipo_compra: "online"
+- condicao_pagamento: condição de pagamento se mencionada, senão ""
+- garantia: garantia se mencionada, senão ""
+- observacao: observações relevantes (ex: "frete grátis", "usado", "vende para CNPJ")
+
+REGRAS:
+- Só inclua ofertas que parecem ser do produto correto ou muito similar.
+- PRIORIZE lojas grandes e marketplaces que vendem para empresa/CNPJ e emitem nota fiscal: Mercado Livre, Magazine Luiza, Amazon, Americanas, Kabum, Kalunga, Casas Bahia e lojas especializadas com CNPJ. Quando for uma dessas, adicione "vende para CNPJ com NF" na observacao.
+- PREÇO É OBRIGATÓRIO: use o preço do resultado ou dos "PREÇOS ENCONTRADOS NA PÁGINA" (escolha o valor que corresponde ao produto, ignorando preços de parcelas ou outros produtos). Se não conseguir determinar o preço de jeito nenhum, NÃO inclua o fornecedor — a menos que haja menos de 3 com preço, aí pode incluir sem preço (valor_unitario 0) indicando "consultar preço no site" na observacao.
+- Ordene do menor preço total (valor + frete) ao maior. Fornecedores sem preço por último.
+- Responda SOMENTE com um array JSON válido, sem markdown, sem explicação.`;
+
+    // 3) Chama Gemini Flash (tier gratuito)
+    let fornecedores = [];
+    try {
+      const geminiRes = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${GEMINI_KEY}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 8192,
+            // Desliga o "thinking" pra resposta não estourar o limite de tokens
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        },
+        { timeout: 60000 },
+      );
+      const parts = geminiRes.data?.candidates?.[0]?.content?.parts || [];
+      const text = parts.map((p) => p.text || '').join('') || '[]';
+      if (!text.includes('[')) {
+        console.warn('[cotacao-ia] Gemini sem JSON. finishReason:', geminiRes.data?.candidates?.[0]?.finishReason, '· resposta:', text.slice(0, 200));
+      }
+      // Tenta extrair JSON do texto (caso venha com markdown)
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        fornecedores = JSON.parse(jsonMatch[0]);
+      }
+    } catch (e) {
+      const apiMsg = e.response?.data?.error?.message || e.message;
+      console.error('[cotacao-ia] Gemini falhou:', apiMsg);
+      return errorResponse(res, 'Falha ao processar com IA: ' + apiMsg, 500, 'AI_ERROR');
+    }
+
+    // Sanitiza e valida
+    fornecedores = (Array.isArray(fornecedores) ? fornecedores : []).map((f) => ({
+      fornecedor_nome: String(f.fornecedor_nome || 'Desconhecido').slice(0, 200),
+      valor_unitario: Math.max(0, Number(f.valor_unitario) || 0),
+      frete: Math.max(0, Number(f.frete) || 0),
+      prazo_entrega: String(f.prazo_entrega || '').slice(0, 100),
+      link: String(f.link || '').slice(0, 500),
+      tipo_compra: 'online',
+      condicao_pagamento: String(f.condicao_pagamento || '').slice(0, 200),
+      garantia: String(f.garantia || '').slice(0, 200),
+      observacao: String(f.observacao || '').slice(0, 500),
+    })).filter((f) => f.fornecedor_nome !== 'Desconhecido' && (f.valor_unitario > 0 || f.link));
+
+    // Garantia extra: com preço primeiro (menor→maior), sem preço no fim
+    fornecedores.sort((a, b) => {
+      const ta = a.valor_unitario + a.frete;
+      const tb = b.valor_unitario + b.frete;
+      if (ta > 0 && tb > 0) return ta - tb;
+      if (ta > 0) return -1;
+      if (tb > 0) return 1;
+      return 0;
+    });
+
+    return successResponse(res, {
+      fornecedores,
+      total: fornecedores.length,
+      busca: searchQuery,
+      shopping_count: shoppingResults.length,
+      organic_count: organicResults.length,
+    }, `${fornecedores.length} fornecedores encontrados via IA`);
+  }),
+);
+
 // ============================================================
 // CLIENTES POR FILIAL (BRANCH)
 // POST /api/tech/clientes-por-empresa
