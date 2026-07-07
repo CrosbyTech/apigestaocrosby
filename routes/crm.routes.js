@@ -4644,6 +4644,115 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// 0e. GET /api/crm/aniversariantes-mes
+//     Clientes (is_customer=true) com aniversário no mês, filtrados por empresa
+//     de cadastro (cd_empresacad). Usado na aba "Aniversariantes" da Minha Franquia.
+//     Query: ?month=1..12 (default: mês atual em America/Sao_Paulo)
+//            ?empresas=1,2,3  (ou repetido ?empresas=1&empresas=2)
+// ---------------------------------------------------------------------------
+router.get(
+  '/aniversariantes-mes',
+  asyncHandler(async (req, res) => {
+    // Mês alvo (1-12)
+    let month = Number(req.query.month);
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      const now = new Date(
+        new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }),
+      );
+      month = now.getMonth() + 1;
+    }
+    const mm = String(month).padStart(2, '0');
+
+    // Empresas (cd_empresacad) — aceita "1,2,3" ou repetição do parâmetro
+    let empresas = [];
+    const rawEmp = req.query.empresas;
+    if (Array.isArray(rawEmp)) empresas = rawEmp;
+    else if (typeof rawEmp === 'string') empresas = rawEmp.split(',');
+    empresas = empresas
+      .map((e) => Number(String(e).trim()))
+      .filter((n) => Number.isFinite(n));
+
+    // Busca paginada em pes_pessoa: clientes com data de nascimento preenchida.
+    // dt_nascimento é do tipo DATE (não aceita LIKE); o filtro por mês é feito
+    // em JS abaixo, isolado ao conjunto de clientes das empresas selecionadas.
+    const PAGE = 1000;
+    let offset = 0;
+    const rows = [];
+    while (true) {
+      let q = supabase
+        .from('pes_pessoa')
+        .select(
+          'code, cd_empresacad, nm_pessoa, fantasy_name, telefone, email, dt_nascimento, classifications',
+        )
+        .eq('is_customer', true)
+        .not('dt_nascimento', 'is', null)
+        .order('dt_nascimento', { ascending: true })
+        .range(offset, offset + PAGE - 1);
+      if (empresas.length > 0) q = q.in('cd_empresacad', empresas);
+      const { data, error } = await q;
+      if (error) {
+        return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
+      }
+      if (!data || data.length === 0) break;
+      // Filtra pelo mês de aniversário (dt_nascimento vem como 'YYYY-MM-DD')
+      for (const p of data) {
+        if (p.dt_nascimento && p.dt_nascimento.slice(5, 7) === mm) {
+          rows.push(p);
+        }
+      }
+      if (data.length < PAGE) break;
+      offset += PAGE;
+    }
+
+    const hoje = new Date(
+      new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }),
+    );
+    const hojeMes = hoje.getMonth() + 1;
+    const hojeDia = hoje.getDate();
+
+    const out = rows.map((p) => {
+      const dt = p.dt_nascimento; // 'YYYY-MM-DD'
+      const dia = dt ? Number(dt.slice(8, 10)) : null;
+      const mesNasc = dt ? Number(dt.slice(5, 7)) : null;
+      let idade = null;
+      if (dt) {
+        const ano = Number(dt.slice(0, 4));
+        if (ano >= 1900) {
+          idade = hoje.getFullYear() - ano;
+          const aindaNaoFez =
+            hojeMes < mesNasc || (hojeMes === mesNasc && hojeDia < dia);
+          if (aindaNaoFez) idade -= 1;
+        }
+      }
+      return {
+        code: p.code,
+        cd_empresa: p.cd_empresacad,
+        nome: p.fantasy_name || p.nm_pessoa || `Cliente ${p.code}`,
+        telefone: p.telefone || '',
+        email: p.email || '',
+        dt_nascimento: dt,
+        dia,
+        idade,
+        is_hoje: mesNasc === hojeMes && dia === hojeDia,
+        classifications: p.classifications || [],
+      };
+    });
+
+    // Ordena por dia do mês e depois nome
+    out.sort(
+      (a, b) => (a.dia ?? 99) - (b.dia ?? 99) || a.nome.localeCompare(b.nome),
+    );
+
+    return successResponse(res, {
+      total: out.length,
+      month,
+      empresas,
+      aniversariantes: out,
+    });
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // 1d. POST /api/crm/conversao-cruzada
 //     Cruzamento ClickUp ↔ TOTVS por vendedor.
 //     Body: { leads: [{ phone, vendedor_clickup_id, vendedor_totvs_id,

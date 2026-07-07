@@ -519,26 +519,38 @@ function toYmd(v) {
 }
 
 async function getFaturamentoPorSegmento(datemin, datemax) {
+  const di = toYmd(datemin);
+  const df = toYmd(datemax);
+  const hojeIso = hojeBrt();
+
+  // ─── FONTE PRIMÁRIA (2026-07): Supabase notas_fiscais direto ───────────
+  // Rápido (~1-2s vs 8-60s do fat-seg TOTVS) e completo — classificarNfCanal
+  // pega TODOS os canais incluindo inbound_david/rafael que o sale-panel
+  // TOTVS às vezes perde. Líquido = Output − Input(devoluções) por canal,
+  // mesma definição validada contra o TOTVS 0326.
+  //
+  // Só NÃO usa Supabase quando o range termina HOJE (visão ao vivo) — nesse
+  // caso o TOTVS pode ter NFs que o cron ainda não sincronizou. Para semana/
+  // mês fechado ou até ONTEM, o Supabase é a fonte de verdade.
+  const terminaHoje = df >= hojeIso;
+  if (!terminaHoje) {
+    const segSb = await getSegSupabaseRange(di, df);
+    if (segSb && Object.keys(segSb).some((k) => Number(segSb[k]) !== 0)) {
+      const out = { ...segSb };
+      out.fabrica = FABRICA_SOURCES.reduce((s, k) => s + Number(segSb[k] || 0), 0);
+      return out;
+    }
+    console.warn(`[getFaturamentoPorSegmento] Supabase vazio (${di}~${df}) — fallback TOTVS`);
+  }
+
+  // ─── FALLBACK / RANGE AO VIVO: fat-seg TOTVS (lite mode) ───────────────
   try {
-    // lite=true → pula PASS 0 (credev em payments, FIS_NFITEMPROD scan) no
-    // fat-seg. Líquido fica levemente inflado mas o card carrega em segundos
-    // e o TOTVS não bloqueia o usuário. Pra ver o líquido oficial completo,
-    // o cron noturno pode rodar full mode separado.
-    // Quando consulta é de 1 dia "recente" (≤ 3 dias atrás), força fresh —
-    // o cache de 24h pode estar com dados parciais do TOTVS sync que rodou
-    // de manhã. Isso afeta o card "Faturamento de Ontem por Canal".
-    const di = toYmd(datemin);
-    const df = toYmd(datemax);
-    const hojeIso = hojeBrt();
     const eumDiaSo = di === df;
     const diasAtras = Math.round(
       (new Date(hojeIso) - new Date(df)) / (1000 * 60 * 60 * 24),
     );
-    // Força fresh quando:
-    //   - é 1 dia recente (até 3 dias atrás) — caso "Faturamento de Ontem"
-    //   - OU range termina HOJE/ONTEM (mês corrente) — caso Comparativo Anual.
-    //     Cache de mês corrente costuma ter canais B2R/B2M/Franquia zerados
-    //     intermitentemente até NF do dia ser sincronizada no TOTVS.
+    // Força fresh quando o range termina HOJE/ONTEM — cache de mês corrente
+    // costuma ter canais B2R/B2M/Franquia zerados até NF do dia sincronizar.
     const dfTerminaRecente = diasAtras >= 0 && diasAtras <= 1;
     const forcarFresh =
       (eumDiaSo && diasAtras >= 0 && diasAtras <= 3) || dfTerminaRecente;
@@ -548,20 +560,16 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     const r = await axios.post(
       url,
       { datemin: di, datemax: df, lite: true, nocache: forcarFresh || undefined },
-      // Timeout reduzido pra 60s — em lite mode não precisa varrer items.
       { timeout: 60000 },
     );
     const seg = r.data?.data?.segmentos || r.data?.segmentos || {};
     const out = { ...seg };
-    // Canal virtual "fabrica" = showroom + novidadesfranquia
     out.fabrica = FABRICA_SOURCES.reduce((s, k) => s + Number(seg[k] || 0), 0);
     return out;
   } catch (e) {
     console.warn(
-      `[forecast/promessa] getFaturamentoPorSegmento falhou (${toYmd(datemin)}~${toYmd(datemax)}): ${e?.message} — tentando fallback via canal-totals`,
+      `[forecast/promessa] getFaturamentoPorSegmento fat-seg falhou (${di}~${df}): ${e?.message} — fallback canal-totals`,
     );
-    // ─── FALLBACK: chama /canal-totals individualmente por canal e monta segMap.
-    // É mais leve que o fat-seg (sem iteração per-NF) e mais resiliente.
     return getFaturamentoPorSegmentoViaCanalTotals(datemin, datemax);
   }
 }
@@ -3428,15 +3436,126 @@ router.get(
   }),
 );
 
+// Cache em memória do Painel de Vendas por vendedor (5min) — reduz hits no
+// Supabase quando vários canais pedem o mesmo range.
+const PAINEL_VEND_CACHE = new Map();
+const PAINEL_VEND_TTL = 5 * 60 * 1000;
+
+// Lê os valores do Painel de Vendas (sale-panel) já sincronizados no Supabase
+// pela tabela forecast_painel_vendas (populada pelo cron painel-vendas-sync).
+// Retorna LÍQUIDO por vendedor: o valor cheio de cada vendedor menos a sua
+// parte proporcional das DEVOLUÇÕES da filial (linha GERAL, dealer 50/500 etc,
+// que o TOTVS não atribui a vendedor). Distribui a devolução de cada filial
+// entre os vendedores positivos daquela filial, na proporção do que venderam.
+// Rápido: 1 query pelas filiais do canal.
+async function lerPainelVendasSupabase(g, dmin, dmax) {
+  try {
+    const sellers = (g.sellers || []).map(Number);
+    const branchs = (g.branchs || []).map(Number);
+    // Puxa TODOS os vendedores das filiais do canal (inclui GERAL negativo)
+    // pra calcular o fator líquido por filial.
+    let q = supabase
+      .from('forecast_painel_vendas')
+      .select('seller_code, seller_name, branch_code, valor')
+      .gte('data', toYmd(dmin))
+      .lte('data', toYmd(dmax));
+    if (branchs.length) q = q.in('branch_code', branchs);
+    const { data, error } = await q;
+    if (error) { console.warn(`[painel-vendas supabase] ${error.message}`); return null; }
+    if (!data || data.length === 0) return [];
+
+    // 1) Por filial: total positivo (vendas) e total negativo (devoluções GERAL)
+    const branchPos = new Map();
+    const branchNeg = new Map();
+    for (const r of data) {
+      const b = Number(r.branch_code);
+      const v = Number(r.valor || 0);
+      if (v > 0) branchPos.set(b, (branchPos.get(b) || 0) + v);
+      else branchNeg.set(b, (branchNeg.get(b) || 0) + v);
+    }
+    // 2) Fator líquido por filial = (pos + neg) / pos  (neg é ≤ 0)
+    const fatorFilial = (b) => {
+      const pos = branchPos.get(b) || 0;
+      const neg = branchNeg.get(b) || 0;
+      return pos > 0 ? (pos + neg) / pos : 1;
+    };
+
+    // 3) Soma LÍQUIDO só dos vendedores do canal (aplica fator da filial)
+    const allow = new Set(sellers);
+    const acc = new Map();
+    for (const r of data) {
+      const code = Number(r.seller_code);
+      const v = Number(r.valor || 0);
+      if (v <= 0) continue; // devoluções já entram via fator
+      if (allow.size > 0 && !allow.has(code)) continue;
+      const liquido = v * fatorFilial(Number(r.branch_code));
+      const cur = acc.get(code) || { valor: 0, nome: r.seller_name };
+      cur.valor += liquido;
+      if (r.seller_name) cur.nome = r.seller_name;
+      acc.set(code, cur);
+    }
+    return [...acc.entries()].map(([code, v]) => ({
+      seller_code: String(code),
+      seller_name: v.nome || `Vend. ${code}`,
+      value: Math.round(v.valor * 100) / 100,
+    }));
+  } catch (e) {
+    console.warn(`[painel-vendas supabase] ${e.message}`);
+    return null;
+  }
+}
+
 async function buildVendedoresLiquido(g, datemin, datemax) {
-  // FONTE PRIMÁRIA (2026-07): Supabase notas_fiscais direto — dealer,
-  // total_value, operation_type, person_code, invoice_code. Rápido (<2s)
-  // e bate com relatório oficial TOTVS. Substitui o replica accounts-
-  // receivable TOTVS que era lento (30-60s) e ficava travando quando
-  // o TOTVS ficava fora do ar.
-  //
-  // TOTVS live (getFaturadoOficialReplica + getSellersOficial + getCredevVendedor)
-  // usados APENAS como fallback se Supabase retornar vazio pro grupo.
+  // ─── FONTE OFICIAL (2026-07): Painel de Vendas do TOTVS via Supabase ───
+  // Decisão do gestor: o Forecast espelha o "Painel de Vendas" (sale-panel/
+  // sellers, campo seller_sale_value) — a MESMA tela que o TOTVS mostra por
+  // vendedor. É a régua oficial. Ex: David R$2.872,94 · Rafael R$1.558,18.
+  // Lê da tabela forecast_painel_vendas (sincronizada pelo cron) → rápido.
+  // Se o Supabase não tiver o range, cai no painel AO VIVO; e por último NF.
+  try {
+    const cacheKey = `${g.code}|${toYmd(datemin)}|${toYmd(datemax)}`;
+    const cached = PAINEL_VEND_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < PAINEL_VEND_TTL) return cached.list;
+
+    // 1) Supabase (sincronizado) — rápido, já traz LÍQUIDO por vendedor
+    let painel = await lerPainelVendasSupabase(g, datemin, datemax);
+    // 2) Fallback: painel ao vivo (TOTVS) se Supabase vazio pro range
+    if (!painel || painel.length === 0) {
+      const live = await getSellersOficial(g.branchs, g.operations, datemin, datemax);
+      painel = Array.isArray(live) ? live : [];
+    }
+    if (painel.length > 0) {
+      const allow = new Set((g.sellers || []).map(Number));
+      const list = [];
+      for (const s of painel) {
+        const code = Number(s.seller_code);
+        if (allow.size > 0 && !allow.has(code)) continue;
+        const valor = Number(s.value || 0);
+        if (valor <= 0) continue;
+        list.push({
+          seller_code: String(code),
+          nome: s.seller_name || `Vend. ${code}`,
+          bruto: Math.round(valor * 100) / 100,
+          credev: 0,
+          real: Math.round(valor * 100) / 100,
+          clientes: 0,
+          nfs: 0,
+        });
+      }
+      if (list.length > 0) {
+        list.sort((a, b) => b.real - a.real);
+        PAINEL_VEND_CACHE.set(cacheKey, { ts: Date.now(), list });
+        return list;
+      }
+    }
+    console.warn(`[buildVendedoresLiquido ${g.code}] painel vazio (${toYmd(datemin)}~${toYmd(datemax)}) — fallback Supabase NF`);
+  } catch (e) {
+    console.warn(`[buildVendedoresLiquido ${g.code}] painel falhou (${e.message}) — fallback Supabase NF`);
+  }
+
+  // ─── FALLBACK: Supabase notas_fiscais direto ───────────────────────────
+  // Usado só se o Painel de Vendas falhar/vier vazio. Dealer, total_value,
+  // operation_type, person_code. Aproxima o painel mas por classificação NF.
   const { createClient } = await import('@supabase/supabase-js');
   const supabaseFiscal = createClient(
     process.env.SUPABASE_FISCAL_URL,
@@ -3562,7 +3681,11 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
         }
         porDealer.set(k, cur);
       }
-      // Sobrescreve customersData (que vem de clientes-por-vendedor)
+      // Sobrescreve customersData (que vem de clientes-por-vendedor).
+      // IMPORTANTE: grava bruto/credev também — o construtor da lista (abaixo)
+      // usa `stats.bruto != null` pra incluir o vendedor na fonte Supabase.
+      // Sem bruto, David/Rafael caíam no fallback TOTVS (vazio) e sumiam.
+      // liquido já é Output − Input, então bruto=liquido e credev=0.
       for (const [code, agg] of porDealer.entries()) {
         const liquido = Math.max(0, agg.valor);
         if (liquido > 0) {
@@ -3572,6 +3695,8 @@ async function buildVendedoresLiquido(g, datemin, datemax) {
           }
           customersData[code] = {
             valor: liquido,
+            bruto: liquido,
+            credev: 0,
             customers: agg.customers.size,
             nfs: agg.nfs,
           };
