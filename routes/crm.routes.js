@@ -13654,7 +13654,7 @@ router.post(
     if (modulo === 'varejo') {
       try {
         const VAREJO_BRANCHES_LIVE = [
-          2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97,
+          2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98,
         ];
         // Operações usadas pelo TOTVS para branches especiais do painel
         // (mesma lista do /sale-panel/ranking-faturamento). Sem isso, TOTVS
@@ -13819,7 +13819,7 @@ router.post(
     const FRANQUIA_DEALER = 40;
     const JUCELINO_DEALER = 288;
     const VAREJO_BRANCH_CODES = new Set([
-      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97,
+      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98,
     ]);
     const REVENDA_BRANCH_CODES = new Set([99]);
     const B2R_REVENDA_DEALERS_EMP2 = new Set([288, 251, 131]);
