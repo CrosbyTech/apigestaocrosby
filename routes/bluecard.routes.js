@@ -503,6 +503,8 @@ router.patch('/leads/:id', async (req, res) => {
     'endereco',
     'numero',
     'complemento',
+    'cidade',
+    'estado',
     'indicado_por',
     'cvv',
   ];

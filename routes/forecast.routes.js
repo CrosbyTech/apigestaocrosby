@@ -13,6 +13,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getPool } from '../services/uazapiSync.js';
+import { getPainelSellerCanais } from '../services/painelCanais.js';
 
 const router = express.Router();
 
@@ -518,6 +519,24 @@ function toYmd(v) {
   return String(v).slice(0, 10);
 }
 
+// Sobrescreve os 4 canais de vendedor com o Painel de Vendas (fonte única).
+// Aplicado em TODOS os retornos do getFaturamentoPorSegmento pra que qualquer
+// consumidor (ontem-canal, promessa, dashboard, etc.) veja o mesmo número do
+// Painel. Guarda hasData: sem painel no período, mantém o valor fat-seg.
+async function aplicarPainelCanaisSeg(out, di, df) {
+  try {
+    const pv = await getPainelSellerCanais(di, df);
+    if (pv.hasData) {
+      for (const canal of ['revenda', 'multimarcas', 'inbound_david', 'inbound_rafael']) {
+        out[canal] = Number(pv[canal] || 0);
+      }
+    }
+  } catch (e) {
+    console.warn(`[getFaturamentoPorSegmento] painel override falhou: ${e.message}`);
+  }
+  return out;
+}
+
 async function getFaturamentoPorSegmento(datemin, datemax) {
   const di = toYmd(datemin);
   const df = toYmd(datemax);
@@ -538,7 +557,7 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     if (segSb && Object.keys(segSb).some((k) => Number(segSb[k]) !== 0)) {
       const out = { ...segSb };
       out.fabrica = FABRICA_SOURCES.reduce((s, k) => s + Number(segSb[k] || 0), 0);
-      return out;
+      return aplicarPainelCanaisSeg(out, di, df);
     }
     console.warn(`[getFaturamentoPorSegmento] Supabase vazio (${di}~${df}) — fallback TOTVS`);
   }
@@ -565,7 +584,9 @@ async function getFaturamentoPorSegmento(datemin, datemax) {
     const seg = r.data?.data?.segmentos || r.data?.segmentos || {};
     const out = { ...seg };
     out.fabrica = FABRICA_SOURCES.reduce((s, k) => s + Number(seg[k] || 0), 0);
-    return out;
+    // O endpoint crm já aplica o painel, mas reforçamos aqui pra garantir que
+    // o helper SEMPRE devolva os 4 canais do painel (fonte única).
+    return aplicarPainelCanaisSeg(out, di, df);
   } catch (e) {
     console.warn(
       `[forecast/promessa] getFaturamentoPorSegmento fat-seg falhou (${di}~${df}): ${e?.message} — fallback canal-totals`,
@@ -1339,22 +1360,72 @@ router.get(
             return { ok: false };
           }
         };
-        const davidR = await recalcInboundSupabase('David', [26, 69]);
-        if (davidR.ok) {
-          console.log(`[ovl cache-only] inbound_david: cache=R$${(seg.inbound_david || 0).toFixed(2)} → Supabase=R$${davidR.valor.toFixed(2)}`);
-          seg.inbound_david = davidR.valor;
-        }
-        const rafaelR = await recalcInboundSupabase('Rafael', [21]);
-        if (rafaelR.ok) {
-          console.log(`[ovl cache-only] inbound_rafael: cache=R$${(seg.inbound_rafael || 0).toFixed(2)} → Supabase=R$${rafaelR.valor.toFixed(2)}`);
-          seg.inbound_rafael = rafaelR.valor;
+        // ── FONTE ÚNICA: Painel de Vendas pros 4 canais de vendedor ────────
+        // Revenda/Multimarcas/Inbound David/Rafael vêm do Painel de Vendas
+        // (forecast_painel_vendas via getPainelSellerCanais) — a MESMA fonte da
+        // Promessa / Métricas por Canal / canal-totals. Garante que a Métricas
+        // Diretoria mostre EXATAMENTE o mesmo número das outras telas.
+        // Guarda hasData: sem painel no período, mantém canal_totals_cache +
+        // recalc de inbound via notas_fiscais (histórico não sincronizado).
+        let painelAplicado = false;
+        try {
+          const pv = await getPainelSellerCanais(dmin, dmax);
+          if (pv.hasData) {
+            for (const canal of ['revenda', 'multimarcas', 'inbound_david', 'inbound_rafael']) {
+              const before = Number(seg[canal] || 0);
+              seg[canal] = Number(pv[canal] || 0);
+              console.log(`[ovl cache-only painel] ${canal}: cache=R$${before.toFixed(2)} → painel=R$${seg[canal].toFixed(2)}`);
+            }
+            painelAplicado = true;
+          }
+        } catch (e) {
+          console.warn(`[ovl cache-only] painel override falhou: ${e.message}`);
         }
 
-        // Override de Multimarcas removido: notas_fiscais Supabase usa só ops
-        // [7235, 7241, 9127, 200] que é mais restrito que o sale-panel TOTVS
-        // (canal_totals_cache.multimarcas). Resultado: deflacionava o valor
-        // pra R$ 100k quando o oficial é R$ 154k. Como o cache canal_totals_cache
-        // já bate com o relatório TOTVS oficial, mantemos ele direto.
+        // Fallback (só quando o painel não tem o período): recalc inbound via
+        // notas_fiscais, como antes.
+        if (!painelAplicado) {
+          const davidR = await recalcInboundSupabase('David', [26, 69]);
+          if (davidR.ok) {
+            console.log(`[ovl cache-only] inbound_david: cache=R$${(seg.inbound_david || 0).toFixed(2)} → Supabase=R$${davidR.valor.toFixed(2)}`);
+            seg.inbound_david = davidR.valor;
+          }
+          const rafaelR = await recalcInboundSupabase('Rafael', [21]);
+          if (rafaelR.ok) {
+            console.log(`[ovl cache-only] inbound_rafael: cache=R$${(seg.inbound_rafael || 0).toFixed(2)} → Supabase=R$${rafaelR.valor.toFixed(2)}`);
+            seg.inbound_rafael = rafaelR.valor;
+          }
+        }
+
+        // ── SNAPSHOT OFICIAL (mês fechado) — palavra final, igual às outras
+        // telas (fat-seg / promessa-mensal). Se o range é um mês inteiro já
+        // fechado, os valores oficiais do snapshot têm prioridade sobre o
+        // painel/cache. Garante que Métricas Diretoria == Promessa no fechado.
+        try {
+          const dp = String(dmin).split('-');
+          const dq = String(dmax).split('-');
+          const sameYM = dp[0] === dq[0] && dp[1] === dq[1];
+          const lastDay = new Date(Number(dp[0]), Number(dp[1]), 0).getDate();
+          const isMonthRange = sameYM && dp[2] === '01' && Number(dq[2]) === lastDay;
+          const nowU = new Date();
+          const mesCorrente = nowU.getUTCFullYear() * 100 + (nowU.getUTCMonth() + 1);
+          const mesConsultado = Number(dp[0]) * 100 + Number(dp[1]);
+          if (isMonthRange && mesConsultado < mesCorrente) {
+            const { data: snaps } = await supabase
+              .from('forecast_canal_snapshot')
+              .select('canal, valor_oficial')
+              .eq('period_type', 'mensal')
+              .eq('period_key', `${dp[0]}-${dp[1]}`)
+              .eq('ativo', true);
+            for (const s of snaps || []) {
+              const before = Number(seg[s.canal] || 0);
+              seg[s.canal] = Number(s.valor_oficial);
+              console.log(`[ovl cache-only snapshot] ${dp[0]}-${dp[1]} ${s.canal}: R$${before.toFixed(2)} → R$${seg[s.canal].toFixed(2)}`);
+            }
+          }
+        } catch (e) {
+          console.warn(`[ovl cache-only] snapshot falhou: ${e.message}`);
+        }
 
         // ── Per-seller breakdown via notas_fiscais (B2M e B2R) ────────────
         // Mapping dinâmico dealer_code → nome via view v_vendedores_integracao.
@@ -3452,45 +3523,42 @@ async function lerPainelVendasSupabase(g, dmin, dmax) {
   try {
     const sellers = (g.sellers || []).map(Number);
     const branchs = (g.branchs || []).map(Number);
-    // Puxa TODOS os vendedores das filiais do canal (inclui GERAL negativo)
-    // pra calcular o fator líquido por filial.
-    let q = supabase
-      .from('forecast_painel_vendas')
-      .select('seller_code, seller_name, branch_code, valor')
-      .gte('data', toYmd(dmin))
-      .lte('data', toYmd(dmax));
-    if (branchs.length) q = q.in('branch_code', branchs);
-    const { data, error } = await q;
-    if (error) { console.warn(`[painel-vendas supabase] ${error.message}`); return null; }
-    if (!data || data.length === 0) return [];
-
-    // 1) Por filial: total positivo (vendas) e total negativo (devoluções GERAL)
-    const branchPos = new Map();
-    const branchNeg = new Map();
-    for (const r of data) {
-      const b = Number(r.branch_code);
-      const v = Number(r.valor || 0);
-      if (v > 0) branchPos.set(b, (branchPos.get(b) || 0) + v);
-      else branchNeg.set(b, (branchNeg.get(b) || 0) + v);
+    // Puxa TODOS os vendedores das filiais do canal (inclui GERAL negativo).
+    // Pagina de 1000 em 1000 — janelas mensais podem passar do cap do Supabase
+    // (ex: mês inteiro × várias filiais) e um corte silencioso subcontaria.
+    const data = [];
+    for (let from = 0; ; from += 1000) {
+      let q = supabase
+        .from('forecast_painel_vendas')
+        .select('seller_code, seller_name, branch_code, valor')
+        .gte('data', toYmd(dmin))
+        .lte('data', toYmd(dmax))
+        .order('data', { ascending: true })
+        .range(from, from + 999);
+      if (branchs.length) q = q.in('branch_code', branchs);
+      const { data: page, error } = await q;
+      if (error) { console.warn(`[painel-vendas supabase] ${error.message}`); return null; }
+      if (!page || page.length === 0) break;
+      data.push(...page);
+      if (page.length < 1000) break;
     }
-    // 2) Fator líquido por filial = (pos + neg) / pos  (neg é ≤ 0)
-    const fatorFilial = (b) => {
-      const pos = branchPos.get(b) || 0;
-      const neg = branchNeg.get(b) || 0;
-      return pos > 0 ? (pos + neg) / pos : 1;
-    };
+    if (data.length === 0) return [];
 
-    // 3) Soma LÍQUIDO só dos vendedores do canal (aplica fator da filial)
+    // Soma o valor do Painel de Vendas por vendedor, EXATAMENTE como a tela do
+    // TOTVS mostra. O seller_sale_value já vem LÍQUIDO (devoluções do próprio
+    // vendedor já descontadas na origem) — então NÃO redistribuímos a linha
+    // GERAL por cima (isso descontava devolução 2x e derrubava o card).
+    // A linha GERAL (dealer 50, valor negativo) fica fora: não é vendedor e o
+    // TOTVS não a atribui a ninguém no Painel de Vendas.
     const allow = new Set(sellers);
     const acc = new Map();
     for (const r of data) {
       const code = Number(r.seller_code);
       const v = Number(r.valor || 0);
-      if (v <= 0) continue; // devoluções já entram via fator
+      if (v <= 0) continue; // GERAL/ajustes negativos não são vendedor
       if (allow.size > 0 && !allow.has(code)) continue;
-      const liquido = v * fatorFilial(Number(r.branch_code));
       const cur = acc.get(code) || { valor: 0, nome: r.seller_name };
-      cur.valor += liquido;
+      cur.valor += v;
       if (r.seller_name) cur.nome = r.seller_name;
       acc.set(code, cur);
     }

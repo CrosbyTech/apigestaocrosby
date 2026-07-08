@@ -58,6 +58,7 @@ async function popularDia(diaIso) {
     for (const s of b.dataRow || []) {
       const code = Number(s.seller_code);
       const valor = Number(s.seller_sale_value || 0);
+      const qtd = Number(s.seller_sale_qty || 0);
       if (!Number.isFinite(code)) continue;
       rows.push({
         data: diaIso,
@@ -65,6 +66,7 @@ async function popularDia(diaIso) {
         seller_name: s.seller_name || null,
         branch_code: branchCode,
         valor: Math.round(valor * 100) / 100,
+        qtd: Number.isFinite(qtd) ? Math.round(qtd) : 0,
         atualizado_em: now,
       });
     }
