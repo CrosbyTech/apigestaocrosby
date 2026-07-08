@@ -655,13 +655,18 @@ router.post(
         }
 
         // Retornar erro detalhado da API TOTVS
+        console.error('📋 Resposta completa da TOTVS (bank-slip):', JSON.stringify(error.response.data, null, 2));
+        const totvs = error.response.data;
+        const first = Array.isArray(totvs) ? totvs[0] : totvs;
         const errorMessage =
-          error.response.data?.message ||
-          error.response.data?.error ||
-          error.response.data?.error_description ||
-          (typeof error.response.data === 'string'
-            ? error.response.data
-            : 'Erro ao gerar boleto bancário na API TOTVS');
+          first?.message ||
+          first?.error ||
+          first?.error_description ||
+          first?.errorMessage ||
+          first?.detailedMessage ||
+          (typeof totvs === 'string'
+            ? totvs
+            : `Erro ${error.response.status} ao gerar boleto na API TOTVS`);
 
         // Retornar resposta de erro com detalhes adicionais
         res.status(error.response.status || 400).json({
