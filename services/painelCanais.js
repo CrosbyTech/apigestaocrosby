@@ -16,6 +16,59 @@
 // caso o chamador NÃO deve sobrescrever (evita zerar histórico não sincronizado).
 // ─────────────────────────────────────────────────────────────────────────
 import supabase from '../config/supabase.js';
+import axios from 'axios';
+import https from 'https';
+import { getToken } from '../utils/totvsTokenManager.js';
+
+// ─── Ricardo Eletro (filiais 11/111) via analytics/fiscal-movement ─────────
+// Essas filiais NÃO são sincronizadas nas notas_fiscais (o fiscal/invoices não
+// as retorna). A fonte oficial é o analytics/fiscal-movement do TOTVS. Cache
+// 30min por período. Usado no override de RE em fat-seg (Forecast e CRM).
+const RE_FM_CACHE = new Map();
+const RE_FM_TTL = 30 * 60 * 1000;
+const RE_AGENT = new https.Agent({ rejectUnauthorized: false });
+export async function getRicardoEletroFM(dmin, dmax) {
+  const key = `${dmin}|${dmax}`;
+  const cached = RE_FM_CACHE.get(key);
+  if (cached && Date.now() - cached.ts < RE_FM_TTL) return cached.valor;
+  try {
+    const tk = await getToken();
+    if (!tk?.access_token) return null;
+    const RE_OPS = [512, 5102, 7236, 200, 510, 521, 545, 548, 7237, 7269, 7277, 7279];
+    const RE_EXCL = new Set([5153, 5152, 5909, 5910, 5912, 6914, 7273]);
+    const base = process.env.TOTVS_BASE_URL || 'https://www30.bhan.com.br:9443/api/totvsmoda';
+    const personSums = new Map();
+    for (let page = 1; ; page++) {
+      const r = await axios.post(
+        `${base}/analytics/v2/fiscal-movement/search`,
+        {
+          filter: { branchCodeList: [11, 111], startMovementDate: `${dmin}T00:00:00`, endMovementDate: `${dmax}T23:59:59` },
+          page, pageSize: 100,
+        },
+        { headers: { Authorization: `Bearer ${tk.access_token}`, 'Content-Type': 'application/json' }, httpsAgent: RE_AGENT, timeout: 60000 },
+      );
+      const items = r.data?.items || [];
+      for (const it of items) {
+        if (it.operationModel !== 'Sales') continue;
+        const opCode = parseInt(it.operationCode);
+        if (!RE_OPS.includes(opCode) || RE_EXCL.has(opCode)) continue;
+        const pc = parseInt(it.personCode);
+        if (!pc || pc >= 100000000) continue;
+        const v = parseFloat(it.netValue || it.grossValue || 0);
+        if (v > 0) personSums.set(pc, (personSums.get(pc) || 0) + v);
+      }
+      if (items.length < 100 || page > 50) break;
+    }
+    let total = 0;
+    for (const v of personSums.values()) total += v;
+    total = Math.round(total * 100) / 100;
+    RE_FM_CACHE.set(key, { ts: Date.now(), valor: total });
+    return total;
+  } catch (e) {
+    console.warn(`[getRicardoEletroFM] ${e.message}`);
+    return null;
+  }
+}
 
 // Grupos espelham os do Forecast (VEND_MENSAL_GROUPS em forecast.routes.js).
 const B2R = {

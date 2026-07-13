@@ -13,7 +13,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getPool } from '../services/uazapiSync.js';
-import { getPainelSellerCanais } from '../services/painelCanais.js';
+import { getPainelSellerCanais, getPainelPerSeller, getRicardoEletroFM } from '../services/painelCanais.js';
 
 const router = express.Router();
 
@@ -519,10 +519,11 @@ function toYmd(v) {
   return String(v).slice(0, 10);
 }
 
-// Sobrescreve os 4 canais de vendedor com o Painel de Vendas (fonte única).
-// Aplicado em TODOS os retornos do getFaturamentoPorSegmento pra que qualquer
-// consumidor (ontem-canal, promessa, dashboard, etc.) veja o mesmo número do
-// Painel. Guarda hasData: sem painel no período, mantém o valor fat-seg.
+// Sobrescreve os 4 canais de vendedor com o Painel de Vendas (fonte única) +
+// Ricardo Eletro via fiscal-movement (não está nas notas). Aplicado em TODOS os
+// retornos do getFaturamentoPorSegmento pra qualquer consumidor (ontem-canal,
+// promessa, dashboard) ver o mesmo número. Guarda hasData: sem painel no
+// período, mantém o valor fat-seg.
 async function aplicarPainelCanaisSeg(out, di, df) {
   try {
     const pv = await getPainelSellerCanais(di, df);
@@ -534,6 +535,10 @@ async function aplicarPainelCanaisSeg(out, di, df) {
   } catch (e) {
     console.warn(`[getFaturamentoPorSegmento] painel override falhou: ${e.message}`);
   }
+  try {
+    const re = await getRicardoEletroFM(di, df);
+    if (re != null) out.ricardoeletro = re;
+  } catch { /* mantém o valor fat-seg */ }
   return out;
 }
 
@@ -911,9 +916,9 @@ const TITULARES_B2R = [
   { label: 'Michel', matches: ['MICHEL'] },
   { label: 'Yago', matches: ['YAGO'] },
 ];
+// Renato (65) e Walter (177) desligados (2026-07) — removidos do display.
+// Seguem no allow-list dos totais (65/177) pra não alterar o histórico de junho.
 const TITULARES_B2M = [
-  { label: 'Renato', matches: ['RENATO'] },
-  { label: 'Walter', matches: ['WALTER'] },
   { label: 'Arthur', matches: ['ARTHUR'] },
 ];
 
@@ -1275,21 +1280,40 @@ router.get(
         // abaixo (Jhemyson, David, Rafael, Multimarcas) recalculam do Supabase
         // notas_fiscais — autoritativo. Pular canais-totals-all com nocache=true
         // (TOTVS direto) que demorava 3+ minutos em ranges grandes.
+        // FONTE ÚNICA: getFaturamentoPorSegmento — MESMA base da Promessa por
+        // Canal (fat-seg Supabase + override Painel nos canais de vendedor).
+        // Garante que a Métricas Diretoria (total E detalhe) bata 1:1 com a
+        // Promessa Mensal por Canal. Antes usava canal_totals_cache, que ficava
+        // defasado em franquia/showroom/fábrica.
         let seg = {};
         try {
-          const { data: rows } = await supabase
-            .from('canal_totals_cache')
-            .select('canal, datemax, valor_liquido')
-            .eq('datemin', dmin);
-          const reqEnd = new Date(`${dmax}T00:00:00Z`).getTime();
-          for (const r of rows || []) {
-            const rowEnd = new Date(`${r.datemax}T00:00:00Z`).getTime();
-            const diffDays = Math.abs(rowEnd - reqEnd) / (24 * 3600 * 1000);
-            if (diffDays <= 2) seg[r.canal] = Number(r.valor_liquido || 0);
-          }
-          console.log(`[ovl cache-only] cache hit (${Object.keys(seg).length} canais) ${dmin}~${dmax}`);
+          seg = (await getFaturamentoPorSegmento(dmin, dmax)) || {};
+          console.log(`[ovl cache-only] fat-seg (${Object.keys(seg).length} canais) ${dmin}~${dmax}`);
         } catch (e) {
-          console.warn(`[ovl cache-only] cache lookup falhou: ${e.message}`);
+          console.warn(`[ovl cache-only] fat-seg falhou (${e.message}) — fallback canal_totals_cache`);
+          try {
+            const { data: rows } = await supabase
+              .from('canal_totals_cache')
+              .select('canal, datemax, valor_liquido')
+              .eq('datemin', dmin);
+            const reqEnd = new Date(`${dmax}T00:00:00Z`).getTime();
+            for (const r of rows || []) {
+              const rowEnd = new Date(`${r.datemax}T00:00:00Z`).getTime();
+              const diffDays = Math.abs(rowEnd - reqEnd) / (24 * 3600 * 1000);
+              if (diffDays <= 2) seg[r.canal] = Number(r.valor_liquido || 0);
+            }
+          } catch (e2) {
+            console.warn(`[ovl cache-only] cache lookup falhou: ${e2.message}`);
+          }
+        }
+
+        // Aplica exclusões (ex: Recife Mall fora de Franquia a partir de 21/05) —
+        // MESMO passo que a Promessa faz. Sem isso a franquia ficava ~R$1.3k
+        // maior aqui do que na Promessa por Canal.
+        try {
+          await aplicarExclusoesForecast(seg, dmin, dmax);
+        } catch (e) {
+          console.warn(`[ovl cache-only] aplicarExclusoesForecast falhou: ${e.message}`);
         }
 
         const round = (v) => Math.round(Number(v || 0) * 100) / 100;
@@ -1643,25 +1667,30 @@ router.get(
         };
 
         let vendedoresB2M = [], vendedoresB2R = [], lojasB2C = [];
+        // Per-seller do PAINEL DE VENDAS (mesma fonte do total do canal) — assim
+        // o detalhamento por vendedor SOMA exatamente o total do canal (Screen
+        // "Detalhado" == Screen "Por Canal"). Antes usava grupoPorDealerNF (dealer
+        // do cabeçalho da NF, que cai em GERAL/50 e subcontava ~metade).
+        const painelParaLista = (r) =>
+          (r?.per_seller || []).map((s) => ({
+            nome: nomeDealer(s.seller_code) !== `Vend. ${s.seller_code}`
+              ? nomeDealer(s.seller_code)
+              : String(s.seller_name || '').trim().toLowerCase().split(/\s+/)
+                  .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ').split(' ')[0],
+            valor: round(s.invoice_value || 0),
+          })).filter((v) => v.valor > 0).sort((a, b) => b.valor - a.valor);
         try {
-          // 100% Supabase notas_fiscais (rápido, atualizado a cada 30min).
-          // Sem fallback TOTVS — dado 0 legítimo NÃO deve disparar TOTVS lento
-          // (timeout 30s pra confirmar vazio custa 30s por canal). O sync fiscal
-          // já garante estar em dia; se algo tiver 0 é porque realmente é 0
-          // no dia (ex: início de mês, feriado, canal sem venda).
-          [vendedoresB2M, vendedoresB2R, lojasB2C] = await Promise.all([
-            grupoPorDealerNF({
-              branchs: B2M_OVERRIDE_BRANCHES,
-              ops: [7235, 7241, 9127, 200],
-              excludeSellers: [21, 26, 69],
-            }),
-            grupoPorDealerNF({
-              branchs: [2, 5, 75, 99, 200],
-              ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279],
-              sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044],
-            }),
+          const [pvMM, pvB2R, lojas] = await Promise.all([
+            getPainelPerSeller('multimarcas', dmin, dmax),
+            getPainelPerSeller('revenda', dmin, dmax),
             lojasVarejoSupabase(),
           ]);
+          // Fallback pra notas só se o painel não tiver dado no período.
+          vendedoresB2M = pvMM.hasData ? painelParaLista(pvMM)
+            : await grupoPorDealerNF({ branchs: B2M_OVERRIDE_BRANCHES, ops: [7235, 7241, 9127, 200], excludeSellers: [21, 26, 69] });
+          vendedoresB2R = pvB2R.hasData ? painelParaLista(pvB2R)
+            : await grupoPorDealerNF({ branchs: [2, 5, 75, 99, 200], ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279], sellers: [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044] });
+          lojasB2C = lojas;
         } catch (e) {
           console.warn(`[ovl cache-only] per_seller falhou: ${e.message}`);
         }
@@ -1755,6 +1784,10 @@ router.get(
         };
         vendedoresB2M = escalarParaTotal(vendedoresB2M, round(seg.multimarcas));
         vendedoresB2R = escalarParaTotal(vendedoresB2R, round(seg.revenda));
+        // Lojas varejo: escala pro total do canal (fat-seg) — a lista de ops do
+        // lojasVarejoSupabase difere um pouco da classificação fat-seg, então
+        // escalamos pra o detalhe por loja somar o mesmo que o canal Varejo.
+        lojasB2C = escalarParaTotal(lojasB2C, round(seg.varejo));
 
         // Per-seller e lojas vêm direto de notas_fiscais (valores REAIS, sem
         // escalonamento proporcional). O total exibido = soma dos valores
@@ -2860,9 +2893,9 @@ const VENDEDORES_CARDS = [
     code: 'B2M',
     label: 'B2M',
     canal: 'multimarcas',
+    // Renato/Walter desligados (2026-07) — fora do display. Totais seguem
+    // via allow-list de sellers (65/177) pra preservar histórico de junho.
     titulares: [
-      { nome: 'RENATO', label: 'Renato' },
-      { nome: 'WALTER', label: 'Walter' },
       { nome: 'ARTHUR', label: 'Arthur' },
     ],
     // Vendedores "convidados": cada um puxa meta + faturamento de OUTRO canal
@@ -2991,10 +3024,34 @@ router.get(
       return out;
     };
 
+    // Ano ANTERIOR (2025): as notas_fiscais de 2025 estão INCOMPLETAS no
+    // Supabase (faltam franquia/multimarcas/showroom; ricardoeletro vem
+    // negativo). Fonte oficial = forecast_comparativo_ref (valores do relatório
+    // TOTVS / planilha Crescimento 24x25), a MESMA do Comparativo Anual.
+    // YTD = meses fechados (valor_full) + mês corrente (valor_acumulado).
+    const agregar2025FromRef = async () => {
+      const mesAtual = hoje.getUTCMonth() + 1;
+      const { data, error } = await supabase
+        .from('forecast_comparativo_ref')
+        .select('mes, canal, valor_full, valor_acumulado')
+        .eq('ano', anoAnterior);
+      if (error) throw new Error(`ref 2025: ${error.message}`);
+      const out = {};
+      for (const r of data || []) {
+        const m = Number(r.mes);
+        let v = 0;
+        if (m < mesAtual) v = Number(r.valor_full || 0);
+        else if (m === mesAtual) v = Number(r.valor_acumulado || 0);
+        else continue;
+        if (v) out[r.canal] = Math.round(((out[r.canal] || 0) + v) * 100) / 100;
+      }
+      return out;
+    };
+
     try {
       const [segAtual, segAnterior] = await Promise.all([
         agregarAno(iniAtual, fimAtual),
-        agregarAno(iniAnterior, fimAnterior),
+        agregar2025FromRef(),
       ]);
       return successResponse(res, {
         ano_atual: anoAtual,
@@ -4355,18 +4412,16 @@ router.get(
     const [refAnt, segAtualReal] = await Promise.all([
       getRefValues(anoAnt, mes, diaAcum),
       periodAtualReal
-        ? ehMesCorrente
-          ? (await getSegViaCanaisTotals(
-              periodAtualReal.datemin,
-              periodAtualReal.datemax,
-            )) || getSegViaTransacaoHistorico(
-              periodAtualReal.datemin,
-              periodAtualReal.datemax,
-            )
-          : getFaturamentoPorSegmento(
-              periodAtualReal.datemin,
-              periodAtualReal.datemax,
-            )
+        // Fonte ÚNICA (2026-07): getFaturamentoPorSegmento — mesma base das
+        // outras telas (fat-seg Supabase + override Painel de Vendas nos canais
+        // de vendedor). Garante que B2M = multimarcas + inbound_david +
+        // inbound_rafael (Arthur + David + Rafael) e bate 1:1 com Métricas por
+        // Canal / Promessa. Antes o mês corrente usava canais-totals-all, que
+        // subcontava B2M/inbound e divergia. RE segue com override fiscal-movement abaixo.
+        ? getFaturamentoPorSegmento(
+            periodAtualReal.datemin,
+            periodAtualReal.datemax,
+          )
         : Promise.resolve(null),
     ]);
     // Override RE via fiscal-movement (mais completo que sale-panel)

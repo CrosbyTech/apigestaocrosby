@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import cron from 'node-cron';
 import evolutionPool from '../config/evolution.js';
 import { createClient } from '@supabase/supabase-js';
-import { getPainelSellerCanais, getPainelPerSeller } from '../services/painelCanais.js';
+import { getPainelSellerCanais, getPainelPerSeller, getRicardoEletroFM } from '../services/painelCanais.js';
 import {
   listUazapiInstances,
   listUazapiInstancesRaw,
@@ -15287,6 +15287,14 @@ router.post(
       }
     } catch (err) {
       console.warn(`[fat-seg painel-canais] override falhou: ${err.message}`);
+    }
+
+    // Ricardo Eletro (11/111) não está nas notas — puxa do fiscal-movement.
+    try {
+      const re = await getRicardoEletroFM(datemin, datemax);
+      if (re != null) segMap.ricardoeletro = re;
+    } catch (err) {
+      console.warn(`[fat-seg ricardoeletro] override falhou: ${err.message}`);
     }
 
     // Arredondamentos finais
