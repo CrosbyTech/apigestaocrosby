@@ -413,20 +413,6 @@ router.patch(
   }),
 );
 
-// DELETE /fila/motivos/:id (soft delete pra não quebrar histórico)
-router.delete(
-  '/motivos/:id',
-  asyncHandler(async (req, res) => {
-    const id = parseInt(req.params.id, 10);
-    const { error } = await supabase
-      .from('fila_motivos_nao_venda')
-      .update({ ativo: false })
-      .eq('id', id);
-    if (error) return errorResponse(res, error.message, 500);
-    return successResponse(res, { ok: true }, 'Motivo desativado');
-  }),
-);
-
 // GET /fila/dashboard?branch=X&datemin=&datemax=
 // Métricas: total atendimentos, conversão, ticket médio, tempo médio, top motivos, por vendedora
 router.get(
@@ -513,30 +499,6 @@ router.get(
       por_vendedora: porVendedora,
       top_motivos: topMotivos,
     });
-  }),
-);
-
-// GET /fila/atendimentos?branch=X&datemin=&datemax=&limit=200
-router.get(
-  '/atendimentos',
-  asyncHandler(async (req, res) => {
-    const branch = parseInt(req.query.branch, 10);
-    const datemin = req.query.datemin || null;
-    const datemax = req.query.datemax || null;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
-
-    let q = supabase
-      .from('fila_atendimentos')
-      .select('*')
-      .order('inicio', { ascending: false })
-      .limit(limit);
-    if (branch) q = q.eq('branch_code', branch);
-    if (datemin) q = q.gte('inicio', `${datemin}T00:00:00`);
-    if (datemax) q = q.lte('inicio', `${datemax}T23:59:59`);
-
-    const { data, error } = await q;
-    if (error) return errorResponse(res, error.message, 500);
-    return successResponse(res, { atendimentos: data || [] });
   }),
 );
 
@@ -958,37 +920,6 @@ router.post(
     });
     await recompactarFila(branchCode);
     return successResponse(res, { ok: true }, `Status alterado para ${tipo}`);
-  }),
-);
-
-// POST /fila/public/sair — sai da fila sem status especial
-router.post(
-  '/public/sair',
-  pinAuth,
-  asyncHandler(async (req, res) => {
-    const { branchCode } = req.filaContext;
-    const vendedora_id = parseInt(req.body?.vendedora_id, 10);
-    if (!vendedora_id) return errorResponse(res, 'vendedora_id obrigatório', 400);
-    const { data: cur } = await supabase
-      .from('fila_vendedora_status')
-      .select('*')
-      .eq('vendedora_id', vendedora_id)
-      .maybeSingle();
-    if (cur?.status === 'em_atendimento') {
-      return errorResponse(res, 'Finalize atendimento atual antes', 400);
-    }
-    await supabase.from('fila_vendedora_status').delete().eq('vendedora_id', vendedora_id);
-    if (cur) {
-      await logStatusChange({
-        vendedora_id,
-        branch_code: branchCode,
-        status_anterior: cur.status,
-        status_novo: 'fora',
-        inicio_status: cur.inicio_status,
-      });
-    }
-    await recompactarFila(branchCode);
-    return successResponse(res, { ok: true }, 'Saiu da fila');
   }),
 );
 

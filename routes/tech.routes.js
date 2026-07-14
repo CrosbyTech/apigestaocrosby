@@ -251,19 +251,6 @@ router.delete(
   }),
 );
 
-// GET /api/tech/chips-log?chip_id=
-router.get(
-  '/chips-log',
-  asyncHandler(async (req, res) => {
-    const chipId = parseInt(req.query.chip_id, 10);
-    let q = supabase.from('tech_chips_log').select('*').order('alterado_em', { ascending: false }).limit(500);
-    if (chipId) q = q.eq('chip_id', chipId);
-    const { data, error } = await q;
-    if (error) return errorResponse(res, error.message, 500);
-    return successResponse(res, { logs: data || [] });
-  }),
-);
-
 // GET /api/tech/chips-stats
 //   Estatísticas agregadas (count por status, operadora, setor)
 router.get(
@@ -1620,10 +1607,6 @@ router.delete(
 
 // ============================================================
 // VOUCHERS — Criação em lote pra clientes do TOTVS
-// POST /api/tech/vouchers/totvs-contacts
-//   body: { operacao, data_inicio, data_fim, empresas? }
-//   reusa o mesmo fluxo do Crosby Bot pra buscar contatos do TOTVS
-//
 // POST /api/tech/vouchers/create-batch
 //   body: {
 //     branchCodeRegistration, voucherType, prefixCode, printTemplateCode,
@@ -1632,28 +1615,6 @@ router.delete(
 //   pra cada customer: cria voucher (voucher/v2/create) + associa ao
 //   cliente (voucher/v2/customer/create). Retorna array com resultado.
 // ============================================================
-
-router.post(
-  '/vouchers/totvs-contacts',
-  asyncHandler(async (req, res) => {
-    // Proxy pro endpoint existente de contatos TOTVS (reusa lógica do Crosby Bot)
-    const axios = (await import('axios')).default;
-    const INTERNAL =
-      process.env.INTERNAL_API_BASE
-      || (process.env.PORT ? `http://localhost:${process.env.PORT}` : 'http://localhost:4001');
-    try {
-      const r = await axios.post(
-        `${INTERNAL}/api/meta/totvs-contacts`,
-        req.body,
-        { timeout: 300000 },
-      );
-      return res.status(r.status).json(r.data);
-    } catch (e) {
-      const status = e.response?.status || 500;
-      return res.status(status).json(e.response?.data || { success: false, message: e.message });
-    }
-  }),
-);
 
 router.post(
   '/vouchers/create-batch',

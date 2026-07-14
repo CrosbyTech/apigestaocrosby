@@ -5,6 +5,7 @@
 import cron from 'node-cron';
 import axios from 'axios';
 import supabase from '../config/supabase.js';
+import { getPainelSellerCanais } from '../services/painelCanais.js';
 
 const INTERNAL_API_BASE =
   process.env.INTERNAL_API_BASE || `http://localhost:${process.env.PORT || 4100}`;
@@ -69,6 +70,25 @@ async function popularCachePeriodo({ key, datemin, datemax }) {
     console.warn(`[canal-totals-cache] ${key} falhou: ${res.erro}`);
     return { ok: false };
   }
+  // Override canônico: revenda/multimarcas vêm do Painel de Vendas (Supabase),
+  // não do analytics. O analytics não mapeia vendedores novos (ex: Arthur 259
+  // em multimarcas) → subconta. Só aplica no mês corrente, onde o Painel tem
+  // cobertura completa; em mes-passado/ano-atual o Painel é parcial e ficaria
+  // subcontado, então mantém o analytics. David/Rafael ficam com a réplica
+  // oficial (já aplicada no /canais-totals-all).
+  if (key === 'mes-atual') {
+    try {
+      const pv = await getPainelSellerCanais(datemin, datemax);
+      if (pv.hasData) {
+        res.segmentos.revenda = pv.revenda;
+        res.segmentos.multimarcas = pv.multimarcas;
+        console.log(`[canal-totals-cache]   ⟳ Painel override: revenda=${pv.revenda} multimarcas=${pv.multimarcas}`);
+      }
+    } catch (e) {
+      console.warn(`[canal-totals-cache] painel override falhou: ${e.message}`);
+    }
+  }
+
   const rows = [];
   for (const canal of CANAIS) {
     const valor = Number(res.segmentos[canal] || 0);
