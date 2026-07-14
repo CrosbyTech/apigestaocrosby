@@ -5,6 +5,7 @@
 import cron from 'node-cron';
 import axios from 'axios';
 import supabase from '../config/supabase.js';
+import { getPainelSellerCanais, getRicardoEletroFM } from '../services/painelCanais.js';
 
 const INTERNAL_API_BASE =
   process.env.INTERNAL_API_BASE || `http://localhost:${process.env.PORT || 4100}`;
@@ -69,6 +70,39 @@ async function popularCachePeriodo({ key, datemin, datemax }) {
     console.warn(`[canal-totals-cache] ${key} falhou: ${res.erro}`);
     return { ok: false };
   }
+  // Override canônico: revenda/multimarcas vêm do Painel de Vendas (Supabase),
+  // não do analytics. O analytics não mapeia vendedores novos (ex: Arthur 259
+  // em multimarcas) → subconta. Só aplica no mês corrente, onde o Painel tem
+  // cobertura completa; em mes-passado/ano-atual o Painel é parcial e ficaria
+  // subcontado, então mantém o analytics. David/Rafael ficam com a réplica
+  // oficial (já aplicada no /canais-totals-all).
+  if (key === 'mes-atual') {
+    try {
+      const pv = await getPainelSellerCanais(datemin, datemax);
+      if (pv.hasData) {
+        res.segmentos.revenda = pv.revenda;
+        res.segmentos.multimarcas = pv.multimarcas;
+        console.log(`[canal-totals-cache]   ⟳ Painel override: revenda=${pv.revenda} multimarcas=${pv.multimarcas}`);
+      }
+    } catch (e) {
+      console.warn(`[canal-totals-cache] painel override falhou: ${e.message}`);
+    }
+  }
+
+  // Ricardo Eletro (filiais 11/111) via fiscal-movement — fonte canônica.
+  // O analytics do /canais-totals-all usa só a op 5102 e subconta (ex: julho
+  // 370 em vez de 7.850). Vale pra qualquer período. Só sobrescreve se vier
+  // valor válido (>0); em falha/timeout preserva o que já estava.
+  try {
+    const re = await getRicardoEletroFM(datemin, datemax);
+    if (Number(re) > 0) {
+      res.segmentos.ricardoeletro = Number(re);
+      console.log(`[canal-totals-cache]   ⟳ RE fiscal-movement override: ${re}`);
+    }
+  } catch (e) {
+    console.warn(`[canal-totals-cache] RE override falhou: ${e.message}`);
+  }
+
   const rows = [];
   for (const canal of CANAIS) {
     const valor = Number(res.segmentos[canal] || 0);

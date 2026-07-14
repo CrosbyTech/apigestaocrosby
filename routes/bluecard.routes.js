@@ -296,6 +296,37 @@ router.get('/leads', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────
 // PATCH /api/bluecard/leads/:id — atualiza status/observação
 // ─────────────────────────────────────────────────────────────────────
+// Infere o sexo pelo PRIMEIRO nome (o lead não captura sexo). Heurística PT-BR
+// + listas de exceção. Retorna 'Male' | 'Female' | null. null = não arrisca
+// (deixa em branco no TOTVS em vez de gravar um gênero possivelmente errado).
+const NOMES_MASCULINOS = new Set([
+  'FELIPE', 'PHILIPE', 'HENRIQUE', 'ANDRE', 'ALEXANDRE', 'GUILHERME', 'VICENTE',
+  'JORGE', 'ENRIQUE', 'DANTE', 'LUCA', 'NICOLA', 'ISAAC', 'KAIQUE', 'JOSUE',
+  'MOISES', 'ELIAS', 'TADEU', 'ABEL', 'NOE', 'DAVI', 'LEVI', 'ELI', 'REMI',
+  'JOSE', 'JAIME', 'JAYME', 'IZAQUE', 'CAIQUE', 'DEIVID', 'ROQUE',
+]);
+const NOMES_FEMININOS = new Set([
+  'BEATRIZ', 'ISABEL', 'ISABELLE', 'ISABELE', 'RAQUEL', 'ESTER', 'ESTHER',
+  'RUTH', 'MIRIAM', 'MYRIAN', 'CARMEN', 'INES', 'SOLANGE', 'SIMONE',
+  'CRISTIANE', 'ELIANE', 'VIVIANE', 'ROSANE', 'JULIANE', 'LUCIANE', 'IVONE',
+  'IONE', 'DAIANE', 'DAYANE', 'ADRIANE', 'LUANE', 'JAQUELINE', 'JACQUELINE',
+  'GEANE', 'NOEMI', 'ABIGAIL', 'DALILA', 'MICHELE', 'MICHELLE', 'DANIELE',
+  'DANIELLE', 'GABRIELE', 'GABRIELLE', 'RAFAELE', 'MARLI', 'NOELI', 'ROSELI',
+]);
+function stripAccents(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+function inferGenderFromName(nome) {
+  const first = stripAccents(nome).trim().toUpperCase().split(/\s+/)[0];
+  if (!first || first.length < 2) return null;
+  if (NOMES_MASCULINOS.has(first)) return 'Male';
+  if (NOMES_FEMININOS.has(first)) return 'Female';
+  const last = first[first.length - 1];
+  if (last === 'A') return 'Female';
+  if ('OSRLZMNDT'.includes(last)) return 'Male';
+  return null; // 'E'/'I'/'U' e ambíguos → deixa em branco
+}
+
 // Helper: cadastra um lead como PF (individual) no TOTVS Moda.
 //   - Não bloqueia o PATCH se falhar; salva o erro em totvs_sync_error.
 //   - Idempotente: se já tem totvs_person_code, retorna sem chamar TOTVS.
@@ -328,6 +359,19 @@ async function _cadastrarLeadNoTotvsInner(lead) {
   }
   const cpf = cpfCheck.cpf;
 
+  // Sexo: manual (lead.sexo) tem prioridade; senão infere pelo nome. Se não
+  // conseguir identificar, NÃO cadastra — sinaliza pra informar manualmente.
+  const gender = (lead.sexo === 'Male' || lead.sexo === 'Female')
+    ? lead.sexo
+    : inferGenderFromName(lead.nome);
+  if (!gender) {
+    return {
+      ok: false,
+      needsGender: true,
+      error: 'Sexo não identificado pelo nome — informe o sexo manualmente antes de cadastrar no TOTVS',
+    };
+  }
+
   const tk = await getToken();
   const accessToken = tk?.access_token;
   if (!accessToken) {
@@ -355,6 +399,22 @@ async function _cadastrarLeadNoTotvsInner(lead) {
   //     mesma rota usada por src/pages/CadastrarCliente.jsx.
   const phoneCheck = normalizarTelefone(lead.whatsapp);
   const cepCheck = lead.cep ? validarCEP(lead.cep) : { ok: false };
+  // Bairro (neighborhood): o lead não tem coluna dedicada — busca no ViaCEP
+  // pelo CEP. Fallback pro complemento (o formulário preenche bairro nele via
+  // ViaCEP). Sem isso o TOTVS ficava sem o bairro do cliente.
+  let bairro = null;
+  if (cepCheck.ok) {
+    try {
+      const cepDigits = String(cepCheck.cep).replace(/\D/g, '');
+      const vr = await axios.get(`https://viacep.com.br/ws/${cepDigits}/json/`, {
+        timeout: 8000,
+      });
+      if (vr.data && !vr.data.erro && vr.data.bairro) bairro = vr.data.bairro;
+    } catch {
+      /* ViaCEP offline/inválido — segue sem bairro */
+    }
+  }
+  if (!bairro && lead.complemento) bairro = String(lead.complemento).trim() || null;
   const branchInsertCode = Number(process.env.BLUECARD_BRANCH_INSERT_CODE || 1);
   // Classificação BlueCard no TOTVS:
   //   classificationTypeCode=55 → "TIPO CLIENTE VAREJO"
@@ -371,6 +431,9 @@ async function _cadastrarLeadNoTotvsInner(lead) {
     insertDate: new Date().toISOString(),
     name: lead.nome,
     cpf,
+    // Sexo inferido pelo primeiro nome (o lead não captura). undefined quando
+    // ambíguo — melhor em branco do que gravar gênero errado no TOTVS.
+    gender: inferGenderFromName(lead.nome) || undefined,
     classifications: [
       {
         classificationTypeCode,
@@ -398,6 +461,7 @@ async function _cadastrarLeadNoTotvsInner(lead) {
               cep: cepCheck.cep,
               address: lead.endereco,
               number: Number(String(lead.numero || '').replace(/\D/g, '')) || undefined,
+              neighborhood: bairro || undefined,
               complement: lead.complemento || undefined,
             },
           ]
@@ -507,6 +571,7 @@ router.patch('/leads/:id', async (req, res) => {
     'estado',
     'indicado_por',
     'cvv',
+    'sexo',
   ];
   const patch = {};
   for (const k of allowed) {
@@ -521,6 +586,14 @@ router.patch('/leads/:id', async (req, res) => {
       // Email lowercase
       if (k === 'email' && typeof val === 'string') {
         val = val.toLowerCase();
+      }
+      // Sexo: normaliza pra formato TOTVS ('Male'/'Female')
+      if (k === 'sexo' && typeof val === 'string') {
+        const s = val.toLowerCase();
+        if (s.startsWith('m') && !s.startsWith('mu') && s !== 'mulher') val = 'Male';
+        else if (s === 'male') val = 'Male';
+        else if (s.startsWith('f') || s.startsWith('mu') || s === 'mulher') val = 'Female';
+        else val = null;
       }
       patch[k] = val;
     }
@@ -548,10 +621,17 @@ router.patch('/leads/:id', async (req, res) => {
   // 🔹 Automação TOTVS: se o status virou 'info_completas' e ainda não tem
   // personCode, cadastra a pessoa no TOTVS e salva o código. NÃO bloqueia
   // a resposta — atualiza em background pra UI continuar fluida.
+  // Re-tenta o cadastro quando: (a) o status virou 'info_completas', ou
+  // (b) o sexo acabou de ser preenchido manualmente e o cadastro estava
+  // bloqueado por falta de sexo. Só se ainda não houver personCode.
+  const sexoAgoraPreenchido =
+    'sexo' in req.body &&
+    (patch.sexo === 'Male' || patch.sexo === 'Female') &&
+    /sexo/i.test(String(data.totvs_sync_error || ''));
   let totvsResult = null;
   if (
-    req.body.status === 'info_completas' &&
-    !data.totvs_person_code
+    !data.totvs_person_code &&
+    (req.body.status === 'info_completas' || sexoAgoraPreenchido)
   ) {
     totvsResult = await cadastrarLeadNoTotvs(data);
     const upd = totvsResult.ok

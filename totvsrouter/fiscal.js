@@ -246,7 +246,10 @@ router.post(
             Accept: 'application/json',
             Authorization: `Bearer ${tokenData.access_token}`,
           },
-          timeout: 30000, // 30 segundos de timeout
+          // Geração de boleto no TOTVS é lenta (fala com o banco/CNAB) e
+          // estourava o timeout com ECONNABORTED → 503. Sem limite (0) = espera
+          // até o TOTVS responder.
+          timeout: 0, // ilimitado
         },
       );
 
@@ -326,7 +329,7 @@ router.post(
                   Accept: 'application/json',
                   Authorization: `Bearer ${newTokenData.access_token}`,
                 },
-                timeout: 30000,
+                timeout: 0, // ilimitado (igual à chamada principal)
               },
             );
 

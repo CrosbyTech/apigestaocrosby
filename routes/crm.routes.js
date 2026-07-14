@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import cron from 'node-cron';
 import evolutionPool from '../config/evolution.js';
 import { createClient } from '@supabase/supabase-js';
-import { getPainelSellerCanais, getPainelPerSeller } from '../services/painelCanais.js';
+import { getPainelSellerCanais, getPainelPerSeller, getRicardoEletroFM } from '../services/painelCanais.js';
 import {
   listUazapiInstances,
   listUazapiInstancesRaw,
@@ -2967,12 +2967,32 @@ router.post(
       console.warn(`[canais-all override varejo] ${e.message}`);
     }
 
-    // ─── Override Revenda: 100% Supabase, faturamento líquido puro
-    // Bruto = NFs Output (venda). Credev = NFs Input (devolução) NO PERÍODO.
-    // Não subtrai vale-troca aplicada como pagamento (essa é a definição do
-    // TOTVS 0326 e cria divergência com Promessa Vendedores, que usa Supabase).
-    // Alinhado com buildVendedoresLiquido (forecast) — os dois cards batem.
+    // ─── Override Revenda ───
+    // 1ª opção: Painel de Vendas (fonte canônica, tempo real) quando cobre o
+    // período (datemin >= 2026-06-01). O notas_fiscais atrasa a sincronização e
+    // subconta (ex: julho 48.6k via notas vs 69k no Painel). Mesma régua de
+    // multimarcas/inbound. Para períodos que começam antes da cobertura do
+    // Painel (ex: ano-atual), cai no cálculo por notas_fiscais abaixo.
+    let revendaPainelAplicado = false;
     try {
+      const PAINEL_MIN = '2026-06-01';
+      if (datemin >= PAINEL_MIN) {
+        const pv = await getPainelSellerCanais(datemin, datemax);
+        if (pv.hasData && pv.revenda > 0) {
+          const old = segmentos.revenda || 0;
+          total += pv.revenda - old;
+          segmentos.revenda = pv.revenda;
+          credevPorCanal.revenda = 0;
+          revendaPainelAplicado = true;
+          console.log(`[canais-all] revenda via Painel: cache=R$${old.toFixed(2)} → R$${pv.revenda.toFixed(2)}`);
+        }
+      }
+    } catch (e) { console.warn(`[canais-all revenda painel] ${e.message}`); }
+
+    // 2ª opção (fallback): 100% Supabase notas_fiscais, faturamento líquido puro.
+    // Bruto = NFs Output (venda). Credev = NFs Input (devolução) NO PERÍODO.
+    // Não subtrai vale-troca aplicada como pagamento (definição do TOTVS 0326).
+    if (!revendaPainelAplicado) try {
       const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
       const REV_OPS = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279];
       const REV_BRANCHS = [2, 5, 75, 99, 200];
@@ -15287,6 +15307,14 @@ router.post(
       }
     } catch (err) {
       console.warn(`[fat-seg painel-canais] override falhou: ${err.message}`);
+    }
+
+    // Ricardo Eletro (11/111) não está nas notas — puxa do fiscal-movement.
+    try {
+      const re = await getRicardoEletroFM(datemin, datemax);
+      if (re != null) segMap.ricardoeletro = re;
+    } catch (err) {
+      console.warn(`[fat-seg ricardoeletro] override falhou: ${err.message}`);
     }
 
     // Arredondamentos finais
