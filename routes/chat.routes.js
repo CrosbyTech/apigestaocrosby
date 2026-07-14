@@ -1,5 +1,9 @@
 import express from 'express';
-import { asyncHandler, errorResponse } from '../utils/errorHandler.js';
+import {
+  asyncHandler,
+  successResponse,
+  errorResponse,
+} from '../utils/errorHandler.js';
 
 const router = express.Router();
 
@@ -125,6 +129,24 @@ router.post(
         ],
       });
     }
+  }),
+);
+
+/**
+ * @route GET /chat/status
+ * @desc Verificar status da configuração de IA
+ * @access Public
+ */
+router.get(
+  '/status',
+  asyncHandler(async (req, res) => {
+    const aiConfig = getAIConfig();
+
+    return successResponse(res, {
+      configured: !!aiConfig,
+      provider: aiConfig?.provider || null,
+      model: aiConfig?.model || null,
+    });
   }),
 );
 

@@ -3,6 +3,7 @@
 // /chips        — controle de chips telefônicos
 // ============================================================
 import express from 'express';
+import { createClient } from '@supabase/supabase-js';
 import supabase from '../config/supabase.js';
 import {
   asyncHandler,
@@ -11,6 +12,86 @@ import {
 } from '../utils/errorHandler.js';
 
 const router = express.Router();
+
+// ──────────────────────────────────────────────────────────────
+// Enriquecimento de resultados de voucher: nome + telefone (pes_pessoa)
+// e valor da última compra (notas_fiscais). O valor do voucher é
+// `percentage`% da última compra. Tudo em lote (sem chamar TOTVS por
+// cliente) — pes_pessoa e notas_fiscais são Supabase.
+// ──────────────────────────────────────────────────────────────
+function chunk(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+async function enriquecerResultadosVoucher(resultados, percentage) {
+  if (!Array.isArray(resultados) || resultados.length === 0) return resultados;
+  const codes = [...new Set(resultados.map((r) => Number(r.customerCode)).filter((c) => Number.isFinite(c) && c > 0))];
+  if (codes.length === 0) return resultados;
+
+  // 1) Nome + telefone (pes_pessoa, main Supabase) — dedup por code
+  const infoPessoa = new Map(); // code → { nome, telefone }
+  for (const bloco of chunk(codes, 300)) {
+    const { data } = await supabase
+      .from('pes_pessoa')
+      .select('code, nm_pessoa, telefone')
+      .in('code', bloco);
+    for (const p of data || []) {
+      if (!infoPessoa.has(p.code)) infoPessoa.set(p.code, { nome: p.nm_pessoa || null, telefone: p.telefone || null });
+    }
+  }
+
+  // 2) Última compra (notas_fiscais, fiscal Supabase) — NF de venda mais
+  //    recente por person_code. Paginа em ordem decrescente e para quando
+  //    já achou a última de todos (ou acabaram as linhas).
+  const ultimaCompra = new Map(); // code → { valor, data }
+  try {
+    const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+    for (const bloco of chunk(codes, 200)) {
+      const pendentes = new Set(bloco);
+      for (let from = 0; pendentes.size > 0; from += 1000) {
+        const { data, error } = await sbf
+          .from('notas_fiscais')
+          .select('person_code, total_value, issue_date, operation_type, invoice_status')
+          .in('person_code', bloco)
+          .eq('operation_type', 'Output')
+          .order('issue_date', { ascending: false })
+          .range(from, from + 999);
+        if (error || !data || data.length === 0) break;
+        for (const n of data) {
+          const pc = Number(n.person_code);
+          if (!pendentes.has(pc)) continue;
+          if (n.invoice_status === 'Canceled' || n.invoice_status === 'Deleted') continue;
+          const val = Number(n.total_value || 0);
+          if (val <= 0) continue;
+          ultimaCompra.set(pc, { valor: val, data: n.issue_date });
+          pendentes.delete(pc); // 1ª (mais recente) já basta
+        }
+        if (data.length < 1000) break;
+      }
+    }
+  } catch (e) {
+    console.warn(`[vouchers enrich] última compra falhou: ${e.message}`);
+  }
+
+  const pct = Number(percentage) || 0;
+  return resultados.map((r) => {
+    const code = Number(r.customerCode);
+    const pes = infoPessoa.get(code) || {};
+    const uc = ultimaCompra.get(code) || {};
+    const ultima = uc.valor != null ? Math.round(uc.valor * 100) / 100 : null;
+    const valorVoucher = ultima != null ? Math.round(ultima * pct) / 100 : null;
+    return {
+      ...r,
+      nome: r.nome ?? pes.nome ?? null,
+      telefone: r.telefone ?? pes.telefone ?? null,
+      ultima_compra_valor: ultima,
+      ultima_compra_data: uc.data || null,
+      valor_voucher: valorVoucher,
+    };
+  });
+}
 
 // ──────────────────────────────────────────────────────────────
 // CRUD: Chips
@@ -248,6 +329,19 @@ router.delete(
     } catch {}
 
     return successResponse(res, { deleted: true }, 'Chip removido');
+  }),
+);
+
+// GET /api/tech/chips-log?chip_id=
+router.get(
+  '/chips-log',
+  asyncHandler(async (req, res) => {
+    const chipId = parseInt(req.query.chip_id, 10);
+    let q = supabase.from('tech_chips_log').select('*').order('alterado_em', { ascending: false }).limit(500);
+    if (chipId) q = q.eq('chip_id', chipId);
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500);
+    return successResponse(res, { logs: data || [] });
   }),
 );
 
@@ -1607,6 +1701,10 @@ router.delete(
 
 // ============================================================
 // VOUCHERS — Criação em lote pra clientes do TOTVS
+// POST /api/tech/vouchers/totvs-contacts
+//   body: { operacao, data_inicio, data_fim, empresas? }
+//   reusa o mesmo fluxo do Crosby Bot pra buscar contatos do TOTVS
+//
 // POST /api/tech/vouchers/create-batch
 //   body: {
 //     branchCodeRegistration, voucherType, prefixCode, printTemplateCode,
@@ -1615,6 +1713,28 @@ router.delete(
 //   pra cada customer: cria voucher (voucher/v2/create) + associa ao
 //   cliente (voucher/v2/customer/create). Retorna array com resultado.
 // ============================================================
+
+router.post(
+  '/vouchers/totvs-contacts',
+  asyncHandler(async (req, res) => {
+    // Proxy pro endpoint existente de contatos TOTVS (reusa lógica do Crosby Bot)
+    const axios = (await import('axios')).default;
+    const INTERNAL =
+      process.env.INTERNAL_API_BASE
+      || (process.env.PORT ? `http://localhost:${process.env.PORT}` : 'http://localhost:4001');
+    try {
+      const r = await axios.post(
+        `${INTERNAL}/api/meta/totvs-contacts`,
+        req.body,
+        { timeout: 300000 },
+      );
+      return res.status(r.status).json(r.data);
+    } catch (e) {
+      const status = e.response?.status || 500;
+      return res.status(status).json(e.response?.data || { success: false, message: e.message });
+    }
+  }),
+);
 
 router.post(
   '/vouchers/create-batch',
@@ -1772,6 +1892,15 @@ router.post(
       }
     }
 
+    // Enriquece com nome, telefone e valor (percentage% da última compra)
+    // antes de persistir/retornar — assim histórico e resultado imediato batem.
+    let resultadosFinais = results;
+    try {
+      resultadosFinais = await enriquecerResultadosVoucher(results, Number(percentage));
+    } catch (e) {
+      console.warn(`[vouchers/create-batch] enriquecimento falhou: ${e.message}`);
+    }
+
     // Persiste batch no Supabase pra histórico
     let batchId = null;
     try {
@@ -1790,7 +1919,7 @@ router.post(
           total_clientes: customerCodes.length,
           sucessos,
           falhas,
-          resultados: results,
+          resultados: resultadosFinais,
           created_by: req.headers['x-user-email'] || null,
         })
         .select('id, created_at')
@@ -1811,7 +1940,7 @@ router.post(
         total: customerCodes.length,
         sucessos,
         falhas,
-        results,
+        results: resultadosFinais,
       },
       `${sucessos} vouchers gerados, ${falhas} falhas`,
     );
@@ -1849,6 +1978,11 @@ router.get(
       .eq('id', id)
       .single();
     if (error) return errorResponse(res, error.message, 404, 'NOT_FOUND');
+    // Enriquece cada resultado com nome, telefone e valor (percentage% da
+    // última compra do cliente) — em lote, sem chamar TOTVS por cliente.
+    if (Array.isArray(data.resultados)) {
+      data.resultados = await enriquecerResultadosVoucher(data.resultados, data.percentage);
+    }
     return successResponse(res, data, 'OK');
   }),
 );
