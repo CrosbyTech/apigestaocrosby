@@ -3,8 +3,11 @@
 // /chips        — controle de chips telefônicos
 // ============================================================
 import express from 'express';
+import axios from 'axios';
+import https from 'https';
 import { createClient } from '@supabase/supabase-js';
 import supabase from '../config/supabase.js';
+import { getToken } from '../utils/totvsTokenManager.js';
 import {
   asyncHandler,
   successResponse,
@@ -12,6 +15,7 @@ import {
 } from '../utils/errorHandler.js';
 
 const router = express.Router();
+const VOUCHER_TOTVS_AGENT = new https.Agent({ rejectUnauthorized: false });
 
 // ──────────────────────────────────────────────────────────────
 // Enriquecimento de resultados de voucher: nome + telefone (pes_pessoa)
@@ -43,9 +47,11 @@ async function enriquecerResultadosVoucher(resultados, percentage) {
   }
 
   // 2) Última compra (notas_fiscais, fiscal Supabase) — NF de venda mais
-  //    recente por person_code. Paginа em ordem decrescente e para quando
-  //    já achou a última de todos (ou acabaram as linhas).
+  //    recente por person_code. Também captura person_name como fonte de nome
+  //    (pes_pessoa não tem clientes recém-cadastrados). Paginа em ordem
+  //    decrescente e para quando já achou a última de todos.
   const ultimaCompra = new Map(); // code → { valor, data }
+  const nomeNotas = new Map(); // code → nome (fallback)
   try {
     const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
     for (const bloco of chunk(codes, 200)) {
@@ -53,7 +59,7 @@ async function enriquecerResultadosVoucher(resultados, percentage) {
       for (let from = 0; pendentes.size > 0; from += 1000) {
         const { data, error } = await sbf
           .from('notas_fiscais')
-          .select('person_code, total_value, issue_date, operation_type, invoice_status')
+          .select('person_code, person_name, total_value, issue_date, operation_type, invoice_status')
           .in('person_code', bloco)
           .eq('operation_type', 'Output')
           .order('issue_date', { ascending: false })
@@ -63,6 +69,7 @@ async function enriquecerResultadosVoucher(resultados, percentage) {
           const pc = Number(n.person_code);
           if (!pendentes.has(pc)) continue;
           if (n.invoice_status === 'Canceled' || n.invoice_status === 'Deleted') continue;
+          if (n.person_name && !nomeNotas.has(pc)) nomeNotas.set(pc, n.person_name);
           const val = Number(n.total_value || 0);
           if (val <= 0) continue;
           ultimaCompra.set(pc, { valor: val, data: n.issue_date });
@@ -75,17 +82,67 @@ async function enriquecerResultadosVoucher(resultados, percentage) {
     console.warn(`[vouchers enrich] última compra falhou: ${e.message}`);
   }
 
+  // 3) Fallback TOTVS pra nome/telefone dos que faltaram no Supabase (clientes
+  //    recém-cadastrados não estão no pes_pessoa). Busca em LOTE por
+  //    personCodeList (individuals; o que sobrar, legal-entities) — poucas
+  //    chamadas, não uma por cliente.
+  const totvsInfo = new Map(); // code → { nome, telefone }
+  const faltamNome = codes.filter((c) => !infoPessoa.get(c)?.nome && !nomeNotas.get(c));
+  const faltamTel = codes.filter((c) => !infoPessoa.get(c)?.telefone);
+  const alvoTotvs = [...new Set([...faltamNome, ...faltamTel])];
+  if (alvoTotvs.length > 0) {
+    try {
+      const tk = await getToken();
+      if (tk?.access_token) {
+        const base = process.env.TOTVS_BASE_URL || 'https://www30.bhan.com.br:9443/api/totvsmoda';
+        const H = { Authorization: `Bearer ${tk.access_token}`, 'Content-Type': 'application/json' };
+        const buscar = async (endpoint, lista) => {
+          const restantes = [];
+          for (const bloco of chunk(lista, 100)) {
+            try {
+              const r = await axios.post(
+                `${base}/person/v2/${endpoint}/search`,
+                { filter: { personCodeList: bloco }, page: 1, pageSize: 100 },
+                { headers: H, httpsAgent: VOUCHER_TOTVS_AGENT, timeout: 40000 },
+              );
+              const achados = new Set();
+              for (const it of r.data?.items || []) {
+                const code = Number(it.code);
+                const tel = it.phones?.find((p) => p.isDefault)?.number || it.phones?.[0]?.number || null;
+                totvsInfo.set(code, { nome: it.name || it.fantasyName || null, telefone: tel });
+                achados.add(code);
+              }
+              for (const c of bloco) if (!achados.has(c)) restantes.push(c);
+            } catch (e) {
+              console.warn(`[vouchers enrich] TOTVS ${endpoint} bloco falhou: ${e.message}`);
+              restantes.push(...bloco);
+            }
+          }
+          return restantes;
+        };
+        // Individuals primeiro; os não encontrados tenta como PJ.
+        const naoAchados = await buscar('individuals', alvoTotvs);
+        if (naoAchados.length > 0) await buscar('legal-entities', naoAchados);
+      }
+    } catch (e) {
+      console.warn(`[vouchers enrich] fallback TOTVS falhou: ${e.message}`);
+    }
+  }
+
   const pct = Number(percentage) || 0;
   return resultados.map((r) => {
     const code = Number(r.customerCode);
     const pes = infoPessoa.get(code) || {};
+    const tot = totvsInfo.get(code) || {};
     const uc = ultimaCompra.get(code) || {};
     const ultima = uc.valor != null ? Math.round(uc.valor * 100) / 100 : null;
     const valorVoucher = ultima != null ? Math.round(ultima * pct) / 100 : null;
+    const nome = pes.nome || nomeNotas.get(code) || tot.nome || null;
+    const telefone = pes.telefone || tot.telefone || null;
     return {
       ...r,
-      nome: r.nome ?? pes.nome ?? null,
-      telefone: r.telefone ?? pes.telefone ?? null,
+      nome,
+      telefone,
       ultima_compra_valor: ultima,
       ultima_compra_data: uc.data || null,
       valor_voucher: valorVoucher,
@@ -1979,9 +2036,23 @@ router.get(
       .single();
     if (error) return errorResponse(res, error.message, 404, 'NOT_FOUND');
     // Enriquece cada resultado com nome, telefone e valor (percentage% da
-    // última compra do cliente) — em lote, sem chamar TOTVS por cliente.
+    // última compra). Se ainda não estava enriquecido, persiste de volta pra
+    // as próximas aberturas serem instantâneas (sem re-buscar TOTVS).
     if (Array.isArray(data.resultados)) {
-      data.resultados = await enriquecerResultadosVoucher(data.resultados, data.percentage);
+      // Re-enriquece se: nunca enriquecido (sem valor_voucher) OU enriquecido
+      // mas sem nenhum nome (batch antigo, salvo antes do fallback TOTVS).
+      const temCampo = data.resultados.some((r) => 'valor_voucher' in r);
+      const temNome = data.resultados.some((r) => r.nome);
+      if (!temCampo || !temNome) {
+        data.resultados = await enriquecerResultadosVoucher(data.resultados, data.percentage);
+        supabase
+          .from('voucher_batches')
+          .update({ resultados: data.resultados })
+          .eq('id', id)
+          .then(({ error: upErr }) => {
+            if (upErr) console.warn(`[vouchers detail] persist enrich falhou: ${upErr.message}`);
+          });
+      }
     }
     return successResponse(res, data, 'OK');
   }),
