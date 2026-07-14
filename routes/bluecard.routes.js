@@ -1,23 +1,7 @@
 // BlueCard — leads capturados pela LP pública /lp/bluecard
-//   POST /api/bluecard/leads        (público, sem auth) — salva lead
-//   GET  /api/bluecard/leads        (admin) — lista leads com filtros
-//   PATCH /api/bluecard/leads/:id   (admin) — atualiza status/observação
-//                                  → automação: cadastra no TOTVS quando
-//                                    status='info_completas'
-//   DELETE /api/bluecard/leads/:id  (admin) — remove lead
-//   POST /api/bluecard/leads/:id/sync-totvs (admin) — força sync TOTVS manual
+//   POST /api/bluecard/leads (público, sem auth) — salva lead
 import express from 'express';
-import axios from 'axios';
 import supabase from '../config/supabase.js';
-import { getToken } from '../utils/totvsTokenManager.js';
-import { validarCPF, normalizarTelefone, validarCEP } from '../utils/docValidator.js';
-
-// Single-flight: evita race condition se PATCH 'info_completas' for chamado
-// 2x simultaneamente pro mesmo lead — cria 2 PFs duplicadas no TOTVS.
-const TOTVS_SYNC_INFLIGHT = new Map(); // leadId → Promise
-
-const TOTVS_BASE_URL =
-  process.env.TOTVS_BASE_URL || 'https://apitotvsmoda.bhan.com.br/api/totvsmoda';
 
 const router = express.Router();
 
@@ -128,6 +112,7 @@ router.post('/leads', async (req, res) => {
   }
 });
 
+<<<<<<< HEAD
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/bluecard/leads/importar — bulk import (admin)
 // Recebe: { rows: [{ nome, whatsapp, email?, cpf?, empresa?, instagram?,
@@ -699,4 +684,6 @@ router.delete('/leads/:id', async (req, res) => {
   return res.json({ ok: true });
 });
 
+=======
+>>>>>>> 271c92dc55b7a09b037b9273d61273308eec0169
 export default router;

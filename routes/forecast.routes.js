@@ -733,19 +733,6 @@ function getVarejoMetaSemanal(metasMes, periodKeySemanal) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ROTA: Semana atual (helper para o front)
-// ═══════════════════════════════════════════════════════════════
-router.get(
-  '/promessa-semanal/semana-atual',
-  asyncHandler(async (req, res) => {
-    // Semana ISO em curso (segunda → domingo correntes)
-    const { ano, semana } = getIsoWeek(new Date());
-    const range = isoWeekRange(ano, semana);
-    return successResponse(res, { ano, semana, ...range });
-  }),
-);
-
-// ═══════════════════════════════════════════════════════════════
 // GET /forecast/ontem-canal
 // Faturamento de ONTEM por canal — direto do TOTVS (sale-panel via
 // canais-totals-all em modo lite). NÃO usa Supabase notas_fiscais.
@@ -2542,16 +2529,6 @@ router.get(
       total_valor: Math.round(total_valor * 100) / 100,
       total_nfs: transacoes.length,
     });
-  }),
-);
-
-// POST /forecast/bluecred-sync — dispara sync manual
-router.post(
-  '/bluecred-sync',
-  asyncHandler(async (req, res) => {
-    const { executarSyncBluecred } = await import('../jobs/pessoas-bluecred-sync.job.js');
-    const r = await executarSyncBluecred();
-    return successResponse(res, r);
   }),
 );
 
@@ -4966,34 +4943,6 @@ function buildTextoComparativo(d) {
   return lines.join('\n');
 }
 
-// POST /forecast/cron-trigger-whatsapp — dispara manualmente o job de envio
-// Body opcional: { phone: '84991234567', untilToday: false }
-// (se não passar phone, usa FORECAST_WHATSAPP_PHONE do .env)
-router.post(
-  '/cron-trigger-whatsapp',
-  asyncHandler(async (req, res) => {
-    const { phone, untilToday } = req.body || {};
-    // Import dinâmico pra evitar carregar Puppeteer no boot da rota
-    const { executarForecastWhatsapp } =
-      await import('../jobs/forecast-whatsapp.job.js');
-    // Dispara em background — responde imediatamente
-    executarForecastWhatsapp({ phone, untilToday: !!untilToday })
-      .then((r) => {
-        console.log(
-          `[cron-trigger-whatsapp] resultado: ${r.indicadores?.filter((i) => i.ok).length}/${r.indicadores?.length} ok`,
-        );
-      })
-      .catch((err) => {
-        console.error(`[cron-trigger-whatsapp] erro: ${err.message}`);
-      });
-    return successResponse(
-      res,
-      { triggered: true, phone: phone || 'env', untilToday: !!untilToday },
-      'Job disparado em background. Acompanhe pelos logs.',
-    );
-  }),
-);
-
 // POST /forecast/send-whatsapp-image — recebe { phone, image (base64), caption }
 router.post(
   '/send-whatsapp-image',
@@ -5086,33 +5035,6 @@ router.post(
     } catch (e) {
       return errorResponse(res, `Falha no envio: ${e.message}`, 502);
     }
-  }),
-);
-
-// POST /forecast/recalcular-ref-yoy
-//   Dispara manualmente o recálculo do ano anterior (forecast_comparativo_ref).
-//   Mesma lógica do cron diário das 02:00 BRT.
-router.post(
-  '/recalcular-ref-yoy',
-  asyncHandler(async (req, res) => {
-    const { recalcularForecastRef } =
-      await import('../jobs/forecast-ref-yoy.job.js');
-    await recalcularForecastRef();
-    return successResponse(res, { ok: true }, 'Referência YoY recalculada');
-  }),
-);
-
-// POST /forecast/limpar-cache
-//   Invalida caches em memória dos endpoints de faturamento.
-//   Útil quando o cache foi populado com dados parciais (ex: TOTVS retornou erro).
-router.post(
-  '/limpar-cache',
-  asyncHandler(async (req, res) => {
-    const r = await axios.post(
-      `${INTERNAL_API_BASE}/api/crm/clear-fatseg-cache`,
-      {},
-    );
-    return successResponse(res, r.data?.data || { ok: true }, 'Cache limpo');
   }),
 );
 
@@ -5620,26 +5542,6 @@ router.get(
       periodo_trimestre: { datemin: trimInicioIso, datemax: trimFimReal },
       periodo_selecionado: { datemin: dmin, datemax: dmax },
     });
-  }),
-);
-
-// GET /forecast/_debug-replica?branchs=99&dmin=2026-06-01&dmax=2026-06-30
-router.get(
-  '/_debug-replica',
-  asyncHandler(async (req, res) => {
-    const branchs = String(req.query.branchs || '99').split(',').map(Number);
-    const dmin = String(req.query.dmin || '');
-    const dmax = String(req.query.dmax || '');
-    if (!dmin || !dmax) return errorResponse(res, 'dmin/dmax obrigatórios', 400);
-    const mapa = await getFaturadoOficialReplica(branchs, dmin, dmax);
-    const rows = [];
-    let total = 0;
-    for (const [dealer, info] of mapa.entries()) {
-      rows.push({ dealer, valor: info.valor, nfs: info.nfs, clientes: info.clientes });
-      total += info.valor;
-    }
-    rows.sort((a, b) => b.valor - a.valor);
-    return successResponse(res, { branchs, dmin, dmax, total, count: rows.length, rows });
   }),
 );
 

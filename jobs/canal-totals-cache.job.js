@@ -5,7 +5,11 @@
 import cron from 'node-cron';
 import axios from 'axios';
 import supabase from '../config/supabase.js';
+<<<<<<< HEAD
 import { getPainelSellerCanais, getRicardoEletroFM } from '../services/painelCanais.js';
+=======
+import { getPainelSellerCanais } from '../services/painelCanais.js';
+>>>>>>> 271c92dc55b7a09b037b9273d61273308eec0169
 
 const INTERNAL_API_BASE =
   process.env.INTERNAL_API_BASE || `http://localhost:${process.env.PORT || 4100}`;
@@ -89,6 +93,7 @@ async function popularCachePeriodo({ key, datemin, datemax }) {
     }
   }
 
+<<<<<<< HEAD
   // Ricardo Eletro (filiais 11/111) via fiscal-movement — fonte canônica.
   // O analytics do /canais-totals-all usa só a op 5102 e subconta (ex: julho
   // 370 em vez de 7.850). Vale pra qualquer período. Só sobrescreve se vier
@@ -103,6 +108,8 @@ async function popularCachePeriodo({ key, datemin, datemax }) {
     console.warn(`[canal-totals-cache] RE override falhou: ${e.message}`);
   }
 
+=======
+>>>>>>> 271c92dc55b7a09b037b9273d61273308eec0169
   const rows = [];
   for (const canal of CANAIS) {
     const valor = Number(res.segmentos[canal] || 0);

@@ -109,21 +109,6 @@ router.get(
 );
 
 /**
- * @route GET /api/evolution/health
- * @desc Verifica conexão com o banco Evolution
- */
-router.get(
-  '/health',
-  asyncHandler(async (req, res) => {
-    const result = await evolutionPool.query('SELECT NOW() as time');
-    return successResponse(res, {
-      connected: true,
-      serverTime: result.rows[0].time,
-    });
-  }),
-);
-
-/**
  * @route POST /api/evolution/media
  * @desc Busca mídia (áudio, imagem, vídeo, documento) via Evolution API HTTP
  *       Retorna base64 do arquivo descriptografado
