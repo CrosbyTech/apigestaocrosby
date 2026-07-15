@@ -609,6 +609,13 @@ router.patch('/leads/:id', async (req, res) => {
   if (req.body.status && STATUS_CONVERSAO.includes(req.body.status) && !patch.convertido_em) {
     patch.convertido_em = new Date().toISOString();
   }
+  // Ao marcar como 'enviado' (cartão enviado), carimba a data de envio (BRT),
+  // a menos que já tenha vindo explicitamente no patch.
+  if (req.body.status === 'enviado' && !patch.data_envio) {
+    patch.data_envio = new Date().toLocaleDateString('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+    });
+  }
   if (Object.keys(patch).length === 0) {
     return res.status(400).json({ error: 'Nenhum campo válido' });
   }
