@@ -573,6 +573,7 @@ router.patch('/leads/:id', async (req, res) => {
     'cvv',
     'sexo',
     'codigo_rastreio',
+    'data_envio',
   ];
   const patch = {};
   for (const k of allowed) {
