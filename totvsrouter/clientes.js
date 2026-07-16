@@ -13,11 +13,8 @@ import {
   TOTVS_AUTH_ENDPOINT,
 } from './totvsHelper.js';
 import {
-  syncFullPesPessoa,
-  syncIncrementalPesPessoa,
   fetchAndMapPersons,
   mapPersonToRow,
-  upsertBatch,
   insertSkipExisting,
 } from '../utils/syncPesPessoa.js';
 import supabase from '../config/supabase.js';
@@ -2335,63 +2332,6 @@ router.get(
 );
 
 /**
- * @route POST /totvs/sync/pes-pessoa/full
- * @desc Carga COMPLETA de todas as pessoas (PF + PJ) do TOTVS para o Supabase.
- *       Use apenas uma vez para popular a tabela pes_pessoa.
- *       ATENÇÃO: Pode demorar vários minutos dependendo do volume de dados.
- * @access Public
- */
-router.post(
-  '/sync/pes-pessoa/full',
-  asyncHandler(async (req, res) => {
-    console.log('🚀 Iniciando SYNC FULL pes_pessoa (manual via API)');
-
-    const result = await syncFullPesPessoa();
-
-    if (result.success) {
-      successResponse(
-        res,
-        result,
-        'Sincronização completa concluída com sucesso',
-      );
-    } else {
-      errorResponse(
-        res,
-        `Erro na sincronização: ${result.error}`,
-        500,
-        'SYNC_FULL_ERROR',
-      );
-    }
-  }),
-);
-
-/**
- * @route POST /totvs/sync/pes-pessoa/incremental
- * @desc Sincronização INCREMENTAL: busca apenas pessoas alteradas/criadas nas últimas 24h
- *       e faz upsert no Supabase. É o que roda automaticamente todo dia às 03:00.
- * @access Public
- */
-router.post(
-  '/sync/pes-pessoa/incremental',
-  asyncHandler(async (req, res) => {
-    console.log('🔄 Iniciando SYNC INCREMENTAL pes_pessoa (manual via API)');
-
-    const result = await syncIncrementalPesPessoa();
-
-    if (result.success) {
-      successResponse(res, result, 'Sincronização incremental concluída');
-    } else {
-      errorResponse(
-        res,
-        `Erro na sincronização incremental: ${result.error}`,
-        500,
-        'SYNC_INCREMENTAL_ERROR',
-      );
-    }
-  }),
-);
-
-/**
  * @route POST /totvs/person-statistics
  * @desc Busca estatísticas de um cliente na API TOTVS Moda
  * @access Public
@@ -2541,38 +2481,6 @@ router.get(
     );
 
     successResponse(res, data, 'CNPJ consultado com sucesso');
-  }),
-);
-
-// ==========================================
-// CONSULTA CEP (BrasilAPI)
-// ==========================================
-
-/**
- * @route GET /totvs/cep/:cep
- * @desc Consulta endereço a partir de um CEP via BrasilAPI
- * @param cep — apenas números, 8 dígitos
- */
-router.get(
-  '/cep/:cep',
-  asyncHandler(async (req, res) => {
-    const cep = (req.params.cep || '').replace(/\D/g, '');
-
-    if (cep.length !== 8) {
-      return errorResponse(
-        res,
-        'CEP deve conter exatamente 8 dígitos numéricos',
-        400,
-        'INVALID_CEP',
-      );
-    }
-
-    const { data } = await axios.get(
-      `https://brasilapi.com.br/api/cep/v2/${cep}`,
-      { timeout: 15000 },
-    );
-
-    successResponse(res, data, 'CEP consultado com sucesso');
   }),
 );
 
