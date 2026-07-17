@@ -2009,6 +2009,31 @@ router.post(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/autentique/chrome-status — diagnóstico do Chrome (Puppeteer).
+// Resolve/instala o Chrome sob demanda e devolve o caminho — útil pra validar
+// o ambiente do Render sem precisar gerar um contrato de verdade.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get(
+  '/chrome-status',
+  asyncHandler(async (req, res) => {
+    const t0 = Date.now();
+    const chromePath = await ensureChromePath();
+    successResponse(
+      res,
+      {
+        ok: !!chromePath,
+        chromePath: chromePath || null,
+        cwd: process.cwd(),
+        cacheDirEnv: process.env.PUPPETEER_CACHE_DIR || null,
+        execPathEnv: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+        durationMs: Date.now() - t0,
+      },
+      chromePath ? 'Chrome disponível' : 'Chrome NÃO disponível',
+    );
+  }),
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/autentique/bluecred/contratos — lista todos os contratos enviados
 // Sincroniza automaticamente com a Autentique os contratos não finalizados.
 // ─────────────────────────────────────────────────────────────────────────────
