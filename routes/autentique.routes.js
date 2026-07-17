@@ -1469,16 +1469,47 @@ const gerarTermoPdf = async (cliente) => {
 </body>
 </html>`;
 
-  const chromePath = await ensureChromePath();
-  const browser = await puppeteer.launch({
+  // Resolve o navegador em ordem de preferência:
+  //   1) Chrome local/sistema (dev, ou já baixado) — via getChromePath()
+  //   2) @sparticuz/chromium — Chromium EMPACOTADO no node_modules, extraído
+  //      localmente SEM baixar da internet. É o caminho ideal no Render, onde
+  //      o download do Chrome pelo puppeteer é lento/estagnado.
+  //   3) fallback: download sob demanda (ensureChromePath)
+  let launchOpts = {
     headless: 'new',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
     ],
-    ...(chromePath ? { executablePath: chromePath } : {}),
-  });
+  };
+  const localChrome = getChromePath();
+  if (localChrome) {
+    launchOpts.executablePath = localChrome;
+  } else {
+    try {
+      const chromium = (await import('@sparticuz/chromium')).default;
+      const execPath = await chromium.executablePath();
+      if (execPath && tryFile(execPath)) {
+        launchOpts = {
+          headless: chromium.headless,
+          args: [...chromium.args, '--disable-dev-shm-usage'],
+          defaultViewport: chromium.defaultViewport,
+          executablePath: execPath,
+        };
+        console.log(`[Puppeteer] Usando @sparticuz/chromium: ${execPath}`);
+      }
+    } catch (e) {
+      console.warn(
+        `[Puppeteer] @sparticuz/chromium indisponível (${e.message}) — tentando download...`,
+      );
+    }
+    if (!launchOpts.executablePath) {
+      const dl = await ensureChromePath();
+      if (dl) launchOpts.executablePath = dl;
+    }
+  }
+  const browser = await puppeteer.launch(launchOpts);
 
   try {
     const page = await browser.newPage();
