@@ -1494,13 +1494,12 @@ const gerarTermoPdf = async (cliente) => {
     <p>A CROSBY concede ao CLIENTE um limite de crédito no valor de R$ 600,00 (seiscentos reais) para aquisição de produtos comercializados pela empresa.</p>
 
     <p class="clausula-title">Cláusula 2 — Da Forma de Pagamento</p>
-    <p>O valor utilizado será pago mediante boletos bancários, podendo ser parcelado em até 5 (cinco) parcelas, conforme abaixo:</p>
+    <p>O valor utilizado será pago mediante boletos bancários, podendo ser parcelado em até 4 (quatro) parcelas, conforme abaixo:</p>
     <ul class="lista">
       <li>1ª parcela: 30 dias;</li>
       <li>2ª parcela: 60 dias;</li>
       <li>3ª parcela: 90 dias;</li>
-      <li>4ª parcela: 120 dias;</li>
-      <li>5ª parcela: 150 dias.</li>
+      <li>4ª parcela: 120 dias.</li>
     </ul>
     <p>Os vencimentos serão definidos no momento do faturamento do pedido.</p>
 
