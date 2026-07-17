@@ -8,6 +8,7 @@
 //   POST /api/bluecard/leads/:id/sync-totvs (admin) — força sync TOTVS manual
 import express from 'express';
 import axios from 'axios';
+import cron from 'node-cron';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { validarCPF, normalizarTelefone, validarCEP } from '../utils/docValidator.js';
@@ -291,6 +292,148 @@ router.get('/leads', async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
   return res.json({ ok: true, leads: data || [], total: count || 0 });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Estatísticas de compra por lead (LTV / ticket médio) — cache no banco
+// ─────────────────────────────────────────────────────────────────────
+// A lista de leads mostra LTV e ticket médio de cada cliente. Buscar o
+// person-statistics do TOTVS a cada abertura da tela (dezenas/centenas de
+// leads) bombardearia a API — então gravamos o resultado em colunas no
+// bluecard_leads e a lista só LÊ. Um job noturno + este endpoint mantêm
+// atualizado. Só reprocessa quem está velho (> STALE_H h) salvo force.
+const STATS_STALE_HOURS = 20;
+
+// Cache das filiais válidas (muda raramente) — evita 1 request extra por lead
+let _branchCache = { at: 0, codes: null };
+async function getBranchCodes(accessToken) {
+  if (_branchCache.codes && Date.now() - _branchCache.at < 6 * 3600 * 1000) {
+    return _branchCache.codes;
+  }
+  const url = `${TOTVS_BASE_URL}/person/v2/branchesList?BranchCodePool=1&Page=1&PageSize=1000`;
+  const r = await axios.get(url, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    timeout: 30000,
+  });
+  const codes = (r.data?.items || [])
+    .map((b) => b.code)
+    .filter((c) => c >= 1 && c <= 990);
+  _branchCache = { at: Date.now(), codes: codes.length ? codes : [1] };
+  return _branchCache.codes;
+}
+
+function serializeBranchParams(params) {
+  const parts = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (Array.isArray(v)) v.forEach((x) => parts.push(`${k}=${x}`));
+    else parts.push(`${k}=${v}`);
+  }
+  return parts.join('&');
+}
+
+// Evita reentrância (cron + clique simultâneos)
+let _statsSyncRunning = false;
+
+async function syncEstatisticasLeads({ force = false } = {}) {
+  if (_statsSyncRunning) return { skipped: 'já em execução' };
+  _statsSyncRunning = true;
+  try {
+    const tk = await getToken();
+    const accessToken = tk?.access_token;
+    if (!accessToken) return { error: 'token TOTVS indisponível' };
+
+    // Só leads já cadastrados no TOTVS (têm personCode)
+    let leads = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from('bluecard_leads')
+        .select('id, totvs_person_code, stats_synced_at')
+        .not('totvs_person_code', 'is', null)
+        .range(from, from + 999);
+      if (error) return { error: error.message };
+      if (!data?.length) break;
+      leads.push(...data);
+      if (data.length < 1000) break;
+    }
+
+    // Sem force: pula quem foi sincronizado há menos de STATS_STALE_HOURS
+    const limite = Date.now() - STATS_STALE_HOURS * 3600 * 1000;
+    const alvos = force
+      ? leads
+      : leads.filter(
+          (l) =>
+            !l.stats_synced_at || new Date(l.stats_synced_at).getTime() < limite,
+        );
+
+    if (!alvos.length) return { total: leads.length, atualizados: 0, erros: 0 };
+
+    const branchCodes = await getBranchCodes(accessToken);
+    const endpoint = `${TOTVS_BASE_URL}/person/v2/person-statistics`;
+    const agora = new Date().toISOString();
+    let ok = 0;
+    let err = 0;
+
+    // Concorrência modesta pra não sobrecarregar o TOTVS (anti-bloqueio)
+    const CONC = 4;
+    for (let i = 0; i < alvos.length; i += CONC) {
+      const bloco = alvos.slice(i, i + CONC);
+      await Promise.all(
+        bloco.map(async (l) => {
+          try {
+            const r = await axios.get(endpoint, {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/json',
+              },
+              params: {
+                CustomerCode: Number(l.totvs_person_code),
+                BranchCode: branchCodes,
+              },
+              paramsSerializer: serializeBranchParams,
+              timeout: 30000,
+            });
+            const d = r.data || {};
+            const ultima = d.lastPurchaseDate
+              ? String(d.lastPurchaseDate).slice(0, 10)
+              : null;
+            await supabase
+              .from('bluecard_leads')
+              .update({
+                ltv: d.totalPurchaseValue ?? 0,
+                ticket_medio: d.averagePurchaseValue ?? 0,
+                qtd_compras: d.purchaseQuantity ?? 0,
+                ultima_compra: ultima,
+                stats_synced_at: agora,
+              })
+              .eq('id', l.id);
+            ok++;
+          } catch (e) {
+            err++;
+            console.warn(
+              `[bluecard/stats] cod ${l.totvs_person_code}:`,
+              e?.response?.status || e.message,
+            );
+          }
+        }),
+      );
+    }
+    return { total: leads.length, alvos: alvos.length, atualizados: ok, erros: err };
+  } finally {
+    _statsSyncRunning = false;
+  }
+}
+
+// POST /api/bluecard/leads/sync-estatisticas — dispara o refresh do cache.
+// ?force=1 reprocessa todos (ignora o "recém-atualizado").
+router.post('/leads/sync-estatisticas', async (req, res) => {
+  const force = req.query.force === '1' || req.body?.force === true;
+  try {
+    const r = await syncEstatisticasLeads({ force });
+    return res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('[bluecard/leads/sync-estatisticas]', e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -729,5 +872,22 @@ router.delete('/leads/:id', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   return res.json({ ok: true });
 });
+
+// Cron diário: atualiza LTV/ticket médio dos leads (03:40 BRT — fora do pico).
+// Escalonado depois do sync de pessoas pra o token já estar quente.
+export function iniciarBluecardStatsSync() {
+  cron.schedule(
+    '40 3 * * *',
+    () => {
+      syncEstatisticasLeads({ force: true })
+        .then((r) =>
+          console.log('[bluecard/stats] cron concluído:', JSON.stringify(r)),
+        )
+        .catch((e) => console.error('[bluecard/stats] cron erro:', e.message));
+    },
+    { timezone: 'America/Sao_Paulo' },
+  );
+  console.log('🗓️  [bluecard/stats] cron agendado (03:40 BRT)');
+}
 
 export default router;

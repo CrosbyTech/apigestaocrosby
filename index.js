@@ -19,7 +19,7 @@ import autentiqueRoutes from './routes/autentique.routes.js';
 import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
-import bluecardRoutes from './routes/bluecard.routes.js';
+import bluecardRoutes, { iniciarBluecardStatsSync } from './routes/bluecard.routes.js';
 import wixRoutes from './routes/wix.routes.js';
 import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
 import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js';
@@ -7545,6 +7545,7 @@ app.listen(PORT, async () => {
   iniciarFaturamentoHistoricoJob();
   iniciarTransacaoHistoricoSync();
   iniciarPessoasBluecredSync();
+  iniciarBluecardStatsSync();
   iniciarCanalTotalsCacheJob();
   iniciarForecastPerSellerCacheJob();
   iniciarPainelVendasSyncJob();
