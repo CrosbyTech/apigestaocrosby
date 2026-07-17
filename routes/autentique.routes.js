@@ -1256,6 +1256,52 @@ const ensureChromePath = async () => {
   return _chromeReady || getChromePath();
 };
 
+// Abre o Puppeteer resolvendo o navegador em ordem de preferência:
+//   1) Chrome local/sistema (dev, ou já baixado) — via getChromePath()
+//   2) @sparticuz/chromium — Chromium EMPACOTADO no node_modules, extraído
+//      localmente SEM baixar da internet. Ideal no Render (o download do
+//      Chrome pelo puppeteer fica estagnado ali).
+//   3) fallback: download sob demanda (ensureChromePath)
+// Retorna { browser, via } — `via` diz qual caminho foi usado (pra diagnóstico).
+async function launchPuppeteer() {
+  const base = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+  const localChrome = getChromePath();
+  if (localChrome) {
+    const browser = await puppeteer.launch({
+      headless: 'new',
+      args: base,
+      executablePath: localChrome,
+    });
+    return { browser, via: `local:${localChrome}` };
+  }
+  // @sparticuz/chromium (produção)
+  try {
+    const chromium = (await import('@sparticuz/chromium')).default;
+    const execPath = await chromium.executablePath();
+    if (execPath && tryFile(execPath)) {
+      const browser = await puppeteer.launch({
+        headless: chromium.headless,
+        args: [...chromium.args, '--disable-dev-shm-usage'],
+        defaultViewport: chromium.defaultViewport,
+        executablePath: execPath,
+      });
+      return { browser, via: `sparticuz:${execPath}` };
+    }
+  } catch (e) {
+    console.warn(
+      `[Puppeteer] @sparticuz/chromium indisponível (${e.message}) — tentando download...`,
+    );
+  }
+  // Último recurso: download sob demanda
+  const dl = await ensureChromePath();
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: base,
+    ...(dl ? { executablePath: dl } : {}),
+  });
+  return { browser, via: dl ? `download:${dl}` : 'puppeteer-default' };
+}
+
 // ─── Helper: formata telefone do TOTVS para E.164 (+55...) ───────────────────
 const formatPhone = (raw = '') => {
   const digits = raw.replace(/\D/g, '');
@@ -1469,47 +1515,7 @@ const gerarTermoPdf = async (cliente) => {
 </body>
 </html>`;
 
-  // Resolve o navegador em ordem de preferência:
-  //   1) Chrome local/sistema (dev, ou já baixado) — via getChromePath()
-  //   2) @sparticuz/chromium — Chromium EMPACOTADO no node_modules, extraído
-  //      localmente SEM baixar da internet. É o caminho ideal no Render, onde
-  //      o download do Chrome pelo puppeteer é lento/estagnado.
-  //   3) fallback: download sob demanda (ensureChromePath)
-  let launchOpts = {
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-    ],
-  };
-  const localChrome = getChromePath();
-  if (localChrome) {
-    launchOpts.executablePath = localChrome;
-  } else {
-    try {
-      const chromium = (await import('@sparticuz/chromium')).default;
-      const execPath = await chromium.executablePath();
-      if (execPath && tryFile(execPath)) {
-        launchOpts = {
-          headless: chromium.headless,
-          args: [...chromium.args, '--disable-dev-shm-usage'],
-          defaultViewport: chromium.defaultViewport,
-          executablePath: execPath,
-        };
-        console.log(`[Puppeteer] Usando @sparticuz/chromium: ${execPath}`);
-      }
-    } catch (e) {
-      console.warn(
-        `[Puppeteer] @sparticuz/chromium indisponível (${e.message}) — tentando download...`,
-      );
-    }
-    if (!launchOpts.executablePath) {
-      const dl = await ensureChromePath();
-      if (dl) launchOpts.executablePath = dl;
-    }
-  }
-  const browser = await puppeteer.launch(launchOpts);
+  const { browser } = await launchPuppeteer();
 
   try {
     const page = await browser.newPage();
@@ -2079,6 +2085,29 @@ router.post(
 router.get(
   '/chrome-status',
   asyncHandler(async (req, res) => {
+    // ?test=1 → abre o Chromium e gera um PDF de teste (prova o pipeline).
+    if (req.query.test === '1') {
+      const t0 = Date.now();
+      try {
+        const { browser, via } = await launchPuppeteer();
+        const page = await browser.newPage();
+        await page.setContent('<h1>Teste Crosby</h1><p>PDF OK</p>');
+        const pdf = await page.pdf({ format: 'A4' });
+        await browser.close();
+        return successResponse(
+          res,
+          { ok: true, via, pdfBytes: pdf.length, durationMs: Date.now() - t0 },
+          'PDF de teste gerado com sucesso',
+        );
+      } catch (e) {
+        return successResponse(
+          res,
+          { ok: false, erro: e.message, durationMs: Date.now() - t0 },
+          'Falha ao gerar PDF de teste',
+        );
+      }
+    }
+
     const chromePath = getChromePath() || _chromeReady;
     // Se não tem Chrome, dispara a instalação em BACKGROUND (não espera aqui).
     if (!chromePath && !_chromeInstalling) prewarmChrome();
