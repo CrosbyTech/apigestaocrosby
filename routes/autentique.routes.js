@@ -34,13 +34,9 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import axios from 'axios';
 import multer from 'multer';
 import puppeteer from 'puppeteer';
-
-const execAsync = promisify(exec);
 import {
   asyncHandler,
   successResponse,
@@ -1182,6 +1178,7 @@ const getChromePath = () => {
 // persistida no runtime) e resolve o caminho. Roda no máx. 1x por instância
 // (single-flight); é assíncrono, não trava o event loop do servidor.
 let _chromeInstallPromise = null;
+let _lastInstallLog = null; // exposto em GET /chrome-status pra diagnóstico
 const ensureChromePath = async () => {
   const existing = getChromePath();
   if (existing) return existing;
@@ -1196,18 +1193,32 @@ const ensureChromePath = async () => {
         `[Puppeteer] Chrome ausente em runtime — instalando sob demanda em ${cacheDir} (pode levar ~1min)...`,
       );
       try {
-        const { stdout } = await execAsync(
-          'npx --yes puppeteer browsers install chrome',
-          {
-            env: { ...process.env, PUPPETEER_CACHE_DIR: cacheDir },
-            timeout: 5 * 60 * 1000,
-            maxBuffer: 20 * 1024 * 1024,
-          },
+        // API programática do @puppeteer/browsers — mais confiável que
+        // `npx puppeteer browsers install` no runtime do Render (npx não
+        // resolve o bin do puppeteer ali e falha na hora).
+        const browsers = await import('@puppeteer/browsers');
+        const platform = browsers.detectBrowserPlatform();
+        const buildId = await browsers.resolveBuildId(
+          browsers.Browser.CHROME,
+          platform,
+          'stable',
         );
+        const installed = await browsers.install({
+          browser: browsers.Browser.CHROME,
+          buildId,
+          cacheDir,
+        });
+        _lastInstallLog = {
+          ok: true,
+          buildId,
+          platform,
+          executablePath: installed?.executablePath || null,
+        };
         console.log(
-          `[Puppeteer] Instalação sob demanda concluída: ${String(stdout).trim().split('\n').pop()}`,
+          `[Puppeteer] Instalação sob demanda concluída: ${installed?.executablePath}`,
         );
       } catch (e) {
+        _lastInstallLog = { ok: false, msg: e.message };
         console.error(
           `[Puppeteer] Falha ao instalar Chrome sob demanda: ${e.message}`,
         );
@@ -1220,7 +1231,14 @@ const ensureChromePath = async () => {
     _chromeInstallPromise = null; // permite nova tentativa se falhar
   }
 
-  // Procura primeiro no dir onde acabamos de instalar, depois no resolvedor geral.
+  // Usa o path retornado pela instalação, senão re-resolve.
+  if (
+    _lastInstallLog?.ok &&
+    _lastInstallLog.executablePath &&
+    tryFile(_lastInstallLog.executablePath)
+  ) {
+    return _lastInstallLog.executablePath;
+  }
   return findChromeInCache(path.join(cacheDir, 'chrome')) || getChromePath();
 };
 
@@ -2026,6 +2044,7 @@ router.get(
         cwd: process.cwd(),
         cacheDirEnv: process.env.PUPPETEER_CACHE_DIR || null,
         execPathEnv: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+        installLog: _lastInstallLog,
         durationMs: Date.now() - t0,
       },
       chromePath ? 'Chrome disponível' : 'Chrome NÃO disponível',
