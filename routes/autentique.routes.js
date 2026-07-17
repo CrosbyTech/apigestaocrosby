@@ -1177,69 +1177,83 @@ const getChromePath = () => {
 // Chrome não é encontrado, instala sob demanda na pasta do projeto (que É
 // persistida no runtime) e resolve o caminho. Roda no máx. 1x por instância
 // (single-flight); é assíncrono, não trava o event loop do servidor.
-let _chromeInstallPromise = null;
+// Estado do Chrome (instalação self-healing em BACKGROUND — nunca bloqueia
+// uma requisição HTTP até o timeout do proxy do Render).
+let _chromeReady = null;
+let _chromeInstalling = false;
 let _lastInstallLog = null; // exposto em GET /chrome-status pra diagnóstico
-const ensureChromePath = async () => {
-  const existing = getChromePath();
-  if (existing) return existing;
 
+// Instala o Chrome em background via API programática do @puppeteer/browsers
+// (mais confiável que `npx` no runtime do Render). Idempotente e single-flight.
+// Chamada no boot do servidor e, como fallback, pelo /chrome-status.
+export async function prewarmChrome() {
+  if (_chromeReady) return _chromeReady;
+  const existing = getChromePath();
+  if (existing) {
+    _chromeReady = existing;
+    return existing;
+  }
+  if (_chromeInstalling) return null; // já rodando
+  _chromeInstalling = true;
   const cacheDir =
     process.env.PUPPETEER_CACHE_DIR ||
     path.resolve(process.cwd(), '.cache', 'puppeteer');
-
-  if (!_chromeInstallPromise) {
-    _chromeInstallPromise = (async () => {
-      console.warn(
-        `[Puppeteer] Chrome ausente em runtime — instalando sob demanda em ${cacheDir} (pode levar ~1min)...`,
-      );
-      try {
-        // API programática do @puppeteer/browsers — mais confiável que
-        // `npx puppeteer browsers install` no runtime do Render (npx não
-        // resolve o bin do puppeteer ali e falha na hora).
-        const browsers = await import('@puppeteer/browsers');
-        const platform = browsers.detectBrowserPlatform();
-        const buildId = await browsers.resolveBuildId(
-          browsers.Browser.CHROME,
-          platform,
-          'stable',
-        );
-        const installed = await browsers.install({
-          browser: browsers.Browser.CHROME,
-          buildId,
-          cacheDir,
-        });
-        _lastInstallLog = {
-          ok: true,
-          buildId,
-          platform,
-          executablePath: installed?.executablePath || null,
-        };
-        console.log(
-          `[Puppeteer] Instalação sob demanda concluída: ${installed?.executablePath}`,
-        );
-      } catch (e) {
-        _lastInstallLog = { ok: false, msg: e.message };
-        console.error(
-          `[Puppeteer] Falha ao instalar Chrome sob demanda: ${e.message}`,
-        );
-      }
-    })();
-  }
+  const t0 = Date.now();
   try {
-    await _chromeInstallPromise;
+    const browsers = await import('@puppeteer/browsers');
+    const platform = browsers.detectBrowserPlatform();
+    _lastInstallLog = { fase: 'resolvendo', platform, inicio: new Date().toISOString() };
+    const buildId = await browsers.resolveBuildId(
+      browsers.Browser.CHROME,
+      platform,
+      'stable',
+    );
+    _lastInstallLog = { fase: 'baixando', platform, buildId, cacheDir, inicio: new Date().toISOString() };
+    console.warn(`[Puppeteer] Baixando Chrome ${buildId} (${platform}) em ${cacheDir}...`);
+    const installed = await browsers.install({
+      browser: browsers.Browser.CHROME,
+      buildId,
+      cacheDir,
+    });
+    _chromeReady =
+      (installed?.executablePath && tryFile(installed.executablePath)) ||
+      getChromePath();
+    _lastInstallLog = {
+      ok: !!_chromeReady,
+      fase: 'concluido',
+      buildId,
+      platform,
+      executablePath: _chromeReady,
+      durationMs: Date.now() - t0,
+    };
+    console.log(`[Puppeteer] Chrome pronto: ${_chromeReady}`);
+  } catch (e) {
+    _lastInstallLog = {
+      ok: false,
+      fase: 'erro',
+      msg: e.message,
+      durationMs: Date.now() - t0,
+    };
+    console.error(`[Puppeteer] Falha ao instalar Chrome: ${e.message}`);
   } finally {
-    _chromeInstallPromise = null; // permite nova tentativa se falhar
+    _chromeInstalling = false;
   }
+  return _chromeReady;
+}
 
-  // Usa o path retornado pela instalação, senão re-resolve.
-  if (
-    _lastInstallLog?.ok &&
-    _lastInstallLog.executablePath &&
-    tryFile(_lastInstallLog.executablePath)
-  ) {
-    return _lastInstallLog.executablePath;
+// Usado pela geração de PDF: garante o Chrome, esperando até ~120s se ele
+// estiver sendo instalado em background. Não relança install se já falhou agora.
+const ensureChromePath = async () => {
+  const existing = getChromePath() || _chromeReady;
+  if (existing) return existing;
+  prewarmChrome(); // dispara/reaproveita instalação em background (sem await)
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    if (_chromeReady) return _chromeReady;
+    if (!_chromeInstalling) break; // terminou (sucesso já tratado acima, ou erro)
+    await new Promise((r) => setTimeout(r, 2000));
   }
-  return findChromeInCache(path.join(cacheDir, 'chrome')) || getChromePath();
+  return _chromeReady || getChromePath();
 };
 
 // ─── Helper: formata telefone do TOTVS para E.164 (+55...) ───────────────────
@@ -2034,20 +2048,25 @@ router.post(
 router.get(
   '/chrome-status',
   asyncHandler(async (req, res) => {
-    const t0 = Date.now();
-    const chromePath = await ensureChromePath();
+    const chromePath = getChromePath() || _chromeReady;
+    // Se não tem Chrome, dispara a instalação em BACKGROUND (não espera aqui).
+    if (!chromePath && !_chromeInstalling) prewarmChrome();
     successResponse(
       res,
       {
         ok: !!chromePath,
         chromePath: chromePath || null,
+        instalando: _chromeInstalling,
+        installLog: _lastInstallLog,
         cwd: process.cwd(),
         cacheDirEnv: process.env.PUPPETEER_CACHE_DIR || null,
         execPathEnv: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-        installLog: _lastInstallLog,
-        durationMs: Date.now() - t0,
       },
-      chromePath ? 'Chrome disponível' : 'Chrome NÃO disponível',
+      chromePath
+        ? 'Chrome disponível'
+        : _chromeInstalling
+          ? 'Chrome sendo instalado em background...'
+          : 'Chrome NÃO disponível',
     );
   }),
 );

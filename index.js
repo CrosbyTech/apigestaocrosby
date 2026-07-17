@@ -12,7 +12,7 @@ import financialCredevRoutes from './routes/financialCredev.routes.js';
 import catalogoRoutes from './routes/catalogo.routes.js';
 import metaRoutes from './routes/meta.routes.js';
 import evolutionRoutes from './routes/evolution.routes.js';
-import autentiqueRoutes from './routes/autentique.routes.js';
+import autentiqueRoutes, { prewarmChrome } from './routes/autentique.routes.js';
 import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
@@ -162,6 +162,11 @@ app.listen(PORT, async () => {
   iniciarTransacaoHistoricoSync();
   iniciarPessoasBluecredSync();
   iniciarBluecardStatsSync();
+  // Pré-instala o Chrome do Puppeteer em background (pra gerar PDF do termo
+  // de crédito) — evita travar a 1ª requisição esperando o download.
+  prewarmChrome().catch((e) =>
+    console.error('[boot] prewarmChrome falhou:', e.message),
+  );
   iniciarCanalTotalsCacheJob();
   iniciarForecastPerSellerCacheJob();
   iniciarPainelVendasSyncJob();
