@@ -34,9 +34,13 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import axios from 'axios';
 import multer from 'multer';
 import puppeteer from 'puppeteer';
+
+const execAsync = promisify(exec);
 import {
   asyncHandler,
   successResponse,
@@ -1171,6 +1175,55 @@ const getChromePath = () => {
   return null;
 };
 
+// ─── Garante o Chrome em runtime (self-healing) ──────────────────────────────
+// No Render, o Chrome baixado no build às vezes some no runtime (cache da HOME
+// não persistido / start command customizado que pula o start.sh). Quando o
+// Chrome não é encontrado, instala sob demanda na pasta do projeto (que É
+// persistida no runtime) e resolve o caminho. Roda no máx. 1x por instância
+// (single-flight); é assíncrono, não trava o event loop do servidor.
+let _chromeInstallPromise = null;
+const ensureChromePath = async () => {
+  const existing = getChromePath();
+  if (existing) return existing;
+
+  const cacheDir =
+    process.env.PUPPETEER_CACHE_DIR ||
+    path.resolve(process.cwd(), '.cache', 'puppeteer');
+
+  if (!_chromeInstallPromise) {
+    _chromeInstallPromise = (async () => {
+      console.warn(
+        `[Puppeteer] Chrome ausente em runtime — instalando sob demanda em ${cacheDir} (pode levar ~1min)...`,
+      );
+      try {
+        const { stdout } = await execAsync(
+          'npx --yes puppeteer browsers install chrome',
+          {
+            env: { ...process.env, PUPPETEER_CACHE_DIR: cacheDir },
+            timeout: 5 * 60 * 1000,
+            maxBuffer: 20 * 1024 * 1024,
+          },
+        );
+        console.log(
+          `[Puppeteer] Instalação sob demanda concluída: ${String(stdout).trim().split('\n').pop()}`,
+        );
+      } catch (e) {
+        console.error(
+          `[Puppeteer] Falha ao instalar Chrome sob demanda: ${e.message}`,
+        );
+      }
+    })();
+  }
+  try {
+    await _chromeInstallPromise;
+  } finally {
+    _chromeInstallPromise = null; // permite nova tentativa se falhar
+  }
+
+  // Procura primeiro no dir onde acabamos de instalar, depois no resolvedor geral.
+  return findChromeInCache(path.join(cacheDir, 'chrome')) || getChromePath();
+};
+
 // ─── Helper: formata telefone do TOTVS para E.164 (+55...) ───────────────────
 const formatPhone = (raw = '') => {
   const digits = raw.replace(/\D/g, '');
@@ -1384,7 +1437,7 @@ const gerarTermoPdf = async (cliente) => {
 </body>
 </html>`;
 
-  const chromePath = getChromePath();
+  const chromePath = await ensureChromePath();
   const browser = await puppeteer.launch({
     headless: 'new',
     args: [
