@@ -378,6 +378,18 @@ async function _cadastrarLeadNoTotvsInner(lead) {
     return { ok: false, error: 'Token TOTVS indisponível' };
   }
 
+  const branchInsertCode = Number(process.env.BLUECARD_BRANCH_INSERT_CODE || 1);
+  // Classificação BlueCard no TOTVS:
+  //   classificationTypeCode=55 → "TIPO CLIENTE VAREJO"
+  //   classificationCode='1'    → "BLUE CARD" (code='8' é BlueCred — outro programa)
+  // Configurável via env caso os códigos mudem (ex: BLUECARD_CLASSIFICATION_CODE='2')
+  const classificationTypeCode = Number(
+    process.env.BLUECARD_CLASSIFICATION_TYPE_CODE || 55,
+  );
+  const classificationCode = String(
+    process.env.BLUECARD_CLASSIFICATION_CODE || '1',
+  );
+
   // 1) Busca por CPF — se já existe, reaproveita o personCode
   try {
     const searchRes = await axios.post(
@@ -387,6 +399,27 @@ async function _cadastrarLeadNoTotvsInner(lead) {
     );
     const found = searchRes.data?.items?.[0];
     if (found?.code) {
+      // Pessoa já cadastrada (cliente antigo virando lead BlueCard): o TOTVS
+      // trata POST /individual-customers como upsert por CPF — reenviar só
+      // {branchInsertCode, cpf, classifications} ADICIONA a classificação na
+      // pessoa existente, sem duplicar e mantendo o mesmo personCode.
+      // Sem isso o lead entrava no TOTVS sem a classificação BLUE CARD.
+      try {
+        await axios.post(
+          `${TOTVS_BASE_URL}/person/v2/individual-customers`,
+          {
+            branchInsertCode,
+            cpf,
+            classifications: [{ classificationTypeCode, classificationCode }],
+          },
+          { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 30000 },
+        );
+      } catch (e) {
+        console.warn(
+          '[bluecard/totvs] classificar pessoa existente falhou:',
+          e?.response?.data?.[0]?.message || e?.response?.data?.message || e.message,
+        );
+      }
       return { ok: true, personCode: Number(found.code), existed: true };
     }
   } catch (e) {
@@ -415,17 +448,6 @@ async function _cadastrarLeadNoTotvsInner(lead) {
     }
   }
   if (!bairro && lead.complemento) bairro = String(lead.complemento).trim() || null;
-  const branchInsertCode = Number(process.env.BLUECARD_BRANCH_INSERT_CODE || 1);
-  // Classificação BlueCard no TOTVS:
-  //   classificationTypeCode=55 → "TIPO CLIENTE VAREJO"
-  //   classificationCode='1'    → "BLUE CARD" (code='8' é BlueCred — outro programa)
-  // Configurável via env caso os códigos mudem (ex: BLUECARD_CLASSIFICATION_CODE='2')
-  const classificationTypeCode = Number(
-    process.env.BLUECARD_CLASSIFICATION_TYPE_CODE || 55,
-  );
-  const classificationCode = String(
-    process.env.BLUECARD_CLASSIFICATION_CODE || '1',
-  );
   const payload = {
     branchInsertCode,
     insertDate: new Date().toISOString(),
