@@ -1533,7 +1533,7 @@ router.post(
       ? `${TOTVS_BASE_URL}/person/v2/legal-entities/search`
       : `${TOTVS_BASE_URL}/person/v2/individuals/search`;
 
-    const expand = 'phones,emails,addresses,observations';
+    const expand = 'phones,emails,addresses,observations,classifications';
     let cliente = null;
 
     if (!isCNPJ) {
@@ -1742,6 +1742,84 @@ router.post(
       `✅ [TermoCredito] Documento criado na Autentique: ${docCriado?.id}`,
     );
 
+    // ── 5b. Classifica o cliente como BLUE CRED (type 55 / code 8) no TOTVS ───
+    // O tipo 55 ("Tipo Cliente Varejo") é ÚNICO: a pessoa só pode ter UM código.
+    //   • sem tipo-55        → aplica 55/8 (upsert por CPF/CNPJ, sem duplicar).
+    //   • já 55/8            → nada a fazer (já é BlueCred).
+    //   • outro 55 (ex 55/1) → NÃO dá pra trocar pela API do TOTVS (só manual);
+    //                          devolve "conflito" pra avisar na tela.
+    const NOMES_CLASSIF_55 = { 1: 'BLUE CARD', 3: 'BLACK CARD', 8: 'BLUE CRED' };
+    let classificacaoBluecred = { status: 'nao_avaliado' };
+    try {
+      const bcTypeCode = Number(
+        process.env.BLUECRED_CLASSIFICATION_TYPE_CODE || 55,
+      );
+      const bcCode = String(process.env.BLUECRED_CLASSIFICATION_CODE || '8');
+      const existente55 = (cliente.classifications || []).find(
+        (c) => Number(c.classificationTypeCode ?? c.typeCode) === bcTypeCode,
+      );
+      const codigoAtual = existente55
+        ? String(existente55.classificationCode ?? existente55.code)
+        : null;
+
+      if (codigoAtual === bcCode) {
+        classificacaoBluecred = { status: 'ja_bluecred' };
+      } else if (codigoAtual) {
+        classificacaoBluecred = {
+          status: 'conflito',
+          atual_codigo: codigoAtual,
+          atual_nome: NOMES_CLASSIF_55[codigoAtual] || `código ${codigoAtual}`,
+        };
+        console.warn(
+          `⚠️ [TermoCredito] ${cliente.name} já tem classificação varejo (55/${codigoAtual}) — BlueCred NÃO aplicado (troca só manual no TOTVS)`,
+        );
+      } else {
+        const bcBranch = Number(
+          process.env.BLUECRED_BRANCH_INSERT_CODE ||
+            process.env.BLUECARD_BRANCH_INSERT_CODE ||
+            1,
+        );
+        const classifUrl = isCNPJ
+          ? `${TOTVS_BASE_URL}/person/v2/legal-customers`
+          : `${TOTVS_BASE_URL}/person/v2/individual-customers`;
+        const classifPayload = {
+          branchInsertCode: bcBranch,
+          ...(isCNPJ ? { cnpj: clean } : { cpf: clean }),
+          classifications: [
+            { classificationTypeCode: bcTypeCode, classificationCode: bcCode },
+          ],
+        };
+        const cr = await axios.post(classifUrl, classifPayload, {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokenData.access_token}`,
+          },
+          timeout: 30000,
+          validateStatus: () => true,
+        });
+        if (cr.status < 300) {
+          classificacaoBluecred = { status: 'aplicada' };
+          console.log(
+            `🏷️ [TermoCredito] ${cliente.name} classificado como BLUE CRED (${bcTypeCode}/${bcCode})`,
+          );
+        } else {
+          classificacaoBluecred = {
+            status: 'erro',
+            erro:
+              cr.data?.[0]?.message || cr.data?.message || `HTTP ${cr.status}`,
+          };
+          console.warn(
+            `⚠️ [TermoCredito] Falha ao classificar BlueCred: ${classificacaoBluecred.erro}`,
+          );
+        }
+      }
+    } catch (classifErr) {
+      classificacaoBluecred = { status: 'erro', erro: classifErr.message };
+      console.warn(
+        `⚠️ [TermoCredito] Erro ao classificar BlueCred: ${classifErr.message}`,
+      );
+    }
+
     // ── 6. Envia o link via Meta WhatsApp oficial (se accountId fornecido) ────
     // Pega o link de assinatura do cliente (1º signatário)
     const clienteSigner = (docCriado?.signatures || []).find(
@@ -1870,6 +1948,7 @@ router.post(
         meta_error: metaError,
         link_assinatura: linkAssinatura,
         apenas_link: somenteLink,
+        classificacao_bluecred: classificacaoBluecred,
       },
       successMsg,
     );
