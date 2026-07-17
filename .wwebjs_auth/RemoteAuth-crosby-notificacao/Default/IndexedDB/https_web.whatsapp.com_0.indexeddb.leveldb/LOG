@@ -1,2 +1,35 @@
-2026/07/15-14:03:51.817 3498 Creating DB C:\Users\teccr\apigestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb since it was missing.
-2026/07/15-14:03:51.838 3498 Reusing MANIFEST C:\Users\teccr\apigestaocrosby\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/07/16-15:55:10.999 4b20 Creating DB C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb since it was missing.
+2026/07/16-15:55:11.013 4b20 Reusing MANIFEST C:\Users\yagom\gestaocrosby\backend\.wwebjs_auth\RemoteAuth-crosby-notificacao\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/07/16-17:08:30.979 36d8 Level-0 table #5: started
+2026/07/16-17:08:31.026 36d8 Level-0 table #5: 1012978 bytes OK
+2026/07/16-17:08:31.033 36d8 Delete type=0 #3
+2026/07/16-17:51:38.491 d0c Level-0 table #7: started
+2026/07/16-17:51:38.682 d0c Level-0 table #7: 800815 bytes OK
+2026/07/16-17:51:38.753 d0c Delete type=0 #4
+2026/07/16-17:54:18.676 d0c Compacting 1@1 + 1@2 files
+2026/07/16-17:54:18.712 d0c Generated table #8@1: 9312 keys, 779402 bytes
+2026/07/16-17:54:18.712 d0c Compacted 1@1 + 1@2 files => 779402 bytes
+2026/07/16-17:54:18.716 d0c compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/07/16-17:54:18.716 d0c Delete type=2 #5
+2026/07/16-17:54:18.717 d0c Delete type=2 #7
+2026/07/16-18:26:02.495 d0c Level-0 table #10: started
+2026/07/16-18:26:02.536 d0c Level-0 table #10: 750431 bytes OK
+2026/07/16-18:26:02.542 d0c Delete type=0 #6
+2026/07/16-18:26:48.230 d0c Compacting 1@1 + 1@2 files
+2026/07/16-18:26:48.301 d0c Generated table #11@1: 11080 keys, 1118426 bytes
+2026/07/16-18:26:48.302 d0c Compacted 1@1 + 1@2 files => 1118426 bytes
+2026/07/16-18:26:48.306 d0c compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/07/16-18:26:48.308 d0c Delete type=2 #8
+2026/07/16-18:26:48.308 d0c Delete type=2 #10
+2026/07/16-18:54:10.324 d0c Level-0 table #13: started
+2026/07/16-18:54:10.360 d0c Level-0 table #13: 718408 bytes OK
+2026/07/16-18:54:10.364 d0c Delete type=0 #9
+2026/07/16-18:54:55.478 d0c Compacting 1@1 + 1@2 files
+2026/07/16-18:54:55.724 d0c Generated table #14@1: 12700 keys, 1459296 bytes
+2026/07/16-18:54:55.724 d0c Compacted 1@1 + 1@2 files => 1459296 bytes
+2026/07/16-18:54:55.727 d0c compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/07/16-18:54:55.730 d0c Delete type=2 #11
+2026/07/16-18:54:55.731 d0c Delete type=2 #13
+2026/07/16-19:18:47.299 d0c Level-0 table #16: started
+2026/07/16-19:18:47.339 d0c Level-0 table #16: 694733 bytes OK
+2026/07/16-19:18:47.344 d0c Delete type=0 #12
