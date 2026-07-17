@@ -1491,7 +1491,10 @@ router.post(
       accountId,         // UUID da conta WhatsApp (whatsapp_accounts) — Meta Cloud API
       templateName,      // Nome do template aprovado (Meta) — opcional
       templateLanguage,  // Código do idioma (default: pt_BR)
+      apenasLink,        // true = só gera o contrato e devolve o link, SEM enviar
+                         //        (Autentique não dispara e-mail/WhatsApp; Meta é ignorado)
     } = req.body;
+    const somenteLink = apenasLink === true || apenasLink === 'true';
 
     // ── 1. Validação ──────────────────────────────────────────────────────────
     if (!fiscalNumber) {
@@ -1635,7 +1638,7 @@ router.post(
       whatsappPhone = telTotvs ? formatPhone(telTotvs) : null;
     }
 
-    if (!whatsappPhone) {
+    if (!whatsappPhone && !somenteLink) {
       return errorResponse(
         res,
         'Nenhum telefone disponível para envio via WhatsApp. Informe o campo "phone" no body.',
@@ -1677,12 +1680,20 @@ router.post(
       {
         // Signatário 1: cliente
         name: cliente.name,
-        ...(clienteEmail ? { email: clienteEmail } : { phone: whatsappPhone }),
-        // Se tem email, usa email. Senão, usa whatsapp DO AUTENTIQUE como
-        // fallback (caso conta Meta não esteja configurada/falhe).
-        delivery_method: clienteEmail
-          ? 'DELIVERY_METHOD_EMAIL'
-          : 'DELIVERY_METHOD_WHATSAPP',
+        // No modo "apenas link", não manda contato pra Autentique não notificar.
+        ...(somenteLink
+          ? {}
+          : clienteEmail
+            ? { email: clienteEmail }
+            : { phone: whatsappPhone }),
+        // apenasLink → DELIVERY_METHOD_LINK: Autentique NÃO envia nada, só
+        // gera o link de assinatura pra compartilhar manualmente.
+        // Senão: email (se houver) ou whatsapp do Autentique como fallback.
+        delivery_method: somenteLink
+          ? 'DELIVERY_METHOD_LINK'
+          : clienteEmail
+            ? 'DELIVERY_METHOD_EMAIL'
+            : 'DELIVERY_METHOD_WHATSAPP',
         action: 'SIGN',
         configs: {
           cpf: clean.length === 11 ? clean : undefined,
@@ -1742,7 +1753,7 @@ router.post(
 
     let metaResult = null;
     let metaError = null;
-    if (accountId) {
+    if (accountId && !somenteLink) {
       try {
         // Busca conta Meta no Supabase
         const { data: account, error: accErr } = await supabase
@@ -1837,11 +1848,13 @@ router.post(
       );
     }
 
-    const successMsg = accountId && metaResult
-      ? `Termo de Crédito enviado para ${cliente.name} via Meta WhatsApp "${metaResult.account_name}" (${whatsappPhone})`
-      : accountId && metaError
-        ? `Documento criado na Autentique. Meta WhatsApp falhou: ${metaError}. Use o link de assinatura.`
-        : `Termo de Crédito enviado para ${cliente.name} via Autentique (${whatsappPhone})`;
+    const successMsg = somenteLink
+      ? `Link do contrato gerado para ${cliente.name} (sem envio — compartilhe o link manualmente)`
+      : accountId && metaResult
+        ? `Termo de Crédito enviado para ${cliente.name} via Meta WhatsApp "${metaResult.account_name}" (${whatsappPhone})`
+        : accountId && metaError
+          ? `Documento criado na Autentique. Meta WhatsApp falhou: ${metaError}. Use o link de assinatura.`
+          : `Termo de Crédito enviado para ${cliente.name} via Autentique (${whatsappPhone})`;
 
     successResponse(
       res,
@@ -1856,6 +1869,7 @@ router.post(
         meta: metaResult,
         meta_error: metaError,
         link_assinatura: linkAssinatura,
+        apenas_link: somenteLink,
       },
       successMsg,
     );
