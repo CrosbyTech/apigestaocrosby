@@ -1450,61 +1450,123 @@ const gerarTermoPdf = async (cliente) => {
       border-top: 1px solid #ccc;
       padding-top: 8px;
     }
+    .credora p { text-align: justify; text-indent: 0; }
+    .lista { margin: 0 0 12px 2.6em; }
+    .lista li { text-align: justify; margin-bottom: 4px; }
+    .assinaturas { margin-top: 48px; }
+    .assinatura-bloco2 {
+      text-align: center;
+      width: 70%;
+      margin: 44px auto 0;
+      line-height: 1.5;
+    }
+    .assinatura-linha2 {
+      border-top: 1px solid #000;
+      margin-bottom: 6px;
+    }
   </style>
 </head>
 <body>
 
   <div class="header">
-    <h1>Crosby</h1>
-    <h2>Termo de Concessão de Crédito</h2>
+    <h1>Termo de Concessão de Crédito e Responsabilidade Financeira</h1>
+  </div>
+
+  <div class="section credora">
+    <div class="section-title">Credora</div>
+    <p><strong>FERREIRA COMÉRCIO E CONFECÇÕES LTDA</strong>, nome fantasia <strong>CROSBY</strong>, inscrita no CNPJ nº <strong>17.176.080/0001-16</strong>, com sede na Rua São José, nº 2189, Lagoa Nova, Natal/RN, CEP 59063-150.</p>
   </div>
 
   <div class="section">
-    <div class="section-title">Dados do Cliente</div>
-    <div class="data-row"><span class="data-label">Nome / Razão Social:</span><span class="data-value">${cliente.name || 'Não informado'}</span></div>
-    <div class="data-row"><span class="data-label">CPF / CNPJ:</span><span class="data-value">${formatCpf(cliente.cpf || cliente.cnpj || '')}</span></div>
-    <div class="data-row"><span class="data-label">Código de cliente:</span><span class="data-value">${cliente.code || 'Não informado'}</span></div>
-    <div class="data-row"><span class="data-label">E-mail:</span><span class="data-value">${emailPrimario}</span></div>
-    <div class="data-row"><span class="data-label">Telefone:</span><span class="data-value">${telefonePrimario}</span></div>
+    <div class="section-title">Cliente (Pessoa Física)</div>
+    <div class="data-row"><span class="data-label">Nome Completo:</span><span class="data-value">${cliente.name || ''}</span></div>
+    <div class="data-row"><span class="data-label">CPF:</span><span class="data-value">${formatCpf(cliente.cpf || '')}</span></div>
+    <div class="data-row"><span class="data-label">RG:</span><span class="data-value">${cliente.rg || ''}</span></div>
     <div class="data-row"><span class="data-label">Endereço:</span><span class="data-value">${endPrincipal}</span></div>
+    <div class="data-row"><span class="data-label">Telefone:</span><span class="data-value">${telefonePrimario}</span></div>
+    <div class="data-row"><span class="data-label">E-mail:</span><span class="data-value">${emailPrimario}</span></div>
   </div>
 
   <div class="section clausulas">
-    <div class="section-title">Cláusulas e Condições</div>
+    <p style="text-indent:0">As partes acima identificadas firmam o presente <strong>TERMO DE CONCESSÃO DE CRÉDITO E RESPONSABILIDADE FINANCEIRA</strong>, mediante as cláusulas e condições abaixo:</p>
 
-    <p class="clausula-title">Cláusula 1ª — Do Objeto</p>
-    <p>O presente Termo tem por objeto a concessão de limite de crédito comercial ao cliente identificado acima, para fins de aquisição de produtos e serviços junto à Crosby, nas condições e limites estabelecidos pela empresa, de acordo com a política de crédito vigente.</p>
+    <p class="clausula-title">Cláusula 1 — Do Crédito Concedido</p>
+    <p>A CROSBY concede ao CLIENTE um limite de crédito no valor de R$ 600,00 (seiscentos reais) para aquisição de produtos comercializados pela empresa.</p>
 
-    <p class="clausula-title">Cláusula 2ª — Das Condições de Pagamento</p>
-    <p>O cliente compromete-se a efetuar o pagamento das compras realizadas dentro dos prazos e condições negociados no momento da venda, respeitando os limites de crédito aprovados e as datas de vencimento das respectivas obrigações.</p>
+    <p class="clausula-title">Cláusula 2 — Da Forma de Pagamento</p>
+    <p>O valor utilizado será pago mediante boletos bancários, podendo ser parcelado em até 5 (cinco) parcelas, conforme abaixo:</p>
+    <ul class="lista">
+      <li>1ª parcela: 30 dias;</li>
+      <li>2ª parcela: 60 dias;</li>
+      <li>3ª parcela: 90 dias;</li>
+      <li>4ª parcela: 120 dias;</li>
+      <li>5ª parcela: 150 dias.</li>
+    </ul>
+    <p>Os vencimentos serão definidos no momento do faturamento do pedido.</p>
 
-    <p class="clausula-title">Cláusula 3ª — Da Responsabilidade</p>
-    <p>O cliente declara que as informações prestadas à Crosby são verdadeiras e completas, responsabilizando-se civil e criminalmente por quaisquer falsidades. Autoriza, ainda, a consulta a órgãos de proteção ao crédito (SPC, Serasa e similares) para fins de análise e manutenção do presente crédito.</p>
+    <p class="clausula-title">Cláusula 3 — Da Análise e Aprovação</p>
+    <p>A concessão do crédito está sujeita à análise cadastral e financeira da CROSBY, podendo ser reduzida, ampliada, suspensa ou cancelada a qualquer momento.</p>
 
-    <p class="clausula-title">Cláusula 4ª — Da Vigência e Revisão</p>
-    <p>O crédito ora concedido poderá ser revisto, suspenso ou cancelado a qualquer tempo, a critério exclusivo da Crosby, mediante simples comunicação ao cliente, especialmente em caso de inadimplência, alteração negativa na capacidade de pagamento ou descumprimento das condições estabelecidas neste Termo.</p>
+    <p class="clausula-title">Cláusula 4 — Do Uso Único do Limite</p>
+    <p>O crédito concedido destina-se exclusivamente à realização de um único pedido. Caso o CLIENTE utilize valor inferior ao limite aprovado, o saldo remanescente será automaticamente cancelado e não poderá ser utilizado posteriormente. Exemplo: sendo aprovado o limite de R$ 2.000,00 e realizado pedido no valor de R$ 1.500,00, os R$ 500,00 restantes serão automaticamente extintos, não gerando qualquer crédito futuro.</p>
 
-    <p class="clausula-title">Cláusula 5ª — Da Concordância</p>
-    <p>Ao assinar o presente instrumento, o cliente declara ter lido, compreendido e concordado integralmente com todas as cláusulas e condições aqui estabelecidas, bem como com a política de crédito e cobrança da Crosby.</p>
+    <p class="clausula-title">Cláusula 5 — Do Inadimplemento</p>
+    <p>Em caso de atraso no pagamento de qualquer parcela, incidirão:</p>
+    <ul class="lista">
+      <li>Multa de 2% sobre o valor em atraso;</li>
+      <li>Juros de mora de 1% ao mês, calculados proporcionalmente aos dias de atraso;</li>
+      <li>Correção monetária na forma da legislação vigente.</li>
+    </ul>
+
+    <p class="clausula-title">Cláusula 6 — Do Vencimento Antecipado</p>
+    <p>O atraso superior a 15 (quinze) dias em qualquer parcela autoriza a CROSBY a considerar antecipadamente vencidas todas as parcelas vincendas, tornando imediatamente exigível a totalidade do saldo devedor.</p>
+
+    <p class="clausula-title">Cláusula 7 — Das Medidas de Cobrança</p>
+    <p>Em caso de inadimplência, o CLIENTE autoriza a CROSBY a promover todas as medidas necessárias para recuperação do crédito, incluindo:</p>
+    <ul class="lista">
+      <li>Cobrança extrajudicial;</li>
+      <li>Protesto de títulos;</li>
+      <li>Inclusão do CPF e/ou CNPJ em órgãos de proteção ao crédito;</li>
+      <li>Cobrança judicial.</li>
+    </ul>
+
+    <p class="clausula-title">Cláusula 8 — Da Responsabilidade Solidária</p>
+    <p>O signatário deste instrumento, na qualidade de pessoa física identificada neste documento, declara ser responsável pela empresa indicada e assume responsabilidade solidária pelo pagamento das obrigações decorrentes das compras realizadas através do crédito concedido. Dessa forma, eventual inadimplência poderá ser cobrada tanto da pessoa jurídica quanto da pessoa física identificadas neste instrumento, observadas as disposições legais aplicáveis.</p>
+
+    <p class="clausula-title">Cláusula 9 — Da Confissão de Dívida</p>
+    <p>O CLIENTE reconhece que a emissão da Nota Fiscal, a retirada da mercadoria, o recebimento dos produtos ou a assinatura de comprovantes de entrega constituem prova suficiente da efetiva utilização do crédito concedido e do reconhecimento da obrigação de pagamento dos respectivos boletos emitidos pela CROSBY.</p>
+
+    <p class="clausula-title">Cláusula 10 — Declarações</p>
+    <p>O CLIENTE declara que:</p>
+    <ul class="lista">
+      <li>Recebeu todas as informações referentes ao crédito concedido;</li>
+      <li>Compreendeu as condições de pagamento;</li>
+      <li>Reconhece a legitimidade dos valores decorrentes das compras realizadas;</li>
+      <li>Autoriza o armazenamento de seus dados para fins cadastrais e de cobrança.</li>
+    </ul>
   </div>
 
   <div class="section">
-    <p style="text-align:right; margin-top: 16px;">Data: ${hoje}</p>
+    <p style="text-align:right; margin-top: 8px;">Natal/RN, ${hoje}.</p>
   </div>
 
-  <div class="assinatura">
-    <div class="assinatura-bloco">
-      <div class="assinatura-linha">
-        ${cliente.name || 'Cliente'}<br>
-        CPF: ${formatCpf(cliente.cpf || '')}<br>
-        <small>Assinatura do Cliente</small>
-      </div>
+  <div class="assinaturas">
+    <div class="assinatura-bloco2">
+      <div class="assinatura-linha2"></div>
+      <strong>FERREIRA COMÉRCIO E CONFECÇÕES LTDA — CROSBY</strong><br>
+      CNPJ: 17.176.080/0001-16
     </div>
-    <div class="assinatura-bloco">
-      <div class="assinatura-linha">
-        Crosby<br>
-        <small>Responsável Comercial</small>
-      </div>
+    <div class="assinatura-bloco2">
+      <div class="assinatura-linha2"></div>
+      <strong>CLIENTE (PESSOA FÍSICA)</strong><br>
+      Nome: ${cliente.name || ''}<br>
+      CPF: ${formatCpf(cliente.cpf || '')}
+    </div>
+    <div class="assinatura-bloco2">
+      <div class="assinatura-linha2"></div>
+      <strong>EMPRESA (PESSOA JURÍDICA)</strong><br>
+      Razão Social: ____________________________<br>
+      CNPJ: ____________________________
     </div>
   </div>
 
