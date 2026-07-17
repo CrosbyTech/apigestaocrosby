@@ -1972,14 +1972,34 @@ router.post(
             { classificationTypeCode: bcTypeCode, classificationCode: bcCode },
           ],
         };
-        const cr = await axios.post(classifUrl, classifPayload, {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${tokenData.access_token}`,
-          },
-          timeout: 30000,
-          validateStatus: () => true,
-        });
+        const postClassif = (extra) =>
+          axios.post(
+            classifUrl,
+            { ...classifPayload, ...extra },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${tokenData.access_token}`,
+              },
+              timeout: 30000,
+              validateStatus: () => true,
+            },
+          );
+        let cr = await postClassif();
+        // Clientes vindos do marketing/RD têm o additionalField code 3
+        // ("TAMANHO") obrigatório e vazio — o TOTVS retorna "Required FieldCode 3".
+        // Reenvia com um placeholder só pra satisfazer a obrigatoriedade (o campo
+        // estava vazio; não sobrescreve tamanho real). Configurável via env.
+        if (
+          cr.status >= 300 &&
+          /FieldCode 3\b/.test(JSON.stringify(cr.data || ''))
+        ) {
+          cr = await postClassif({
+            additionalFields: [
+              { code: 3, value: process.env.BLUECRED_TAMANHO_DEFAULT || '-' },
+            ],
+          });
+        }
         if (cr.status < 300) {
           classificacaoBluecred = { status: 'aplicada' };
           console.log(
