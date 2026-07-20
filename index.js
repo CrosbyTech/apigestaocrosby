@@ -23,6 +23,7 @@ import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js'
 import faturamentoTransacaoRoutes from './routes/faturamentoTransacao.routes.js';
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
+import automacaoRoutes from './routes/automacao.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
@@ -83,6 +84,7 @@ import {
   iniciarJobProvisaoLiberacao,
   executarProvisaoLiberacao,
 } from './jobs/provisao-liberacao.job.js';
+import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -136,6 +138,7 @@ app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
 app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/conciliacao-stone', conciliacaoStoneRoutes); // Conciliação Stone (cartões)
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
+app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -181,6 +184,7 @@ app.listen(PORT, async () => {
   iniciarJobPesPessoaSync();
   iniciarJobConversaoTemplate();
   iniciarJobProvisaoLiberacao();
+  iniciarJobBoletoCobranca();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {
