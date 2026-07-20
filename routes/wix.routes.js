@@ -41,15 +41,23 @@ router.get('/pedidos', async (req, res) => {
     const { data: pedidos, error, count } = await q;
     if (error) return res.status(500).json({ error: error.message });
 
-    // Busca itens dos pedidos retornados (1 query)
+    // Busca itens dos pedidos retornados. IMPORTANTE: o Supabase limita a
+    // resposta a 1000 linhas por padrão — com muitos pedidos (janela de 12
+    // meses) os itens passam disso e a maioria vinha 0. Pagina até pegar todos.
     const ids = (pedidos || []).map((p) => p.id);
     let itens = [];
     if (ids.length > 0) {
-      const r = await supabase
-        .from('wix_pedido_items')
-        .select('*')
-        .in('pedido_id', ids);
-      itens = r.data || [];
+      for (let from = 0; ; from += 1000) {
+        const r = await supabase
+          .from('wix_pedido_items')
+          .select('*')
+          .in('pedido_id', ids)
+          .range(from, from + 999);
+        if (r.error) break;
+        const batch = r.data || [];
+        itens.push(...batch);
+        if (batch.length < 1000) break;
+      }
     }
     // Agrupa por pedido_id
     const itensPorPedido = {};
