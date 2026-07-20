@@ -9,7 +9,7 @@
     "npm": ">=8.0.0"
   },
   "scripts": {
-    "start": "cross-env NODE_OPTIONS=--max-old-space-size=4096 bash start.sh",
+    "start": "cross-env NODE_OPTIONS=--max-old-space-size=4096 node index.js",
     "postinstall": "node scripts/install-chrome.mjs",
     "dev": "cross-env NODE_ENV=development NODE_OPTIONS=--max-old-space-size=4096 nodemon index.js",
     "test": "cross-env NODE_OPTIONS=\"--experimental-vm-modules\" NODE_ENV=test jest",
