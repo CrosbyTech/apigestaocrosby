@@ -583,6 +583,7 @@ export async function enviarBoletoTeste() {
 // deslizante de BATCH_WINDOW_MS (default 5 a cada 30 min) + gap mínimo.
 // ─────────────────────────────────────────────────────────────────────────────
 let processando = false;
+let ultimaTentativaEnvio = 0; // timestamp da última tentativa (trava anti-flood)
 
 export async function processarFila() {
   if (!ENABLED) return;
@@ -590,6 +591,10 @@ export async function processarFila() {
   processando = true;
   try {
     const hoje = ymd();
+
+    // Trava em memória (defesa extra): mesmo que a gravação no banco falhe,
+    // NUNCA envia mais de 1 por MIN_GAP_MS. Impede flood se o DB não atualizar.
+    if (Date.now() - ultimaTentativaEnvio < MIN_GAP_MS) return;
 
     // Limite por janela: no máx BATCH_SIZE enviados nos últimos BATCH_WINDOW_MS.
     const desdeJanela = new Date(Date.now() - BATCH_WINDOW_MS).toISOString();
@@ -628,6 +633,9 @@ export async function processarFila() {
     const row = pend?.[0];
     if (!row) return;
 
+    // Marca a tentativa ANTES de enviar — garante o espaçamento mesmo se o
+    // envio/gravação demorar ou falhar.
+    ultimaTentativaEnvio = Date.now();
     await processarUm(row, hoje);
   } catch (err) {
     console.error(`❌ [boleto-cobranca] worker: ${err.message}`);
@@ -637,10 +645,31 @@ export async function processarFila() {
 }
 
 async function marcar(id, patch) {
-  await supabase
+  const nowISO = new Date().toISOString();
+  const { error } = await supabase
     .from(TABLE)
-    .update({ ...patch, atualizado_em: new Date().toISOString() })
+    .update({ ...patch, atualizado_em: nowISO })
     .eq('id', id);
+  if (!error) return;
+  // CRÍTICO: se a atualização completa falhar (ex.: coluna inexistente na
+  // tabela), tenta um patch MÍNIMO com colunas garantidas. O essencial é a
+  // linha SAIR de 'pendente' — senão o worker a reenvia em loop (flood).
+  console.error(
+    `❌ [boleto-cobranca] marcar #${id} falhou (${error.message}) — retry com patch mínimo`,
+  );
+  const minimal = { atualizado_em: nowISO };
+  if (patch.status !== undefined) minimal.status = patch.status;
+  if (patch.enviado_em !== undefined) minimal.enviado_em = patch.enviado_em;
+  if (patch.erro !== undefined) minimal.erro = patch.erro;
+  const { error: e2 } = await supabase
+    .from(TABLE)
+    .update(minimal)
+    .eq('id', id);
+  if (e2) {
+    console.error(
+      `❌ [boleto-cobranca] marcar #${id} FALHOU no retry mínimo: ${e2.message} — risco de reenvio!`,
+    );
+  }
 }
 
 async function processarUm(row, hoje) {

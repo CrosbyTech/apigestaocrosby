@@ -127,6 +127,25 @@ router.post('/boletos/cancelar', async (req, res) => {
   }
 });
 
+// Reseta o dia: APAGA todos os registros da data (para re-testar do zero).
+// Cuidado: remove inclusive os 'enviado' — em modo real, re-rodar pode
+// contatar novamente clientes já enviados.
+router.post('/boletos/resetar', async (req, res) => {
+  const data = req.query.data || hojeBRT();
+  try {
+    const { data: rows, error } = await supabase
+      .from(TABLE)
+      .delete()
+      .eq('data_ref', data)
+      .select('id');
+    if (error) throw error;
+    res.json({ success: true, removidos: rows?.length || 0 });
+  } catch (err) {
+    console.error('[automacao] erro ao resetar:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Envia 1 boleto de amostra AGORA para o número de teste (exige TEST_PHONE)
 router.post('/boletos/testar', async (_req, res) => {
   try {
