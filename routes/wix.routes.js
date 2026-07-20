@@ -109,14 +109,15 @@ router.patch('/pedidos/:id', async (req, res) => {
     const allowed = [
       'forma_pagamento', 'data_pagamento', 'observacao_pagamento',
       'cliente_totvs_code', 'cliente_totvs_nome', 'cliente_totvs_doc',
-      'cliente_classificacao', 'vendedor',
+      'cliente_classificacao', 'vendedor', 'parcelas',
     ];
     const patch = {};
     for (const k of allowed) {
       if (k in req.body) {
         let val = req.body[k];
         if (typeof val === 'string') val = val.trim() || null;
-        if (k === 'cliente_totvs_code' && val != null) val = Number(val) || null;
+        if ((k === 'cliente_totvs_code' || k === 'parcelas') && val != null)
+          val = Number(val) || null;
         patch[k] = val;
       }
     }
