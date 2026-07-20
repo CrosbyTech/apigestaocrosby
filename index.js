@@ -79,6 +79,10 @@ import {
   iniciarJobConversaoTemplate,
   executarConversaoTemplate,
 } from './jobs/template-conversao.job.js';
+import {
+  iniciarJobProvisaoLiberacao,
+  executarProvisaoLiberacao,
+} from './jobs/provisao-liberacao.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -176,6 +180,7 @@ app.listen(PORT, async () => {
   iniciarUazapiMonitor();
   iniciarJobPesPessoaSync();
   iniciarJobConversaoTemplate();
+  iniciarJobProvisaoLiberacao();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {
@@ -213,6 +218,19 @@ app.listen(PORT, async () => {
       console.warn(`[boot resume] erro: ${e.message}`);
     }
   })();
+});
+
+// Endpoint manual pra disparar a provisão automática (Contas a Pagar → Liberação)
+// ?dryRun=1 apenas loga o que faria (não insere). Aguarda e retorna o resumo.
+app.post('/api/jobs/provisao-liberacao/run', async (req, res) => {
+  const dryRun = req.query.dryRun === '1' || req.body?.dryRun === true;
+  try {
+    const resultado = await executarProvisaoLiberacao({ dryRun });
+    res.json({ success: true, dryRun, resultado });
+  } catch (e) {
+    console.error('[provisao-liberacao manual] erro:', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
 });
 
 // Endpoint manual pra disparar conversão
