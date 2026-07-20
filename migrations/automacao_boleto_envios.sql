@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS automacao_boleto_envios (
   --   'pulado_pago'          — re-check detectou pagamento → não enviado
   --   'pulado_cancelado'     — re-check detectou cancelamento → não enviado
   --   'pulado_sem_telefone'  — cliente sem telefone cadastrado
+  --   'pulado_sem_boleto'    — fatura sem linha digitável (boleto) no TOTVS
   status           VARCHAR(24) NOT NULL DEFAULT 'pendente',
   erro             TEXT,
   -- texto exato (legenda) que foi enviado ao cliente

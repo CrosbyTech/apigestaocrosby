@@ -50,6 +50,8 @@ router.get('/boletos/envios', async (req, res) => {
       pulado_pago: 0,
       pulado_cancelado: 0,
       pulado_sem_telefone: 0,
+      pulado_sem_boleto: 0,
+      cancelado_manual: 0,
       valor_total: 0,
     };
     for (const r of lista) {
@@ -98,6 +100,29 @@ router.post('/boletos/processar', async (_req, res) => {
     await processarFila();
     res.json({ success: true });
   } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Para a fila: marca todos os 'pendente' do dia como 'cancelado_manual'
+// (kill switch — interrompe um lote em andamento).
+router.post('/boletos/cancelar', async (req, res) => {
+  const data = req.query.data || hojeBRT();
+  try {
+    const { data: rows, error } = await supabase
+      .from(TABLE)
+      .update({
+        status: 'cancelado_manual',
+        erro: 'Cancelado manualmente',
+        atualizado_em: new Date().toISOString(),
+      })
+      .eq('data_ref', data)
+      .eq('status', 'pendente')
+      .select('id');
+    if (error) throw error;
+    res.json({ success: true, cancelados: rows?.length || 0 });
+  } catch (err) {
+    console.error('[automacao] erro ao cancelar:', err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
