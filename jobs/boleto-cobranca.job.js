@@ -384,8 +384,32 @@ export async function planejarEnvios({ dryRun = false } = {}) {
   // vencem exatamente em D-0 ou D-3.
   const elegiveis = filtrarElegiveis(faturas, hoje, alvoD3);
   // Enviamos só a linha digitável (texto): fila = faturas que TÊM boleto.
-  const selecionados = elegiveis.filter((s) => s.f.linha_digitavel);
-  const semBoletoCount = elegiveis.length - selecionados.length;
+  const comBoleto = elegiveis.filter((s) => s.f.linha_digitavel);
+  const semBoletoCount = elegiveis.length - comBoleto.length;
+  // DEDUPE por IDENTIDADE da fatura (cliente|nº|parcela|vencimento|valor —
+  // SEM empresa, pois a mesma fatura pode aparecer sob filiais diferentes):
+  // a API do TOTVS pagina em paralelo e pode devolver o mesmo item 2x —
+  // cada fatura entra na fila 1 única vez.
+  const vistos = new Set();
+  const selecionados = [];
+  for (const s of comBoleto) {
+    const k = [
+      s.f.cd_cliente,
+      s.f.nr_fatura ?? s.f.nr_fat,
+      s.f.nr_parcela,
+      String(s.f.dt_vencimento || '').slice(0, 10),
+      Number(s.f.vl_fatura || 0).toFixed(2),
+    ].join('|');
+    if (vistos.has(k)) continue;
+    vistos.add(k);
+    selecionados.push(s);
+  }
+  const duplicadasApi = comBoleto.length - selecionados.length;
+  if (duplicadasApi > 0) {
+    console.warn(
+      `⚠️ [boleto-cobranca] ${duplicadasApi} item(ns) duplicado(s) na resposta do TOTVS — removidos`,
+    );
+  }
 
   // Telefones (em lote) — nomes reais + celular
   const codigos = [...new Set(selecionados.map((s) => s.f.cd_cliente))];
@@ -579,64 +603,163 @@ export async function enviarBoletoTeste() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WORKER — processa 1 item por tick, com limite de BATCH_SIZE por janela
-// deslizante de BATCH_WINDOW_MS (default 5 a cada 30 min) + gap mínimo.
+// WORKER — processamento SEQUENCIAL: monta um array com os itens do lote da
+// janela (até BATCH_SIZE) e envia UM POR VEZ, num loop. Cada item só é enviado
+// depois que o anterior teve o status CONFIRMADO no banco. Se a confirmação
+// falhar, o loop ABORTA (nunca arriscar duplicar).
+//
+// Defesas anti-duplicação (em camadas):
+//   a) claim atômico 'pendente'→'enviando' (só 1 instância vence a linha);
+//   b) checagem de idempotência POR FATURA: se a mesma fatura (empresa/cliente/
+//      número/parcela) já está 'enviado' ou 'enviando' hoje em QUALQUER outra
+//      linha, pula — a mesma fatura nunca sai 2x no dia;
+//   c) status 'enviado' é gravado e VERIFICADO antes de passar ao próximo item;
+//   d) trava em memória de gap mínimo entre envios.
 // ─────────────────────────────────────────────────────────────────────────────
 let processando = false;
 let ultimaTentativaEnvio = 0; // timestamp da última tentativa (trava anti-flood)
+// Memória de faturas já enviadas por ESTA instância (chave → timestamp).
+// Garante que a mesma fatura nunca sai 2x na mesma janela, mesmo que o banco
+// falhe ou atrase.
+const enviosRecentes = new Map();
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Chave de IDENTIDADE da fatura (independente de id/linha/empresa):
+// cliente + nº fatura + parcela + vencimento + emissão + valor.
+function chaveFatura(r) {
+  const val = Number(r.vl_fatura || 0).toFixed(2);
+  return `${r.cd_cliente}|${r.nr_fatura}|${r.nr_parcela}|${r.dt_vencimento}|${r.dt_emissao}|${val}`;
+}
 
 export async function processarFila() {
   if (!ENABLED) return;
-  if (processando) return; // evita sobreposição de ticks
+  if (processando) return; // evita sobreposição de ticks na mesma instância
   processando = true;
   try {
     const hoje = ymd();
+    const agoraISO = new Date().toISOString();
 
-    // Trava em memória (defesa extra): mesmo que a gravação no banco falhe,
-    // NUNCA envia mais de 1 por MIN_GAP_MS. Impede flood se o DB não atualizar.
-    if (Date.now() - ultimaTentativaEnvio < MIN_GAP_MS) return;
+    // Recupera linhas presas em 'enviando' (instância morreu no meio). NÃO
+    // reenvia — não dá pra saber se a mensagem saiu; marca falha p/ revisão.
+    const presasDesde = new Date(Date.now() - 10 * 60_000).toISOString();
+    await supabase
+      .from(TABLE)
+      .update({
+        status: 'falha',
+        erro: 'Interrompido durante envio (restart) — verificar antes de reenviar',
+        atualizado_em: agoraISO,
+      })
+      .eq('status', 'enviando')
+      .lt('atualizado_em', presasDesde);
 
-    // Limite por janela: no máx BATCH_SIZE enviados nos últimos BATCH_WINDOW_MS.
+    // Quota da janela: no máx BATCH_SIZE enviados nos últimos BATCH_WINDOW_MS.
     const desdeJanela = new Date(Date.now() - BATCH_WINDOW_MS).toISOString();
     const { count: enviadosJanela } = await supabase
       .from(TABLE)
       .select('id', { count: 'exact', head: true })
       .eq('status', 'enviado')
       .gte('enviado_em', desdeJanela);
-    if ((enviadosJanela || 0) >= BATCH_SIZE) return; // janela cheia — aguarda
+    const quota = BATCH_SIZE - (enviadosJanela || 0);
+    if (quota <= 0) return; // janela cheia — aguarda a próxima
 
-    // Guard anti-ban: se enviamos algo há menos de MIN_GAP_MS, espera.
-    const { data: ultimos } = await supabase
-      .from(TABLE)
-      .select('enviado_em')
-      .eq('status', 'enviado')
-      .not('enviado_em', 'is', null)
-      .order('enviado_em', { ascending: false })
-      .limit(1);
-    const ultimoEnvio = ultimos?.[0]?.enviado_em
-      ? new Date(ultimos[0].enviado_em).getTime()
-      : 0;
-    if (Date.now() - ultimoEnvio < MIN_GAP_MS) return;
-
-    // Próxima pendente já vencida (scheduled_at <= agora)
-    const { data: pend, error } = await supabase
+    // ARRAY DO LOTE: até `quota` pendentes vencidas, em ordem
+    const { data: lote, error } = await supabase
       .from(TABLE)
       .select('*')
       .eq('status', 'pendente')
-      .lte('scheduled_at', new Date().toISOString())
+      .lte('scheduled_at', agoraISO)
       .order('scheduled_at', { ascending: true })
-      .limit(1);
+      .order('id', { ascending: true })
+      .limit(quota);
     if (error) {
       console.error(`❌ [boleto-cobranca] Erro ao buscar fila: ${error.message}`);
       return;
     }
-    const row = pend?.[0];
-    if (!row) return;
+    if (!lote?.length) return;
 
-    // Marca a tentativa ANTES de enviar — garante o espaçamento mesmo se o
-    // envio/gravação demorar ou falhar.
-    ultimaTentativaEnvio = Date.now();
-    await processarUm(row, hoje);
+    console.log(
+      `📦 [boleto-cobranca] Lote: ${lote.length} item(ns) — enviando 1 por vez`,
+    );
+
+    // LOOP SEQUENCIAL — um item por vez, status confirmado entre cada um
+    for (const row of lote) {
+      // Gap mínimo entre envios (memória + relógio)
+      const espera = MIN_GAP_MS - (Date.now() - ultimaTentativaEnvio);
+      if (espera > 0) await sleep(espera);
+
+      // a) CLAIM atômico: só segue quem mudar 'pendente'→'enviando'
+      const { data: claimed, error: claimErr } = await supabase
+        .from(TABLE)
+        .update({ status: 'enviando', atualizado_em: new Date().toISOString() })
+        .eq('id', row.id)
+        .eq('status', 'pendente')
+        .select('id');
+      if (claimErr) {
+        console.error(
+          `❌ [boleto-cobranca] claim #${row.id}: ${claimErr.message} — abortando lote`,
+        );
+        break; // sem certeza do estado → não arriscar
+      }
+      if (!claimed?.length) continue; // outra instância pegou esta linha
+
+      // b) IDEMPOTÊNCIA POR FATURA (cliente+fatura+parcela+vencimento, SEM
+      // empresa — a mesma fatura pode aparecer sob filiais diferentes):
+      // já enviada/em envio hoje em qualquer outra linha?
+      const { count: jaTratada, error: dupErr } = await supabase
+        .from(TABLE)
+        .select('id', { count: 'exact', head: true })
+        .eq('data_ref', row.data_ref)
+        .eq('cd_cliente', row.cd_cliente)
+        .eq('nr_fatura', row.nr_fatura)
+        .eq('nr_parcela', row.nr_parcela)
+        .eq('dt_vencimento', row.dt_vencimento)
+        .in('status', ['enviado', 'enviando'])
+        .neq('id', row.id);
+      if (dupErr) {
+        console.error(
+          `❌ [boleto-cobranca] check duplicidade #${row.id}: ${dupErr.message} — abortando lote`,
+        );
+        await marcar(row.id, { status: 'pendente' }); // devolve pra fila
+        break;
+      }
+      if ((jaTratada || 0) > 0) {
+        await marcar(row.id, {
+          status: 'pulado_duplicado',
+          erro: `Fatura ${chaveFatura(row)} já enviada hoje em outra linha`,
+        });
+        console.log(
+          `⏭️ [boleto-cobranca] #${row.id} pulado (fatura duplicada no dia)`,
+        );
+        continue;
+      }
+
+      // b2) TRAVA DE MEMÓRIA: esta instância já enviou esta fatura na janela?
+      // (protege mesmo se o banco falhar/atrasar)
+      const chave = chaveFatura(row);
+      const ultimoEnvioFatura = enviosRecentes.get(chave) || 0;
+      if (Date.now() - ultimoEnvioFatura < BATCH_WINDOW_MS) {
+        await marcar(row.id, {
+          status: 'pulado_duplicado',
+          erro: `Fatura ${chave} enviada há menos de ${Math.round(BATCH_WINDOW_MS / 60000)} min (memória)`,
+        });
+        console.log(
+          `⏭️ [boleto-cobranca] #${row.id} pulado (duplicada na memória)`,
+        );
+        continue;
+      }
+
+      // c) Envia e CONFIRMA o status antes do próximo
+      ultimaTentativaEnvio = Date.now();
+      const resultado = await processarUm(row, hoje);
+      if (resultado === 'enviado') enviosRecentes.set(chave, Date.now());
+      if (resultado === 'abort') {
+        console.error(
+          `🛑 [boleto-cobranca] status do #${row.id} não confirmado — lote abortado p/ evitar duplicação`,
+        );
+        break;
+      }
+    }
   } catch (err) {
     console.error(`❌ [boleto-cobranca] worker: ${err.message}`);
   } finally {
@@ -644,16 +767,17 @@ export async function processarFila() {
   }
 }
 
+// Atualiza a linha e retorna true/false conforme a gravação foi CONFIRMADA.
 async function marcar(id, patch) {
   const nowISO = new Date().toISOString();
   const { error } = await supabase
     .from(TABLE)
     .update({ ...patch, atualizado_em: nowISO })
     .eq('id', id);
-  if (!error) return;
+  if (!error) return true;
   // CRÍTICO: se a atualização completa falhar (ex.: coluna inexistente na
   // tabela), tenta um patch MÍNIMO com colunas garantidas. O essencial é a
-  // linha SAIR de 'pendente' — senão o worker a reenvia em loop (flood).
+  // linha SAIR da fila — senão o worker a reenviaria (flood).
   console.error(
     `❌ [boleto-cobranca] marcar #${id} falhou (${error.message}) — retry com patch mínimo`,
   );
@@ -669,7 +793,9 @@ async function marcar(id, patch) {
     console.error(
       `❌ [boleto-cobranca] marcar #${id} FALHOU no retry mínimo: ${e2.message} — risco de reenvio!`,
     );
+    return false;
   }
+  return true;
 }
 
 async function processarUm(row, hoje) {
@@ -750,23 +876,37 @@ async function processarUm(row, hoje) {
   const caption = montarMensagem(row);
   try {
     await enviarCobranca({ phone: destino, row, token: sender.token });
-    await marcar(row.id, {
-      status: 'enviado',
-      enviado_em: new Date().toISOString(),
-      conteudo_enviado: caption,
-      redirecionado_para: TEST_PHONE ? destino : null,
-      erro: null,
-    });
-    console.log(
-      `✅ [boleto-cobranca] #${row.id} enviado → ${row.nome_cliente} ` +
-        (TEST_PHONE
-          ? `[TESTE → ${destino}] (cliente real: ${row.telefone || 'sem telefone'})`
-          : `(${destino})`),
-    );
   } catch (err) {
     const msg = err.response?.data?.message || err.message;
     await falharOuReagendar(row, `Erro no envio UAzapi: ${msg}`);
+    return 'falha';
   }
+
+  // 5) CONFIRMAR o status 'enviado' no banco ANTES de liberar o próximo item.
+  // Se não conseguir confirmar, o chamador ABORTA o lote (nunca duplicar).
+  const okMarcar = await marcar(row.id, {
+    status: 'enviado',
+    enviado_em: new Date().toISOString(),
+    conteudo_enviado: caption,
+    redirecionado_para: TEST_PHONE ? destino : null,
+    erro: null,
+  });
+  if (!okMarcar) {
+    // Verificação final: relê a linha pra ter certeza do estado
+    const { data: check } = await supabase
+      .from(TABLE)
+      .select('status')
+      .eq('id', row.id)
+      .single();
+    if (check?.status !== 'enviado') return 'abort';
+  }
+  console.log(
+    `✅ [boleto-cobranca] #${row.id} enviado → ${row.nome_cliente} ` +
+      (TEST_PHONE
+        ? `[TESTE → ${destino}] (cliente real: ${row.telefone || 'sem telefone'})`
+        : `(${destino})`),
+  );
+  return 'enviado';
 }
 
 async function falharOuReagendar(row, mensagem) {

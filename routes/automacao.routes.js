@@ -45,12 +45,14 @@ router.get('/boletos/envios', async (req, res) => {
     const resumo = {
       total: lista.length,
       enviado: 0,
+      enviando: 0,
       pendente: 0,
       falha: 0,
       pulado_pago: 0,
       pulado_cancelado: 0,
       pulado_sem_telefone: 0,
       pulado_sem_boleto: 0,
+      pulado_duplicado: 0,
       cancelado_manual: 0,
       valor_total: 0,
     };
