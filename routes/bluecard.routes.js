@@ -12,6 +12,7 @@ import cron from 'node-cron';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { validarCPF, normalizarTelefone, validarCEP } from '../utils/docValidator.js';
+import { alertarErroCadastroBluecard } from '../services/alertaBluecard.js';
 
 // Single-flight: evita race condition se PATCH 'info_completas' for chamado
 // 2x simultaneamente pro mesmo lead — cria 2 PFs duplicadas no TOTVS.
@@ -818,6 +819,10 @@ router.patch('/leads/:id', async (req, res) => {
           totvs_sync_error: totvsResult.error,
           totvs_synced_at: new Date().toISOString(),
         };
+    // Falhou o cadastro no TOTVS → avisa o responsável no WhatsApp (não bloqueia).
+    if (!totvsResult.ok) {
+      alertarErroCadastroBluecard(data, totvsResult.error);
+    }
     const r2 = await supabase
       .from('bluecard_leads')
       .update(upd)
@@ -853,6 +858,10 @@ router.post('/leads/:id/sync-totvs', async (req, res) => {
         totvs_sync_error: r.error,
         totvs_synced_at: new Date().toISOString(),
       };
+  // Falhou o cadastro no TOTVS → avisa o responsável no WhatsApp (não bloqueia).
+  if (!r.ok) {
+    alertarErroCadastroBluecard(lead, r.error);
+  }
   const r2 = await supabase
     .from('bluecard_leads')
     .update(upd)
