@@ -12,7 +12,11 @@ import cron from 'node-cron';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { validarCPF, normalizarTelefone, validarCEP } from '../utils/docValidator.js';
-import { alertarErroCadastroBluecard } from '../services/alertaBluecard.js';
+import {
+  alertarErroCadastroBluecard,
+  enviarWhatsappBluecard,
+  ALERT_PHONE,
+} from '../services/alertaBluecard.js';
 
 // Single-flight: evita race condition se PATCH 'info_completas' for chamado
 // 2x simultaneamente pro mesmo lead — cria 2 PFs duplicadas no TOTVS.
@@ -869,6 +873,126 @@ router.post('/leads/:id/sync-totvs', async (req, res) => {
     .select()
     .single();
   return res.json({ ok: r.ok, lead: r2.data, totvs: r });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/bluecard/whatsapp-webhook — recebe mensagens da uazapi (crosbybot).
+// Quando o responsável responde "#<id> <campo> <valor>", corrige o lead e
+// tenta recadastrar no TOTVS, respondendo o resultado na conversa.
+// ─────────────────────────────────────────────────────────────────────
+// Campos que o responsável pode corrigir pela conversa → coluna do lead.
+const CAMPOS_CORRIGIVEIS = new Set([
+  'cep', 'endereco', 'numero', 'complemento', 'cidade', 'estado',
+  'nome', 'cpf', 'email', 'whatsapp', 'data_nasc',
+]);
+function normalizarValorCampo(campo, valor) {
+  const v = String(valor || '').trim();
+  if (campo === 'cep' || campo === 'cpf' || campo === 'whatsapp') {
+    return v.replace(/\D/g, '');
+  }
+  if (campo === 'email') return v.toLowerCase();
+  if (campo === 'estado') return v.toUpperCase().slice(0, 2);
+  return v;
+}
+
+router.post('/whatsapp-webhook', async (req, res) => {
+  // Responde rápido — o processamento é assíncrono (webhook não deve travar).
+  res.json({ ok: true });
+  try {
+    const body = req.body || {};
+    const msg = body.message || body.messages?.[0] || body.data || body;
+    if (!msg || typeof msg !== 'object') return;
+    // Ignora mensagens enviadas por nós mesmos.
+    if (msg.fromMe || msg.from_me || msg.key?.fromMe) return;
+
+    const texto = String(
+      msg.text ||
+        msg.content?.text ||
+        msg.content?.extendedTextMessage?.text ||
+        msg.body ||
+        '',
+    ).trim();
+    if (!texto || !texto.startsWith('#')) return; // só comandos começando com #
+
+    // Só aceita comandos do número autorizado (Rodolfo).
+    const remetente = String(
+      msg.sender || msg.chatid || msg.senderPn || msg.from || '',
+    ).replace(/\D/g, '');
+    const autorizado = String(ALERT_PHONE).replace(/\D/g, '');
+    const ultimos = autorizado.slice(-11); // DDD + número, ignora "55"
+    if (ultimos && !remetente.includes(ultimos)) {
+      console.log(`[bluecard/webhook] comando de número não autorizado (${remetente}) — ignorado`);
+      return;
+    }
+
+    // Parse: "#<id> <campo> <valor...>"
+    const m = texto.match(/^#?\s*(\d+)\s+([a-zA-Z_]+)\s+([\s\S]+)$/);
+    if (!m) {
+      await enviarWhatsappBluecard(
+        `❓ Não entendi. Use: *#<id> <campo> <valor>*\nEx.: *#53 cep 58510000*`,
+      ).catch(() => {});
+      return;
+    }
+    const leadId = Number(m[1]);
+    const campo = m[2].toLowerCase();
+    const valor = normalizarValorCampo(campo, m[3]);
+
+    if (!CAMPOS_CORRIGIVEIS.has(campo)) {
+      await enviarWhatsappBluecard(
+        `❌ Campo "${campo}" não é editável.\nCampos: ${[...CAMPOS_CORRIGIVEIS].join(', ')}.`,
+      ).catch(() => {});
+      return;
+    }
+    if (!valor) {
+      await enviarWhatsappBluecard(`❌ Valor vazio para "${campo}".`).catch(() => {});
+      return;
+    }
+
+    // Busca o lead
+    const { data: lead, error: e1 } = await supabase
+      .from('bluecard_leads')
+      .select('*')
+      .eq('id', leadId)
+      .single();
+    if (e1 || !lead) {
+      await enviarWhatsappBluecard(`❌ Lead #${leadId} não encontrado.`).catch(() => {});
+      return;
+    }
+    if (lead.totvs_person_code) {
+      await enviarWhatsappBluecard(
+        `ℹ️ Lead #${leadId} (${lead.nome}) já está cadastrado no TOTVS (cód. ${lead.totvs_person_code}).`,
+      ).catch(() => {});
+      return;
+    }
+
+    // Atualiza o campo e recadastra
+    await supabase.from('bluecard_leads').update({ [campo]: valor }).eq('id', leadId);
+    const leadAtualizado = { ...lead, [campo]: valor };
+    const r = await cadastrarLeadNoTotvs(leadAtualizado);
+    const upd = r.ok
+      ? {
+          totvs_person_code: r.personCode,
+          totvs_synced_at: new Date().toISOString(),
+          totvs_sync_error: null,
+        }
+      : {
+          totvs_sync_error: r.error,
+          totvs_synced_at: new Date().toISOString(),
+        };
+    await supabase.from('bluecard_leads').update(upd).eq('id', leadId);
+
+    if (r.ok) {
+      await enviarWhatsappBluecard(
+        `✅ *${lead.nome}* cadastrado no TOTVS! (cód. ${r.personCode})\nCampo *${campo}* atualizado para *${valor}*.`,
+      ).catch(() => {});
+    } else {
+      await enviarWhatsappBluecard(
+        `⚠️ Atualizei o *${campo}* de *${lead.nome}*, mas o cadastro ainda falhou:\n❌ ${r.error}\n\nCorrija outro campo e tente de novo.`,
+      ).catch(() => {});
+    }
+  } catch (e) {
+    console.error('[bluecard/webhook] erro:', e.message);
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────

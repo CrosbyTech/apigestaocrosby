@@ -1,14 +1,14 @@
-// Alerta por WhatsApp (uazapi / instância crosbybot) quando um lead BlueCard
-// falha ao ser cadastrado no TOTVS — pra o responsável ajustar o cadastro e
-// reprocessar na automação.
+// Alerta/conversa por WhatsApp (uazapi / instância crosbybot) do fluxo BlueCard:
+//  - avisa o responsável quando um lead falha ao cadastrar no TOTVS;
+//  - recebe a correção dele (webhook) e responde o resultado.
 import axios from 'axios';
 import { getPool } from './uazapiSync.js';
 
 const UAZ_BASE = process.env.UAZAPI_BASE_URL || '';
-// Instância de envio (mesma usada nos alertas do forecast). "crosbybot" = o bot Crosby.
+// Instância de envio (mesma dos alertas do forecast). "crosbybot" = o bot Crosby.
 const ALERT_INSTANCE = process.env.UAZAPI_ALERT_INSTANCE || 'crosbybot';
-// Número que recebe o alerta (Rodolfo). Configurável por env.
-const ALERT_PHONE = process.env.BLUECARD_ALERT_PHONE || '5584996211158';
+// Número que recebe/opera os alertas (Rodolfo). Configurável por env.
+export const ALERT_PHONE = process.env.BLUECARD_ALERT_PHONE || '5584996211158';
 
 function normalizeBrPhone(s) {
   const d = String(s || '').replace(/\D/g, '');
@@ -36,7 +36,11 @@ async function getInstanceToken() {
   return r.rows[0] || null;
 }
 
-async function enviarWhatsapp(number, text) {
+// Envia texto pela instância crosbybot. Lança se falhar (o chamador decide).
+export async function enviarWhatsappBluecard(text, phone = ALERT_PHONE) {
+  if (!UAZ_BASE) throw new Error('UAZAPI_BASE_URL não configurado');
+  const number = normalizeBrPhone(phone);
+  if (!number) throw new Error('Telefone inválido');
   const sender = await getInstanceToken();
   if (!sender?.token) throw new Error(`Instância "${ALERT_INSTANCE}" não encontrada`);
   try {
@@ -46,7 +50,6 @@ async function enviarWhatsapp(number, text) {
       { headers: { token: sender.token, 'Content-Type': 'application/json' }, timeout: 30000 },
     );
   } catch (err) {
-    // Alguns deploys do uazapi usam /sendText
     if (err.response?.status === 404) {
       await axios.post(
         `${UAZ_BASE}/sendText`,
@@ -63,21 +66,34 @@ function fmtCpf(s) {
   return s || '—';
 }
 
-// Dispara o alerta (fire-and-forget — nunca lança pra não travar o cadastro).
+// Sugere qual campo corrigir conforme a mensagem de erro do TOTVS.
+function campoSugerido(erro) {
+  const e = String(erro || '').toLowerCase();
+  if (/\bcep\b/.test(e)) return 'cep';
+  if (/endere|address/.test(e)) return 'endereco';
+  if (/cpf/.test(e)) return 'cpf';
+  if (/email|e-mail/.test(e)) return 'email';
+  if (/nome|name/.test(e)) return 'nome';
+  return 'cep';
+}
+
+// Alerta de falha de cadastro (fire-and-forget — nunca lança).
 export async function alertarErroCadastroBluecard(lead, erro) {
   try {
-    if (!UAZ_BASE) return;
-    const number = normalizeBrPhone(ALERT_PHONE);
-    if (!number) return;
+    const campo = campoSugerido(erro);
     const texto =
       `⚠️ *BlueCard — cliente não cadastrado no TOTVS*\n\n` +
+      `🆔 Lead *#${lead?.id}*\n` +
       `👤 *${lead?.nome || 'Sem nome'}*\n` +
       `🪪 CPF: ${fmtCpf(lead?.cpf)}\n` +
       (lead?.whatsapp ? `📱 WhatsApp: ${lead.whatsapp}\n` : '') +
       `\n❌ *Motivo:* ${erro || 'erro desconhecido'}\n\n` +
-      `Ajuste o cadastro do cliente e reprocesse na automação para cadastrar novamente.`;
-    await enviarWhatsapp(number, texto);
-    console.log(`📲 [bluecard/alerta] enviado a ${number} — lead "${lead?.nome}"`);
+      `Para corrigir e recadastrar, responda:\n` +
+      `*#${lead?.id} ${campo} <valor novo>*\n` +
+      `Ex.: *#${lead?.id} ${campo} ${campo === 'cep' ? '58510000' : '...'}*\n\n` +
+      `Campos: cep, endereco, numero, complemento, cidade, estado, nome, cpf, email, whatsapp, data_nasc.`;
+    await enviarWhatsappBluecard(texto);
+    console.log(`📲 [bluecard/alerta] enviado — lead #${lead?.id} "${lead?.nome}"`);
   } catch (e) {
     console.warn('[bluecard/alerta] falha ao enviar WhatsApp:', e.message);
   }
