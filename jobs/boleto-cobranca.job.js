@@ -51,12 +51,14 @@ const INTERNAL_API_BASE =
   `http://localhost:${process.env.PORT || 4100}`;
 
 const TABLE = 'automacao_boleto_envios';
-// Ritmo anti-banimento: no máximo BATCH_SIZE cobranças enviadas a cada
-// BATCH_WINDOW (janela deslizante). Default: 5 a cada 30 minutos.
-const BATCH_SIZE = Number(process.env.BOLETO_COBRANCA_BATCH_SIZE || 5);
+// Ritmo anti-banimento: no máximo BATCH_SIZE cobranças por janela deslizante
+// de BATCH_WINDOW, com gap mínimo de MIN_GAP entre envios.
+// Default: 2 por 80 min, gap 20 min → padrão 8:00, 8:20 | 9:20, 9:40 | 10:40...
+const BATCH_SIZE = Number(process.env.BOLETO_COBRANCA_BATCH_SIZE || 2);
 const BATCH_WINDOW_MS =
-  Number(process.env.BOLETO_COBRANCA_BATCH_MINUTES || 30) * 60_000;
-const MIN_GAP_MS = 45_000; // gap mínimo entre 2 envios (espaça o lote)
+  Number(process.env.BOLETO_COBRANCA_BATCH_MINUTES || 80) * 60_000;
+const MIN_GAP_MS =
+  Number(process.env.BOLETO_COBRANCA_GAP_MINUTES || 20) * 60_000;
 const MAX_TENTATIVAS = 3;
 const RETRY_DELAY_MS = 5 * 60_000; // reagenda 5 min em caso de erro de envio
 
@@ -97,23 +99,51 @@ function normalizeBrPhone(s) {
   return d;
 }
 
-// ─── Mensagem enviada ao cliente ─────────────────────────────────────────────
+// ─── Spintax: varia as palavras da mensagem pra simular redação humana ────────
+// Sintaxe {op1|op2|op3} → escolhe uma opção aleatória (aceita aninhamento).
+// Objetivo: cada envio sai com texto ligeiramente diferente, SEM mudar o teor
+// nem os dados (fatura/datas/valor), reduzindo o padrão que o WhatsApp bloqueia.
+function spin(template) {
+  let s = String(template);
+  const re = /\{([^{}]*)\}/; // grupo mais interno (sem chaves aninhadas dentro)
+  let guard = 0;
+  while (re.test(s) && guard++ < 2000) {
+    s = s.replace(re, (_, corpo) => {
+      const opcoes = corpo.split('|');
+      return opcoes[Math.floor(Math.random() * opcoes.length)];
+    });
+  }
+  return s;
+}
+
+// ─── Mensagem enviada ao cliente (com variação spintax) ───────────────────────
 function montarMensagem(row) {
   const nome = String(row.nome_cliente || 'Cliente').trim();
-  const venceTxt = row.tipo === 'D-3' ? 'vence em 3 dias' : 'vence hoje';
-  return [
-    `Olá, ${nome}! 👋`,
-    `Lembrete da sua fatura junto ao ${REMETENTE}.`,
+  const venceTxt =
+    row.tipo === 'D-3'
+      ? '{vence em 3 dias|vence daqui a 3 dias|tem vencimento em 3 dias}'
+      : '{vence hoje|vence no dia de hoje|tem vencimento para hoje}';
+  const fatura = row.nr_fatura;
+  const emissao = formatDateBR(row.dt_emissao);
+  const vencimento = formatDateBR(row.dt_vencimento);
+  const valor = formatBRL(row.vl_fatura);
+
+  // Os dados (fatura/datas/valor) já entram fixos; só as PALAVRAS variam.
+  const template = [
+    `{Olá|Oi|Olá,|Prezado(a),} ${nome}! 👋`,
+    `{Passando para lembrar|Este é um lembrete|Lembrete|Só passando para lembrar} da sua {fatura|cobrança|conta} {junto ao|aqui no|com o} ${REMETENTE}.`,
     ``,
-    `📄 Fatura: ${row.nr_fatura}`,
-    `📅 Emissão: ${formatDateBR(row.dt_emissao)}`,
-    `⏰ Vencimento: ${formatDateBR(row.dt_vencimento)} (${venceTxt})`,
-    `💰 Valor: ${formatBRL(row.vl_fatura)}`,
+    `📄 {Fatura|Nº da fatura|Documento}: ${fatura}`,
+    `📅 {Emissão|Emitida em|Data de emissão}: ${emissao}`,
+    `⏰ {Vencimento|Data de vencimento|Vence em}: ${vencimento} (${venceTxt})`,
+    `💰 {Valor|Total|Valor a pagar}: ${valor}`,
     ``,
-    `Segue abaixo a linha digitável do boleto para pagamento 👇`,
+    `{Segue abaixo|Logo abaixo você encontra|Segue em seguida} a linha digitável do boleto {para pagamento|para o pagamento|para você pagar} 👇`,
     ``,
-    `✅ Se já efetuou o pagamento, por favor desconsidere esta mensagem.`,
+    `✅ {Se já efetuou o pagamento, por favor desconsidere esta mensagem.|Caso o pagamento já tenha sido feito, é só desconsiderar.|Se já pagou, pode ignorar esta mensagem.|Já efetuou o pagamento? Então desconsidere, por favor.}`,
   ].join('\n');
+
+  return spin(template);
 }
 
 // ─── UAzapi: resolver instância e enviar documento (PDF) ─────────────────────
@@ -623,8 +653,6 @@ let ultimaTentativaEnvio = 0; // timestamp da última tentativa (trava anti-floo
 // falhe ou atrase.
 const enviosRecentes = new Map();
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // Chave de IDENTIDADE da fatura (independente de id/linha/empresa):
 // cliente + nº fatura + parcela + vencimento + emissão + valor.
 function chaveFatura(r) {
@@ -653,112 +681,110 @@ export async function processarFila() {
       .eq('status', 'enviando')
       .lt('atualizado_em', presasDesde);
 
-    // Quota da janela: no máx BATCH_SIZE enviados nos últimos BATCH_WINDOW_MS.
+    // RITMO — 1 envio por tick, controlado por 2 travas (ambas contam só o
+    // status 'enviado', então PULOS não consomem o ritmo):
+    //   • Janela: no máx BATCH_SIZE enviados nos últimos BATCH_WINDOW_MS.
+    //   • Gap: nenhum envio nos últimos MIN_GAP_MS.
+    // Ex.: BATCH_SIZE=2 / janela=80min / gap=20min → 8:00, 8:20 | 9:20, 9:40...
+
+    // Gap em memória (proteção rápida contra 2 envios seguidos na instância)
+    if (Date.now() - ultimaTentativaEnvio < MIN_GAP_MS) return;
+
+    // Gap no banco (vale entre múltiplas instâncias)
+    const desdeGap = new Date(Date.now() - MIN_GAP_MS).toISOString();
+    const { count: enviadosNoGap } = await supabase
+      .from(TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'enviado')
+      .gte('enviado_em', desdeGap);
+    if ((enviadosNoGap || 0) > 0) return; // enviou algo há menos de MIN_GAP
+
+    // Janela deslizante
     const desdeJanela = new Date(Date.now() - BATCH_WINDOW_MS).toISOString();
     const { count: enviadosJanela } = await supabase
       .from(TABLE)
       .select('id', { count: 'exact', head: true })
       .eq('status', 'enviado')
       .gte('enviado_em', desdeJanela);
-    const quota = BATCH_SIZE - (enviadosJanela || 0);
-    if (quota <= 0) return; // janela cheia — aguarda a próxima
+    if ((enviadosJanela || 0) >= BATCH_SIZE) return; // janela cheia
 
-    // ARRAY DO LOTE: até `quota` pendentes vencidas, em ordem
-    const { data: lote, error } = await supabase
+    // PRÓXIMO item — prioridade: D-0 (vence hoje) antes de D-3 ('D-0' < 'D-3'),
+    // depois o mais antigo na fila.
+    const { data: pendentes, error } = await supabase
       .from(TABLE)
       .select('*')
       .eq('status', 'pendente')
       .lte('scheduled_at', agoraISO)
+      .order('tipo', { ascending: true })
       .order('scheduled_at', { ascending: true })
       .order('id', { ascending: true })
-      .limit(quota);
+      .limit(1);
     if (error) {
       console.error(`❌ [boleto-cobranca] Erro ao buscar fila: ${error.message}`);
       return;
     }
-    if (!lote?.length) return;
+    const row = pendentes?.[0];
+    if (!row) return;
 
-    console.log(
-      `📦 [boleto-cobranca] Lote: ${lote.length} item(ns) — enviando 1 por vez`,
-    );
+    // a) CLAIM atômico: só segue quem mudar 'pendente'→'enviando'
+    const { data: claimed, error: claimErr } = await supabase
+      .from(TABLE)
+      .update({ status: 'enviando', atualizado_em: new Date().toISOString() })
+      .eq('id', row.id)
+      .eq('status', 'pendente')
+      .select('id');
+    if (claimErr) {
+      console.error(`❌ [boleto-cobranca] claim #${row.id}: ${claimErr.message}`);
+      return;
+    }
+    if (!claimed?.length) return; // outra instância pegou esta linha
 
-    // LOOP SEQUENCIAL — um item por vez, status confirmado entre cada um
-    for (const row of lote) {
-      // Gap mínimo entre envios (memória + relógio)
-      const espera = MIN_GAP_MS - (Date.now() - ultimaTentativaEnvio);
-      if (espera > 0) await sleep(espera);
+    // b) IDEMPOTÊNCIA POR FATURA (cliente+fatura+parcela+vencimento, SEM
+    // empresa): já enviada/em envio hoje em qualquer outra linha?
+    const { count: jaTratada, error: dupErr } = await supabase
+      .from(TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('data_ref', row.data_ref)
+      .eq('cd_cliente', row.cd_cliente)
+      .eq('nr_fatura', row.nr_fatura)
+      .eq('nr_parcela', row.nr_parcela)
+      .eq('dt_vencimento', row.dt_vencimento)
+      .in('status', ['enviado', 'enviando'])
+      .neq('id', row.id);
+    if (dupErr) {
+      console.error(
+        `❌ [boleto-cobranca] check duplicidade #${row.id}: ${dupErr.message}`,
+      );
+      await marcar(row.id, { status: 'pendente' }); // devolve pra fila
+      return;
+    }
+    if ((jaTratada || 0) > 0) {
+      await marcar(row.id, {
+        status: 'pulado_duplicado',
+        erro: `Fatura ${chaveFatura(row)} já enviada hoje em outra linha`,
+      });
+      console.log(`⏭️ [boleto-cobranca] #${row.id} pulado (fatura duplicada)`);
+      return;
+    }
 
-      // a) CLAIM atômico: só segue quem mudar 'pendente'→'enviando'
-      const { data: claimed, error: claimErr } = await supabase
-        .from(TABLE)
-        .update({ status: 'enviando', atualizado_em: new Date().toISOString() })
-        .eq('id', row.id)
-        .eq('status', 'pendente')
-        .select('id');
-      if (claimErr) {
-        console.error(
-          `❌ [boleto-cobranca] claim #${row.id}: ${claimErr.message} — abortando lote`,
-        );
-        break; // sem certeza do estado → não arriscar
-      }
-      if (!claimed?.length) continue; // outra instância pegou esta linha
+    // b2) TRAVA DE MEMÓRIA por fatura (protege mesmo se o banco atrasar)
+    const chave = chaveFatura(row);
+    if (Date.now() - (enviosRecentes.get(chave) || 0) < BATCH_WINDOW_MS) {
+      await marcar(row.id, {
+        status: 'pulado_duplicado',
+        erro: `Fatura ${chave} enviada há pouco (memória)`,
+      });
+      console.log(`⏭️ [boleto-cobranca] #${row.id} pulado (duplicada memória)`);
+      return;
+    }
 
-      // b) IDEMPOTÊNCIA POR FATURA (cliente+fatura+parcela+vencimento, SEM
-      // empresa — a mesma fatura pode aparecer sob filiais diferentes):
-      // já enviada/em envio hoje em qualquer outra linha?
-      const { count: jaTratada, error: dupErr } = await supabase
-        .from(TABLE)
-        .select('id', { count: 'exact', head: true })
-        .eq('data_ref', row.data_ref)
-        .eq('cd_cliente', row.cd_cliente)
-        .eq('nr_fatura', row.nr_fatura)
-        .eq('nr_parcela', row.nr_parcela)
-        .eq('dt_vencimento', row.dt_vencimento)
-        .in('status', ['enviado', 'enviando'])
-        .neq('id', row.id);
-      if (dupErr) {
-        console.error(
-          `❌ [boleto-cobranca] check duplicidade #${row.id}: ${dupErr.message} — abortando lote`,
-        );
-        await marcar(row.id, { status: 'pendente' }); // devolve pra fila
-        break;
-      }
-      if ((jaTratada || 0) > 0) {
-        await marcar(row.id, {
-          status: 'pulado_duplicado',
-          erro: `Fatura ${chaveFatura(row)} já enviada hoje em outra linha`,
-        });
-        console.log(
-          `⏭️ [boleto-cobranca] #${row.id} pulado (fatura duplicada no dia)`,
-        );
-        continue;
-      }
-
-      // b2) TRAVA DE MEMÓRIA: esta instância já enviou esta fatura na janela?
-      // (protege mesmo se o banco falhar/atrasar)
-      const chave = chaveFatura(row);
-      const ultimoEnvioFatura = enviosRecentes.get(chave) || 0;
-      if (Date.now() - ultimoEnvioFatura < BATCH_WINDOW_MS) {
-        await marcar(row.id, {
-          status: 'pulado_duplicado',
-          erro: `Fatura ${chave} enviada há menos de ${Math.round(BATCH_WINDOW_MS / 60000)} min (memória)`,
-        });
-        console.log(
-          `⏭️ [boleto-cobranca] #${row.id} pulado (duplicada na memória)`,
-        );
-        continue;
-      }
-
-      // c) Envia e CONFIRMA o status antes do próximo
-      ultimaTentativaEnvio = Date.now();
-      const resultado = await processarUm(row, hoje);
-      if (resultado === 'enviado') enviosRecentes.set(chave, Date.now());
-      if (resultado === 'abort') {
-        console.error(
-          `🛑 [boleto-cobranca] status do #${row.id} não confirmado — lote abortado p/ evitar duplicação`,
-        );
-        break;
-      }
+    // c) Envia e confirma o status
+    const resultado = await processarUm(row, hoje);
+    if (resultado === 'enviado') enviosRecentes.set(chave, Date.now());
+    if (resultado === 'abort') {
+      console.error(
+        `🛑 [boleto-cobranca] status do #${row.id} não confirmado — evitando duplicação`,
+      );
     }
   } catch (err) {
     console.error(`❌ [boleto-cobranca] worker: ${err.message}`);
@@ -872,7 +898,10 @@ async function processarUm(row, hoje) {
     return;
   }
 
-  // 4) Enviar via UAzapi: mensagem principal + 2ª msg só com a linha digitável
+  // 4) Enviar via UAzapi: mensagem principal + 2ª msg só com a linha digitável.
+  // Marca o instante do envio ANTES de disparar (trava de gap em memória) —
+  // só chega aqui quem vai realmente enviar (pulos não consomem o ritmo).
+  ultimaTentativaEnvio = Date.now();
   const caption = montarMensagem(row);
   try {
     await enviarCobranca({ phone: destino, row, token: sender.token });
@@ -939,13 +968,14 @@ export function iniciarJobBoletoCobranca() {
     );
     return null;
   }
-  // Planner automático: 09:00 seg-sex
-  cron.schedule('0 9 * * 1-5', () => planejarEnvios({}), { timezone: TZ });
-  // Worker: a cada minuto das 08h às 21h, todos os dias (drena a fila no ritmo
-  // de BATCH_SIZE por janela). Janela ampla p/ também drenar execuções manuais.
+  // Planner automático: 07:45 seg-sex (monta a fila ANTES do 1º envio às 08h)
+  cron.schedule('45 7 * * 1-5', () => planejarEnvios({}), { timezone: TZ });
+  // Worker: a cada minuto das 08h às 21h, todos os dias. O 1º envio sai às 08h;
+  // o ritmo (BATCH_SIZE por janela + gap) espaça os demais. Janela ampla também
+  // drena execuções manuais.
   cron.schedule('* 8-21 * * *', () => processarFila(), { timezone: TZ });
   console.log(
-    `⏰ [boleto-cobranca] Agendado — planner 09:00 seg-sex; worker a cada min (08h–21h); ritmo ${BATCH_SIZE}/${Math.round(BATCH_WINDOW_MS / 60000)}min. Instância: "${INSTANCE}"`,
+    `⏰ [boleto-cobranca] Agendado — planner 07:45 seg-sex; worker a cada min (08h–21h); ritmo ${BATCH_SIZE} a cada ${Math.round(BATCH_WINDOW_MS / 60000)}min, gap ${Math.round(MIN_GAP_MS / 60000)}min. Instância: "${INSTANCE}"`,
   );
   if (TEST_PHONE) {
     console.warn(
