@@ -493,6 +493,12 @@ export async function planejarEnvios({ dryRun = false } = {}) {
     sem_boleto: semBoletoCount,
     modo_teste: !!TEST_PHONE,
     test_phone: TEST_PHONE ? normalizeBrPhone(TEST_PHONE) : null,
+    // ritmo atual (pro front mostrar corretamente no botão)
+    ritmo: {
+      batch_size: BATCH_SIZE,
+      batch_minutes: Math.round(BATCH_WINDOW_MS / 60000),
+      gap_minutes: Math.round(MIN_GAP_MS / 60000),
+    },
     dryRun,
   };
 
