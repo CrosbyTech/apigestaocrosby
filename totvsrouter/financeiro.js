@@ -2121,24 +2121,20 @@ router.get(
       );
       found = (resp.data?.items || [])[0] || null;
     } else {
-      // CNPJ — PJ (pagina até encontrar)
+      // CNPJ — PJ (filtro direto por cnpjList; a API suporta, ver voucher.js)
       const endpoint = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-      let page = 1;
-      let hasMore = true;
-      let token = tokenData.access_token;
-      while (hasMore && page <= 40 && !found) {
-        const resp = await doPost(
-          endpoint,
-          { filter: {}, page, pageSize: 500, order: 'personCode' },
-          token,
-        );
-        const items = resp.data?.items || [];
-        hasMore = resp.data?.hasNext || false;
+      const resp = await doPost(
+        endpoint,
+        { filter: { cnpjList: [raw] }, page: 1, pageSize: 10 },
+        tokenData.access_token,
+      );
+      found = (resp.data?.items || [])[0] || null;
+      // Fallback defensivo: confere o CNPJ retornado (caso a API ignore o filtro)
+      if (found && String(found.cnpj || '').replace(/\D/g, '') !== raw) {
         found =
-          items.find(
+          (resp.data?.items || []).find(
             (item) => String(item.cnpj || '').replace(/\D/g, '') === raw,
-          ) || null;
-        page++;
+          ) || found;
       }
     }
 
