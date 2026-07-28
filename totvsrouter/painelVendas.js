@@ -1168,6 +1168,18 @@ router.post(
 
     // ======== FASE 2: buscar nomes — SÓ DOS TOP CLIENTES, EM PARALELO ========
     const personNames = {};
+    const personPhones = {};
+    // Extrai o 1º telefone válido (>= 8 dígitos) de um item de pessoa do TOTVS
+    const extractPhone = (item) => {
+      if (!Array.isArray(item?.phones)) return null;
+      for (const ph of item.phones) {
+        const num = String(ph.number || '').replace(/\D/g, '');
+        if (num.length < 8) continue;
+        const area = String(ph.areaCode || '').replace(/\D/g, '');
+        return area && !num.startsWith(area) ? area + num : num;
+      }
+      return null;
+    };
     const codesToLookup = [...needNameCodes];
     if (codesToLookup.length > 0) {
       const BATCH = 50;
@@ -1193,6 +1205,7 @@ router.post(
         nameBatches.map(async (batch) => {
           const payload = {
             filter: { personCodeList: batch },
+            expand: 'phones',
             page: 1,
             pageSize: batch.length,
           };
@@ -1222,10 +1235,18 @@ router.post(
       for (const result of nameResults) {
         if (result.status !== 'fulfilled') continue;
         for (const p of result.value.pj) {
-          if (p.code) personNames[p.code] = p.fantasyName || p.name || '';
+          if (p.code) {
+            personNames[p.code] = p.fantasyName || p.name || '';
+            const tel = extractPhone(p);
+            if (tel) personPhones[p.code] = tel;
+          }
         }
         for (const p of result.value.pf) {
-          if (p.code) personNames[p.code] = p.name || '';
+          if (p.code) {
+            personNames[p.code] = p.name || '';
+            const tel = extractPhone(p);
+            if (tel) personPhones[p.code] = tel;
+          }
         }
       }
 
@@ -1247,8 +1268,10 @@ router.post(
       // Enriquecer com nomes e calcular métricas de compra
       for (const c of clientList) {
         c.name = personNames[c.personCode] || `Cliente ${c.personCode}`;
+        c.telefone = personPhones[c.personCode] || null;
         const dates = [...(c.purchaseDates || [])].sort();
         c.purchaseCount = dates.length;
+        c.lastPurchase = dates.length > 0 ? dates[dates.length - 1] : null;
         if (dates.length >= 2) {
           const first = new Date(dates[0]).getTime();
           const last = new Date(dates[dates.length - 1]).getTime();
