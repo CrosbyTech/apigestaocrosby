@@ -1414,10 +1414,13 @@ REGRAS:
 router.post(
   '/clientes-por-empresa',
   asyncHandler(async (req, res) => {
-    const { branch_code, search, page = 1, pageSize = 50 } = req.body || {};
+    const { branch_code, search, page = 1, pageSize = 50, datemin, datemax } = req.body || {};
     if (!branch_code) {
       return errorResponse(res, 'branch_code obrigatório', 400, 'MISSING_BRANCH');
     }
+    // Filtro de data (opcional) — 'YYYY-MM-DD'. Sem datas = histórico completo.
+    const dmin = datemin ? String(datemin).slice(0, 10) : null;
+    const dmax = datemax ? String(datemax).slice(0, 10) : null;
 
     const brCode = Number(branch_code);
     if (!Number.isFinite(brCode)) {
@@ -1435,13 +1438,15 @@ router.post(
       const PAGE = 1000;
       const linhas = [];
       for (let from = 0; ; from += PAGE) {
-        const { data, error } = await supabaseFiscal
+        let query = supabaseFiscal
           .from('notas_fiscais')
           .select('person_code, person_name, dealer_code, total_value, issue_date, operation_type, operation_code')
           .eq('branch_code', brCode)
           .neq('invoice_status', 'Canceled')
-          .neq('invoice_status', 'Deleted')
-          .range(from, from + PAGE - 1);
+          .neq('invoice_status', 'Deleted');
+        if (dmin) query = query.gte('issue_date', dmin);
+        if (dmax) query = query.lte('issue_date', dmax);
+        const { data, error } = await query.range(from, from + PAGE - 1);
         if (error || !data?.length) break;
         linhas.push(...data);
         if (data.length < PAGE) break;
@@ -1461,8 +1466,11 @@ router.post(
         const token = tokenData?.access_token;
         if (token) {
           const BASE = process.env.TOTVS_BASE_URL || 'https://apitotvsmoda.bhan.com.br/api/totvsmoda';
-          const hoje = new Date();
-          const inicio = new Date(hoje); inicio.setDate(hoje.getDate() - 540); // 18 meses
+          const hoje = dmax ? new Date(`${dmax}T23:59:59`) : new Date();
+          // Se veio filtro de data, respeita; senão, últimos 18 meses.
+          const inicio = dmin
+            ? new Date(`${dmin}T00:00:00`)
+            : (() => { const d = new Date(hoje); d.setDate(hoje.getDate() - 540); return d; })();
           const chunks = [];
           let cur = new Date(inicio);
           const MS_5MES = 150 * 86400000;
