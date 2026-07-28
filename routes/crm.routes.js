@@ -16749,4 +16749,122 @@ export function iniciarCronSyncLeadsCompras() {
   return task;
 }
 
+// ──────────────────────────────────────────────────────────────
+// GET /api/crm/pos-vendas
+// Pós-venda: clientes que compraram em um dia específico (padrão: D-7,
+// exatamente 7 dias atrás) nas empresas/filiais informadas. Retorna
+// { code, nome, telefone, branch_code, data_compra } — para o franqueado
+// ligar/mandar mensagem uma semana após a compra.
+// Query: ?empresas=2&empresas=5 (ou empresas=2,5) [&date=YYYY-MM-DD]
+// ──────────────────────────────────────────────────────────────
+router.get(
+  '/pos-vendas',
+  asyncHandler(async (req, res) => {
+    // empresas: aceita repetido (?empresas=2&empresas=5) ou "2,5"
+    let empresas = req.query.empresas;
+    if (typeof empresas === 'string') empresas = empresas.split(',');
+    const branchCodes = [
+      ...new Set(
+        (Array.isArray(empresas) ? empresas : [])
+          .map((e) => Number(String(e).trim()))
+          .filter((n) => Number.isFinite(n)),
+      ),
+    ];
+    if (branchCodes.length === 0) {
+      return errorResponse(
+        res,
+        'Informe ao menos uma empresa',
+        400,
+        'MISSING_EMPRESAS',
+      );
+    }
+
+    // Data-alvo (dia da compra). Sem 'date' → 7 dias atrás.
+    let dateStr = req.query.date ? String(req.query.date).slice(0, 10) : null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr || '')) {
+      const d = new Date();
+      d.setDate(d.getDate() - 7);
+      dateStr = d.toISOString().slice(0, 10);
+    }
+    // Janela do dia: [date, date+1)
+    const next = new Date(`${dateStr}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    const nextStr = next.toISOString().slice(0, 10);
+
+    // 1) NFs de saída do dia, nas filiais — dedup por person_code
+    const porCliente = new Map(); // person_code → { code, nome, branch_code, data_compra }
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseFiscal
+        .from('notas_fiscais')
+        .select('person_code, person_name, branch_code, issue_date')
+        .in('branch_code', branchCodes)
+        .eq('operation_type', 'Output')
+        .not('invoice_status', 'eq', 'Canceled')
+        .not('invoice_status', 'eq', 'Deleted')
+        .gte('issue_date', dateStr)
+        .lt('issue_date', nextStr)
+        .range(from, from + PAGE - 1);
+      if (error) {
+        return errorResponse(res, error.message, 500, 'FISCAL_ERROR');
+      }
+      if (!data || data.length === 0) break;
+      for (const nf of data) {
+        const pc = nf.person_code;
+        if (pc == null || porCliente.has(pc)) continue;
+        const nome = nf.person_name || '';
+        const up = nome.toUpperCase();
+        // Ignora lojas próprias CROSBY e registros de TESTE
+        if (up.startsWith('CROSBY') || up.startsWith('TESTE')) continue;
+        porCliente.set(pc, {
+          code: pc,
+          nome,
+          telefone: '',
+          branch_code: nf.branch_code,
+          data_compra: String(nf.issue_date).slice(0, 10),
+        });
+      }
+      if (data.length < PAGE) break;
+    }
+
+    const codes = [...porCliente.keys()];
+
+    // 2) Telefone via pes_pessoa (lote). Fallback: 1º de phones[].
+    for (let i = 0; i < codes.length; i += 500) {
+      const bloco = codes.slice(i, i + 500);
+      const { data: pessoas } = await supabase
+        .from('pes_pessoa')
+        .select('code, nm_pessoa, telefone, phones')
+        .in('code', bloco);
+      for (const p of pessoas || []) {
+        const rec = porCliente.get(p.code);
+        if (!rec) continue;
+        let tel = p.telefone || '';
+        if (!tel && Array.isArray(p.phones)) {
+          for (const ph of p.phones) {
+            const num =
+              typeof ph === 'string' ? ph : ph?.number || ph?.telefone || '';
+            if (num) {
+              tel = num;
+              break;
+            }
+          }
+        }
+        rec.telefone = tel ? String(tel).replace(/\D/g, '') : '';
+        if (!rec.nome && p.nm_pessoa) rec.nome = p.nm_pessoa;
+      }
+    }
+
+    const clientes = [...porCliente.values()].sort((a, b) =>
+      String(a.nome).localeCompare(String(b.nome)),
+    );
+
+    return successResponse(res, {
+      date: dateStr,
+      total: clientes.length,
+      clientes,
+    });
+  }),
+);
+
 export default router;
