@@ -238,10 +238,11 @@ router.get(
       .limit(500);
 
     if (error) {
-      if (/status|motivo/i.test(error.message || '')) {
+      // Colunas novas ainda não criadas: devolve instrução em vez de erro cru
+      if (/does not exist|status|motivo|nm_cliente/i.test(error.message || '')) {
         return errorResponse(
           res,
-          'Colunas de erro ausentes — rode o ALTER TABLE de database/schema-call-center.sql',
+          'Log de falhas ainda não habilitado: rode o ALTER TABLE de database/schema-call-center.sql no Supabase (colunas status, motivo e nm_cliente em sms_enviados).',
           503,
           'MIGRACAO_PENDENTE',
         );
