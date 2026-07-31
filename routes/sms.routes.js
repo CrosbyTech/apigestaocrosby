@@ -49,13 +49,60 @@ const authHeaders = () => ({
   'Content-Type': 'application/json',
 });
 
-// Normaliza para o formato aceito pela DisparoPro: 55 + DDD + numero (só dígitos)
+/**
+ * Normaliza para 55 + DDD + 9 dígitos (celular).
+ *
+ * O cadastro do TOTVS ainda tem muito celular no formato antigo de 8 dígitos,
+ * anterior ao nono dígito. Enviar assim faz a operadora recusar: no primeiro
+ * disparo real, 35 das 68 mensagens falharam e TODAS eram números de 12
+ * dígitos (55+DDD+8). Aqui o 9 é reposto quando o número começa com 6-9.
+ *
+ * Telefone fixo (começa com 2-5) não recebe SMS e é recusado — não existe
+ * correção possível, e mandar mesmo assim só gastaria crédito.
+ *
+ * @returns {{numero: string|null, motivo: string|null}}
+ */
 function normalizarNumero(s) {
   const d = String(s || '').replace(/\D/g, '');
-  if (!d) return null;
-  if (d.startsWith('55') && (d.length === 12 || d.length === 13)) return d;
-  if (d.length === 10 || d.length === 11) return `55${d}`;
-  return null; // tamanho inválido — melhor recusar do que disparar errado
+  if (!d) return { numero: null, motivo: 'Número vazio' };
+
+  // Tira o DDI para trabalhar sempre com DDD + assinante
+  let nacional = d;
+  if (d.length >= 12 && d.startsWith('55')) nacional = d.slice(2);
+
+  if (nacional.length < 10 || nacional.length > 11) {
+    return {
+      numero: null,
+      motivo: `Número com ${nacional.length} dígitos após o DDD (esperado 10 ou 11)`,
+    };
+  }
+
+  const ddd = nacional.slice(0, 2);
+  let assinante = nacional.slice(2);
+
+  if (Number(ddd) < 11) {
+    return { numero: null, motivo: `DDD inválido (${ddd})` };
+  }
+
+  if (assinante.length === 8) {
+    // 2-5 = fixo; 6-9 = celular no formato antigo
+    if (/^[2-5]/.test(assinante)) {
+      return {
+        numero: null,
+        motivo: 'Telefone fixo não recebe SMS',
+      };
+    }
+    assinante = `9${assinante}`; // repõe o nono dígito
+  }
+
+  if (assinante.length !== 9 || !assinante.startsWith('9')) {
+    return {
+      numero: null,
+      motivo: 'Não parece um celular (esperado 9 dígitos começando com 9)',
+    };
+  }
+
+  return { numero: `55${ddd}${assinante}`, motivo: null };
 }
 
 // Data/hora corrente no fuso de Brasília (BRT = UTC-3, sem horário de verão
@@ -109,11 +156,25 @@ async function historicoRecente(numeros) {
     ),
   );
 
-  const { data, error } = await supabase
-    .from('sms_enviados')
-    .select('numero, enviado_em')
-    .in('numero', numeros)
-    .gte('enviado_em', desde.toISOString());
+  const consulta = (comStatus) => {
+    let q = supabase
+      .from('sms_enviados')
+      .select('numero, enviado_em')
+      .in('numero', numeros)
+      .gte('enviado_em', desde.toISOString());
+    // Só envio aceito consome teto/cooldown — falha não pode punir o cliente
+    if (comStatus) q = q.eq('status', 'ACEITO');
+    return q;
+  };
+
+  let { data, error } = await consulta(true);
+  // Base ainda sem a coluna status (ALTER TABLE não rodado): tenta sem o filtro
+  if (error && /status/i.test(error.message || '')) {
+    console.warn(
+      '⚠️ sms_enviados sem a coluna status — rode o ALTER TABLE de database/schema-call-center.sql',
+    );
+    ({ data, error } = await consulta(false));
+  }
 
   if (error) {
     // Sem histórico não dá para garantir as travas — melhor recusar o disparo
@@ -157,6 +218,48 @@ router.get(
 );
 
 /**
+ * GET /api/sms/falhas?dias=7
+ * SMS que não chegaram, com o motivo — alimenta o painel de falhas da tela.
+ */
+router.get(
+  '/falhas',
+  asyncHandler(async (req, res) => {
+    const dias = Math.min(Math.max(parseInt(req.query.dias, 10) || 7, 1), 90);
+    const desde = new Date(Date.now() - dias * 24 * 60 * 60 * 1000);
+
+    const { data, error } = await supabase
+      .from('sms_enviados')
+      .select(
+        'id, numero, cd_cliente, nm_cliente, status, motivo, codigo_status, enviado_em',
+      )
+      .neq('status', 'ACEITO')
+      .gte('enviado_em', desde.toISOString())
+      .order('enviado_em', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      if (/status|motivo/i.test(error.message || '')) {
+        return errorResponse(
+          res,
+          'Colunas de erro ausentes — rode o ALTER TABLE de database/schema-call-center.sql',
+          503,
+          'MIGRACAO_PENDENTE',
+        );
+      }
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+
+    const porMotivo = {};
+    (data || []).forEach((f) => {
+      const k = f.motivo || f.status;
+      porMotivo[k] = (porMotivo[k] || 0) + 1;
+    });
+
+    return successResponse(res, { dias, total: data?.length || 0, porMotivo, falhas: data || [] });
+  }),
+);
+
+/**
  * POST /api/sms/enviar
  * Body: { mensagens: [{ numero, mensagem, prioridade?, cd_cliente?, parceiro_id? }] }
  * Aplica janela de horário, teto diário e cooldown antes de chamar a DisparoPro.
@@ -186,20 +289,34 @@ router.post(
     const candidatas = [];
 
     mensagens.forEach((m, i) => {
-      const numero = normalizarNumero(m.numero);
+      const { numero, motivo } = normalizarNumero(m.numero);
       const texto = String(m.mensagem || '').trim();
       if (!numero) {
-        invalidas.push({ indice: i, numero: m.numero, motivo: 'Número inválido' });
+        invalidas.push({
+          indice: i,
+          numero: m.numero,
+          cd_cliente: m.cd_cliente != null ? String(m.cd_cliente) : null,
+          nm_cliente: m.nm_cliente || null,
+          motivo,
+        });
         return;
       }
       if (!texto) {
-        invalidas.push({ indice: i, numero: m.numero, motivo: 'Mensagem vazia' });
+        invalidas.push({
+          indice: i,
+          numero: m.numero,
+          cd_cliente: m.cd_cliente != null ? String(m.cd_cliente) : null,
+          nm_cliente: m.nm_cliente || null,
+          motivo: 'Mensagem vazia',
+        });
         return;
       }
       if (texto.length > MAX_CHARS) {
         invalidas.push({
           indice: i,
           numero: m.numero,
+          cd_cliente: m.cd_cliente != null ? String(m.cd_cliente) : null,
+          nm_cliente: m.nm_cliente || null,
           motivo: `Mensagem com ${texto.length} caracteres (máx. ${MAX_CHARS})`,
         });
         return;
@@ -209,6 +326,7 @@ router.post(
         texto,
         prioridade: m.prioridade === 'URGENTE' ? 'URGENTE' : 'NORMAL',
         cd_cliente: m.cd_cliente != null ? String(m.cd_cliente) : null,
+        nm_cliente: m.nm_cliente || null,
         parceiro_id: m.parceiro_id,
         indice: i,
       });
@@ -233,6 +351,7 @@ router.post(
           indice: c.indice,
           numero: c.numero,
           cd_cliente: c.cd_cliente,
+          nm_cliente: c.nm_cliente,
           motivo: `Teto de ${TETO_DIARIO} SMS por dia já atingido para este número`,
           trava: 'TETO_DIARIO',
         });
@@ -305,7 +424,10 @@ router.post(
       porNumero.get(n).push(d);
     });
     const consumo = new Map();
+    const agora = new Date().toISOString();
     const paraLogar = [];
+    const falhasParaLogar = [];
+
     aprovadas.forEach((c) => {
       const fila = porNumero.get(c.numero) || [];
       const idx = consumo.get(c.numero) || 0;
@@ -318,12 +440,54 @@ router.post(
           prioridade: c.prioridade,
           mensagem: c.texto,
           codigo_status: String(det.codigo_status),
-          enviado_em: new Date().toISOString(),
+          enviado_em: agora,
+        });
+      } else {
+        falhasParaLogar.push({
+          numero: c.numero,
+          cd_cliente: c.cd_cliente,
+          nm_cliente: c.nm_cliente,
+          prioridade: c.prioridade,
+          mensagem: c.texto,
+          codigo_status: det ? String(det.codigo_status) : null,
+          status: 'REJEITADO',
+          motivo:
+            det?.descricao_detalhe || 'Operadora não aceitou (sem detalhe)',
+          enviado_em: agora,
         });
       }
     });
 
+    // Número recusado antes mesmo de sair (ex.: fixo, telefone incompleto)
+    invalidas.forEach((iv) => {
+      falhasParaLogar.push({
+        numero: String(iv.numero || '').replace(/\D/g, '') || 'sem-numero',
+        cd_cliente: iv.cd_cliente,
+        nm_cliente: iv.nm_cliente,
+        mensagem: null,
+        status: 'INVALIDO',
+        motivo: iv.motivo,
+        enviado_em: agora,
+      });
+    });
+
+    // Barrado por teto diário ou cooldown
+    bloqueadas.forEach((bq) => {
+      falhasParaLogar.push({
+        numero: bq.numero,
+        cd_cliente: bq.cd_cliente,
+        nm_cliente: bq.nm_cliente,
+        mensagem: null,
+        status: 'BLOQUEADO',
+        motivo: bq.motivo,
+        enviado_em: agora,
+      });
+    });
+
     if (paraLogar.length > 0) {
+      // Sem status/motivo de proposito: assim o insert funciona mesmo se o
+      // ALTER TABLE das colunas de erro ainda nao tiver rodado (o default da
+      // coluna cuida do ACEITO). Este e o log que alimenta as travas.
       const { error: logErro } = await supabase
         .from('sms_enviados')
         .insert(paraLogar);
@@ -333,6 +497,19 @@ router.post(
         console.error(
           '⚠️ SMS enviado mas NÃO registrado em sms_enviados:',
           logErro.message,
+        );
+      }
+    }
+
+    if (falhasParaLogar.length > 0) {
+      // Best-effort: se as colunas de erro nao existirem, o disparo segue
+      const { error: falhaErro } = await supabase
+        .from('sms_enviados')
+        .insert(falhasParaLogar);
+      if (falhaErro) {
+        console.warn(
+          '⚠️ Falhas de SMS não registradas (rode o ALTER TABLE de database/schema-call-center.sql):',
+          falhaErro.message,
         );
       }
     }
