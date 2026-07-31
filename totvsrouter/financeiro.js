@@ -307,7 +307,10 @@ router.get(
         tp_baixa,
         situacao, // statusList TOTVS: 1=Normal, 2=Devolvido, 3=Cancelado, 4=Quebrada
         branches, // branchCodes das empresas selecionadas pelo usuário
+        expand_invoice, // '1' => expand=invoice no TOTVS (traz a NF vinculada à parcela)
       } = req.query;
+
+      const comInvoice = expand_invoice === '1' || expand_invoice === 'true';
 
       if (!dt_inicio || !dt_fim) {
         return errorResponse(
@@ -427,6 +430,7 @@ router.get(
           endpoint,
           {
             filter,
+            ...(comInvoice ? { expand: 'invoice' } : {}),
             page: pageNum,
             pageSize: PAGE_SIZE,
             order: modo === 'emissao' ? '-issueDate' : '-expiredDate',
@@ -617,6 +621,9 @@ router.get(
         linha_digitavel: item.digitableLine,
         nosso_numero: item.ourNumber,
         qr_code_pix: item.qrCodePix,
+        // NF vinculada (via expand=invoice); null quando a fatura não tem NF
+        nr_nota_fiscal:
+          (Array.isArray(item.invoice) && item.invoice[0]?.invoiceCode) || null,
         tp_situacao: item.status,
         tp_documento: item.documentType,
         tp_faturamento: item.billingType,
