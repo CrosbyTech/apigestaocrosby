@@ -1489,7 +1489,8 @@ router.post(
           ds_despesaitem: firstExpense?.expenseName || '',
           cd_ccusto: firstExpense?.costCenterCode || '',
           ds_ccusto: '', // Será enriquecido pelo frontend
-          nm_fornecedor: '', // Será enriquecido pelo frontend
+          nm_fornecedor: '', // Será enriquecido no PASSO 5
+          nm_razaosocial_fornecedor: '', // Será enriquecido no PASSO 5
           ds_observacao: '', // Não disponível no search
           // Campos extras da API TOTVS
           tp_inclusao: item.inclusionType,
@@ -1499,12 +1500,14 @@ router.post(
         };
       });
 
-      // PASSO 5: Enriquecer com nomes de fornecedores via API TOTVS Person
+      // PASSO 5: Enriquecer com dados de fornecedores via API TOTVS Person
+      // (nome fantasia, razão social e CNPJ/CPF)
       const uniqueSupplierCodes = [
         ...new Set(mappedItems.map((i) => i.cd_fornecedor).filter(Boolean)),
       ];
 
-      const supplierNameMap = new Map();
+      // code → { nome, razaoSocial, doc }
+      const supplierInfoMap = new Map();
       if (uniqueSupplierCodes.length > 0) {
         console.log(
           `👤 Buscando nomes de ${uniqueSupplierCodes.length} fornecedores...`,
@@ -1612,28 +1615,33 @@ router.post(
           pjResults.flat().forEach((p) => {
             const pCode = p.code ?? p.personCode;
             if (pCode != null) {
-              supplierNameMap.set(
-                pCode,
-                p.fantasyName || p.name || p.corporateName || '',
-              );
+              supplierInfoMap.set(pCode, {
+                nome: p.fantasyName || p.name || p.corporateName || '',
+                razaoSocial: p.legalName || p.name || p.corporateName || '',
+                doc: String(p.cnpj || p.cpfCnpj || '').trim(),
+              });
             }
           });
 
           // Processar resultados PF (nome completo)
           pfResults.flat().forEach((p) => {
             const pCode = p.code ?? p.personCode;
-            if (pCode != null && !supplierNameMap.has(pCode)) {
-              supplierNameMap.set(pCode, p.name || '');
+            if (pCode != null && !supplierInfoMap.has(pCode)) {
+              supplierInfoMap.set(pCode, {
+                nome: p.name || '',
+                razaoSocial: p.name || '',
+                doc: String(p.cpf || p.cpfCnpj || '').trim(),
+              });
             }
           });
 
           console.log(
-            `👤 ${supplierNameMap.size} nomes de fornecedores encontrados de ${uniqueSupplierCodes.length} únicos`,
+            `👤 ${supplierInfoMap.size} fornecedores encontrados de ${uniqueSupplierCodes.length} únicos`,
           );
 
           // Log de amostra
-          if (supplierNameMap.size > 0) {
-            const sample = Array.from(supplierNameMap.entries()).slice(0, 3);
+          if (supplierInfoMap.size > 0) {
+            const sample = Array.from(supplierInfoMap.entries()).slice(0, 3);
             console.log(`👤 Amostra: ${JSON.stringify(sample)}`);
           } else {
             console.warn(
@@ -1643,10 +1651,16 @@ router.post(
         }
       }
 
-      // Aplicar nomes dos fornecedores nos itens mapeados
+      // Aplicar dados dos fornecedores nos itens mapeados
       mappedItems.forEach((item) => {
-        const nome = supplierNameMap.get(item.cd_fornecedor);
-        if (nome) item.nm_fornecedor = nome;
+        const info = supplierInfoMap.get(item.cd_fornecedor);
+        if (!info) return;
+        if (info.nome) item.nm_fornecedor = info.nome;
+        if (info.razaoSocial) item.nm_razaosocial_fornecedor = info.razaoSocial;
+        // Só sobrescreve se a duplicata não trouxe o documento
+        if (!item.nr_cpfcnpj_fornecedor && info.doc) {
+          item.nr_cpfcnpj_fornecedor = info.doc;
+        }
       });
 
       const totalTime = Date.now() - startTime;
