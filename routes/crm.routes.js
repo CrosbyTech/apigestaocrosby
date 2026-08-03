@@ -16867,4 +16867,110 @@ router.get(
   }),
 );
 
+// ──────────────────────────────────────────────────────────────
+// GET /api/crm/bluecred-dashboard
+// Dashboard BlueCred: ranking de lojas por vendas no BOLETO (crediário).
+// Considera só NFs de saída com condição de pagamento contendo "boleto".
+// Query: ?datemin=YYYY-MM-DD&datemax=YYYY-MM-DD (default: mês atual)
+// ──────────────────────────────────────────────────────────────
+const BLUECRED_BRANCH_NAMES = {
+  2: 'João Pessoa',
+  5: 'Nova Cruz',
+  55: 'Parnamirim',
+  65: 'Canguaretama',
+  87: 'Cidade Jardim',
+  88: 'Guararapes',
+  90: 'Ayrton Senna',
+  93: 'Imperatriz',
+  94: 'Patos',
+  95: 'Midway',
+  97: 'Teresina',
+  98: 'Shopping Recife',
+};
+
+router.get(
+  '/bluecred-dashboard',
+  asyncHandler(async (req, res) => {
+    // Período (default: mês atual, do dia 1 até hoje)
+    const hoje = new Date();
+    const primeiroDia = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}-01`;
+    const dmin = req.query.datemin
+      ? String(req.query.datemin).slice(0, 10)
+      : primeiroDia;
+    const dmax = req.query.datemax
+      ? String(req.query.datemax).slice(0, 10)
+      : hoje.toISOString().slice(0, 10);
+    // Janela [dmin, dmax] inclusive → usa lt (dmax + 1 dia)
+    const dmaxNext = new Date(`${dmax}T00:00:00Z`);
+    dmaxNext.setUTCDate(dmaxNext.getUTCDate() + 1);
+    const dmaxNextStr = dmaxNext.toISOString().slice(0, 10);
+
+    // Agrega NFs de boleto por filial
+    const porLoja = new Map(); // branch_code → { total, nfs, clientes:Set }
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseFiscal
+        .from('notas_fiscais')
+        .select('branch_code, person_code, total_value')
+        .eq('operation_type', 'Output')
+        .not('invoice_status', 'eq', 'Canceled')
+        .not('invoice_status', 'eq', 'Deleted')
+        .ilike('payment_condition_name', '%boleto%')
+        .gte('issue_date', dmin)
+        .lt('issue_date', dmaxNextStr)
+        .range(from, from + PAGE - 1);
+      if (error) {
+        return errorResponse(res, error.message, 500, 'FISCAL_ERROR');
+      }
+      if (!data || data.length === 0) break;
+      for (const nf of data) {
+        const bc = nf.branch_code;
+        if (bc == null) continue;
+        let rec = porLoja.get(bc);
+        if (!rec) {
+          rec = { branch_code: bc, total: 0, nfs: 0, clientes: new Set() };
+          porLoja.set(bc, rec);
+        }
+        rec.total += Number(nf.total_value || 0);
+        rec.nfs += 1;
+        if (nf.person_code != null) rec.clientes.add(nf.person_code);
+      }
+      if (data.length < PAGE) break;
+    }
+
+    const lojas = [...porLoja.values()]
+      .map((r) => ({
+        branch_code: r.branch_code,
+        branch_name:
+          BLUECRED_BRANCH_NAMES[r.branch_code] || `Filial ${r.branch_code}`,
+        total_vendas: Math.round(r.total * 100) / 100,
+        num_nfs: r.nfs,
+        ticket_medio: r.nfs > 0 ? Math.round((r.total / r.nfs) * 100) / 100 : 0,
+        num_clientes_boleto: r.clientes.size,
+      }))
+      .sort((a, b) => b.total_vendas - a.total_vendas);
+
+    const maxBy = (key) =>
+      lojas.reduce((best, l) => (!best || l[key] > best[key] ? l : best), null);
+
+    return successResponse(res, {
+      datemin: dmin,
+      datemax: dmax,
+      total_lojas: lojas.length,
+      total_geral:
+        Math.round(lojas.reduce((s, l) => s + l.total_vendas, 0) * 100) / 100,
+      total_clientes_boleto: lojas.reduce(
+        (s, l) => s + l.num_clientes_boleto,
+        0,
+      ),
+      destaques: {
+        mais_vendas: maxBy('total_vendas'),
+        maior_ticket: maxBy('ticket_medio'),
+        mais_clientes_boleto: maxBy('num_clientes_boleto'),
+      },
+      lojas,
+    });
+  }),
+);
+
 export default router;
