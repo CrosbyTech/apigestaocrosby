@@ -7,6 +7,7 @@ import axios from 'axios';
 import https from 'https';
 import { createClient } from '@supabase/supabase-js';
 import supabase from '../config/supabase.js';
+import supabaseFiscal from '../config/supabaseFiscal.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import {
   asyncHandler,
@@ -53,7 +54,7 @@ async function enriquecerResultadosVoucher(resultados, percentage) {
   const ultimaCompra = new Map(); // code → { valor, data }
   const nomeNotas = new Map(); // code → nome (fallback)
   try {
-    const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+    const sbf = supabaseFiscal;
     for (const bloco of chunk(codes, 200)) {
       const pendentes = new Set(bloco);
       for (let from = 0; pendentes.size > 0; from += 1000) {

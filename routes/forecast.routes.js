@@ -7,6 +7,7 @@
 import express from 'express';
 import axios from 'axios';
 import supabase from '../config/supabase.js';
+import supabaseFiscal from '../config/supabaseFiscal.js';
 import {
   asyncHandler,
   successResponse,
@@ -2472,7 +2473,7 @@ router.get(
     }
     // 2) Busca NFs no fiscal
     const { createClient } = await import('@supabase/supabase-js');
-    const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+    const sbf = supabaseFiscal;
     // Loop paginado (como os demais) — .limit(2000) truncava ranges grandes.
     const nfs = [];
     const PAGE = 1000;
@@ -5564,7 +5565,7 @@ router.get(
     const dmax = String(req.query.datemax || '');
     if (!dmin || !dmax) return errorResponse(res, 'datemin e datemax obrigatórios', 400);
     const { createClient } = await import('@supabase/supabase-js');
-    const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+    const sbf = supabaseFiscal;
     // Paginacao obrigatoria — Supabase corta em 1000. Mes inteiro em varejo
     // passa facil de 1000 → ajustes de adiantamento nao aparecem, faturamento
     // continua descontando errado.

@@ -2860,7 +2860,7 @@ router.post(
     // Bruto = NFs Output (venda). Credev = NFs Input (devolução) NO PERÍODO.
     // Não subtrai vale-troca aplicada como pagamento (definição do TOTVS 0326).
     if (!revendaPainelAplicado) try {
-      const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+      const sbf = supabaseFiscal;
       const REV_OPS = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279];
       const REV_BRANCHS = [2, 5, 75, 99, 200];
       const REV_SELLERS = [25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044];
@@ -2911,7 +2911,7 @@ router.post(
     // Solução: zerar business + redistribuir NFs op 7279 pros canais reais
     // baseado no dealer (Jhemyson 40 → franquia, B2R sellers → revenda, etc.).
     try {
-      const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+      const sbf = supabaseFiscal;
       // Sellers por canal (espelha config CRM)
       const SELLERS_REVENDA = new Set([25, 15, 161, 165, 241, 779, 288, 251, 131, 94, 1924, 7044]);
       const SELLERS_MULTIMARCAS = new Set([65, 177, 259]); // B2M titulares (não inbound)
@@ -2971,7 +2971,7 @@ router.post(
       const { getNFsAdiantamento } = await import('./forecast.routes.js');
       const adiantSet = await getNFsAdiantamento();
       if (adiantSet.size > 0) {
-        const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+        const sbf = supabaseFiscal;
         // Busca as NFs marcadas do período pra somar de volta
         const marcadas = [...adiantSet].map((k) => k.split('|'));
         const invoiceCodes = marcadas.map((p) => Number(p[0]));
@@ -3024,7 +3024,7 @@ router.post(
           // ricardoeletro
           5153, 5152,
         ];
-        const sbf = createClient(process.env.SUPABASE_FISCAL_URL, process.env.SUPABASE_FISCAL_KEY);
+        const sbf = supabaseFiscal;
         let totDev = 0; let from = 0;
         while (true) {
           const { data, error } = await sbf
