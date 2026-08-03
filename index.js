@@ -24,6 +24,7 @@ import faturamentoTransacaoRoutes from './routes/faturamentoTransacao.routes.js'
 import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import automacaoRoutes from './routes/automacao.routes.js';
+import smsRoutes from './routes/sms.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
@@ -140,6 +141,7 @@ app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/conciliacao-stone', conciliacaoStoneRoutes); // Conciliação Stone (cartões)
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
+app.use('/api/sms', smsRoutes); // SMS DisparoPro — Call Center de cobrança
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
 
 // Error handling middleware

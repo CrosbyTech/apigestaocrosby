@@ -1852,10 +1852,11 @@ router.post(
         // Para adiantamento (paidType 3), tenta primeiro empresa 99, se falhar tenta empresa 1
         const settlementBranchCode = requestPaidType === 3 ? 99 : branchCode;
 
+        // movementDate fica DENTRO de payments[] (schema InvoicesPaymentCommand);
+        // na raiz o TOTVS ignora e grava o movimento com a data do dia.
         const buildPayload = (sBranchCode) => ({
           branchCode: sBranchCode,
           settlementDate,
-          movementDate: settlementDate,
           invoices: [
             {
               branchCode,
@@ -1869,6 +1870,7 @@ router.post(
             {
               value: paidValue,
               paidType: requestPaidType,
+              movementDate: settlementDate,
               ...(requestPaidType === 4
                 ? {
                     bank: {
