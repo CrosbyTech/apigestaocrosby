@@ -196,16 +196,26 @@ async function filtrarNaoDuplicados(registros) {
   if (comChave.length === 0) return [];
 
   const numeros = [...new Set(comChave.map((r) => r.nr_duplicata))];
-  const { data: existentes, error } = await supabase
-    .from('pagamentos_liberacao')
-    .select('nr_duplicata, cd_empresa, nr_parcela, cd_fornecedor, dt_vencimento, status')
-    .in('nr_duplicata', numeros)
-    .not('status', 'eq', 'CANCELADO');
+  // Supabase corta cada consulta em 1000 linhas — pagina até o fim, senão um
+  // registro existente pode ficar fora da resposta e o título ser duplicado.
+  const PAGE = 1000;
+  const existentes = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('pagamentos_liberacao')
+      .select('nr_duplicata, cd_empresa, nr_parcela, cd_fornecedor, dt_vencimento, status')
+      .in('nr_duplicata', numeros)
+      .not('status', 'eq', 'CANCELADO')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
 
-  if (error) {
-    console.error('❌ [provisao-liberacao] Erro ao checar duplicatas:', error.message);
-    // Em caso de erro na checagem, aborta para não arriscar duplicar.
-    throw error;
+    if (error) {
+      console.error('❌ [provisao-liberacao] Erro ao checar duplicatas:', error.message);
+      // Em caso de erro na checagem, aborta para não arriscar duplicar.
+      throw error;
+    }
+    existentes.push(...(data || []));
+    if (!data || data.length < PAGE) break;
   }
 
   const existentesSet = new Set(
