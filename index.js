@@ -17,6 +17,7 @@ import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
 import bluecardRoutes, { iniciarBluecardStatsSync } from './routes/bluecard.routes.js';
+import bluecardIntegracaoRoutes from './routes/bluecardIntegracao.routes.js';
 import wixRoutes from './routes/wix.routes.js';
 import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
 import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js';
@@ -87,6 +88,7 @@ import {
   executarProvisaoLiberacao,
 } from './jobs/provisao-liberacao.job.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
+import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -100,7 +102,16 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(compression());
 app.use(morgan('combined'));
-app.use(express.json({ limit: '50mb' }));
+// verify: guarda os bytes CRUS do corpo em req.rawBody — a assinatura HMAC da
+// integração BlueCard cobre o corpo exato; re-serializar JSON mudaria o hash.
+app.use(
+  express.json({
+    limit: '50mb',
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  }),
+);
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Health check
@@ -132,6 +143,7 @@ app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, 
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
+app.use('/api/bluecard', bluecardIntegracaoRoutes); // BlueCard — integração crediário (webhook + reconciliação, HMAC)
 app.use('/api/wix', wixRoutes); // Wix — sync de pedidos do e-commerce
 app.use('/api/expedicao-showroom', expedicaoShowroomRoutes); // Expedição Showroom — controle envios
 app.use('/api/faturamento-historico', faturamentoHistoricoRoutes); // Faturamento histórico diário por canal
@@ -189,6 +201,7 @@ app.listen(PORT, async () => {
   iniciarJobConversaoTemplate();
   iniciarJobProvisaoLiberacao();
   iniciarJobBoletoCobranca();
+  iniciarBluecardPagamentosSync();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {
