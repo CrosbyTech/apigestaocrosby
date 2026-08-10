@@ -60,6 +60,45 @@ async function fetchNonSalesAgg({ branchs, datemin, datemax }) {
   }
 }
 
+// Variante do fetchNonSalesAgg com quebra por VENDEDOR (dealer_code da NF).
+// Usada pelo Painel de Vendas pra atribuir a 5919 ao vendedor real (ex: NF
+// de bonificação emitida pela vendedora da loja). Retorna
+// Map branchCode → Map dealerCode|null → { qtd, valor }
+async function fetchNonSalesPorVendedor({ branchs, datemin, datemax }) {
+  if (!RANKING_NON_SALES_OPS.length || !branchs?.length) return new Map();
+  try {
+    const { data, error } = await supabaseFiscal
+      .from('notas_fiscais')
+      .select('branch_code, dealer_code, total_value, invoice_status')
+      .in('operation_code', RANKING_NON_SALES_OPS)
+      .in('branch_code', branchs)
+      .eq('operation_type', 'Output')
+      .gte('issue_date', datemin)
+      .lte('issue_date', datemax)
+      .limit(50000);
+    if (error) {
+      console.error('[PainelVendas/NonSales] supabase erro:', error.message);
+      return new Map();
+    }
+    const porBranch = new Map();
+    for (const r of data || []) {
+      if (r.invoice_status === 'Canceled' || r.invoice_status === 'Deleted') continue;
+      const bc = Number(r.branch_code);
+      const dealer = r.dealer_code != null ? Number(r.dealer_code) : null;
+      if (!porBranch.has(bc)) porBranch.set(bc, new Map());
+      const porDealer = porBranch.get(bc);
+      const cur = porDealer.get(dealer) || { qtd: 0, valor: 0 };
+      cur.qtd += 1;
+      cur.valor += Number(r.total_value || 0);
+      porDealer.set(dealer, cur);
+    }
+    return porBranch;
+  } catch (e) {
+    console.error('[PainelVendas/NonSales] fetch falhou:', e.message);
+    return new Map();
+  }
+}
+
 // Mescla o agregado non-sales no dataRow TOTVS por filial.
 function mergeNonSalesIntoDataRow(dataRow, agg) {
   if (!agg || !Object.keys(agg).length) return dataRow;
@@ -753,6 +792,1255 @@ router.post(
     const total = Math.round(sellers.reduce((a, s) => a + s.value, 0) * 100) / 100;
 
     return successResponse(res, { sellers, total });
+  }),
+);
+
+// =============================================================================
+// FATURAMENTO POR VENDEDOR — réplica da query SQL do ERP (VR_FCR_FATURAI)
+// POST /api/totvs/sale-panel/faturamento-vendedor
+// Body: { filtroempresa?: number[], datemin, datemax }
+//
+// Reproduz via API a query Oracle:
+//   SUM(CASE WHEN TP_DOCUMENTO='9' THEN VL_FATURA*-1 ELSE VL_FATURA END)
+//   por CD_COMPVEND (vendedor da transação de origem da fatura).
+//
+// Mapeamento SQL → API:
+//   VR_FCR_FATURAI + DT_EMISSAO      → accounts-receivable/v2/documents/search
+//                                      (startIssueDate/endIssueDate)
+//   TP_SITUACAO='1'                  → statusList:[1] + filtro local
+//   TP_FATURAMENTO NOT IN ('3')      → filtro local billingType !== 3
+//   TP_DOCUMENTO NOT IN ('20')       → filtro local documentType !== 20
+//   TP_COBRANCA <> '14'              → filtro local chargeType !== 14
+//   TP_DOCUMENTO='9' → negativo      → sinal invertido local
+//   join LIQUIDACAO→TRANSACAO        → analytics/v2/fiscal-movement/search:
+//     (CD_COMPVEND)                    mapa (branchCode|invoiceNumber) → seller
+//   CD_OPERACAO NOT IN (lista)       → operationCode do movimento
+//   CD_CLIENTE NOT IN (clas tipo 2)  → person/v2/{individuals,legal-entities}
+//                                      expand=classifications, typeCode=2
+//   VR_PES_VENDEDOR (nome)           → analytics/v2/seller-panel/totals/search
+// =============================================================================
+const FAT_VEND_EXCLUDED_OPS = new Set([
+  1, 2, 1002, 15, 16, 1016, 510, 511, 1511, 521, 1521, 522, 9001, 9009, 9027,
+  8750, 9017, 600, 1600, 2009, 3335, 3401, 200, 300,
+]);
+// NOTA: a query original excluía clientes com VR_PES_PESSOACLAS CD_TIPOCLAS=2,
+// mas o "tipo 2" da API TOTVS é outro domínio (flag SIM presente em todas as
+// franquias) — hoje não há exclusão de cliente (ver passo 5).
+
+// EXPEDIÇÃO: toda venda nestas operações (showroom, novidades, bazar) —
+// independente do vendedor — vai pro card EXPEDIÇÃO como pseudo-vendedor -50.
+// No New Forecast os recortes são: 7255 → NOVIDADES · 887/888/889 → BAZAR ·
+// demais → SHOWROOM/FÁBRICAS.
+const FAT_VEND_EXPEDICAO_OPS = new Set([
+  7254, 7276, 7255, 7237, 7299, 7007,
+  887, 888, 889, // bazar
+]);
+const FAT_VEND_BAZAR_OPS = new Set([887, 888, 889]);
+const FAT_VEND_EXPEDICAO_CODE = -50;
+
+// Docs que são MEIO DE PAGAMENTO: quando a fatura inteira não tem NF
+// vinculada, é pagamento avulso (ex: cartões da entrada de um pedido grande),
+// não venda — descartar pra não contar em dobro com a fatura da transação.
+// (2 cheque, 3 dinheiro, 4/5 cartão, 7/8 TEF, 16 TED, 17/19/22 TEF, 27-30 apps)
+const FAT_VEND_PAGTO_DOCS = new Set([2, 3, 4, 5, 7, 8, 16, 17, 19, 22, 27, 28, 29, 30]);
+
+// FILIAL = mesmo critério do botão "Filial" do FiltroEmpresa (frontend):
+// cd_empresa < 5999 e fora das franquias (98/980; acima de 6000 é franquia).
+// Usado como default quando o filtroempresa não vem preenchido.
+const FAT_VEND_FRANQUIA_CODES = new Set([98, 980]);
+const onlyFiliais = (codes) =>
+  (codes || []).filter((c) => c < 5999 && !FAT_VEND_FRANQUIA_CODES.has(c));
+
+// ─── VAREJO: mesma fonte do Ranking de Faturamento ──────────────────────────
+// O ranking usa o painel oficial TOTVS (sale-panel) com estas operações para
+// as filiais "especiais". O card VAREJO do Painel de Vendas lê daqui para
+// bater com o Ranking (a query SQL do contas a receber EXCLUI as ops de
+// varejo 510/511/521/522..., então ela só serve pro atacado).
+const PANEL_SPECIAL_BRANCHES = new Set([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 31, 41, 45, 50, 55,
+  65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+  105, 106, 107, 108, 109, 111, 200, 300, 311, 351, 400, 411, 450, 500, 550,
+  551, 600, 650, 700, 750, 800, 850, 870, 880, 890, 891, 900, 910, 920, 930,
+  940, 950, 960, 970, 980, 990,
+]);
+const PANEL_OPERATIONS = [
+  1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017,
+  9400, 9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205,
+  1101, 9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067, 7234, 7236, 7240,
+  7241, 7242, 7235, 7237, 7254, 7259, 7255, 7243, 7245, 7244, 5919,
+];
+const PANEL_OPERATIONS_SET = new Set(PANEL_OPERATIONS);
+// Vendedores de ATACADO (grupos FRANQUIA/REVENDA/MTM do frontend — manter em
+// sincronia com GRUPOS_FIXOS do PainelVendas.jsx). Ficam FORA do painel
+// varejo: as vendas deles já aparecem nos cards do atacado (contas a
+// receber) e entrariam duplicadas aqui.
+const PANEL_ATACADO_SELLERS = new Set([40, 161, 241, 165, 259, 21, 26]);
+
+// Cache: rota pesada (AR paginado + fiscal-movement paginado). 30min —
+// também serve o drill-down por vendedor sem recomputar.
+const FAT_VEND_CACHE = new Map();
+const FAT_VEND_TTL = 30 * 60 * 1000;
+
+router.post(
+  '/sale-panel/faturamento-vendedor',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
+    const startTime = Date.now();
+    const { filtroempresa, datemin, datemax } = req.body || {};
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    let token = tokenData.access_token;
+
+    // Resolver filiais (@CD_EMPRESA da query). Sem seleção explícita, usa
+    // apenas as empresas FILIAL (critério do botão "Filial" do FiltroEmpresa).
+    let branchs;
+    if (Array.isArray(filtroempresa) && filtroempresa.length > 0) {
+      branchs = filtroempresa
+        .map((b) => parseInt(b))
+        .filter((b) => !isNaN(b) && b > 0);
+    }
+    if (!branchs || branchs.length === 0) {
+      branchs = onlyFiliais(await getBranchCodes(token));
+    }
+
+    const dateOnlyKey = (s) => String(s).split('T')[0];
+    const cacheKey = `${dateOnlyKey(datemin)}|${dateOnlyKey(datemax)}|${[...branchs].sort((a, b) => a - b).join(',')}`;
+    const cached = FAT_VEND_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.ts < FAT_VEND_TTL) {
+      return successResponse(res, { ...cached.data, cached: true }, 'OK (cache)');
+    }
+
+    const axiosCfg = (t, timeout = 60000) => ({
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${t}`,
+      },
+      httpsAgent,
+      httpAgent,
+      timeout,
+    });
+    const postWithRetry = async (url, payload, timeout) => {
+      try {
+        const r = await axios.post(url, payload, axiosCfg(token, timeout));
+        return r.data;
+      } catch (err) {
+        if (err.response?.status === 401) {
+          const nt = await getToken(true);
+          token = nt.access_token;
+          const r2 = await axios.post(url, payload, axiosCfg(token, timeout));
+          return r2.data;
+        }
+        throw err;
+      }
+    };
+
+    const dateOnly = (s) => String(s).split('T')[0];
+    const dmin = dateOnly(datemin);
+    const dmax = dateOnly(datemax);
+
+    // ─── 1) Contas a receber do período (VR_FCR_FATURAI) ────────────────────
+    // RÉGUA DO PERÍODO = DATA DA TRANSAÇÃO (data da NF vinculada à fatura),
+    // igual ao TRAR008. A busca no AR é por emissão da FATURA com folga de
+    // ±7 dias (fatura pode ser emitida dias antes/depois da NF — ex: fatura
+    // 30/06, transação 01/07); o filtro fino pela data da NF acontece no
+    // passo 4. Exclusões de tipo aplicadas localmente porque a API só
+    // aceita listas de INCLUSÃO nesses campos.
+    const addDaysIso = (iso, n) => {
+      const d = new Date(`${iso}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + n);
+      return d.toISOString().slice(0, 10);
+    };
+    const fetchFaturas = async () => {
+      const AR_URL = `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`;
+      const PAGE_SIZE = 100;
+      const MAX_PAGES = 400;
+      const filter = {
+        branchCodeList: branchs,
+        statusList: [1], // TP_SITUACAO='1'
+        startIssueDate: `${addDaysIso(dmin, -7)}T00:00:00`,
+        endIssueDate: `${addDaysIso(dmax, 7)}T23:59:59`,
+      };
+      const fetchPage = async (page) => {
+        // 3 tentativas — perder página do AR = perder faturas silenciosamente
+        for (let tent = 1; tent <= 3; tent++) {
+          try {
+            return await postWithRetry(AR_URL, {
+              filter,
+              expand: 'invoice',
+              page,
+              pageSize: PAGE_SIZE,
+            });
+          } catch (err) {
+            console.warn(
+              `[fat-vendedor/AR] pág ${page} tent ${tent}/3: ${err.message}`,
+            );
+            if (tent < 3) await new Promise((r) => setTimeout(r, 3000 * tent));
+          }
+        }
+        return { items: [], hasNext: false };
+      };
+      const out = [];
+      let page = 1;
+      let hasNext = true;
+      const CONC = 5;
+      while (hasNext && page <= MAX_PAGES) {
+        const batch = Array.from(
+          { length: Math.min(CONC, MAX_PAGES - page + 1) },
+          (_, i) => page + i,
+        );
+        const results = await Promise.all(batch.map(fetchPage));
+        for (const r of results) {
+          out.push(...(r?.items || []));
+        }
+        const last = results[results.length - 1];
+        hasNext =
+          (last?.hasNext ?? false) ||
+          (last?.items || []).length === PAGE_SIZE;
+        page += batch.length;
+      }
+      return out;
+    };
+
+    // ─── 2) fiscal-movement → mapa (filial|cliente|data) → movimentos ───────
+    // Substitui o join TRALIQUIDACAO→TRANSACAO da query: é daqui que vem o
+    // CD_COMPVEND e o CD_OPERACAO da transação de origem de cada fatura.
+    // O fiscal-movement NÃO expõe o nº da NF, então o vínculo com a parcela
+    // do contas a receber é feito por (filial, cliente, data de emissão).
+    const fetchMovementMap = async () => {
+      const FM_URL = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+      const PAGE_SIZE = 1000;
+      const map = new Map(); // `${branch}|${person}|${yyyy-mm-dd}` → [{sellerCode, operationCode, netValue}]
+      let pg = 1;
+      let hasNext = true;
+      while (hasNext && pg <= 200) {
+        // 3 tentativas por página — sem o fiscal-movement completo a
+        // atribuição de vendedor colapsa (tudo cai em sem_vinculo).
+        let data = null;
+        for (let tent = 1; tent <= 3 && !data; tent++) {
+          try {
+            data = await postWithRetry(
+              FM_URL,
+              {
+                filter: {
+                  branchCodeList: branchs,
+                  startMovementDate: dmin,
+                  endMovementDate: dmax,
+                },
+                page: pg,
+                pageSize: PAGE_SIZE,
+              },
+              150000,
+            );
+          } catch (err) {
+            console.warn(
+              `[fat-vendedor/FM] pág ${pg} tent ${tent}/3: ${err.message}`,
+            );
+            if (tent < 3) await new Promise((r) => setTimeout(r, 3000 * tent));
+          }
+        }
+        if (!data) {
+          console.error(
+            `[fat-vendedor/FM] pág ${pg} perdida após 3 tentativas — mapa incompleto`,
+          );
+          break;
+        }
+        for (const item of data?.items || []) {
+          const bc = item.branchCode;
+          const pc = item.personCode;
+          const dt = item.movementDate ? String(item.movementDate).slice(0, 10) : null;
+          if (!bc || !pc || !dt) continue;
+          const key = `${bc}|${pc}|${dt}`;
+          let arr = map.get(key);
+          if (!arr) {
+            arr = [];
+            map.set(key, arr);
+          }
+          arr.push({
+            sellerCode: item.sellerCode ?? null,
+            operationCode: Number(item.operationCode),
+            netValue: Number(item.netValue || 0),
+            model: item.operationModel || null,
+          });
+        }
+        hasNext = data?.hasNext ?? false;
+        pg++;
+      }
+      return map;
+    };
+
+    // ─── 3) Nomes de vendedor (VR_PES_VENDEDOR) via Supabase ────────────────
+    // forecast_painel_vendas é sincronizada do Painel de Vendas TOTVS pelo
+    // cron painel-vendas-sync e traz seller_code + seller_name. O endpoint
+    // analytics/seller-panel/totals só devolve agregado, sem nomes.
+    const fetchSellerNames = async () => {
+      const names = new Map();
+      try {
+        const { data, error } = await supabase
+          .from('forecast_painel_vendas')
+          .select('seller_code, seller_name, data')
+          .order('data', { ascending: false })
+          .limit(5000);
+        if (error) throw new Error(error.message);
+        for (const r of data || []) {
+          const code = Number(r.seller_code);
+          if (Number.isFinite(code) && r.seller_name && !names.has(code)) {
+            names.set(code, r.seller_name);
+          }
+        }
+      } catch (err) {
+        console.warn(`[fat-vendedor/nomes] ${err.message}`);
+      }
+      return names;
+    };
+
+    // ─── 3.5) Painel VAREJO — mesma fonte do Ranking de Faturamento ─────────
+    // sale-panel/v2/sellers/search por filial (exceto 99/atacado), com as
+    // operações do ranking. É o número oficial da tela do TOTVS.
+    const fetchVarejoPainel = async () => {
+      const SELLERS_URL = `${TOTVS_BASE_URL}/sale-panel/v2/sellers/search`;
+      const alvo = branchs.filter((b) => b !== 99);
+      const out = [];
+      const BATCH = 5;
+      for (let i = 0; i < alvo.length; i += BATCH) {
+        const slice = alvo.slice(i, i + BATCH);
+        const results = await Promise.all(
+          slice.map(async (bc) => {
+            try {
+              const body = { branchs: [bc], datemin: dmin, datemax: dmax };
+              if (PANEL_SPECIAL_BRANCHES.has(bc)) {
+                body.operations = PANEL_OPERATIONS;
+              }
+              let d = null;
+              for (let tent = 1; tent <= 3 && !d; tent++) {
+                try {
+                  d = await postWithRetry(SELLERS_URL, body);
+                } catch (err) {
+                  if (tent === 3) throw err;
+                  await new Promise((r) => setTimeout(r, 2000 * tent));
+                }
+              }
+              const sellersRows = (d?.dataRow || [])
+                .map((s) => ({
+                  seller_code: Number(s.seller_code),
+                  seller_name: s.seller_name || null,
+                  qtd: Number(s.seller_sale_qty || 0),
+                  valor:
+                    Math.round(Number(s.seller_sale_value || 0) * 100) / 100,
+                }))
+                .filter(
+                  (s) =>
+                    Number.isFinite(s.seller_code) &&
+                    s.valor !== 0 &&
+                    // atacado não entra no varejo (evita duplicar com os cards)
+                    !PANEL_ATACADO_SELLERS.has(s.seller_code),
+                )
+                .sort((a, b) => b.valor - a.valor);
+              if (sellersRows.length === 0) return null;
+              return {
+                branch_code: bc,
+                qtd: sellersRows.reduce((a, s) => a + s.qtd, 0),
+                valor:
+                  Math.round(
+                    sellersRows.reduce((a, s) => a + s.valor, 0) * 100,
+                  ) / 100,
+                sellers: sellersRows,
+              };
+            } catch (e) {
+              console.warn(`[fat-vendedor/varejo] filial ${bc}: ${e.message}`);
+              return null;
+            }
+          }),
+        );
+        out.push(...results.filter(Boolean));
+      }
+      out.sort((a, b) => b.valor - a.valor);
+      return out;
+    };
+
+    // ─── 3.6) NFs de EXPEDIÇÃO (régua TRAR008: transação do período) ────────
+    // fiscal/v2/invoices/search com operationCodeList — o totalValue da NF
+    // inclui FRETE, que o fiscal-movement (linhas de produto) não traz
+    // (a diferença de R$820 vs TRAR008 era exatamente o frete das 7299/MTM),
+    // e a data de emissão da NF é a data da transação.
+    const fetchExpedicaoNFs = async () => {
+      const NF_URL = `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`;
+      const pageSize = 100;
+      const out = [];
+      let page = 1;
+      for (;;) {
+        let d = null;
+        for (let tent = 1; tent <= 3 && !d; tent++) {
+          try {
+            d = await postWithRetry(NF_URL, {
+              filter: {
+                branchCodeList: branchs,
+                operationCodeList: [...FAT_VEND_EXPEDICAO_OPS],
+                operationType: 'Output',
+                startIssueDate: `${dmin}T00:00:00`,
+                endIssueDate: `${dmax}T23:59:59`,
+              },
+              page,
+              pageSize,
+            });
+          } catch (err) {
+            console.warn(
+              `[fat-vendedor/expedicao] pág ${page} tent ${tent}/3: ${err.message}`,
+            );
+            if (tent < 3) await new Promise((r) => setTimeout(r, 2000 * tent));
+          }
+        }
+        if (!d) break;
+        out.push(...(d.items || []));
+        const hasNext = d.hasNext ?? (d.items || []).length === pageSize;
+        if (!hasNext || page >= 100) break;
+        page++;
+      }
+      return out;
+    };
+
+    const [
+      faturas,
+      movMap,
+      sellerNames,
+      varejoPainel,
+      expedicaoNFs,
+      nonSalesVarejo,
+    ] = await Promise.all([
+        fetchFaturas(),
+        fetchMovementMap(),
+        fetchSellerNames(),
+        fetchVarejoPainel(),
+        fetchExpedicaoNFs(),
+        // Mesmo merge do Ranking: ops fora do universo "Sales" (5919 —
+        // Remessa Bonificação Elite) somadas do Supabase fiscal, com quebra
+        // por vendedor (dealer_code da NF).
+        fetchNonSalesPorVendedor({
+          branchs: branchs.filter((b) => b !== 99),
+          datemin: dmin,
+          datemax: dmax,
+        }),
+      ]);
+
+    // Mescla as non-sales no painel varejo. NF com dealer_code soma no
+    // vendedor real (ex: 5919 da NETO na Midway); sem dealer vira linha
+    // "BONIFICAÇÃO ELITE". Assim card e drill batem com o Ranking.
+    for (const [bc, porDealer] of nonSalesVarejo.entries()) {
+      let row = varejoPainel.find((b) => b.branch_code === bc);
+      for (const [dealer, agg] of porDealer.entries()) {
+        // vendedor de atacado não entra no varejo (já conta nos cards)
+        if (dealer != null && PANEL_ATACADO_SELLERS.has(dealer)) continue;
+        const valor = Math.round(agg.valor * 100) / 100;
+        if (!valor && !agg.qtd) continue;
+        if (!row) {
+          row = { branch_code: bc, qtd: 0, valor: 0, sellers: [] };
+          varejoPainel.push(row);
+        }
+        const sellerRow =
+          dealer != null
+            ? row.sellers.find((s) => s.seller_code === dealer)
+            : null;
+        if (sellerRow) {
+          sellerRow.qtd += agg.qtd;
+          sellerRow.valor = Math.round((sellerRow.valor + valor) * 100) / 100;
+        } else {
+          row.sellers.push({
+            seller_code: dealer ?? -5919,
+            seller_name:
+              dealer != null
+                ? sellerNames.get(dealer) || `Vend. ${dealer}`
+                : 'BONIFICAÇÃO ELITE (5919)',
+            qtd: agg.qtd,
+            valor,
+          });
+        }
+        row.qtd += agg.qtd;
+        row.valor = Math.round((row.valor + valor) * 100) / 100;
+      }
+      if (row) row.sellers.sort((a, b) => b.valor - a.valor);
+    }
+    varejoPainel.sort((a, b) => b.valor - a.valor);
+    console.log(
+      `[fat-vendedor] ${faturas.length} parcelas AR · ${movMap.size} NFs no fiscal-movement (${Date.now() - startTime}ms)`,
+    );
+
+    // ─── 4) Filtros da fatura + vínculo com o vendedor ──────────────────────
+    // Tipos de documento (TP_DOCUMENTO) descartados: 20 = CREDEV, 26 = PIX.
+    // CREDEV fica fora por REGRA INTERNA: a parte da venda paga com crédito
+    // do cliente não conta no faturado do vendedor (TRAR008 − credev).
+    // PIX fica fora porque no fluxo atacado a venda gera a fatura de
+    // Adiantamento (valor faturado real) e o PIX é só a entrada do dinheiro.
+    // Desconto financeiro (11) CONTA — o ERP soma essas parcelas no faturado.
+    const FAT_VEND_EXCLUDED_DOCS = new Set([20, 26]);
+    const porFatura = new Map(); // `${branch}|${receivable}` → fatura agregada
+    let semVinculo = { qtd: 0, valor: 0 };
+    let opExcluida = { qtd: 0, valor: 0 };
+    let foraPeriodo = { qtd: 0, valor: 0 }; // NF fora do período (régua transação)
+    for (const item of faturas) {
+      // TP_SITUACAO='1' (reforço local — a API pode ignorar statusList)
+      if (item.status !== undefined && Number(item.status) !== 1) continue;
+      // TP_FATURAMENTO NOT IN ('3')
+      if (Number(item.billingType) === 3) continue;
+      // TP_DOCUMENTO fora: 20 CREDEV (query original) + 11 Desconto financeiro
+      if (FAT_VEND_EXCLUDED_DOCS.has(Number(item.documentType))) continue;
+      // TP_COBRANCA <> '14'
+      if (Number(item.chargeType) === 14) continue;
+
+      const bruto = Number(item.installmentValue || 0);
+      if (!bruto) continue;
+      // TP_DOCUMENTO='9' → VL_FATURA * -1
+      const valor = Number(item.documentType) === 9 ? -bruto : bruto;
+
+      // Data da NF de origem (expand=invoice), senão data de emissão da fatura
+      const inv = Array.isArray(item.invoice) ? item.invoice[0] : item.invoice;
+      const dtNf = String(inv?.invoiceDate || item.issueDate || '').slice(0, 10);
+      // RÉGUA: só conta se a DATA DA TRANSAÇÃO (NF) cai no período pedido —
+      // a busca do AR veio com folga de ±7 dias justamente pra isso.
+      if (dtNf < dmin || dtNf > dmax) {
+        foraPeriodo.qtd += 1;
+        foraPeriodo.valor += valor;
+        continue;
+      }
+      const movs = dtNf
+        ? movMap.get(`${item.branchCode}|${item.customerCode}|${dtNf}`)
+        : null;
+      if (!movs || movs.length === 0) {
+        // Sem transação localizada → equivale a não passar no join da query
+        semVinculo.qtd += 1;
+        semVinculo.valor += valor;
+        continue;
+      }
+      // CD_OPERACAO NOT IN (lista): se TODOS os movimentos do dia são de
+      // operação excluída, a fatura fica fora (ex: venda varejo 510/521).
+      const validos = movs.filter(
+        (m) => !FAT_VEND_EXCLUDED_OPS.has(m.operationCode),
+      );
+      if (validos.length === 0) {
+        opExcluida.qtd += 1;
+        opExcluida.valor += valor;
+        continue;
+      }
+      // Agrega as parcelas por fatura (receivableCode). O vendedor é
+      // atribuído DEPOIS da dedup, por grupo cliente/dia (ver passo 4.2).
+      const fatKey = `${item.branchCode}|${item.receivableCode}`;
+      let fat = porFatura.get(fatKey);
+      if (!fat) {
+        fat = {
+          sellerCode: null,
+          customerCode: Number(item.customerCode),
+          branchCode: item.branchCode,
+          receivableCode: item.receivableCode,
+          issueDate: dtNf,
+          docType: Number(item.documentType),
+          valor: 0,
+          temNf: false,
+        };
+        porFatura.set(fatKey, fat);
+      }
+      fat.valor += valor;
+      if (inv) fat.temNf = true; // alguma parcela com NF vinculada
+    }
+
+    // ─── 4.0) Pagamentos avulsos: meio de pagamento SEM NF vinculada ────────
+    // Ex: entrada de pedido grande paga em 3 cartões (COLLYER 24/07: cartões
+    // 15.000 + 13.217,46 + 14.300,50 sem NF, além da fatura real da venda
+    // com NF). Contá-los dobraria a venda.
+    let pagamentoSemNf = { qtd: 0, valor: 0 };
+    for (const [k, f] of porFatura.entries()) {
+      if (!f.temNf && FAT_VEND_PAGTO_DOCS.has(f.docType)) {
+        pagamentoSemNf.qtd += 1;
+        pagamentoSemNf.valor += f.valor;
+        porFatura.delete(k);
+      }
+    }
+
+    // ─── 4.1) Dedup pagamento × Adiantamento ────────────────────────────────
+    // Mesmo com PIX (26) já excluído, outros meios (TED, dinheiro etc.) podem
+    // gerar fatura em par com o Adiantamento no mesmo valor/dia. A dedup SÓ
+    // age quando o grupo tem Adiantamento (10) + outro documento: fica o
+    // Adiantamento (valor faturado real) e o espelho do pagamento sai.
+    // Dois documentos comuns de mesmo valor são vendas DISTINTAS e ficam
+    // (ex: cliente compra duas peças iguais em transações separadas).
+    const porDup = new Map(); // `${branch}|${cliente}|${data}|${valor}` → [faturas]
+    for (const f of porFatura.values()) {
+      const dk = `${f.branchCode}|${f.customerCode}|${f.issueDate}|${f.valor.toFixed(2)}`;
+      if (!porDup.has(dk)) porDup.set(dk, []);
+      porDup.get(dk).push(f);
+    }
+    const vendasFinais = [];
+    let duplicadas = { qtd: 0, valor: 0 };
+    for (const grupo of porDup.values()) {
+      const adiantamentos = grupo.filter((f) => f.docType === 10);
+      const outros = grupo.filter((f) => f.docType !== 10);
+      if (adiantamentos.length > 0 && outros.length > 0) {
+        vendasFinais.push(...adiantamentos);
+        for (const f of outros) {
+          duplicadas.qtd += 1;
+          duplicadas.valor += f.valor;
+        }
+      } else {
+        vendasFinais.push(...grupo);
+      }
+    }
+
+    // ─── 4.2) Atribuição de vendedor por CASAMENTO DE VALOR ─────────────────
+    // Quando o cliente compra de 2+ vendedores no mesmo dia (ex: vendedor da
+    // franquia + showroom/GERAL), cada fatura vai pro vendedor cuja soma de
+    // vendas do dia mais se aproxima do valor dela — guloso, maiores faturas
+    // primeiro, descontando a soma restante do vendedor escolhido.
+    // (Caso Vitor 15/07: cartões 227,66+58,25 → vendedor 40, cuja soma era
+    // 285,92; adiantamento 1.039,53 → showroom GERAL, soma exata.)
+    // Com um único vendedor no dia, tudo vai pra ele, como antes.
+    // PREFERE movimentos "Sales" (devolução não rouba a fatura — caso Juliane).
+    const porGrupoDia = new Map();
+    for (const f of vendasFinais) {
+      const gk = `${f.branchCode}|${f.customerCode}|${f.issueDate}`;
+      if (!porGrupoDia.has(gk)) porGrupoDia.set(gk, []);
+      porGrupoDia.get(gk).push(f);
+    }
+    for (const [gk, fats] of porGrupoDia.entries()) {
+      const movs = movMap.get(gk) || [];
+      const validos = movs.filter(
+        (m) => !FAT_VEND_EXCLUDED_OPS.has(m.operationCode),
+      );
+      const vendasMovs = validos.filter((m) => m.model === 'Sales');
+      const pool = vendasMovs.length > 0 ? vendasMovs : validos;
+      const restante = new Map(); // sellerCode → soma ainda não "consumida"
+      for (const m of pool) {
+        let sc = m.sellerCode != null ? Number(m.sellerCode) : null;
+        // Operação de expedição → pseudo-vendedor EXPEDIÇÃO (qualquer vendedor)
+        if (FAT_VEND_EXPEDICAO_OPS.has(m.operationCode)) {
+          sc = FAT_VEND_EXPEDICAO_CODE;
+        }
+        restante.set(sc, (restante.get(sc) || 0) + (m.netValue || 0));
+      }
+      if (restante.size === 0) continue; // não deveria ocorrer (já filtrado)
+      for (const f of [...fats].sort(
+        (a, b) => Math.abs(b.valor) - Math.abs(a.valor),
+      )) {
+        let melhor = null;
+        let melhorDiff = Infinity;
+        for (const [sc, rem] of restante.entries()) {
+          const diff = Math.abs(rem - f.valor);
+          if (diff < melhorDiff) {
+            melhorDiff = diff;
+            melhor = sc;
+          }
+        }
+        f.sellerCode = melhor;
+        if (melhor !== null) {
+          restante.set(melhor, (restante.get(melhor) || 0) - f.valor);
+        }
+      }
+    }
+
+    // ─── 4.3) EXPEDIÇÃO pela régua de TRANSAÇÃO (NFs das ops de expedição) ──
+    // Espelha o TRAR008: uma linha por NF (= transação), totalValue com
+    // frete, data de emissão = data da transação. Cobre faturamento
+    // antecipado (fatura de maio, transação em julho — CYRO/MARANGUAPE) e
+    // ignora pagamentos avulsos por construção. As faturas que o casamento
+    // atribuiu à EXPEDIÇÃO são descartadas do contas a receber (passo 6).
+    const vendasExp = [];
+    let expedicaoTotal = 0;
+    const expPorOp = {}; // operação → valor (integração New Forecast)
+    for (const nf of expedicaoNFs) {
+      if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
+      const valor = Number(nf.totalValue || 0);
+      if (!valor) continue;
+      expedicaoTotal += valor;
+      const opNf = Number(nf.operationCode);
+      expPorOp[opNf] = Math.round(((expPorOp[opNf] || 0) + valor) * 100) / 100;
+      vendasExp.push({
+        data: nf.issueDate ? String(nf.issueDate).slice(0, 10) : null,
+        branch_code: Number(nf.branchCode),
+        fatura: nf.invoiceCode ?? null, // nº da NF
+        cliente_code: Number(nf.personCode),
+        cliente_nome: nf.personName || null,
+        valor: Math.round(valor * 100) / 100,
+        op: opNf, // operação — o New Forecast separa 7255 (novidades) do resto
+      });
+    }
+    vendasExp.sort(
+      (a, b) =>
+        String(b.data).localeCompare(String(a.data)) || b.valor - a.valor,
+    );
+
+    // ─── 5) Lookup de nomes dos clientes (pro drill-down) ───────────────────
+    // ⚠️ SEM exclusão de cliente por classificação ou nome:
+    //  - classificationTypeCode=2 da API ≠ CD_TIPOCLAS=2 do ERP (o "tipo 2"
+    //    da API é um flag SIM presente em todas as franquias — excluía o
+    //    vendedor 40 inteiro);
+    //  - nome começando com "CROSBY" também NÃO serve: franquias legítimas
+    //    têm razão social CROSBY (ex: CROSBY SÃO JOÃO, CROSBY AREIA BRANCA).
+    // Transferências internas já ficam de fora pelo NOT IN de operações.
+    const customerCodes = [
+      ...new Set([
+        ...vendasFinais.map((p) => p.customerCode),
+        // clientes da EXPEDIÇÃO (podem não ter fatura no período — ex: CYRO)
+        ...vendasExp.map((v) => v.cliente_code),
+      ]),
+    ].filter(Boolean);
+    const excludedCustomers = new Set(); // mantido vazio (ver nota acima)
+    const personNames = new Map();
+    if (customerCodes.length > 0) {
+      const BATCH = 50;
+      const chunks = [];
+      for (let i = 0; i < customerCodes.length; i += BATCH) {
+        chunks.push(customerCodes.slice(i, i + BATCH));
+      }
+      const lookupChunk = async (chunk) => {
+        const payload = {
+          filter: { personCodeList: chunk },
+          page: 1,
+          pageSize: chunk.length,
+        };
+        const [pj, pf] = await Promise.all([
+          postWithRetry(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, payload, 30000)
+            .then((d) => d?.items || [])
+            .catch(() => []),
+          postWithRetry(`${TOTVS_BASE_URL}/person/v2/individuals/search`, payload, 30000)
+            .then((d) => d?.items || [])
+            .catch(() => []),
+        ]);
+        for (const p of [...pj, ...pf]) {
+          if (!p.code) continue;
+          const nome = p.fantasyName || p.name;
+          if (nome) personNames.set(Number(p.code), nome);
+        }
+      };
+      const CONC = 4;
+      for (let i = 0; i < chunks.length; i += CONC) {
+        await Promise.all(chunks.slice(i, i + CONC).map(lookupChunk));
+      }
+    }
+
+    // ─── 6) GROUP BY vendedor (com detalhe por fatura pro drill-down) ───────
+    const bySeller = new Map();
+    for (const p of vendasFinais) {
+      if (excludedCustomers.has(p.customerCode)) continue;
+      // Faturas casadas com a EXPEDIÇÃO saem daqui — o card vem dos
+      // movimentos (passo 4.3), contá-las seria dobrar.
+      if (p.sellerCode === FAT_VEND_EXPEDICAO_CODE) continue;
+      const code = p.sellerCode ?? 0; // 0 = sem vendedor na transação
+      const cur = bySeller.get(code) || {
+        seller_code: code,
+        seller_name:
+          code === FAT_VEND_EXPEDICAO_CODE
+            ? 'EXPEDIÇÃO'
+            : sellerNames.get(code) || null,
+        valor: 0,
+        faturas: new Map(), // receivableKey → venda (fatura)
+        porFilial: {}, // branchCode → { qtd, valor }
+      };
+      const pf = cur.porFilial[p.branchCode] || { qtd: 0, valor: 0 };
+      pf.qtd += 1;
+      pf.valor += p.valor;
+      cur.porFilial[p.branchCode] = pf;
+      cur.faturas.set(`${p.branchCode}|${p.receivableCode}`, {
+        data: p.issueDate,
+        branch_code: p.branchCode,
+        fatura: p.receivableCode,
+        cliente_code: p.customerCode,
+        cliente_nome: null, // preenchido abaixo (personNames)
+        valor: p.valor,
+      });
+      cur.valor += p.valor;
+      bySeller.set(code, cur);
+    }
+
+    const dataRow = [...bySeller.values()]
+      .map((s) => ({
+        seller_code: s.seller_code,
+        seller_name:
+          s.seller_name || (s.seller_code === 0 ? 'SEM VENDEDOR' : `Vend. ${s.seller_code}`),
+        qtd: s.faturas.size,
+        valor: Math.round(s.valor * 100) / 100,
+        // Filiais onde o vendedor tem vendas no período (99 = atacado/matriz)
+        branch_codes: [
+          ...new Set([...s.faturas.values()].map((f) => Number(f.branch_code))),
+        ].sort((a, b) => a - b),
+        // Quebra por filial: { branchCode: { qtd, valor } } — usado no drill
+        por_filial: Object.fromEntries(
+          Object.entries(s.porFilial).map(([bc, v]) => [
+            bc,
+            { qtd: v.qtd, valor: Math.round(v.valor * 100) / 100 },
+          ]),
+        ),
+      }))
+      .sort((a, b) => b.valor - a.valor);
+
+    // Detalhe por vendedor: lista de vendas (faturas), mais recentes primeiro
+    const detalhes = {};
+    for (const s of bySeller.values()) {
+      detalhes[s.seller_code] = [...s.faturas.values()]
+        .map((f) => ({
+          ...f,
+          cliente_nome: personNames.get(f.cliente_code) || null,
+          valor: Math.round(f.valor * 100) / 100,
+        }))
+        .sort(
+          (a, b) =>
+            String(b.data).localeCompare(String(a.data)) || b.valor - a.valor,
+        );
+    }
+
+    // EXPEDIÇÃO no dataRow/detalhes — uma linha por NF (régua TRAR008).
+    if (vendasExp.length > 0) {
+      // nome fantasia do lookup quando disponível (senão o personName da NF)
+      for (const v of vendasExp) {
+        v.cliente_nome = personNames.get(v.cliente_code) || v.cliente_nome;
+      }
+      const porFilialExp = {};
+      for (const v of vendasExp) {
+        const pf = porFilialExp[v.branch_code] || { qtd: 0, valor: 0 };
+        pf.qtd += 1;
+        pf.valor = Math.round((pf.valor + v.valor) * 100) / 100;
+        porFilialExp[v.branch_code] = pf;
+      }
+      dataRow.push({
+        seller_code: FAT_VEND_EXPEDICAO_CODE,
+        seller_name: 'EXPEDIÇÃO',
+        qtd: vendasExp.length,
+        valor: Math.round(expedicaoTotal * 100) / 100,
+        branch_codes: Object.keys(porFilialExp)
+          .map(Number)
+          .sort((a, b) => a - b),
+        por_filial: porFilialExp,
+      });
+      dataRow.sort((a, b) => b.valor - a.valor);
+      detalhes[FAT_VEND_EXPEDICAO_CODE] = vendasExp;
+    }
+
+    // Detalhe dos vendedores do VAREJO: montado do fiscal-movement (já em
+    // memória), agregado por cliente/dia/filial com as operações do painel.
+    // Aproxima as vendas da tela oficial (líquido de devoluções).
+    const varejoSellerSet = new Set(
+      varejoPainel.flatMap((b) => b.sellers.map((s) => s.seller_code)),
+    );
+    const varejoAgg = new Map(); // `${seller}|${branch}|${person}|${date}` → valor
+    for (const [key, movs] of movMap.entries()) {
+      const [bcStr, pcStr, dt] = key.split('|');
+      const bc = Number(bcStr);
+      if (bc === 99) continue;
+      for (const m of movs) {
+        const sc = m.sellerCode != null ? Number(m.sellerCode) : null;
+        if (sc === null || !varejoSellerSet.has(sc)) continue;
+        if (!PANEL_OPERATIONS_SET.has(m.operationCode)) continue;
+        if (m.model === 'Purchases') continue;
+        const sign = m.model === 'SaleReturns' ? -1 : 1;
+        const k = `${sc}|${bc}|${pcStr}|${dt}`;
+        varejoAgg.set(k, (varejoAgg.get(k) || 0) + sign * (m.netValue || 0));
+      }
+    }
+    const varejoDetalhes = {};
+    for (const [k, valor] of varejoAgg.entries()) {
+      const [sc, bc, pc, dt] = k.split('|');
+      if (!varejoDetalhes[sc]) varejoDetalhes[sc] = [];
+      varejoDetalhes[sc].push({
+        data: dt,
+        branch_code: Number(bc),
+        fatura: null, // venda de painel — sem nº de fatura
+        cliente_code: Number(pc),
+        cliente_nome: null,
+        valor: Math.round(valor * 100) / 100,
+      });
+    }
+    for (const arr of Object.values(varejoDetalhes)) {
+      arr.sort(
+        (a, b) =>
+          String(b.data).localeCompare(String(a.data)) || b.valor - a.valor,
+      );
+    }
+
+    const responseData = {
+      dataRow,
+      // VAREJO oficial (mesma fonte/ops do Ranking de Faturamento), por filial
+      varejo: varejoPainel,
+      // EXPEDIÇÃO por operação (7255=novidades etc.) — usado pelo New Forecast
+      expedicao_por_op: expPorOp,
+      total: Math.round(dataRow.reduce((a, s) => a + s.valor, 0) * 100) / 100,
+      // Parcelas cuja transação não foi localizada no fiscal-movement (fora do join)
+      sem_vinculo_nf: {
+        qtd: semVinculo.qtd,
+        valor: Math.round(semVinculo.valor * 100) / 100,
+      },
+      // Parcelas descartadas porque a operação está no NOT IN da query
+      op_excluida: {
+        qtd: opExcluida.qtd,
+        valor: Math.round(opExcluida.valor * 100) / 100,
+      },
+      // Faturas removidas na dedup PIX × Adiantamento (mesmo valor/dia/cliente)
+      duplicadas_removidas: {
+        qtd: duplicadas.qtd,
+        valor: Math.round(duplicadas.valor * 100) / 100,
+      },
+      // Meios de pagamento sem NF vinculada (entrada de pedido etc.)
+      pagamento_sem_nf: {
+        qtd: pagamentoSemNf.qtd,
+        valor: Math.round(pagamentoSemNf.valor * 100) / 100,
+      },
+      // Faturas cuja NF (data da transação) caiu fora do período pedido
+      fora_periodo: {
+        qtd: foraPeriodo.qtd,
+        valor: Math.round(foraPeriodo.valor * 100) / 100,
+      },
+      period: { datemin: dmin, datemax: dmax },
+      branchs_used: branchs,
+      stats: { fm_chaves: movMap.size, ar_parcelas: faturas.length },
+    };
+    // Não cachear resultado suspeito: sem_vinculo dominando o total indica
+    // que o fiscal-movement veio incompleto (atribuição colapsada).
+    const totalBruto =
+      Math.abs(responseData.total) + Math.abs(semVinculo.valor);
+    const colapsado =
+      totalBruto > 0 && Math.abs(semVinculo.valor) / totalBruto > 0.5;
+    if (colapsado) {
+      console.error(
+        `[fat-vendedor] ⚠️ resultado colapsado (sem_vinculo ${semVinculo.valor.toFixed(2)} > 50% do bruto) — NÃO cacheado`,
+      );
+    }
+    if (!colapsado && (dataRow.length > 0 || varejoPainel.length > 0)) {
+      // detalhes fica só no cache (drill-down) — não infla a resposta da lista
+      FAT_VEND_CACHE.set(cacheKey, {
+        data: responseData,
+        detalhes,
+        varejoDetalhes,
+        ts: Date.now(),
+      });
+      if (FAT_VEND_CACHE.size > 20) {
+        const oldest = [...FAT_VEND_CACHE.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+        FAT_VEND_CACHE.delete(oldest[0]);
+      }
+    }
+    console.log(
+      `[fat-vendedor] ${dataRow.length} vendedores · R$ ${responseData.total.toFixed(2)} · ${Date.now() - startTime}ms`,
+    );
+    return successResponse(
+      res,
+      responseData,
+      `${dataRow.length} vendedores no período`,
+    );
+  }),
+);
+
+// =============================================================================
+// DRILL-DOWN: vendas (faturas) de um vendedor no período
+// POST /api/totvs/sale-panel/faturamento-vendedor-detalhe
+// Body: { seller_code, datemin, datemax, filtroempresa? }
+// Lê do cache do faturamento-vendedor; se expirado, recomputa chamando a
+// própria rota internamente (mesmo padrão do painel-vendas-sync).
+// =============================================================================
+router.post(
+  '/sale-panel/faturamento-vendedor-detalhe',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
+    const { seller_code, filtroempresa, datemin, datemax } = req.body || {};
+    if (seller_code === undefined || seller_code === null || !datemin || !datemax) {
+      return errorResponse(
+        res,
+        'seller_code, datemin e datemax obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    const dateOnly = (s) => String(s).split('T')[0];
+    const dmin = dateOnly(datemin);
+    const dmax = dateOnly(datemax);
+
+    // Resolve branchs do mesmo jeito da rota principal → mesma cacheKey
+    let branchs;
+    if (Array.isArray(filtroempresa) && filtroempresa.length > 0) {
+      branchs = filtroempresa
+        .map((b) => parseInt(b))
+        .filter((b) => !isNaN(b) && b > 0);
+    }
+    if (!branchs || branchs.length === 0) {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+      }
+      branchs = onlyFiliais(await getBranchCodes(tokenData.access_token));
+    }
+    const cacheKey = `${dmin}|${dmax}|${[...branchs].sort((a, b) => a - b).join(',')}`;
+
+    let cached = FAT_VEND_CACHE.get(cacheKey);
+    if (!cached || Date.now() - cached.ts >= FAT_VEND_TTL) {
+      try {
+        await axios.post(
+          `http://localhost:${process.env.PORT || 4100}/api/totvs/sale-panel/faturamento-vendedor`,
+          { filtroempresa: branchs, datemin: dmin, datemax: dmax },
+          { timeout: 600000 },
+        );
+      } catch (err) {
+        return errorResponse(res, `Falha ao computar faturamento: ${err.message}`, 502);
+      }
+      cached = FAT_VEND_CACHE.get(cacheKey);
+      if (!cached) {
+        return successResponse(
+          res,
+          { seller_code: Number(seller_code), seller_name: null, vendas: [], total: 0 },
+          'Sem dados no período',
+        );
+      }
+    }
+
+    const code = Number(seller_code);
+    // Atacado (contas a receber) primeiro; senão, vendas do painel varejo
+    const vendas =
+      (cached.detalhes?.[code]?.length
+        ? cached.detalhes[code]
+        : cached.varejoDetalhes?.[code]) || [];
+    const row = (cached.data?.dataRow || []).find(
+      (r) => Number(r.seller_code) === code,
+    );
+    return successResponse(
+      res,
+      {
+        seller_code: code,
+        seller_name: row?.seller_name || null,
+        vendas,
+        total:
+          row?.valor ??
+          Math.round(vendas.reduce((a, v) => a + v.valor, 0) * 100) / 100,
+      },
+      `${vendas.length} vendas`,
+    );
+  }),
+);
+
+// =============================================================================
+// FATURAMENTO POR VENDEDOR — SEMANAL (integração New Forecast)
+// POST /api/totvs/sale-panel/faturamento-vendedor-semanal
+// Body: { mes: 'YYYY-MM', filtroempresa? }
+//
+// Roda o faturamento-vendedor para cada semana do mês (S1=1-7, S2=8-14,
+// S3=15-21, S4=22-28, S5=29+ — mesma régua do PlanejamentoMensalModal) via
+// chamada interna (aproveita o cache de 30min de cada semana) e devolve os
+// canais do New Forecast já mapeados:
+//   FRANQUIAS(40) · REVENDA(161/241/165) · MTM_RAFAEL(21) · MTM_DAVID(26)
+//   MTM_ARTHUR(259) · VAREJO(painel oficial) · NOVIDADES(exp op 7255)
+//   SHOWROOM(demais ops de expedição)
+// =============================================================================
+router.post(
+  '/sale-panel/faturamento-vendedor-semanal',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
+    const { mes, datemin, datemax, filtroempresa, semanas } = req.body || {};
+    const isYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+    // Período: datemin/datemax livres; `mes` ('YYYY-MM') aceito como atalho.
+    let dminP;
+    let dmaxP;
+    if (isYmd(datemin) && isYmd(datemax) && datemin <= datemax) {
+      dminP = datemin;
+      dmaxP = datemax;
+    } else if (/^\d{4}-\d{2}$/.test(String(mes || ''))) {
+      const [y, m] = String(mes).split('-').map(Number);
+      dminP = `${mes}-01`;
+      dmaxP = `${mes}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+    } else {
+      return errorResponse(
+        res,
+        "Informe datemin/datemax ('YYYY-MM-DD') ou mes ('YYYY-MM')",
+        400,
+        'MISSING_PERIOD',
+      );
+    }
+    // Semanas customizadas do frontend (o gestor ajusta as datas);
+    // sem elas, quebra o período em blocos de 7 dias a partir do início.
+    const custom = Array.isArray(semanas)
+      ? semanas
+          .filter((w) => w && isYmd(w.datemin) && isYmd(w.datemax) && w.datemin <= w.datemax)
+          .map((w, i) => ({ s: Number(w.s) || i + 1, datemin: w.datemin, datemax: w.datemax }))
+      : [];
+    const addDays = (iso, n) => {
+      const d = new Date(`${iso}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + n);
+      return d.toISOString().slice(0, 10);
+    };
+    const SEMANAS_DEF =
+      custom.length > 0
+        ? custom
+        : (() => {
+            const out = [];
+            let ini = dminP;
+            let s = 1;
+            while (ini <= dmaxP && s <= 10) {
+              const fimBloco = addDays(ini, 6);
+              out.push({
+                s,
+                datemin: ini,
+                datemax: fimBloco <= dmaxP ? fimBloco : dmaxP,
+              });
+              ini = addDays(out[out.length - 1].datemax, 1);
+              s++;
+            }
+            return out;
+          })();
+
+    const INTERNAL = `http://localhost:${process.env.PORT || 4100}/api/totvs/sale-panel/faturamento-vendedor`;
+    const canais = {}; // CANAL → { s1..s5 }
+    const put = (key, s, valor) => {
+      if (!canais[key]) canais[key] = {};
+      canais[key][`s${s}`] =
+        Math.round(((canais[key][`s${s}`] || 0) + (valor || 0)) * 100) / 100;
+    };
+
+    // Vendedores dos canais do Forecast — o drill deles vai JUNTO na resposta
+    // (o clique na célula não refaz busca nenhuma: as vendas já foram
+    // computadas pra chegar no total da célula).
+    const CANAL_SELLER_CODES = [40, 161, 241, 165, 21, 26, 259];
+    // Lê o cache da rota principal (mesmo processo) pra extrair as vendas
+    const harvestDrill = (w, data) => {
+      let cached = null;
+      for (const [k, v] of FAT_VEND_CACHE.entries()) {
+        if (k.startsWith(`${w.datemin}|${w.datemax}|`)) {
+          cached = v;
+          break;
+        }
+      }
+      const vendedores = {};
+      for (const code of CANAL_SELLER_CODES) {
+        const row = (data.dataRow || []).find(
+          (x) => Number(x.seller_code) === code,
+        );
+        if (!row) continue;
+        vendedores[code] = {
+          seller_code: code,
+          seller_name: row.seller_name,
+          qtd: row.qtd,
+          valor: row.valor,
+          vendas: cached?.detalhes?.[code] || [],
+        };
+      }
+      return {
+        vendedores,
+        varejo: data.varejo || [], // lojas + vendedores (clientes sob demanda)
+        expedicao: cached?.detalhes?.[FAT_VEND_EXPEDICAO_CODE] || [],
+      };
+    };
+
+    // 2 semanas em paralelo: corta o tempo frio pela metade sem sobrecarregar
+    const drill = {};
+    let idxSem = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = idxSem++;
+        if (i >= SEMANAS_DEF.length) return;
+        const w = SEMANAS_DEF[i];
+        let data;
+        try {
+          const r = await axios.post(
+            INTERNAL,
+            { filtroempresa: filtroempresa || [], datemin: w.datemin, datemax: w.datemax },
+            { timeout: 600000 },
+          );
+          data = r.data?.data || r.data || {};
+        } catch (err) {
+          console.warn(`[fat-vend-semanal] S${w.s} falhou: ${err.message}`);
+          continue;
+        }
+        const rowVal = (code) =>
+          Number(
+            (data.dataRow || []).find((x) => Number(x.seller_code) === code)
+              ?.valor || 0,
+          );
+        put('FRANQUIAS', w.s, rowVal(40));
+        put('REVENDA', w.s, rowVal(161) + rowVal(241) + rowVal(165));
+        put('MTM_RAFAEL', w.s, rowVal(21));
+        put('MTM_DAVID', w.s, rowVal(26));
+        put('MTM_ARTHUR', w.s, rowVal(259));
+        put(
+          'VAREJO',
+          w.s,
+          (data.varejo || []).reduce((a, b) => a + (b.valor || 0), 0),
+        );
+        let novidades = 0;
+        let showroom = 0;
+        let bazar = 0;
+        for (const [op, v] of Object.entries(data.expedicao_por_op || {})) {
+          const opNum = Number(op);
+          if (opNum === 7255) novidades += v;
+          else if (FAT_VEND_BAZAR_OPS.has(opNum)) bazar += v;
+          else showroom += v;
+        }
+        put('NOVIDADES', w.s, novidades);
+        put('SHOWROOM', w.s, showroom);
+        put('BAZAR', w.s, bazar);
+        drill[`s${w.s}`] = harvestDrill(w, data);
+      }
+    };
+    await Promise.all([worker(), worker()]);
+
+    return successResponse(
+      res,
+      { datemin: dminP, datemax: dmaxP, semanas: SEMANAS_DEF, canais, drill },
+      `Semanal de ${dminP} a ${dmaxP} (${SEMANAS_DEF.length} semanas)`,
+    );
+  }),
+);
+
+// =============================================================================
+// NEW FORECAST — configuração persistida por período
+// Tabela Supabase new_forecast_config (migrations/new_forecast_config.sql):
+// semanas ajustadas, metas, valores manuais e overrides — compartilhados
+// entre navegadores/usuários.
+// GET  /api/totvs/new-forecast/config?datemin=&datemax=
+// POST /api/totvs/new-forecast/config { datemin, datemax, semanas?, metas?, manual?, overrides? }
+// =============================================================================
+router.get(
+  '/new-forecast/config',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax } = req.query || {};
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_PERIOD');
+    }
+    const key = `${datemin}|${datemax}`;
+    const { data, error } = await supabase
+      .from('new_forecast_config')
+      .select('*')
+      .eq('period_key', key)
+      .limit(1);
+    if (error) {
+      return errorResponse(res, `Supabase: ${error.message}`, 500);
+    }
+    return successResponse(res, data?.[0] || null);
+  }),
+);
+
+router.post(
+  '/new-forecast/config',
+  asyncHandler(async (req, res) => {
+    const { datemin, datemax, semanas, metas, manual, overrides } = req.body || {};
+    const isYmdCfg = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+    if (!isYmdCfg(datemin) || !isYmdCfg(datemax)) {
+      return errorResponse(res, 'datemin e datemax obrigatórios (YYYY-MM-DD)', 400, 'MISSING_PERIOD');
+    }
+    const row = {
+      period_key: `${datemin}|${datemax}`,
+      datemin,
+      datemax,
+      semanas: Array.isArray(semanas) && semanas.length ? semanas : null,
+      metas: metas && typeof metas === 'object' ? metas : {},
+      manual: manual && typeof manual === 'object' ? manual : {},
+      overrides: overrides && typeof overrides === 'object' ? overrides : {},
+      atualizado_em: new Date().toISOString(),
+    };
+    const { error } = await supabase
+      .from('new_forecast_config')
+      .upsert(row, { onConflict: 'period_key' });
+    if (error) {
+      return errorResponse(res, `Supabase: ${error.message}`, 500);
+    }
+    return successResponse(res, row, 'Config salva');
   }),
 );
 
