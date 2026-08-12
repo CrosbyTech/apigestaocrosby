@@ -90,6 +90,10 @@ import {
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
+import {
+  iniciarJobContratoAluguelVencimento,
+  executarContratoAluguelVencimento,
+} from './jobs/contrato-aluguel-vencimento.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -204,6 +208,7 @@ app.listen(PORT, async () => {
   iniciarJobBoletoCobranca();
   iniciarBluecardPagamentosSync();
   iniciarBluecardLimiteWatchdog();
+  iniciarJobContratoAluguelVencimento();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {
@@ -252,6 +257,19 @@ app.post('/api/jobs/provisao-liberacao/run', async (req, res) => {
     res.json({ success: true, dryRun, resultado });
   } catch (e) {
     console.error('[provisao-liberacao manual] erro:', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Endpoint manual pro alerta de vencimento de contrato de aluguel
+// ?dryRun=1 apenas loga o que faria (não notifica nem marca o dedupe).
+app.post('/api/jobs/contrato-aluguel/run', async (req, res) => {
+  const dryRun = req.query.dryRun === '1' || req.body?.dryRun === true;
+  try {
+    const resultado = await executarContratoAluguelVencimento({ dryRun });
+    res.json({ success: true, resultado });
+  } catch (e) {
+    console.error('[contrato-aluguel manual] erro:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
