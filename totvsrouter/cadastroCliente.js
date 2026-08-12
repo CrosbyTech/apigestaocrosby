@@ -15,7 +15,7 @@ const router = express.Router();
  * Sanitiza recursivamente o payload removendo strings vazias / null / undefined / NaN
  * e remove arrays vazios. Mantém objetos vazios? -> remove também.
  */
-function sanitizePayload(value) {
+export function sanitizePayload(value) {
   if (Array.isArray(value)) {
     const arr = value
       .map((v) => sanitizePayload(v))
@@ -36,7 +36,7 @@ function sanitizePayload(value) {
   return value;
 }
 
-async function postToTotvs(endpointPath, payload) {
+export async function postToTotvs(endpointPath, payload) {
   const tokenData = await getToken();
   if (!tokenData || !tokenData.access_token) {
     const err = new Error('Não foi possível obter token TOTVS');

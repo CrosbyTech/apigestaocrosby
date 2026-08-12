@@ -17,6 +17,14 @@ import express from 'express';
 import { createHash } from 'node:crypto';
 import supabase from '../config/supabase.js';
 import { exigirAssinaturaBluecard } from '../utils/bluecardHmac.js';
+import {
+  limiteAutoAtivo,
+  liberarLimiteParaCompra,
+  zerarLimite,
+  buscarClientePorCpf,
+  buscarClientePorCnpj,
+  postTotvs,
+} from '../services/bluecardLimite.js';
 
 const router = express.Router();
 
@@ -78,12 +86,27 @@ async function processarEvento(id, evento, body) {
   try {
     switch (evento) {
       case 'compra.aprovada':
-      case 'compra.recusada':
-        // O fluxo do PDV consulta GET /compras/{id} (pode_fechar_venda) —
-        // aqui só fica o registro auditável. Em compra.recusada a venda
-        // NÃO deve ser fechada no TOTVS.
         console.log(
-          `🔵 [bluecard] ${evento} — documento=${body?.compra?.documento} cpf=${body?.compra?.cpf}`,
+          `🔵 [bluecard] compra.aprovada — documento=${body?.compra?.documento} cpf=${body?.compra?.cpf}`,
+        );
+        // Cliente autorizou no app → sobe o limite no TOTVS para o valor
+        // exato aprovado; é o que destrava o PDV a fechar a venda
+        // FATURA - BLUECARD (cliente vive com limite 0). O watchdog
+        // (bluecard-limite.job.js) zera de volta depois.
+        if (limiteAutoAtivo()) {
+          await liberarLimiteParaCompra(body?.compra || {});
+        } else {
+          console.log(
+            '⏸️ [bluecard] BLUECARD_LIMITE_AUTO_ENABLED != true — limite TOTVS não alterado',
+          );
+        }
+        break;
+
+      case 'compra.recusada':
+        // Limite nunca subiu — nada a fazer no TOTVS. A venda NÃO deve
+        // ser fechada no PDV.
+        console.log(
+          `🔵 [bluecard] compra.recusada — documento=${body?.compra?.documento} cpf=${body?.compra?.cpf}`,
         );
         break;
 
@@ -118,6 +141,17 @@ async function processarEvento(id, evento, body) {
             .eq('compra_id', compraId)
             .neq('status', 'pago');
           if (e) throw new Error(`cancelar títulos: ${e.message}`);
+
+          // Se o limite estava liberado aguardando a venda fechar, fecha a janela.
+          if (limiteAutoAtivo()) {
+            const { data: lib } = await supabase
+              .from('bluecard_liberacoes')
+              .select('compra_id, cpf, nome')
+              .eq('compra_id', compraId)
+              .eq('status', 'liberado')
+              .maybeSingle();
+            if (lib) await zerarLimite(lib, 'zerado_cancelado');
+          }
         }
         console.log(
           `🔵 [bluecard] compra.cancelada — documento=${body?.compra?.documento} ` +
@@ -181,6 +215,121 @@ router.get('/pagamentos', exigirAssinaturaBluecard, async (req, res) => {
       meio: t.meio || 'boleto',
     })),
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/bluecard/faturas?cpf=06451367435          (ou ?cnpj=...)
+//     &status=aberto|pago|todos   (default: todos)
+//     &desde=2026-01-01           (opcional: emissão a partir de)
+//
+// Consulta AO VIVO o Contas a Receber do TOTVS para o cliente pedido.
+// É como o BlueCard enxerga as faturas/títulos de um cliente do crediário
+// (fatura, vencimento, valor, pago ou não) sem depender do espelho local.
+// externo_id no mesmo formato do resto da integração: TOTVS-<título>-<parcela>.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
+  const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+  const cnpj = String(req.query.cnpj || '').replace(/\D/g, '');
+  const status = String(req.query.status || 'todos').toLowerCase();
+  const desde = req.query.desde;
+
+  if ((!cpf || cpf.length !== 11) && (!cnpj || cnpj.length !== 14)) {
+    return res.status(400).json({
+      erro: {
+        codigo: 'campo_invalido',
+        mensagem: 'Informe ?cpf= (11 dígitos) ou ?cnpj= (14 dígitos)',
+        detalhe: null,
+      },
+    });
+  }
+  if (!['todos', 'aberto', 'pago'].includes(status)) {
+    return res.status(400).json({
+      erro: {
+        codigo: 'campo_invalido',
+        mensagem: 'status deve ser: aberto, pago ou todos',
+        detalhe: null,
+      },
+    });
+  }
+  if (desde && isNaN(Date.parse(desde))) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'desde deve ser data ISO 8601', detalhe: null },
+    });
+  }
+
+  try {
+    const cliente = cpf
+      ? await buscarClientePorCpf(cpf)
+      : await buscarClientePorCnpj(cnpj);
+    if (!cliente) {
+      return res.status(404).json({
+        erro: {
+          codigo: 'cliente_nao_encontrado',
+          mensagem: `${cpf ? 'CPF' : 'CNPJ'} sem cadastro no TOTVS`,
+          detalhe: null,
+        },
+      });
+    }
+
+    const filter = { customerCodeList: [Number(cliente.code)] };
+    if (desde) filter.startIssueDate = new Date(desde).toISOString();
+
+    // Pagina até 5x100 títulos — muito acima do plausível pra um cliente PF
+    const itens = [];
+    for (let page = 1; page <= 5; page++) {
+      const resp = await postTotvs('/accounts-receivable/v2/documents/search', {
+        filter,
+        page,
+        pageSize: 100,
+        order: '-issueDate',
+      });
+      itens.push(...(resp.data?.items || []));
+      if (page >= (resp.data?.totalPages || 1)) break;
+    }
+
+    let totalAbertoCents = 0;
+    const titulos = itens
+      .map((t) => {
+        const pagoEm = t.paymentDate || t.settlementDate || null;
+        const valorCents = Math.round(Number(t.installmentValue || 0) * 100);
+        if (!pagoEm) totalAbertoCents += valorCents;
+        return {
+          externo_id: `TOTVS-${t.receivableCode}-${t.installmentCode ?? 1}`,
+          documento: String(t.receivableCode),
+          parcela: t.installmentCode ?? 1,
+          valor_cents: valorCents,
+          emitido_em: t.issueDate || null,
+          vencimento: (t.expiredDate || '').slice(0, 10) || null,
+          status: pagoEm ? 'pago' : 'aberto',
+          pago_em: pagoEm,
+          valor_pago_cents: pagoEm
+            ? Math.round(Number(t.netValue ?? t.installmentValue ?? 0) * 100)
+            : null,
+          filial: t.branchCode ?? null,
+        };
+      })
+      .filter((t) => (status === 'todos' ? true : t.status === status));
+
+    res.json({
+      cliente: {
+        [cpf ? 'cpf' : 'cnpj']: cpf || cnpj,
+        nome: cliente.name,
+        codigo_totvs: cliente.code,
+      },
+      total_aberto_cents: totalAbertoCents,
+      quantidade: titulos.length,
+      titulos,
+    });
+  } catch (e) {
+    console.error('❌ [bluecard/faturas] consulta falhou:', e.message);
+    res.status(500).json({
+      erro: {
+        codigo: 'erro_interno',
+        mensagem: 'Falha ao consultar o Contas a Receber',
+        detalhe: null,
+      },
+    });
+  }
 });
 
 export default router;
