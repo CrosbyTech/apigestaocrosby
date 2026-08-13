@@ -26,12 +26,9 @@ import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import {
   TOTVS_BASE_URL,
-  getBranchesWithNames,
+  getFilialBranchCodes,
 } from '../totvsrouter/totvsHelper.js';
 import { sanitizePayload } from '../totvsrouter/cadastroCliente.js';
-
-// Mesma exclusão do filtro "Filial" do Ranking de Faturamento (frontend)
-const EXCLUIR_FILIAL = new Set([98, 980]);
 
 /**
  * Branches onde o limite BlueCard é gravado. Override por env
@@ -46,22 +43,7 @@ export async function listarBranchesLimite() {
 
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('token TOTVS indisponível');
-  const branches = await getBranchesWithNames(tokenData.access_token);
-  const filiais = (branches || [])
-    .filter((b) => {
-      const nome = String(b.name || '').toUpperCase();
-      if (!nome.includes('CROSBY') || nome.includes('FRANQUIA')) return false;
-      return !EXCLUIR_FILIAL.has(Number(b.code));
-    })
-    .map((b) => Number(b.code));
-  if (filiais.length === 0) {
-    // Cache de branches falhou (nomes viram "Filial N") — melhor abortar do
-    // que liberar limite em lugar nenhum e o PDV continuar travado.
-    throw new Error(
-      'nenhuma branch FILIAL encontrada (cache de branches indisponível?)',
-    );
-  }
-  return filiais;
+  return getFilialBranchCodes(tokenData.access_token);
 }
 
 export function limiteAutoAtivo() {

@@ -90,6 +90,31 @@ export async function getBranchesWithNames(token) {
   return codes.map((c) => ({ code: c, name: `Filial ${c}` }));
 }
 
+// Filiais próprias na regra do Ranking de Faturamento tipo FILIAL: nome contém
+// CROSBY, não é FRANQUIA, exclui 98/980. É a lista onde o limite de crédito
+// precisa ser gravado para o PDV de QUALQUER loja enxergar o limite — usada
+// pelo crediário BlueCard e pela Análise de Crédito Multimarcas.
+const EXCLUIR_FILIAL_LIMITE = new Set([98, 980]);
+
+export async function getFilialBranchCodes(token) {
+  const branches = await getBranchesWithNames(token);
+  const filiais = (branches || [])
+    .filter((b) => {
+      const nome = String(b.name || '').toUpperCase();
+      if (!nome.includes('CROSBY') || nome.includes('FRANQUIA')) return false;
+      return !EXCLUIR_FILIAL_LIMITE.has(Number(b.code));
+    })
+    .map((b) => Number(b.code));
+  if (filiais.length === 0) {
+    // Cache de branches falhou (nomes viram "Filial N") — melhor abortar do que
+    // gravar limite em lugar nenhum e o PDV continuar travado.
+    throw new Error(
+      'nenhuma branch FILIAL encontrada (cache de branches indisponível?)',
+    );
+  }
+  return filiais;
+}
+
 // Filiais que recebem filtro de operações específico (CASCAVEL, JOÃO PESSOA,
 // BREJINHO, TACARUNÁ etc.) — alinhado com o Ranking de Faturamento.
 export const SPECIAL_BRANCH_CODES = [
