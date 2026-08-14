@@ -90,6 +90,7 @@ import {
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
+import { iniciarJobEsteiraProtesto } from './jobs/esteira-protesto.job.js';
 import {
   iniciarJobContratoAluguelVencimento,
   executarContratoAluguelVencimento,
@@ -208,6 +209,7 @@ app.listen(PORT, async () => {
   iniciarJobBoletoCobranca();
   iniciarBluecardPagamentosSync();
   iniciarBluecardLimiteWatchdog();
+  iniciarJobEsteiraProtesto();
   iniciarJobContratoAluguelVencimento();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
