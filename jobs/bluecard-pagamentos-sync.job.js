@@ -46,7 +46,9 @@ async function buscarTitulosTotvs(token, receivableCodes) {
     const resp = await axios.post(
       endpoint,
       {
-        filter: { receivableCodeList: receivableCodes },
+        // statusList [1]: título cancelado (status 3) continua aparecendo na
+        // busca — sem o filtro, um cancelamento poderia virar "pagamento".
+        filter: { receivableCodeList: receivableCodes, statusList: [1] },
         page,
         pageSize: 100,
       },

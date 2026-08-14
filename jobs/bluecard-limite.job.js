@@ -23,9 +23,17 @@ import axios from 'axios';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
-import { limiteAutoAtivo, zerarLimite } from '../services/bluecardLimite.js';
+import {
+  limiteAutoAtivo,
+  zerarLimite,
+  liberarLimiteParaCompra,
+  TOTVS_STATUS_NORMAL,
+} from '../services/bluecardLimite.js';
 
-const CRON_EXPR = process.env.BLUECARD_LIMITE_CRON || '*/5 * * * *';
+// A cada minuto: enquanto o limite está alto, o cliente pode fechar uma
+// segunda venda sem passar pelo app — que é justamente o antifraude que a
+// aprovação existe pra garantir. Quanto menor a janela, menor o buraco.
+const CRON_EXPR = process.env.BLUECARD_LIMITE_CRON || '* * * * *';
 const TIMEOUT_MIN = Number(process.env.BLUECARD_LIBERACAO_TIMEOUT_MIN || 120);
 const TZ = 'America/Sao_Paulo';
 
@@ -34,12 +42,17 @@ let rodando = false;
 async function titulosDoClienteDesde(customerCode, desdeIso) {
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('token TOTVS indisponível');
+  // startIssueDate SOZINHO é ignorado pelo TOTVS (devolve o histórico inteiro
+  // calado) — o par com endIssueDate é obrigatório. Sem isso o watchdog veria
+  // títulos de 2024 e zeraria o limite antes de o vendedor fechar a venda.
+  const dia = String(desdeIso).slice(0, 10);
   const resp = await axios.post(
     `${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`,
     {
       filter: {
         customerCodeList: [Number(customerCode)],
-        startIssueDate: desdeIso,
+        startIssueDate: `${dia}T00:00:00`,
+        endIssueDate: `${new Date().toISOString().slice(0, 10)}T23:59:59`,
       },
       page: 1,
       pageSize: 100,
@@ -53,7 +66,43 @@ async function titulosDoClienteDesde(customerCode, desdeIso) {
       timeout: 60000,
     },
   );
-  return resp.data?.items || [];
+  // Cancelado (status 3) não some da busca: o TOTVS mantém o título e emite
+  // outro, então a mesma venda aparece 2–3x. Espelhar o cancelado faria o
+  // cliente ver no app um boleto que ninguém vai pagar.
+  return (resp.data?.items || []).filter(
+    (t) => Number(t.status) === TOTVS_STATUS_NORMAL,
+  );
+}
+
+/**
+ * Retenta liberações que falharam no webhook. O BlueCard recebeu 200 (o
+ * processamento é assíncrono) e portanto NÃO vai reenviar — sem este retry,
+ * um soluço de rede na hora do compra.aprovada deixaria o vendedor travado
+ * pra sempre. liberarLimiteParaCompra ignora compra já consumida/zerada.
+ */
+async function retentarLiberacoesComErro() {
+  const desde = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const { data: eventos } = await supabase
+    .from('bluecard_eventos')
+    .select('id, payload')
+    .eq('evento', 'compra.aprovada')
+    .eq('status', 'erro')
+    .gte('recebido_em', desde)
+    .limit(20);
+
+  for (const ev of eventos || []) {
+    try {
+      await liberarLimiteParaCompra(ev.payload?.compra || {});
+      await supabase
+        .from('bluecard_eventos')
+        .update({ status: 'processado', processado_em: new Date().toISOString(), erro: null })
+        .eq('id', ev.id);
+      console.log(`🔁 [bluecard-limite] liberação recuperada no retry (evento ${ev.id})`);
+    } catch (e) {
+      // Continua 'erro' — tenta de novo no próximo ciclo, dentro das 24h
+      console.warn(`🔁 [bluecard-limite] retry do evento ${ev.id} falhou: ${e.message}`);
+    }
+  }
 }
 
 export async function executarBluecardLimiteWatchdog() {
@@ -61,6 +110,7 @@ export async function executarBluecardLimiteWatchdog() {
   if (rodando) return { pulado: true };
   rodando = true;
   try {
+    await retentarLiberacoesComErro();
     const { data: liberacoes, error } = await supabase
       .from('bluecard_liberacoes')
       .select('*')
@@ -75,9 +125,14 @@ export async function executarBluecardLimiteWatchdog() {
     for (const lib of liberacoes) {
       try {
         // 1) A venda fechou no TOTVS?
-        const titulos = await titulosDoClienteDesde(
-          lib.customer_code,
-          lib.liberado_em,
+        // issueDate é DATA (sem hora), então um título do mesmo dia anterior à
+        // liberação entraria na busca. Comparamos contra o snapshot tirado na
+        // liberação: só título NOVO conta como "a venda fechou".
+        const previos = new Set(lib.titulos_previos || []);
+        const titulos = (
+          await titulosDoClienteDesde(lib.customer_code, lib.liberado_em)
+        ).filter(
+          (t) => !previos.has(`${t.receivableCode}-${t.installmentCode ?? 1}`),
         );
         if (titulos.length > 0) {
           // Espelha os títulos para o job de pagamentos e a reconciliação

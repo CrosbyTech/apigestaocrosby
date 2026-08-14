@@ -30,6 +30,18 @@ import {
 } from '../totvsrouter/totvsHelper.js';
 import { sanitizePayload } from '../totvsrouter/cadastroCliente.js';
 
+// statusList do Contas a Receber TOTVS. Cancelar NÃO tira o título da busca:
+// o TOTVS marca status 3 e emite outro, então a mesma venda volta 2–3 vezes
+// com valor idêntico. Quem casa pelo título errado registra um boleto que
+// ninguém vai pagar.
+export const TOTVS_STATUS_NORMAL = 1;
+export const TOTVS_STATUS_NOME = {
+  1: 'normal',
+  2: 'devolvido',
+  3: 'cancelado',
+  4: 'quebrada',
+};
+
 /**
  * Branches onde o limite BlueCard é gravado. Override por env
  * (BLUECARD_LIMITE_BRANCH_CODES="2,5,6") ou regra FILIAL do ranking.
@@ -53,7 +65,7 @@ export function limiteAutoAtivo() {
   );
 }
 
-export async function postTotvs(path, payload) {
+export async function postTotvs(path, payload, { timeout = 60000 } = {}) {
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('token TOTVS indisponível');
   const doRequest = (t) =>
@@ -63,7 +75,7 @@ export async function postTotvs(path, payload) {
         Accept: 'application/json',
         Authorization: `Bearer ${t}`,
       },
-      timeout: 60000,
+      timeout,
     });
   try {
     return await doRequest(tokenData.access_token);
@@ -100,24 +112,38 @@ export async function buscarClientePorCnpj(cnpj) {
   return { code: item.code, name: item.name };
 }
 
-/** Soma (em reais) dos títulos em aberto do cliente no Contas a Receber. */
-export async function somarTitulosAbertos(customerCode) {
+/**
+ * Títulos em aberto do cliente: soma em reais + ids de TODOS os títulos do dia
+ * de hoje (snapshot que o watchdog usa pra saber o que já existia antes da
+ * liberação — ver jobs/bluecard-limite.job.js).
+ *
+ * A soma inclui título de compra à vista antiga, não só crediário: é
+ * intencional. O TOTVS calcula "disponível = limite − em aberto", então sem
+ * somar o que o cliente já deve, a 2ª compra ficaria bloqueada mesmo aprovada.
+ */
+export async function levantarTitulos(customerCode) {
+  // statusList [1]: cancelado (3) continua aparecendo na busca e não é dívida
   const resp = await postTotvs('/accounts-receivable/v2/documents/search', {
     filter: {
       customerCodeList: [Number(customerCode)],
-      hasOpenInvoices: true,
-      dischargeTypeList: [0],
+      statusList: [1],
     },
     page: 1,
     pageSize: 100,
   });
+  const itens = resp.data?.items || [];
+  const hoje = new Date().toISOString().slice(0, 10);
   let soma = 0;
-  for (const it of resp.data?.items || []) {
-    if (!it.paymentDate && !it.settlementDate) {
+  const idsHoje = [];
+  for (const it of itens) {
+    if (!it.paymentDate && !it.settlementDate && Number(it.dischargeType) === 0) {
       soma += Number(it.installmentValue || 0);
     }
+    if ((it.issueDate || '').slice(0, 10) === hoje) {
+      idsHoje.push(`${it.receivableCode}-${it.installmentCode ?? 1}`);
+    }
   }
-  return soma;
+  return { abertosReais: soma, titulosHoje: idsHoje };
 }
 
 /**
@@ -187,10 +213,25 @@ export async function liberarLimiteParaCompra(compra) {
     );
   }
 
+  // Reprocessamento (retry do BlueCard ou do watchdog) não pode REABRIR uma
+  // janela que já foi fechada — senão um webhook atrasado devolve limite a um
+  // cliente cuja venda já fechou.
+  const { data: existente } = await supabase
+    .from('bluecard_liberacoes')
+    .select('status')
+    .eq('compra_id', compra.id)
+    .maybeSingle();
+  if (existente && existente.status !== 'liberado') {
+    console.log(
+      `⏭️ [bluecard-limite] compra ${compra.id} já ${existente.status} — liberação ignorada`,
+    );
+    return { jaProcessada: true, status: existente.status };
+  }
+
   const cliente = await buscarClientePorCpf(cpf);
   if (!cliente) throw new Error(`CPF ${cpf} não encontrado no TOTVS`);
 
-  const abertosReais = await somarTitulosAbertos(cliente.code);
+  const { abertosReais, titulosHoje } = await levantarTitulos(cliente.code);
   const valorReais = valorCents / 100;
   const limiteReais = Math.round((valorReais + abertosReais) * 100) / 100;
 
@@ -213,6 +254,7 @@ export async function liberarLimiteParaCompra(compra) {
       valor_cents: valorCents,
       abertos_cents: Math.round(abertosReais * 100),
       limite_cents: Math.round(limiteReais * 100),
+      titulos_previos: titulosHoje,
       status: 'liberado',
       liberado_em: new Date().toISOString(),
       atualizado_em: new Date().toISOString(),

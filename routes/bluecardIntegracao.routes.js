@@ -24,6 +24,8 @@ import {
   buscarClientePorCpf,
   buscarClientePorCnpj,
   postTotvs,
+  TOTVS_STATUS_NORMAL,
+  TOTVS_STATUS_NOME,
 } from '../services/bluecardLimite.js';
 
 const router = express.Router();
@@ -221,17 +223,32 @@ router.get('/pagamentos', exigirAssinaturaBluecard, async (req, res) => {
 // GET /api/bluecard/faturas?cpf=06451367435          (ou ?cnpj=...)
 //     &status=aberto|pago|todos   (default: todos)
 //     &desde=2026-01-01           (opcional: emissão a partir de)
+//     &incluir_cancelados=1       (opcional: mostra títulos cancelados)
 //
 // Consulta AO VIVO o Contas a Receber do TOTVS para o cliente pedido.
 // É como o BlueCard enxerga as faturas/títulos de um cliente do crediário
 // (fatura, vencimento, valor, pago ou não) sem depender do espelho local.
 // externo_id no mesmo formato do resto da integração: TOTVS-<título>-<parcela>.
+//
+// DOIS DETALHES DO TOTVS QUE CUSTARAM DEBUG (não mexer sem ler):
+//
+//  1) `startIssueDate` SOZINHO É IGNORADO pela API. Só filtra quando vem
+//     acompanhado de `endIssueDate` — sem o par, o TOTVS devolve o histórico
+//     inteiro do cliente calado. Por isso mandamos sempre os dois e ainda
+//     refiltramos aqui (cinto e suspensório).
+//
+//  2) Cancelado NÃO some da busca. O TOTVS mantém o título com status 3 e
+//     emite um novo — a mesma venda aparece 2–3 vezes com valores idênticos.
+//     Quem casar pelo título errado registra um boleto que ninguém vai pagar.
+//     Default: só status 1 (NORMAL).
 // ─────────────────────────────────────────────────────────────────────
 router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
   const cpf = String(req.query.cpf || '').replace(/\D/g, '');
   const cnpj = String(req.query.cnpj || '').replace(/\D/g, '');
   const status = String(req.query.status || 'todos').toLowerCase();
   const desde = req.query.desde;
+  const incluirCancelados =
+    req.query.incluir_cancelados === '1' || req.query.incluir_cancelados === 'true';
 
   if ((!cpf || cpf.length !== 11) && (!cnpj || cnpj.length !== 14)) {
     return res.status(400).json({
@@ -272,7 +289,12 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
     }
 
     const filter = { customerCodeList: [Number(cliente.code)] };
-    if (desde) filter.startIssueDate = new Date(desde).toISOString();
+    if (!incluirCancelados) filter.statusList = [TOTVS_STATUS_NORMAL];
+    if (desde) {
+      // O par é obrigatório: startIssueDate sozinho é ignorado (ver cabeçalho)
+      filter.startIssueDate = `${new Date(desde).toISOString().slice(0, 10)}T00:00:00`;
+      filter.endIssueDate = `${new Date().toISOString().slice(0, 10)}T23:59:59`;
+    }
 
     // Pagina até 5x100 títulos — muito acima do plausível pra um cliente PF
     const itens = [];
@@ -287,8 +309,16 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
       if (page >= (resp.data?.totalPages || 1)) break;
     }
 
+    const desdeMs = desde ? Date.parse(desde) : null;
     let totalAbertoCents = 0;
     const titulos = itens
+      .filter((t) => {
+        // Refiltro local: o TOTVS ignora startIssueDate sem o par, e mesmo
+        // com o par não confiamos cegamente na borda do intervalo.
+        if (desdeMs && t.issueDate && Date.parse(t.issueDate) < desdeMs) return false;
+        if (!incluirCancelados && Number(t.status) !== TOTVS_STATUS_NORMAL) return false;
+        return true;
+      })
       .map((t) => {
         const pagoEm = t.paymentDate || t.settlementDate || null;
         const valorCents = Math.round(Number(t.installmentValue || 0) * 100);
@@ -306,6 +336,12 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
             ? Math.round(Number(t.netValue ?? t.installmentValue ?? 0) * 100)
             : null,
           filial: t.branchCode ?? null,
+          situacao: TOTVS_STATUS_NOME[Number(t.status)] || `status_${t.status}`,
+          // Dados de cobrança: só existem depois que o boleto é registrado
+          // no banco. qrCodePix vem vazio nesta carteira (PIX não habilitado).
+          linha_digitavel: t.digitableLine || null,
+          codigo_barras: t.barCode || null,
+          pix_copia_e_cola: t.qrCodePix || null,
         };
       })
       .filter((t) => (status === 'todos' ? true : t.status === status));
@@ -328,6 +364,146 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
         mensagem: 'Falha ao consultar o Contas a Receber',
         detalhe: null,
       },
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/bluecard/pix?externo_id=TOTVS-247122-1
+//
+// Gera o Pix copia-e-cola SOB DEMANDA para um título (contrato do doc do
+// BlueCard de 12/08: pix_copia_e_cola obrigatório, resto opcional; timeout
+// deles é 20s — o cliente está com o dedo no botão).
+//
+// Por baixo: POST accounts-receivable/v2/payment-link do TOTVS, que fala com
+// o hub de pagamentos (banco Rendimento). Descobertas que custaram debug:
+//   - correctedValue é OBRIGATÓRIO: sem ele o hub recebe amount=null e a
+//     chamada morre com "$.amount could not be converted" enterrado no erro;
+//   - branchCode tem que ser o DA FILIAL DO TÍTULO (outro dá NotFound);
+//   - terminal de pagamento é configurado POR EMPRESA no TOTVS — filial sem
+//     terminal devolve o erro 51732 (mapeado abaixo para o BlueCard).
+//
+// Encargos de atraso: régua do contrato BlueCard v3 — multa 2% única +
+// mora 1% a.m. pró-rata dia, juros simples. Calculada AQUI e enviada ao
+// gerar a cobrança, para o Pix cobrar o mesmo número que o app mostra.
+// ─────────────────────────────────────────────────────────────────────
+const PIX_MULTA_PCT = 2; // CDC art. 52 §1º — teto
+const PIX_MORA_AM_PCT = 1; // Súmula 379/STJ — mora máxima p/ não-financeira
+
+router.get('/pix', exigirAssinaturaBluecard, async (req, res) => {
+  const externoId = String(req.query.externo_id || '');
+  const m = externoId.match(/^TOTVS-(\d+)-(\d+)$/);
+  if (!m) {
+    return res.status(400).json({
+      erro: {
+        codigo: 'campo_invalido',
+        mensagem: 'externo_id deve ter o formato TOTVS-<titulo>-<parcela>',
+        detalhe: null,
+      },
+    });
+  }
+  const receivableCode = Number(m[1]);
+  const installmentNumber = Number(m[2]);
+
+  try {
+    // 1) Localiza o título (branch, cpf, valor, situação)
+    const busca = await postTotvs(
+      '/accounts-receivable/v2/documents/search',
+      {
+        filter: { receivableCodeList: [receivableCode] },
+        page: 1,
+        pageSize: 10,
+      },
+      { timeout: 8000 },
+    );
+    // Conferir TAMBÉM o receivableCode: o TOTVS pode ignorar o filtro
+    // (receivableCode inexistente devolve outros títulos calado — mesma
+    // família de armadilha do startIssueDate)
+    const titulo = (busca.data?.items || []).find(
+      (t) =>
+        Number(t.receivableCode) === receivableCode &&
+        Number(t.installmentCode ?? 1) === installmentNumber,
+    );
+    if (!titulo) {
+      return res.status(404).json({
+        erro: { codigo: 'titulo_nao_encontrado', mensagem: 'Título não existe no TOTVS', detalhe: null },
+      });
+    }
+    if (Number(titulo.status) !== TOTVS_STATUS_NORMAL) {
+      return res.status(409).json({
+        erro: {
+          codigo: 'estado_invalido',
+          mensagem: `Título ${TOTVS_STATUS_NOME[Number(titulo.status)] || 'em situação inválida'} no TOTVS`,
+          detalhe: null,
+        },
+      });
+    }
+    if (titulo.paymentDate || titulo.settlementDate) {
+      return res.status(409).json({
+        erro: { codigo: 'ja_registrada', mensagem: 'Título já está pago', detalhe: null },
+      });
+    }
+
+    // 2) Encargos de atraso (régua do contrato BlueCard v3)
+    const valor = Number(titulo.installmentValue || 0);
+    const hoje = new Date();
+    const venc = new Date(`${String(titulo.expiredDate).slice(0, 10)}T23:59:59-03:00`);
+    const daysLate = Math.max(0, Math.floor((hoje - venc) / 86400000));
+    const fineValue = daysLate > 0 ? Math.round(valor * PIX_MULTA_PCT) / 100 : 0;
+    const interestValue =
+      daysLate > 0
+        ? Math.round(valor * (PIX_MORA_AM_PCT / 100) * (daysLate / 30) * 100) / 100
+        : 0;
+    const correctedValue = Math.round((valor + fineValue + interestValue) * 100) / 100;
+
+    // 3) Gera o Pix (timeout curto: o app do BlueCard desiste em 20s)
+    const r = await postTotvs(
+      '/accounts-receivable/v2/payment-link',
+      {
+        branchCode: Number(titulo.branchCode),
+        customerCpfCnpj: titulo.customerCpfCnpj,
+        receivableCode,
+        installmentNumber,
+        isPortal: true,
+        daysLate,
+        increaseValue: 0,
+        discountValue: 0,
+        fineValue,
+        interestValue,
+        correctedValue,
+      },
+      { timeout: 15000 },
+    );
+    const copiaECola = r.data?.content;
+    if (!copiaECola || r.data?.unifaceResponseStatus !== 'Success') {
+      throw new Error(`payment-link sem content (${JSON.stringify(r.data).slice(0, 200)})`);
+    }
+
+    console.log(
+      `💠 [bluecard/pix] gerado: ${externoId} R$${correctedValue.toFixed(2)}` +
+        (daysLate > 0 ? ` (${daysLate}d atraso: multa ${fineValue} + mora ${interestValue})` : ''),
+    );
+    res.json({
+      pix_copia_e_cola: copiaECola,
+      valor_cents: Math.round(correctedValue * 100),
+      dias_atraso: daysLate,
+    });
+  } catch (e) {
+    const totvsMsg = JSON.stringify(e.response?.data || '') || '';
+    // Filial sem terminal de pagamento configurado no TOTVS (erro 51732)
+    if (totvsMsg.includes('51732') || /Nenhum terminal configurado/i.test(totvsMsg)) {
+      console.warn(`⚠️ [bluecard/pix] ${externoId}: filial sem terminal de pagamento`);
+      return res.status(409).json({
+        erro: {
+          codigo: 'estado_invalido',
+          mensagem: 'Filial do título sem terminal de pagamento configurado no TOTVS',
+          detalhe: null,
+        },
+      });
+    }
+    console.error(`❌ [bluecard/pix] ${externoId}:`, e.message, totvsMsg.slice(0, 300));
+    res.status(500).json({
+      erro: { codigo: 'erro_interno', mensagem: 'Não foi possível gerar o Pix agora', detalhe: null },
     });
   }
 });

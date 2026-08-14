@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { headersAssinados } from '../utils/bluecardHmac.js';
 
 const BASE_URL =
-  process.env.BLUECARD_BASE_URL || 'https://credit-crosby.vercel.app';
+  process.env.BLUECARD_BASE_URL || 'https://bluecard.crosbyoficial.com.br';
 
 async function chamar(method, path, body = null, { idempotencyKey } = {}) {
   // Serializa UMA vez — a assinatura cobre exatamente estes bytes.

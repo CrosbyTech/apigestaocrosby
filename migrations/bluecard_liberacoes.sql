@@ -18,11 +18,22 @@ CREATE TABLE IF NOT EXISTS bluecard_liberacoes (
     -- consumido         → venda detectada no TOTVS, limite zerado
     -- zerado_expirado   → venda nunca fechou, zerado por timeout
     -- zerado_cancelado  → compra.cancelada antes da venda fechar
+  -- Snapshot dos títulos que o cliente JÁ tinha no dia da liberação
+  -- ("<receivableCode>-<installmentCode>"). O watchdog só considera "venda
+  -- fechou" quando aparece um título FORA desta lista — issueDate no TOTVS é
+  -- data sem hora, então sem o snapshot um título do mesmo dia daria falso
+  -- positivo e zeraria o limite com o vendedor ainda no caixa.
+  titulos_previos JSONB DEFAULT '[]'::jsonb,
   liberado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   venda_detectada_em TIMESTAMPTZ,
   zerado_em TIMESTAMPTZ,
   atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Idempotência: se a tabela foi criada por versão anterior desta migration
+-- (sem o snapshot), o ALTER cobre.
+ALTER TABLE bluecard_liberacoes
+  ADD COLUMN IF NOT EXISTS titulos_previos JSONB DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_bcl_status ON bluecard_liberacoes (status);
 CREATE INDEX IF NOT EXISTS idx_bcl_cpf ON bluecard_liberacoes (cpf);
