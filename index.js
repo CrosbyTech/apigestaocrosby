@@ -64,6 +64,7 @@ import financeiroRouter from './totvsrouter/financeiro.js';
 import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
+import pdvRouter from './totvsrouter/pdv.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
 import { iniciarJobForecastRefYoy } from './jobs/forecast-ref-yoy.job.js';
 import { iniciarJobForecastWhatsapp } from './jobs/forecast-whatsapp.job.js';
@@ -135,6 +136,7 @@ app.use('/api/totvs', financeiroRouter); // accounts-receivable, accounts-payabl
 app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
 app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
 app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
+app.use('/api/totvs', pdvRouter); // PDV RFID — produto por código/EPC, condições, transação
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
