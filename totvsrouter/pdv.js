@@ -20,7 +20,7 @@ import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
 const router = express.Router();
 
 // Chamada TOTVS com retry automático em 401 (token expirado)
-async function callTotvs(method, url, { data, params } = {}) {
+async function callTotvs(method, url, { data, params, timeout } = {}) {
   const doCall = async (token) =>
     axios({
       method,
@@ -34,7 +34,7 @@ async function callTotvs(method, url, { data, params } = {}) {
       },
       httpsAgent,
       httpAgent,
-      timeout: 30000,
+      timeout: timeout ?? 30000,
     });
 
   const tokenData = await getToken();
@@ -248,8 +248,8 @@ router.post(
       );
     }
 
-    // TransactionStatusType é obrigatório no TOTVS (0 é inválido);
-    // 1 = InProgress ("Em andamento")
+    // TransactionStatusType é obrigatório e o insert SÓ aceita 1 (Em
+    // andamento) — 0 e 2..6 retornam "Invalid Status value".
     if (payload.status == null) payload.status = 1;
 
     console.log(
@@ -347,19 +347,29 @@ router.post(
     );
 
     try {
+      // O recebimento dispara o faturamento (NF) de forma síncrona no ERP —
+      // costuma passar de 30s; timeout largo pra receber a resposta real.
       const resp = await callTotvs(
         'post',
         `${TOTVS_BASE_URL}/general/v2/transaction-receiving`,
-        { data: payload },
+        { data: payload, timeout: 180000 },
       );
       console.log(`✅ [PDV] Recebimento OK: ${JSON.stringify(resp.data)}`);
       return successResponse(res, resp.data ?? {}, 'Recebimento efetuado');
     } catch (err) {
       const detail = err.response?.data;
-      console.error(
-        `❌ [PDV] Erro no recebimento:`,
-        JSON.stringify(detail || err.message).slice(0, 500),
-      );
+      // Log completo da borda TOTVS: às vezes o 503 vem do gateway com corpo
+      // HTML/vazio — registrar status, content-type e corpo bruto ajuda a
+      // distinguir gateway de regra de negócio
+      console.error(`❌ [PDV] Erro no recebimento:`, {
+        httpStatus: err.response?.status ?? null,
+        contentType: err.response?.headers?.['content-type'] ?? null,
+        axiosMessage: err.message,
+        bodyRaw:
+          typeof detail === 'string'
+            ? detail.slice(0, 400)
+            : JSON.stringify(detail ?? null)?.slice(0, 400),
+      });
       return errorResponse(
         res,
         Array.isArray(detail)
