@@ -481,4 +481,106 @@ router.post(
   }),
 );
 
+/**
+ * @route POST /api/totvs/cliente/toggle-inactive
+ * @desc Ativa ou inativa um cliente PF ou PJ no TOTVS (campo "Ativo/Inativo"
+ *       do PESFM010). Body: { cpf | cnpj, isInactive: boolean }.
+ *       O nome e a empresa de cadastro são resolvidos automaticamente via
+ *       busca no TOTVS — mesma estratégia de alteração parcial do update-limit.
+ */
+router.post(
+  '/cliente/toggle-inactive',
+  asyncHandler(async (req, res) => {
+    const { personType, cpf, cnpj, isInactive } = req.body || {};
+
+    if (typeof isInactive !== 'boolean') {
+      return errorResponse(
+        res,
+        'isInactive (true/false) é obrigatório',
+        400,
+        'MISSING_IS_INACTIVE',
+      );
+    }
+
+    const isPJ = personType === 'PJ' || !!cnpj;
+    const docField = isPJ ? 'cnpj' : 'cpf';
+    const docValue = isPJ ? cnpj : cpf;
+    if (!docValue) {
+      return errorResponse(
+        res,
+        `${docField.toUpperCase()} é obrigatório`,
+        400,
+        `MISSING_${docField.toUpperCase()}`,
+      );
+    }
+    const docCheck = isPJ ? validarCNPJ(docValue) : validarCPF(docValue);
+    if (!docCheck.ok) {
+      return errorResponse(res, docCheck.error, 400, 'INVALID_DOC');
+    }
+    const doc = isPJ ? docCheck.cnpj : docCheck.cpf;
+
+    // Busca o cadastro para obter nome e empresa de cadastro (obrigatórios)
+    let cliente = null;
+    try {
+      const buscaEndpoint = isPJ
+        ? '/person/v2/legal-entities/search'
+        : '/person/v2/individuals/search';
+      const filtro = isPJ ? { cnpjList: [doc] } : { cpfList: [doc] };
+      const busca = await postToTotvs(buscaEndpoint, {
+        filter: filtro,
+        page: 1,
+        pageSize: 1,
+      });
+      cliente = busca.data?.items?.[0] || null;
+    } catch (e) {
+      console.error(
+        '[toggle-inactive] falha ao buscar cliente no TOTVS:',
+        e.message,
+      );
+    }
+    if (!cliente?.name) {
+      return errorResponse(
+        res,
+        'Cliente não encontrado no TOTVS para este CPF/CNPJ',
+        404,
+        'CUSTOMER_NOT_FOUND',
+      );
+    }
+
+    const endpoint = isPJ
+      ? '/person/v2/legal-customers'
+      : '/person/v2/individual-customers';
+    // sanitizePayload preserva booleanos (só remove '', null, undefined, NaN)
+    const payload = sanitizePayload({
+      [docField]: doc,
+      name: cliente.name,
+      branchInsertCode: parseInt(cliente.branchInsertCode, 10) || 1,
+      insertDate: new Date().toISOString(),
+      isInactive,
+    });
+
+    try {
+      console.log(
+        `[toggle-inactive] ${docField}=${doc} isInactive=${isInactive} endpoint=${endpoint}`,
+      );
+      const response = await postToTotvs(endpoint, payload);
+      return successResponse(
+        res,
+        {
+          code: cliente.code,
+          name: cliente.name,
+          [docField]: doc,
+          isInactive,
+          totvs: response.data,
+        },
+        isInactive
+          ? 'Cliente inativado no TOTVS'
+          : 'Cliente ativado no TOTVS',
+      );
+    } catch (error) {
+      return handleTotvsError(res, error, payload);
+    }
+  }),
+);
+
 export default router;

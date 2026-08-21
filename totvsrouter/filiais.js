@@ -735,6 +735,9 @@ router.get(
               name: item.name || '',
               fantasyName: item.fantasyName || '',
               cnpj: item.cnpj || '',
+              isInactive: item.isInactive === true,
+              customerStatus: item.customerStatus || '',
+              branchInsertCode: item.branchInsertCode || null,
             })),
           );
 
