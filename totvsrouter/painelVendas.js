@@ -838,6 +838,85 @@ const FAT_VEND_EXPEDICAO_OPS = new Set([
 const FAT_VEND_BAZAR_OPS = new Set([887, 888, 889]);
 const FAT_VEND_EXPEDICAO_CODE = -50;
 
+// RICARDO ELETRO: card próprio no Painel (pseudo-vendedor -512) e canal
+// automático no New Forecast. Diferente da expedição, a op 512 NÃO gera NF
+// fiscal (checado: zero NFs em 2026) — a venda existe só como movimento +
+// fatura. Por isso ela segue o fluxo normal do contas a receber; só o
+// vendedor é trocado pelo pseudo-código no casamento (passo 4.2).
+const FAT_VEND_RICARDO_OPS = new Set([512]);
+const FAT_VEND_RICARDO_CODE = -512;
+
+// BLUECRED: clientes com contrato na tabela bluecred_contratos (mesma lista
+// da página /clientes-bluecred, identificada por CPF) que compraram no
+// CREDIÁRIO — faturas com documentType=1 (Fatura). Card próprio no Painel e
+// canal automático no New Forecast.
+// ⚠️ São vendas de LOJA: o mesmo valor também está dentro do card VAREJO
+// (que vem do painel oficial do TOTVS, sem separar forma de pagamento).
+const FAT_VEND_BLUECRED_CODE = -1000;
+const FAT_VEND_BLUECRED_DOC = 1; // 1 = Fatura (crediário)
+// Filiais fora do BlueCred (pedido do gestor): 551 = PARNAMIRIM TEMPORARIA
+const FAT_VEND_BLUECRED_FILIAIS_FORA = new Set([551]);
+
+// CPF → personCode dos clientes BlueCred (lista muda pouco: cache de 30min)
+let BLUECRED_CODES_CACHE = { codes: [], ts: 0 };
+const BLUECRED_CODES_TTL = 30 * 60 * 1000;
+
+async function getBlueCredPersonCodes(token) {
+  if (
+    BLUECRED_CODES_CACHE.codes.length > 0 &&
+    Date.now() - BLUECRED_CODES_CACHE.ts < BLUECRED_CODES_TTL
+  ) {
+    return BLUECRED_CODES_CACHE.codes;
+  }
+  try {
+    const { data, error } = await supabase
+      .from('bluecred_contratos')
+      .select('cliente_cpf');
+    if (error) throw new Error(error.message);
+    const cpfs = [
+      ...new Set(
+        (data || [])
+          .map((c) => String(c.cliente_cpf || '').replace(/\D/g, ''))
+          .filter((c) => c.length >= 11),
+      ),
+    ];
+    if (cpfs.length === 0) return [];
+    const codes = [];
+    for (let i = 0; i < cpfs.length; i += 50) {
+      const chunk = cpfs.slice(i, i + 50);
+      try {
+        const r = await axios.post(
+          `${TOTVS_BASE_URL}/person/v2/individuals/search`,
+          { filter: { cpfList: chunk }, page: 1, pageSize: chunk.length },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            httpsAgent,
+            httpAgent,
+            timeout: 30000,
+          },
+        );
+        for (const p of r.data?.items || []) {
+          if (p.code) codes.push(Number(p.code));
+        }
+      } catch (e) {
+        console.warn(`[bluecred] lookup CPF falhou: ${e.message}`);
+      }
+    }
+    BLUECRED_CODES_CACHE = { codes, ts: Date.now() };
+    console.log(
+      `[bluecred] ${codes.length}/${cpfs.length} clientes resolvidos no TOTVS`,
+    );
+    return codes;
+  } catch (e) {
+    console.warn(`[bluecred] lista de clientes falhou: ${e.message}`);
+    return [];
+  }
+}
+
 // Docs que são MEIO DE PAGAMENTO: quando a fatura inteira não tem NF
 // vinculada, é pagamento avulso (ex: cartões da entrada de um pedido grande),
 // não venda — descartar pra não contar em dobro com a fatura da transação.
@@ -1212,6 +1291,7 @@ router.post(
       sellerNames,
       varejoPainel,
       expedicaoNFs,
+      bluecredCodes,
       nonSalesVarejo,
     ] = await Promise.all([
         fetchFaturas(),
@@ -1219,6 +1299,7 @@ router.post(
         fetchSellerNames(),
         fetchVarejoPainel(),
         fetchExpedicaoNFs(),
+        getBlueCredPersonCodes(token),
         // Mesmo merge do Ranking: ops fora do universo "Sales" (5919 —
         // Remessa Bonificação Elite) somadas do Supabase fiscal, com quebra
         // por vendedor (dealer_code da NF).
@@ -1352,9 +1433,20 @@ router.post(
     // Ex: entrada de pedido grande paga em 3 cartões (COLLYER 24/07: cartões
     // 15.000 + 13.217,46 + 14.300,50 sem NF, além da fatura real da venda
     // com NF). Contá-los dobraria a venda.
+    // Só descarta quando existe OUTRA fatura COM NF no mesmo cliente/dia/
+    // filial — aí o pagamento é espelho da venda já contada. Sem nenhuma NF
+    // no grupo, a própria fatura É a venda (ex: op 512/Ricardo Eletro, que
+    // não gera NF fiscal) e precisa contar.
+    const grupoComNf = new Set();
+    for (const f of porFatura.values()) {
+      if (f.temNf) {
+        grupoComNf.add(`${f.branchCode}|${f.customerCode}|${f.issueDate}`);
+      }
+    }
     let pagamentoSemNf = { qtd: 0, valor: 0 };
     for (const [k, f] of porFatura.entries()) {
-      if (!f.temNf && FAT_VEND_PAGTO_DOCS.has(f.docType)) {
+      const gk = `${f.branchCode}|${f.customerCode}|${f.issueDate}`;
+      if (!f.temNf && FAT_VEND_PAGTO_DOCS.has(f.docType) && grupoComNf.has(gk)) {
         pagamentoSemNf.qtd += 1;
         pagamentoSemNf.valor += f.valor;
         porFatura.delete(k);
@@ -1415,9 +1507,12 @@ router.post(
       const restante = new Map(); // sellerCode → soma ainda não "consumida"
       for (const m of pool) {
         let sc = m.sellerCode != null ? Number(m.sellerCode) : null;
-        // Operação de expedição → pseudo-vendedor EXPEDIÇÃO (qualquer vendedor)
+        // Operações de expedição/ricardo → pseudo-vendedor (qualquer vendedor);
+        // essas faturas são descartadas no passo 6 — o card vem das NFs.
         if (FAT_VEND_EXPEDICAO_OPS.has(m.operationCode)) {
           sc = FAT_VEND_EXPEDICAO_CODE;
+        } else if (FAT_VEND_RICARDO_OPS.has(m.operationCode)) {
+          sc = FAT_VEND_RICARDO_CODE;
         }
         restante.set(sc, (restante.get(sc) || 0) + (m.netValue || 0));
       }
@@ -1441,12 +1536,12 @@ router.post(
       }
     }
 
-    // ─── 4.3) EXPEDIÇÃO pela régua de TRANSAÇÃO (NFs das ops de expedição) ──
+    // ─── 4.3) EXPEDIÇÃO / RICARDO ELETRO pela régua de TRANSAÇÃO (NFs) ──────
     // Espelha o TRAR008: uma linha por NF (= transação), totalValue com
     // frete, data de emissão = data da transação. Cobre faturamento
     // antecipado (fatura de maio, transação em julho — CYRO/MARANGUAPE) e
     // ignora pagamentos avulsos por construção. As faturas que o casamento
-    // atribuiu à EXPEDIÇÃO são descartadas do contas a receber (passo 6).
+    // atribuiu a esses pseudo-vendedores saem do contas a receber (passo 6).
     const vendasExp = [];
     let expedicaoTotal = 0;
     const expPorOp = {}; // operação → valor (integração New Forecast)
@@ -1454,8 +1549,8 @@ router.post(
       if (nf.invoiceStatus === 'Canceled' || nf.invoiceStatus === 'Deleted') continue;
       const valor = Number(nf.totalValue || 0);
       if (!valor) continue;
-      expedicaoTotal += valor;
       const opNf = Number(nf.operationCode);
+      expedicaoTotal += valor;
       expPorOp[opNf] = Math.round(((expPorOp[opNf] || 0) + valor) * 100) / 100;
       vendasExp.push({
         data: nf.issueDate ? String(nf.issueDate).slice(0, 10) : null,
@@ -1464,13 +1559,70 @@ router.post(
         cliente_code: Number(nf.personCode),
         cliente_nome: nf.personName || null,
         valor: Math.round(valor * 100) / 100,
-        op: opNf, // operação — o New Forecast separa 7255 (novidades) do resto
+        op: opNf, // operação — o New Forecast separa novidades/bazar/showroom
       });
     }
     vendasExp.sort(
       (a, b) =>
         String(b.data).localeCompare(String(a.data)) || b.valor - a.valor,
     );
+
+    // ─── 4.4) BLUECRED: vendas no crediário dos clientes com contrato ───────
+    // Reaproveita as parcelas já baixadas do contas a receber (sem request
+    // extra), com a mesma régua de período (data da NF/transação).
+    // Critério por VENDA (não por documento): a venda entra se tiver ao menos
+    // uma parcela de FATURA (doc 1 = crediário); nesse caso contam TAMBÉM as
+    // outras formas de pagamento da mesma venda (entrada em dinheiro, cartão
+    // etc.). Venda sem nenhuma fatura fica inteira de fora, mesmo sendo do
+    // cliente BlueCred. CREDEV e PIX seguem excluídos como no resto do painel.
+    // Venda = NF (quando existe) ou filial+cliente+dia.
+    // Não colide com os cards de atacado: vendas de loja caem em op excluída.
+    const bluecredSet = new Set(bluecredCodes);
+    const vendasBluecred = [];
+    let bluecredTotal = 0;
+    if (bluecredSet.size > 0) {
+      const porVendaBc = new Map(); // chave da venda → { temFatura, parcelas }
+      for (const item of faturas) {
+        if (!bluecredSet.has(Number(item.customerCode))) continue;
+        if (FAT_VEND_BLUECRED_FILIAIS_FORA.has(Number(item.branchCode))) continue;
+        if (item.status !== undefined && Number(item.status) !== 1) continue;
+        const docType = Number(item.documentType);
+        if (FAT_VEND_EXCLUDED_DOCS.has(docType)) continue; // credev/PIX
+        const valor = Number(item.installmentValue || 0);
+        if (!valor) continue;
+        const inv = Array.isArray(item.invoice) ? item.invoice[0] : item.invoice;
+        const dtNf = String(inv?.invoiceDate || item.issueDate || '').slice(0, 10);
+        if (dtNf < dmin || dtNf > dmax) continue;
+        const chave = inv?.invoiceCode
+          ? `nf|${item.branchCode}|${inv.invoiceCode}`
+          : `dia|${item.branchCode}|${item.customerCode}|${dtNf}`;
+        let venda = porVendaBc.get(chave);
+        if (!venda) {
+          venda = { temFatura: false, parcelas: [] };
+          porVendaBc.set(chave, venda);
+        }
+        if (docType === FAT_VEND_BLUECRED_DOC) venda.temFatura = true;
+        venda.parcelas.push({
+          data: dtNf,
+          branch_code: Number(item.branchCode),
+          fatura: item.receivableCode,
+          cliente_code: Number(item.customerCode),
+          cliente_nome: null, // preenchido no lookup (passo 5)
+          valor: Math.round(valor * 100) / 100,
+        });
+      }
+      for (const venda of porVendaBc.values()) {
+        if (!venda.temFatura) continue; // sem crediário: fora do BlueCred
+        for (const p of venda.parcelas) {
+          bluecredTotal += p.valor;
+          vendasBluecred.push(p);
+        }
+      }
+      vendasBluecred.sort(
+        (a, b) =>
+          String(b.data).localeCompare(String(a.data)) || b.valor - a.valor,
+      );
+    }
 
     // ─── 5) Lookup de nomes dos clientes (pro drill-down) ───────────────────
     // ⚠️ SEM exclusão de cliente por classificação ou nome:
@@ -1485,6 +1637,7 @@ router.post(
         ...vendasFinais.map((p) => p.customerCode),
         // clientes da EXPEDIÇÃO (podem não ter fatura no período — ex: CYRO)
         ...vendasExp.map((v) => v.cliente_code),
+        ...vendasBluecred.map((v) => v.cliente_code),
       ]),
     ].filter(Boolean);
     const excludedCustomers = new Set(); // mantido vazio (ver nota acima)
@@ -1525,15 +1678,16 @@ router.post(
     const bySeller = new Map();
     for (const p of vendasFinais) {
       if (excludedCustomers.has(p.customerCode)) continue;
-      // Faturas casadas com a EXPEDIÇÃO saem daqui — o card vem dos
-      // movimentos (passo 4.3), contá-las seria dobrar.
+      // Faturas casadas com a EXPEDIÇÃO saem daqui — aquele card vem das NFs
+      // (passo 4.3), contá-las seria dobrar. RICARDO (op 512) fica: não há
+      // NF pra essas vendas, o contas a receber é a única fonte.
       if (p.sellerCode === FAT_VEND_EXPEDICAO_CODE) continue;
       const code = p.sellerCode ?? 0; // 0 = sem vendedor na transação
       const cur = bySeller.get(code) || {
         seller_code: code,
         seller_name:
-          code === FAT_VEND_EXPEDICAO_CODE
-            ? 'EXPEDIÇÃO'
+          code === FAT_VEND_RICARDO_CODE
+            ? 'RICARDO ELETRO'
             : sellerNames.get(code) || null,
         valor: 0,
         faturas: new Map(), // receivableKey → venda (fatura)
@@ -1591,32 +1745,44 @@ router.post(
         );
     }
 
-    // EXPEDIÇÃO no dataRow/detalhes — uma linha por NF (régua TRAR008).
-    if (vendasExp.length > 0) {
+    // Pseudo-vendedores (EXPEDIÇÃO / RICARDO ELETRO) no dataRow e detalhes —
+    // uma linha por NF (régua TRAR008).
+    const pushPseudoVendedor = (code, nome, vendas, total) => {
+      if (vendas.length === 0) return;
       // nome fantasia do lookup quando disponível (senão o personName da NF)
-      for (const v of vendasExp) {
+      const porFilial = {};
+      for (const v of vendas) {
         v.cliente_nome = personNames.get(v.cliente_code) || v.cliente_nome;
-      }
-      const porFilialExp = {};
-      for (const v of vendasExp) {
-        const pf = porFilialExp[v.branch_code] || { qtd: 0, valor: 0 };
+        const pf = porFilial[v.branch_code] || { qtd: 0, valor: 0 };
         pf.qtd += 1;
         pf.valor = Math.round((pf.valor + v.valor) * 100) / 100;
-        porFilialExp[v.branch_code] = pf;
+        porFilial[v.branch_code] = pf;
       }
       dataRow.push({
-        seller_code: FAT_VEND_EXPEDICAO_CODE,
-        seller_name: 'EXPEDIÇÃO',
-        qtd: vendasExp.length,
-        valor: Math.round(expedicaoTotal * 100) / 100,
-        branch_codes: Object.keys(porFilialExp)
+        seller_code: code,
+        seller_name: nome,
+        qtd: vendas.length,
+        valor: Math.round(total * 100) / 100,
+        branch_codes: Object.keys(porFilial)
           .map(Number)
           .sort((a, b) => a - b),
-        por_filial: porFilialExp,
+        por_filial: porFilial,
       });
-      dataRow.sort((a, b) => b.valor - a.valor);
-      detalhes[FAT_VEND_EXPEDICAO_CODE] = vendasExp;
-    }
+      detalhes[code] = vendas;
+    };
+    pushPseudoVendedor(
+      FAT_VEND_EXPEDICAO_CODE,
+      'EXPEDIÇÃO',
+      vendasExp,
+      expedicaoTotal,
+    );
+    pushPseudoVendedor(
+      FAT_VEND_BLUECRED_CODE,
+      'BLUECRED',
+      vendasBluecred,
+      bluecredTotal,
+    );
+    dataRow.sort((a, b) => b.valor - a.valor);
 
     // Detalhe dos vendedores do VAREJO: montado do fiscal-movement (já em
     // memória), agregado por cliente/dia/filial com as operações do painel.
@@ -1897,7 +2063,11 @@ router.post(
     // Vendedores dos canais do Forecast — o drill deles vai JUNTO na resposta
     // (o clique na célula não refaz busca nenhuma: as vendas já foram
     // computadas pra chegar no total da célula).
-    const CANAL_SELLER_CODES = [40, 161, 241, 165, 21, 26, 259];
+    const CANAL_SELLER_CODES = [
+      40, 161, 241, 165, 21, 26, 259,
+      FAT_VEND_RICARDO_CODE, // -512 (Ricardo Eletro, op 512)
+      FAT_VEND_BLUECRED_CODE, // -1000 (BlueCred, crediário)
+    ];
     // Lê o cache da rota principal (mesmo processo) pra extrair as vendas
     const harvestDrill = (w, data) => {
       let cached = null;
@@ -1975,6 +2145,8 @@ router.post(
         put('NOVIDADES', w.s, novidades);
         put('SHOWROOM', w.s, showroom);
         put('BAZAR', w.s, bazar);
+        put('RICARDO_ELETRO', w.s, rowVal(FAT_VEND_RICARDO_CODE));
+        put('BLUECRED', w.s, rowVal(FAT_VEND_BLUECRED_CODE));
         drill[`s${w.s}`] = harvestDrill(w, data);
       }
     };
