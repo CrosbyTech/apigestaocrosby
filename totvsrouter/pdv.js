@@ -540,7 +540,7 @@ router.get(
         description:
           pick(p, 'referenceName', 'productName', 'name', 'description') ||
           `Produto ${it.productCode}`,
-        fullName: pick(p, 'productName'),
+        fullName: pick(p, 'productName'),
         color: pick(p, 'colorName', 'color.colorName', 'colorDescription'),
         size: pick(p, 'sizeName', 'size.sizeName', 'sizeDescription'),
         ean: pick(p, 'barCode', 'ean', 'barcode'),
