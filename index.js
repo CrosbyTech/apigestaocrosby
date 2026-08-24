@@ -29,6 +29,7 @@ import smsRoutes from './routes/sms.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
+import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
 import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
@@ -163,6 +164,7 @@ app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgr
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
 app.use('/api/sms', smsRoutes); // SMS DisparoPro — Call Center de cobrança
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
+app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
