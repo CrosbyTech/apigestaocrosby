@@ -17004,6 +17004,117 @@ router.get(
 );
 
 // ──────────────────────────────────────────────────────────────
+// GET /api/crm/bluecard-cobranca?dias=7
+// Cobrança BlueCard: boletos VENCIDOS + os que vencem nos próximos N
+// dias (default 7). Lê o espelho local bluecard_titulos (status=aberto),
+// junta nome (bluecard_liberacoes) e telefone (pes_pessoa por CPF).
+// ──────────────────────────────────────────────────────────────
+router.get(
+  '/bluecard-cobranca',
+  asyncHandler(async (req, res) => {
+    const dias = Math.max(0, Math.min(90, Number(req.query.dias) || 7));
+    const hoje = new Date();
+    const hojeStr = hoje.toISOString().slice(0, 10);
+    const limite = new Date(hoje);
+    limite.setDate(limite.getDate() + dias);
+    const limiteStr = limite.toISOString().slice(0, 10);
+
+    // 1) Títulos em aberto (não pagos/cancelados/substituídos)
+    const { data: titulos, error } = await supabase
+      .from('bluecard_titulos')
+      .select(
+        'externo_id, compra_id, documento, cpf, parcela, valor_cents, vencimento, status, totvs_branch_code',
+      )
+      .eq('status', 'aberto')
+      .order('vencimento', { ascending: true });
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+
+    // 2) Nome via bluecard_liberacoes (cpf → nome)
+    const { data: libs } = await supabase
+      .from('bluecard_liberacoes')
+      .select('cpf, nome');
+    const nomeByCpf = new Map();
+    for (const l of libs || []) {
+      if (l.cpf && !nomeByCpf.has(l.cpf)) nomeByCpf.set(l.cpf, l.nome);
+    }
+
+    // 3) Telefone (e nome fallback) via pes_pessoa por CPF
+    const cpfs = [...new Set((titulos || []).map((t) => t.cpf).filter(Boolean))];
+    const infoByCpf = new Map();
+    for (let i = 0; i < cpfs.length; i += 200) {
+      const bloco = cpfs.slice(i, i + 200);
+      const { data: pessoas } = await supabase
+        .from('pes_pessoa')
+        .select('cpf, nm_pessoa, telefone, phones')
+        .in('cpf', bloco);
+      for (const p of pessoas || []) {
+        let tel = p.telefone || '';
+        if (!tel && Array.isArray(p.phones)) {
+          for (const ph of p.phones) {
+            const num =
+              typeof ph === 'string' ? ph : ph?.number || ph?.telefone || '';
+            if (num) {
+              tel = num;
+              break;
+            }
+          }
+        }
+        infoByCpf.set(p.cpf, {
+          tel: tel ? String(tel).replace(/\D/g, '') : '',
+          nome: p.nm_pessoa || '',
+        });
+      }
+    }
+
+    // 4) Classifica vencido / a vencer (dentro da janela)
+    const linhas = [];
+    for (const t of titulos || []) {
+      const venc = t.vencimento ? String(t.vencimento).slice(0, 10) : null;
+      if (!venc) continue;
+      let situacao;
+      if (venc < hojeStr) situacao = 'vencido';
+      else if (venc <= limiteStr) situacao = 'a_vencer';
+      else continue; // vence além da janela → fora do relatório
+      const info = infoByCpf.get(t.cpf) || {};
+      const diasVenc = Math.floor(
+        (new Date(`${venc}T00:00:00`) - new Date(`${hojeStr}T00:00:00`)) /
+          86400000,
+      );
+      linhas.push({
+        cpf: t.cpf,
+        nome: nomeByCpf.get(t.cpf) || info.nome || '',
+        telefone: info.tel || '',
+        documento: t.documento,
+        parcela: t.parcela,
+        valor: Math.round((t.valor_cents || 0)) / 100,
+        vencimento: venc,
+        dias_para_vencer: diasVenc, // negativo = vencido há X dias
+        situacao,
+        branch_code: t.totvs_branch_code,
+      });
+    }
+    linhas.sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+
+    const somaPor = (s) =>
+      Math.round(
+        linhas
+          .filter((l) => l.situacao === s)
+          .reduce((acc, l) => acc + l.valor, 0) * 100,
+      ) / 100;
+
+    return successResponse(res, {
+      hoje: hojeStr,
+      dias,
+      vencido_qtd: linhas.filter((l) => l.situacao === 'vencido').length,
+      a_vencer_qtd: linhas.filter((l) => l.situacao === 'a_vencer').length,
+      total_vencido: somaPor('vencido'),
+      total_a_vencer: somaPor('a_vencer'),
+      titulos: linhas,
+    });
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
 // GET /api/crm/bluecred-dashboard
 // Dashboard BlueCred: ranking de lojas por vendas no BOLETO (crediário).
 // Considera só NFs de saída com condição de pagamento contendo "boleto".
