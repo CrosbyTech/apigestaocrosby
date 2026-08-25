@@ -17,6 +17,7 @@ import crmRoutes, { iniciarCronSyncLeadsCompras } from './routes/crm.routes.js';
 import filaRoutes from './routes/fila.routes.js';
 import forecastRoutes from './routes/forecast.routes.js';
 import bluecardRoutes, { iniciarBluecardStatsSync } from './routes/bluecard.routes.js';
+import bluecardIntegracaoRoutes from './routes/bluecardIntegracao.routes.js';
 import wixRoutes from './routes/wix.routes.js';
 import expedicaoShowroomRoutes from './routes/expedicaoShowroom.routes.js';
 import faturamentoHistoricoRoutes from './routes/faturamentoHistorico.routes.js';
@@ -28,6 +29,7 @@ import smsRoutes from './routes/sms.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
+import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
 import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
@@ -63,6 +65,7 @@ import financeiroRouter from './totvsrouter/financeiro.js';
 import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
+import pdvRouter from './totvsrouter/pdv.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
 import { iniciarJobForecastRefYoy } from './jobs/forecast-ref-yoy.job.js';
 import { iniciarJobForecastWhatsapp } from './jobs/forecast-whatsapp.job.js';
@@ -87,6 +90,14 @@ import {
   executarProvisaoLiberacao,
 } from './jobs/provisao-liberacao.job.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
+import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
+import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
+import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
+import { iniciarJobEsteiraProtesto } from './jobs/esteira-protesto.job.js';
+import {
+  iniciarJobContratoAluguelVencimento,
+  executarContratoAluguelVencimento,
+} from './jobs/contrato-aluguel-vencimento.job.js';
 
 // =============================================================================
 // SERVER SETUP
@@ -100,7 +111,16 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(compression());
 app.use(morgan('combined'));
-app.use(express.json({ limit: '50mb' }));
+// verify: guarda os bytes CRUS do corpo em req.rawBody — a assinatura HMAC da
+// integração BlueCard cobre o corpo exato; re-serializar JSON mudaria o hash.
+app.use(
+  express.json({
+    limit: '50mb',
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  }),
+);
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Health check
@@ -118,6 +138,7 @@ app.use('/api/totvs', financeiroRouter); // accounts-receivable, accounts-payabl
 app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
 app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
 app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
+app.use('/api/totvs', pdvRouter); // PDV RFID — produto por código/EPC, condições, transação
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
 app.use('/api/chat', chatRoutes);
@@ -132,6 +153,7 @@ app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, 
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
+app.use('/api/bluecard', bluecardIntegracaoRoutes); // BlueCard — integração crediário (webhook + reconciliação, HMAC)
 app.use('/api/wix', wixRoutes); // Wix — sync de pedidos do e-commerce
 app.use('/api/expedicao-showroom', expedicaoShowroomRoutes); // Expedição Showroom — controle envios
 app.use('/api/faturamento-historico', faturamentoHistoricoRoutes); // Faturamento histórico diário por canal
@@ -143,6 +165,7 @@ app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgr
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
 app.use('/api/sms', smsRoutes); // SMS DisparoPro — Call Center de cobrança
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
+app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -189,6 +212,11 @@ app.listen(PORT, async () => {
   iniciarJobConversaoTemplate();
   iniciarJobProvisaoLiberacao();
   iniciarJobBoletoCobranca();
+  iniciarBluecardPagamentosSync();
+  iniciarBluecardLimiteWatchdog();
+  iniciarJobEsteiraProtesto();
+  iniciarJobContratoAluguelVencimento();
+  iniciarJobDrylandChamados();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {
@@ -237,6 +265,19 @@ app.post('/api/jobs/provisao-liberacao/run', async (req, res) => {
     res.json({ success: true, dryRun, resultado });
   } catch (e) {
     console.error('[provisao-liberacao manual] erro:', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Endpoint manual pro alerta de vencimento de contrato de aluguel
+// ?dryRun=1 apenas loga o que faria (não notifica nem marca o dedupe).
+app.post('/api/jobs/contrato-aluguel/run', async (req, res) => {
+  const dryRun = req.query.dryRun === '1' || req.body?.dryRun === true;
+  try {
+    const resultado = await executarContratoAluguelVencimento({ dryRun });
+    res.json({ success: true, resultado });
+  } catch (e) {
+    console.error('[contrato-aluguel manual] erro:', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });

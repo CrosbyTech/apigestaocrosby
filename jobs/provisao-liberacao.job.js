@@ -196,33 +196,55 @@ async function filtrarNaoDuplicados(registros) {
   if (comChave.length === 0) return [];
 
   const numeros = [...new Set(comChave.map((r) => r.nr_duplicata))];
-  const { data: existentes, error } = await supabase
-    .from('pagamentos_liberacao')
-    .select('nr_duplicata, cd_empresa, nr_parcela, cd_fornecedor, dt_vencimento, status')
-    .in('nr_duplicata', numeros)
-    .not('status', 'eq', 'CANCELADO');
+  // Supabase corta cada consulta em 1000 linhas — pagina até o fim, senão um
+  // registro existente pode ficar fora da resposta e o título ser duplicado.
+  const PAGE = 1000;
+  const existentes = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('pagamentos_liberacao')
+      .select('nr_duplicata, cd_empresa, nr_parcela, cd_fornecedor, dt_vencimento, vl_duplicata, status')
+      .in('nr_duplicata', numeros)
+      .not('status', 'eq', 'CANCELADO')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
 
-  if (error) {
-    console.error('❌ [provisao-liberacao] Erro ao checar duplicatas:', error.message);
-    // Em caso de erro na checagem, aborta para não arriscar duplicar.
-    throw error;
+    if (error) {
+      console.error('❌ [provisao-liberacao] Erro ao checar duplicatas:', error.message);
+      // Em caso de erro na checagem, aborta para não arriscar duplicar.
+      throw error;
+    }
+    existentes.push(...(data || []));
+    if (!data || data.length < PAGE) break;
   }
 
-  const existentesSet = new Set(
-    (existentes || []).map((ex) =>
-      chaveDedup({
-        nr_duplicata: ex.nr_duplicata,
-        cd_fornecedor: ex.cd_fornecedor,
-        cd_empresa: ex.cd_empresa,
-        nr_parcela: ex.nr_parcela,
-        dt_vencimento: ex.dt_vencimento
-          ? String(ex.dt_vencimento).split('T')[0]
-          : null,
-      }),
-    ),
-  );
+  return registros.filter((r) => !existentes.some((ex) => conflita(r, ex)));
+}
 
-  return registros.filter((r) => !existentesSet.has(chaveDedup(r)));
+// Conflito entre um registro novo e uma linha já existente na Liberação.
+// Linhas criadas pela Solicitação Crosby não têm cd_fornecedor/nr_parcela —
+// nesses casos o conflito é detectado por duplicata + empresa + vencimento + valor,
+// para a mesma duplicata não subir por dois caminhos diferentes.
+function conflita(r, ex) {
+  if (String(r.nr_duplicata ?? '') !== String(ex.nr_duplicata ?? '')) return false;
+  const exVenc = ex.dt_vencimento ? String(ex.dt_vencimento).split('T')[0] : null;
+  if ((r.dt_vencimento ?? null) !== exVenc) return false;
+  if (
+    r.cd_empresa != null &&
+    ex.cd_empresa != null &&
+    String(r.cd_empresa) !== String(ex.cd_empresa)
+  )
+    return false;
+  const temFornecedor = r.cd_fornecedor != null && ex.cd_fornecedor != null;
+  const temParcela = r.nr_parcela != null && ex.nr_parcela != null;
+  if (temFornecedor && String(r.cd_fornecedor) !== String(ex.cd_fornecedor))
+    return false;
+  if (temParcela && String(r.nr_parcela) !== String(ex.nr_parcela)) return false;
+  if (temFornecedor && temParcela) return true;
+  return (
+    Math.abs(parseFloat(r.vl_duplicata || 0) - parseFloat(ex.vl_duplicata || 0)) <
+    0.005
+  );
 }
 
 // ─── Monta a linha de pagamentos_liberacao a partir do item do TOTVS ────────

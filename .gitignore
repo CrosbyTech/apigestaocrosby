@@ -13,3 +13,13 @@ uploads/
 
 # Logs
 *.log
+
+# Sessao do WhatsApp Web (cache do Chromium) — nunca versionar
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Config local do Claude Code
+.claude/
+
+# Sondas descartaveis contra a API do TOTVS
+*.tmp.mjs
