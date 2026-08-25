@@ -16868,6 +16868,142 @@ router.get(
 );
 
 // ──────────────────────────────────────────────────────────────
+// GET /api/crm/clientes-inativos
+// Reativação (Minha Franquia): clientes que já compraram nas filiais
+// informadas mas estão há N meses (default 6) sem comprar. Considera o
+// histórico dos últimos 24 meses (alvos realistas de reativação).
+// Retorna { code, nome, telefone, ultima_compra, dias_sem_comprar,
+// total_compras } ordenado pelos inativos mais recentes (melhores alvos).
+// Query: ?empresas=6132&empresas=6206 (ou "6132,6206") [&meses=6]
+// ──────────────────────────────────────────────────────────────
+router.get(
+  '/clientes-inativos',
+  asyncHandler(async (req, res) => {
+    let empresas = req.query.empresas;
+    if (typeof empresas === 'string') empresas = empresas.split(',');
+    const branchCodes = [
+      ...new Set(
+        (Array.isArray(empresas) ? empresas : [])
+          .map((e) => Number(String(e).trim()))
+          .filter((n) => Number.isFinite(n)),
+      ),
+    ];
+    if (branchCodes.length === 0) {
+      return errorResponse(
+        res,
+        'Informe ao menos uma empresa',
+        400,
+        'MISSING_EMPRESAS',
+      );
+    }
+
+    // Meses de inatividade (default 6). Limite 1..36.
+    const meses = Math.max(1, Math.min(36, Number(req.query.meses) || 6));
+    const hoje = new Date();
+    const cutoff = new Date(hoje);
+    cutoff.setMonth(cutoff.getMonth() - meses);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    // Janela de histórico considerada (últimos 24 meses) — evita puxar
+    // clientes "mortos" há anos e limita o volume da varredura.
+    const janela = new Date(hoje);
+    janela.setMonth(janela.getMonth() - 24);
+    const janelaStr = janela.toISOString().slice(0, 10);
+
+    // 1) Agrega compras (Output) das filiais por person_code → última compra
+    const porCliente = new Map(); // pc → { code, nome, ultima, total }
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseFiscal
+        .from('notas_fiscais')
+        .select('person_code, person_name, issue_date')
+        .in('branch_code', branchCodes)
+        .eq('operation_type', 'Output')
+        .not('invoice_status', 'eq', 'Canceled')
+        .not('invoice_status', 'eq', 'Deleted')
+        .not('person_code', 'is', null)
+        .gte('issue_date', janelaStr)
+        .order('issue_date', { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (error) {
+        return errorResponse(res, error.message, 500, 'FISCAL_ERROR');
+      }
+      if (!data || data.length === 0) break;
+      for (const nf of data) {
+        const pc = nf.person_code;
+        if (pc == null) continue;
+        const nome = nf.person_name || '';
+        const up = nome.toUpperCase();
+        if (up.startsWith('CROSBY') || up.startsWith('TESTE')) continue;
+        const d = String(nf.issue_date).slice(0, 10);
+        let rec = porCliente.get(pc);
+        if (!rec) {
+          rec = { code: pc, nome, telefone: '', ultima: d, total: 0 };
+          porCliente.set(pc, rec);
+        }
+        if (d > rec.ultima) rec.ultima = d;
+        if (nome && !rec.nome) rec.nome = nome;
+        rec.total += 1;
+      }
+      if (data.length < PAGE) break;
+    }
+
+    // 2) Inativos: última compra <= cutoff (sem comprar há >= N meses)
+    const inativos = [...porCliente.values()].filter(
+      (r) => r.ultima <= cutoffStr,
+    );
+
+    // 3) Telefone via pes_pessoa (lote)
+    const codes = inativos.map((r) => r.code);
+    for (let i = 0; i < codes.length; i += 500) {
+      const bloco = codes.slice(i, i + 500);
+      const { data: pessoas } = await supabase
+        .from('pes_pessoa')
+        .select('code, nm_pessoa, telefone, phones')
+        .in('code', bloco);
+      for (const p of pessoas || []) {
+        const rec = porCliente.get(p.code);
+        if (!rec) continue;
+        let tel = p.telefone || '';
+        if (!tel && Array.isArray(p.phones)) {
+          for (const ph of p.phones) {
+            const num =
+              typeof ph === 'string' ? ph : ph?.number || ph?.telefone || '';
+            if (num) {
+              tel = num;
+              break;
+            }
+          }
+        }
+        rec.telefone = tel ? String(tel).replace(/\D/g, '') : '';
+        if (!rec.nome && p.nm_pessoa) rec.nome = p.nm_pessoa;
+      }
+    }
+
+    // 4) dias sem comprar + ordena (inativos mais recentes primeiro)
+    const clientes = inativos
+      .map((r) => ({
+        code: r.code,
+        nome: r.nome,
+        telefone: r.telefone,
+        ultima_compra: r.ultima,
+        dias_sem_comprar: Math.floor(
+          (hoje - new Date(`${r.ultima}T00:00:00`)) / 86400000,
+        ),
+        total_compras: r.total,
+      }))
+      .sort((a, b) => b.ultima_compra.localeCompare(a.ultima_compra));
+
+    return successResponse(res, {
+      meses,
+      cutoff: cutoffStr,
+      hoje: hoje.toISOString().slice(0, 10),
+      total: clientes.length,
+      clientes,
+    });
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
 // GET /api/crm/bluecred-dashboard
 // Dashboard BlueCred: ranking de lojas por vendas no BOLETO (crediário).
 // Considera só NFs de saída com condição de pagamento contendo "boleto".
