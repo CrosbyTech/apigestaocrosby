@@ -287,6 +287,62 @@ router.post(
 );
 
 // =============================================================================
+// GET /pdv/transaction-status?branch=95&code=879424&date=2026-08-25
+// Consulta a transação com as parcelas — usado pelo botão "Encerrar venda"
+// para confirmar que o plano de pagamento foi gravado antes de liberar o
+// recebimento (recebimento sem plano trava no TOTVS e cancela a transação).
+// =============================================================================
+router.get(
+  '/pdv/transaction-status',
+  asyncHandler(async (req, res) => {
+    const branch = parseInt(req.query.branch, 10);
+    const code = parseInt(req.query.code, 10);
+    const date = String(req.query.date || '');
+    if (!branch || !code || !date) {
+      return errorResponse(
+        res,
+        'Informe ?branch=&code=&date=',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    const resp = await callTotvs(
+      'get',
+      `${TOTVS_BASE_URL}/general/v2/transactions/search`,
+      {
+        params: {
+          BranchCodeList: branch,
+          TransactionCodeList: code,
+          TransactionDate: date,
+          Page: 1,
+          PageSize: 1,
+          Expand: 'installment',
+        },
+      },
+    );
+    const t = resp.data?.items?.[0];
+    if (!t) {
+      return errorResponse(
+        res,
+        `Transação ${code} não encontrada na empresa ${branch}`,
+        404,
+        'TRANSACTION_NOT_FOUND',
+      );
+    }
+    return successResponse(
+      res,
+      {
+        status: t.status,
+        totalValue: t.totalValue,
+        installment: t.installment || [],
+        hasPaymentPlan: (t.installment || []).length > 0,
+      },
+      'Situação da transação',
+    );
+  }),
+);
+
+// =============================================================================
 // POST /pdv/transaction-receiving — recebe o pagamento da transação
 // Gera o contas a receber e dispara o faturamento (transação vira "atendida").
 // Body: { branchCode, transactionCode, transactionDate, totalAmount,

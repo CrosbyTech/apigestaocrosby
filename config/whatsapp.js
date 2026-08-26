@@ -13,6 +13,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const store = new SupabaseSessionStore();
 
 let qrCodeData = null;
+let qrLogged = false; // evita repetir o aviso a cada reemissão do QR
 let clientReady = false;
 let clientStatus = 'initializing'; // initializing | qr_needed | ready | disconnected | auth_failure
 
@@ -115,9 +116,19 @@ client.on('qr', async (qr) => {
   clientStatus = 'qr_needed';
   clientReady = false;
 
-  // Exibe no terminal
-  qrcodeTerminal.generate(qr, { small: true });
-  logger.info('📱 QR Code gerado — escaneie com o WhatsApp');
+  // O whatsapp-web.js re-emite 'qr' a cada ~20s enquanto ninguém escaneia.
+  // Desenhar o QR no terminal a cada emissão inunda o log, então o ASCII só
+  // sai com WHATSAPP_QR_TERMINAL=1 e o aviso é logado uma vez por sessão —
+  // o QR continua sempre disponível em base64 no endpoint HTTP.
+  if (process.env.WHATSAPP_QR_TERMINAL === '1') {
+    qrcodeTerminal.generate(qr, { small: true });
+  }
+  if (!qrLogged) {
+    qrLogged = true;
+    logger.info(
+      '📱 WhatsApp aguardando pareamento — QR disponível em /api/whatsapp/qr',
+    );
+  }
 
   // Salva como base64 para endpoint HTTP
   try {
@@ -131,6 +142,7 @@ client.on('ready', () => {
   clientReady = true;
   clientStatus = 'ready';
   qrCodeData = null;
+  qrLogged = false;
   logger.info('✅ WhatsApp client pronto e conectado!');
 });
 
