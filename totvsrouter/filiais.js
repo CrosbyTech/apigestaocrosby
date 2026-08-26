@@ -798,4 +798,180 @@ router.get(
     }
   }),
 );
+
+// ==========================================
+// ROTA: BUSCAR CLIENTES REVENDA (por classificacao)
+// Cache em memoria (recarrega a cada 60 min)
+// Classificacoes REVENDA: Tipo 7 (REVENDEDOR) / codigo 1 = SIM
+//                         Tipo 20 (TIPO DE CLIENTE) / codigo 3 = REVENDEDOR
+// Busca PESSOA JURIDICA e PESSOA FISICA — ao contrario dos multimarcas, a
+// revenda tem a maior parte dos clientes cadastrada como pessoa fisica.
+// ==========================================
+let cachedResellerClients = null;
+let resellerCacheTimestamp = 0;
+const RESELLER_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
+const RESELLER_PAGE_SIZE = 500;
+const RESELLER_CONCURRENCY = 6;
+
+/**
+ * @route GET /totvs/reseller-clients
+ * @desc Retorna lista de clientes REVENDA (classificacao TOTVS), PJ + PF
+ * Classificacoes: type 7 codeList ["1"] e/ou type 20 codeList ["3"]
+ */
+router.get(
+  '/reseller-clients',
+  asyncHandler(async (req, res) => {
+    const now = Date.now();
+    const forceRefresh = req.query.refresh === 'true';
+
+    // Retornar cache se valido
+    if (
+      !forceRefresh &&
+      cachedResellerClients &&
+      now - resellerCacheTimestamp < RESELLER_CACHE_TTL
+    ) {
+      console.log(
+        `📋 Reseller clients (cache): ${cachedResellerClients.length} clientes`,
+      );
+      return successResponse(
+        res,
+        cachedResellerClients,
+        `${cachedResellerClients.length} clientes de revenda (cache)`,
+      );
+    }
+
+    const startTime = Date.now();
+
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(res, 'Token indisponivel', 503, 'TOKEN_UNAVAILABLE');
+      }
+
+      let token = tokenData.access_token;
+      const endpointPJ = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+      const endpointPF = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+      const doRequest = async (endpoint, classificationType, codeList, page) => {
+        const payload = {
+          filter: {
+            classifications: [
+              {
+                type: classificationType,
+                codeList: codeList,
+              },
+            ],
+          },
+          page,
+          pageSize: RESELLER_PAGE_SIZE,
+          order: 'code',
+        };
+        const chamar = (accessToken) =>
+          axios.post(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 120000,
+          });
+        try {
+          return await chamar(token);
+        } catch (error) {
+          if (error.response?.status === 401) {
+            const novoToken = await getToken(true);
+            token = novoToken.access_token;
+            return chamar(token);
+          }
+          throw error;
+        }
+      };
+
+      const mapear = (item, personType) => ({
+        code: item.code,
+        name: item.name || '',
+        fantasyName: item.fantasyName || '',
+        cnpj: item.cnpj || '',
+        cpf: item.cpf || '',
+        cpfCnpj: item.cnpj || item.cpf || '',
+        personType,
+        isInactive: item.isInactive === true,
+        customerStatus: item.customerStatus || '',
+        branchInsertCode: item.branchInsertCode || null,
+      });
+
+      // A primeira pagina informa o total; as demais vao em paralelo — a busca
+      // sequencial passava de 20 min no volume de pessoa fisica
+      const fetchAllPages = async (endpoint, personType, tipo, code) => {
+        const primeira = await doRequest(endpoint, tipo, [code], 1);
+        const itens = (primeira.data?.items || []).map((i) => mapear(i, personType));
+        const totalPaginas = primeira.data?.totalPages || 1;
+
+        for (let inicio = 2; inicio <= totalPaginas; inicio += RESELLER_CONCURRENCY) {
+          const paginas = [];
+          for (
+            let p = inicio;
+            p < inicio + RESELLER_CONCURRENCY && p <= totalPaginas;
+            p++
+          ) {
+            paginas.push(p);
+          }
+          const respostas = await Promise.all(
+            paginas.map((p) => doRequest(endpoint, tipo, [code], p)),
+          );
+          respostas.forEach((r) => {
+            (r.data?.items || []).forEach((i) => itens.push(mapear(i, personType)));
+          });
+        }
+
+        console.log(
+          `📄 ${personType} tipo ${tipo}/code ${code}: ${itens.length} clientes (${totalPaginas} paginas)`,
+        );
+        return itens;
+      };
+
+      console.log(
+        '🔍 Buscando clientes REVENDA na API TOTVS (PJ + PF, tipo 7/code 1 e tipo 20/code 3)...',
+      );
+
+      const [pj7, pj20, pf7, pf20] = await Promise.all([
+        fetchAllPages(endpointPJ, 'PJ', 7, '1'),
+        fetchAllPages(endpointPJ, 'PJ', 20, '3'),
+        fetchAllPages(endpointPF, 'PF', 7, '1'),
+        fetchAllPages(endpointPF, 'PF', 20, '3'),
+      ]);
+
+      // Mesclar e deduplicar por code
+      const codesSet = new Set();
+      const allReseller = [];
+
+      [...pj7, ...pj20, ...pf7, ...pf20].forEach((item) => {
+        if (!codesSet.has(item.code)) {
+          codesSet.add(item.code);
+          allReseller.push(item);
+        }
+      });
+
+      // Salvar no cache
+      cachedResellerClients = allReseller;
+      resellerCacheTimestamp = Date.now();
+
+      const totalTime = Date.now() - startTime;
+      const qtdPJ = allReseller.filter((c) => c.personType === 'PJ').length;
+      console.log(
+        `✅ ${allReseller.length} clientes de revenda (${qtdPJ} PJ / ${allReseller.length - qtdPJ} PF) em ${totalTime}ms`,
+      );
+
+      successResponse(
+        res,
+        allReseller,
+        `${allReseller.length} clientes de revenda encontrados em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar clientes de revenda:', error.message);
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
 export default router;
