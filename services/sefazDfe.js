@@ -8,6 +8,8 @@ import { carregarCertificados } from '../config/sefazCerts.js';
 const TP_AMB = process.env.SEFAZ_TP_AMB || '1'; // 1 = produção
 // A SEFAZ bloqueia por ~1h em caso de consumo indevido (cStat 656)
 const BLOQUEIO_MS = 65 * 60 * 1000;
+// Intervalo mínimo entre consultas do mesmo CNPJ sem NSU pendente
+const INTERVALO_MIN_MS = 61 * 60 * 1000;
 const MAX_LOOPS = 200; // 200 × 50 docs = 10.000 docs por sync — mais que suficiente
 
 const somenteDigitos = (v) => String(v || '').replace(/\D/g, '');
@@ -154,8 +156,33 @@ export async function sincronizarCertificado(cert) {
 
   const controle = await getControle(cnpj);
   if (controle?.bloqueado_ate && new Date(controle.bloqueado_ate) > new Date()) {
-    resultado.erro = `Bloqueado pela SEFAZ até ${controle.bloqueado_ate} (consumo indevido)`;
+    const ate = new Date(controle.bloqueado_ate).toLocaleTimeString('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    resultado.erro = `Bloqueado pela SEFAZ (consumo indevido) — libera às ${ate}`;
     return resultado;
+  }
+
+  // Regra anti-abuso da SEFAZ: re-consultar com o mesmo ultNSU em menos de 1h
+  // gera 656. Só permite nova consulta se passou 1h da última OU se ainda há
+  // NSUs pendentes para baixar (ult_nsu < max_nsu, onde o NSU avança).
+  const temPendencia =
+    BigInt(controle?.max_nsu || 0) > BigInt(controle?.ult_nsu || 0);
+  if (controle?.ultima_consulta && !temPendencia) {
+    const decorridoMs = Date.now() - new Date(controle.ultima_consulta).getTime();
+    if (decorridoMs < INTERVALO_MIN_MS) {
+      const liberaEm = new Date(
+        new Date(controle.ultima_consulta).getTime() + INTERVALO_MIN_MS,
+      ).toLocaleTimeString('pt-BR', {
+        timeZone: 'America/Sao_Paulo',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      resultado.erro = `Consulta recente — a SEFAZ exige intervalo de 1h por CNPJ (próxima liberada às ${liberaEm})`;
+      return resultado;
+    }
   }
 
   let ultNSU = BigInt(controle?.ult_nsu || 0);
@@ -210,7 +237,10 @@ export async function sincronizarCertificado(cert) {
 
       // cStat 138 — documentos localizados
       const docs = Array.isArray(d.docZip) ? d.docZip : [];
-      const notas = [];
+      // Dedup por chave dentro do lote: a mesma NF pode vir como resNFe e
+      // procNFe no mesmo lote, e o upsert não aceita a mesma linha 2x.
+      // O XML completo (procNFe) tem prioridade; empate → maior NSU vence.
+      const notasPorChave = new Map();
       const eventos = [];
 
       for (const doc of docs) {
@@ -218,10 +248,19 @@ export async function sincronizarCertificado(cert) {
           const parsed = parseDoc(doc, cnpj);
           if (!parsed) continue;
           if (parsed.tipo === 'nota' && parsed.registro.chave_acesso) {
-            notas.push({
+            const registro = {
               ...parsed.registro,
+              empresa_codigo: cert.empresaCodigo || null,
               atualizado_em: new Date().toISOString(),
-            });
+            };
+            const chave = registro.chave_acesso;
+            const existente = notasPorChave.get(chave);
+            const substituir =
+              !existente ||
+              (registro.xml_completo && !existente.xml_completo) ||
+              (registro.xml_completo === existente.xml_completo &&
+                (registro.nsu || 0) >= (existente.nsu || 0));
+            if (substituir) notasPorChave.set(chave, registro);
           } else if (parsed.tipo === 'evento') {
             eventos.push(parsed.evento);
           }
@@ -230,6 +269,7 @@ export async function sincronizarCertificado(cert) {
         }
       }
 
+      const notas = [...notasPorChave.values()];
       if (notas.length > 0) {
         const { error } = await supabase
           .from('sefaz_dfe_notas')
@@ -293,6 +333,7 @@ export function listarEmpresas() {
     cnpj: somenteDigitos(c.cnpj),
     descricao: c.descricao,
     razaoSocial: c.razaoSocial,
+    empresaCodigo: c.empresaCodigo || null,
     validade: c.validade,
   }));
 }

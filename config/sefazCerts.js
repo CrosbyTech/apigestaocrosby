@@ -68,6 +68,7 @@ export function carregarCertificados({ forcar = false } = {}) {
         descricao: item.descricao || dados.razaoSocial,
         razaoSocial: dados.razaoSocial,
         cnpj: item.cnpj || dados.cnpj,
+        empresaCodigo: item.empresaCodigo || null,
         cUF: item.cUF || '26',
         validade: dados.validade,
         pfx,
