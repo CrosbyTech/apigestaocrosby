@@ -41,6 +41,54 @@ function cleanCPF(s) {
 function cleanPhone(s) {
   return clean((s || '').replace(/\D/g, ''), 20);
 }
+// Normaliza data de nascimento vinda em formatos variados (DDMMAAAA,
+// DD/MM/AAAA e ate MM/DD/AAAA americano) para { display:'DD/MM/AAAA',
+// iso:'AAAA-MM-DD' }. Retorna null se nao conseguir interpretar.
+function parseDataNasc(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  let dd;
+  let mm;
+  let yyyy;
+  const temSep = /[/\-.]/.test(s);
+  const digits = s.replace(/\D/g, '');
+  if (!temSep && digits.length === 8) {
+    dd = digits.slice(0, 2);
+    mm = digits.slice(2, 4);
+    yyyy = digits.slice(4, 8);
+  } else {
+    const parts = s.split(/[/\-.]/).map((p) => p.trim()).filter(Boolean);
+    if (parts.length !== 3) return null;
+    if (parts[0].length === 4) {
+      [yyyy, mm, dd] = parts;
+    } else {
+      const [a, b, c] = parts;
+      yyyy = c;
+      const na = Number(a);
+      const nb = Number(b);
+      if (na > 12 && nb <= 12) {
+        dd = a;
+        mm = b;
+      } else if (nb > 12 && na <= 12) {
+        dd = b;
+        mm = a;
+      } else {
+        dd = a;
+        mm = b;
+      }
+    }
+  }
+  dd = String(dd).padStart(2, '0');
+  mm = String(mm).padStart(2, '0');
+  yyyy = String(yyyy);
+  if (yyyy.length === 2) yyyy = (Number(yyyy) > 30 ? '19' : '20') + yyyy;
+  const d = Number(dd);
+  const m = Number(mm);
+  const y = Number(yyyy);
+  if (!(y >= 1900 && y <= new Date().getFullYear())) return null;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return { display: `${dd}/${mm}/${yyyy}`, iso: `${yyyy}-${mm}-${dd}` };
+}
 
 // Gera CVV único de 3 dígitos. Tenta até 5x se houver colisão (improvável).
 // Retorna null se a coluna não existir no schema (não bloqueia o lead).
@@ -88,11 +136,13 @@ router.post('/leads', async (req, res) => {
       cpf,
       empresa: clean(b.empresa),
       instagram: clean(b.instagram, 100),
-      data_nasc: clean(b.data_nasc, 20),
+      data_nasc: parseDataNasc(b.data_nasc)?.display || clean(b.data_nasc, 20),
       cep: clean((b.cep || '').replace(/\D/g, ''), 8),
       endereco: clean(b.endereco, 500),
       numero: clean(b.numero, 20),
       complemento: clean(b.complemento, 200),
+      cidade: clean(b.cidade, 120),
+      estado: clean(b.estado, 2)?.toUpperCase() || null,
       // Quem indicou o lead (vem da LP /lp/bluecard/indicacao?indicado_por=NOME)
       indicado_por: clean(b.indicado_por, 100),
       origem: clean(b.origem) || 'lp_bluecard',
@@ -204,7 +254,7 @@ router.post('/leads/importar', async (req, res) => {
         cpf: cpf || `IMPORT-${Date.now()}-${idx}`.slice(0, 14),
         empresa: clean(r.empresa),
         instagram: clean(r.instagram, 100),
-        data_nasc: clean(r.data_nasc, 20),
+        data_nasc: parseDataNasc(r.data_nasc)?.display || clean(r.data_nasc, 20),
         cidade: clean(r.cidade, 100),
         estado: clean(r.estado, 2)?.toUpperCase() || null,
         cep: clean((r.cep || '').replace(/\D/g, ''), 8),
@@ -596,11 +646,16 @@ async function _cadastrarLeadNoTotvsInner(lead) {
     }
   }
   if (!bairro && lead.complemento) bairro = String(lead.complemento).trim() || null;
+  const nascParsed = parseDataNasc(lead.data_nasc);
   const payload = {
     branchInsertCode,
     insertDate: new Date().toISOString(),
     name: lead.nome,
     cpf,
+    // Data de nascimento em ISO (o TOTVS espera birthDate como datetime)
+    birthDate: nascParsed
+      ? new Date(`${nascParsed.iso}T00:00:00`).toISOString()
+      : undefined,
     // Sexo inferido pelo primeiro nome (o lead não captura). undefined quando
     // ambíguo — melhor em branco do que gravar gênero errado no TOTVS.
     gender: inferGenderFromName(lead.nome) || undefined,
