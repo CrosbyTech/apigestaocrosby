@@ -23,3 +23,6 @@ uploads/
 
 # Sondas descartaveis contra a API do TOTVS
 *.tmp.mjs
+# Certificados digitais A1 (NUNCA commitar)
+certs/
+*.pfx

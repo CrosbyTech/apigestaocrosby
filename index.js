@@ -76,6 +76,8 @@ import { iniciarCanalTotalsCacheJob } from './jobs/canal-totals-cache.job.js';
 import { iniciarForecastPerSellerCacheJob } from './jobs/forecast-per-seller-cache.job.js';
 import { iniciarPainelVendasSyncJob } from './jobs/painel-vendas-sync.job.js';
 import { iniciarCronWixSync } from './jobs/wix-sync.job.js';
+import { iniciarCronSefazDfe } from './jobs/sefaz-dfe-sync.job.js';
+import sefazDfeRoutes from './routes/sefazDfe.routes.js';
 import {
   iniciarJobPesPessoaSync,
   syncPesPessoaDelta,
@@ -151,6 +153,7 @@ app.use('/api/evolution', evolutionRoutes); // Evolution WhatsApp conversations
 app.use('/api/autentique', autentiqueRoutes); // Autentique assinatura digital (termo-credito, CRUD documentos)
 app.use('/api/crm', crmRoutes); // CRM: leads (ClickUp), inst-check-bulk, msgs, roubos, IA
 app.use('/api/fila', filaRoutes); // Fila da Vez (varejo) — admin + público (PIN)
+app.use('/api/sefaz/dfe', sefazDfeRoutes); // Manifestação do Destinatário (SEFAZ Distribuição DFe)
 app.use('/api/forecast', forecastRoutes); // Forecast — Promessa Semanal por Canal
 app.use('/api/bluecard', bluecardRoutes); // BlueCard — leads da LP /lp/bluecard
 app.use('/api/bluecard', bluecardIntegracaoRoutes); // BlueCard — integração crediário (webhook + reconciliação, HMAC)
@@ -205,6 +208,7 @@ app.listen(PORT, async () => {
   iniciarForecastPerSellerCacheJob();
   iniciarPainelVendasSyncJob();
   iniciarCronWixSync();
+  iniciarCronSefazDfe();
   iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();
