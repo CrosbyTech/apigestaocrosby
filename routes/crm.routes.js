@@ -13603,9 +13603,42 @@ router.post(
         console.log(
           `[sellers-totals/varejo TOTVS live] ${dataRow.length} vendedores, total R$${dataRow.reduce((s, x) => s + x.invoice_value, 0).toFixed(2)}`,
         );
+        // Bonificação Elite (op 5919): as NFs não têm vendedor no TOTVS, então
+        // não entram no dataRow por vendedor. Soma direto de notas_fiscais e
+        // devolve `bonificacoes` (total e por loja) para o front contabilizar
+        // no TOTAL da loja — decisão do Yago (2026): somar no total, sem virar
+        // vendedor.
+        let bonificacoes = 0;
+        const bonificacoesPorLoja = {};
+        try {
+          const { data: bonRows } = await supabaseFiscal
+            .from('notas_fiscais')
+            .select('total_value, branch_code')
+            .eq('operation_code', 5919)
+            .eq('operation_type', 'Output')
+            .not('invoice_status', 'eq', 'Canceled')
+            .not('invoice_status', 'eq', 'Deleted')
+            .gt('total_value', 0)
+            .gte('issue_date', datemin)
+            .lte('issue_date', datemax)
+            .in('branch_code', VAREJO_BRANCHES_LIVE);
+          for (const r of bonRows || []) {
+            const v = Number(r.total_value || 0);
+            bonificacoes += v;
+            const bc = Number(r.branch_code);
+            if (bc) bonificacoesPorLoja[bc] = (bonificacoesPorLoja[bc] || 0) + v;
+          }
+          bonificacoes = Math.round(bonificacoes * 100) / 100;
+        } catch (e) {
+          console.warn(`[sellers-totals/varejo bonificacoes] ${e.message}`);
+        }
+
         const varejoResp = {
           dataRow,
-          total: dataRow.reduce((s, x) => s + x.invoice_value, 0),
+          total:
+            dataRow.reduce((s, x) => s + x.invoice_value, 0) + bonificacoes,
+          bonificacoes,
+          bonificacoes_por_loja: bonificacoesPorLoja,
           source: 'totvs-live (sale-panel/v2/sellers/search)',
           modulo: 'varejo',
         };
