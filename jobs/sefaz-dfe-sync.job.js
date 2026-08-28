@@ -24,6 +24,14 @@ export async function executarSyncSefazDfe() {
 
 export function iniciarCronSefazDfe() {
   if (agendado) return;
+  // Producao e o ambiente local compartilham o mesmo banco e os mesmos CNPJs.
+  // Duas instancias consultando a SEFAZ em paralelo dobram as chamadas e
+  // levam a 656, entao o ambiente que nao deve sincronizar seta
+  // SEFAZ_SYNC_ENABLED=false.
+  if (process.env.SEFAZ_SYNC_ENABLED === 'false') {
+    console.log('[sefaz-dfe] cron desabilitado (SEFAZ_SYNC_ENABLED=false)');
+    return;
+  }
   agendado = true;
   // A cada hora, no minuto 7 (evita colidir com outros jobs de hora cheia)
   cron.schedule(
