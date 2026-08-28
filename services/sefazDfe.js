@@ -63,6 +63,13 @@ function parseDoc(doc, cnpjDest) {
     const chave =
       val(prot.chNFe) || String(inf.$?.Id || inf.Id || '').replace(/^NFe/, '');
     const destReal = somenteDigitos(val(inf.dest?.CNPJ)) || null;
+    const destCpf = somenteDigitos(val(inf.dest?.CPF)) || null;
+    // Destinatario e um CPF: venda ao consumidor de uma loja do grupo, que
+    // so chegou aqui porque um CNPJ nosso esta no <autXML>. Nao e nota
+    // "emitida para mim" — descarta e manda apagar resumo antigo da chave.
+    if (!destReal && destCpf) {
+      return { tipo: 'venda_consumidor', chave };
+    }
     return {
       tipo: 'nota',
       registro: {
@@ -303,6 +310,17 @@ export async function sincronizarFilial(filial, cert) {
               (registro.xml_completo === existente.xml_completo &&
                 (registro.nsu || 0) >= (existente.nsu || 0));
             if (substituir) notasPorChave.set(chave, registro);
+          } else if (parsed.tipo === 'venda_consumidor') {
+            // Apaga o resumo que possa ter entrado antes com esta chave
+            // (o resNFe nao traz o destinatario, entao ele e gravado no
+            // fluxo consultado ate o XML completo revelar que e consumidor)
+            notasPorChave.delete(parsed.chave);
+            await supabase
+              .from('sefaz_dfe_notas')
+              .delete()
+              .eq('chave_acesso', parsed.chave);
+            resultado.descartadasConsumidor =
+              (resultado.descartadasConsumidor || 0) + 1;
           } else if (parsed.tipo === 'evento') {
             eventos.push(parsed.evento);
           }
