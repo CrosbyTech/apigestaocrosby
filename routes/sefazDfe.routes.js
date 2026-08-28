@@ -92,13 +92,18 @@ router.get(
       if (tipoOperacao) query = query.eq('tipo_operacao', tipoOperacao);
       if (situacao) query = query.eq('situacao', situacao);
       // Origem do registro: SEFAZ (resNFe/procNFe) ou TOTVS (CSV do FISFP153)
-      if (escrituracao === 'escriturada') query = query.eq('escriturada', true);
-      else if (escrituracao === 'pendente') {
-        // Cancelada (2) e denegada (3) nao entram na fila: nao se escritura
-        // nota que nao vale. Pendente e so a autorizada ainda sem fatura.
+      // Nao se escritura nota cancelada (2), denegada (3) nem de entrada
+      // (tpNF 0): elas ficam fora dos dois lados da escrituracao.
+      if (escrituracao === 'escriturada') {
+        query = query
+          .eq('escriturada', true)
+          .eq('situacao', '1')
+          .eq('tipo_operacao', '1');
+      } else if (escrituracao === 'pendente') {
         query = query
           .or('escriturada.is.null,escriturada.eq.false')
-          .eq('situacao', '1');
+          .eq('situacao', '1')
+          .eq('tipo_operacao', '1');
       }
       if (origem === 'sefaz')
         query = query.in('schema_origem', ['resNFe', 'procNFe']);
