@@ -2,17 +2,9 @@
 // Uso: node scripts/import-manifestacoes-csv.mjs "C:\caminho\MANIFESTACOES2026.CSV"
 import fs from 'node:fs';
 import supabase from '../config/supabase.js';
+import { filialPorCodigo } from '../config/sefazFiliais.js';
 
 const ARQUIVO = process.argv[2] || 'C:/Users/yagom/Desktop/MANIFESTACOES2026.CSV';
-
-// Raiz do CNPJ (8 dígitos) → CNPJ matriz (o mesmo dos certificados A1)
-const RAIZ_PARA_MATRIZ = {
-  17177680: '17177680000116', // Ferreira Comércio
-  27728810: '27728810000115', // F A Moda e Varejo
-  33592092: '33592092000103', // Irmãos CR Vestuário
-  53661116: '53661116000138', // Irmãos Varejo Comercial
-  36569459: '36569459000158', // Recife Mall
-};
 
 // Cód. empresa TOTVS → CNPJ da filial (de /api/totvs/branches)
 const EMPRESA_CNPJ = {
@@ -56,14 +48,14 @@ for (let i = 1; i < lines.length; i++) {
   const [empresa, dtEmissao, chave, cnpjEmi, razao, nrNf, serie, nsu, op, sit, manif, valor] = c;
 
   const codEmpresa = parseInt(empresa);
-  const filialCnpj = EMPRESA_CNPJ[codEmpresa];
-  const matriz = filialCnpj
-    ? RAIZ_PARA_MATRIZ[filialCnpj.slice(0, 8)]
-    : null;
+  // O destinatario e a propria filial — e assim que a SEFAZ organiza a DFe,
+  // e e o que permite bater o historico do TOTVS com o que vem da SEFAZ.
+  const filial = filialPorCodigo(codEmpresa);
+  const destinatario = filial?.cnpj || EMPRESA_CNPJ[codEmpresa] || null;
 
-  if (!matriz || !/^\d{44}$/.test(chave || '') || !['S', 'E'].includes(op)) {
+  if (!destinatario || !/^\d{44}$/.test(chave || '') || !['S', 'E'].includes(op)) {
     stats.puladas++;
-    if (!matriz && empresa)
+    if (!destinatario && empresa)
       stats.semEmpresa[empresa] = (stats.semEmpresa[empresa] || 0) + 1;
     continue;
   }
@@ -76,8 +68,9 @@ for (let i = 1; i < lines.length; i++) {
   );
 
   const reg = {
-    cnpj_destinatario: matriz,
+    cnpj_destinatario: destinatario,
     empresa_codigo: codEmpresa,
+    empresa_nome: filial?.nome || null,
     chave_acesso: chave,
     nsu: parseInt(nsu) || null,
     emitente_cnpj: (cnpjEmi || '').replace(/\D/g, '') || null,

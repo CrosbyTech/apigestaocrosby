@@ -59,7 +59,7 @@ router.get(
       let query = supabase
         .from('sefaz_dfe_notas')
         .select(
-          'cnpj_destinatario, empresa_codigo, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
+          'cnpj_destinatario, empresa_codigo, empresa_nome, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
         )
         .order('data_emissao', { ascending: false })
         .range(offset, offset + PAGINA - 1);
@@ -102,8 +102,8 @@ router.get(
 router.post(
   '/sync',
   asyncHandler(async (req, res) => {
-    const { cnpj } = req.body || {};
-    const resultado = await sincronizarTodos({ cnpj });
+    const { cnpj, codigo } = req.body || {};
+    const resultado = await sincronizarTodos({ cnpj, codigo });
     if (!resultado.ok)
       return errorResponse(res, resultado.erro, 400, 'SEFAZ_SYNC_ERROR');
     successResponse(res, resultado.resultados, 'Sincronização concluída');

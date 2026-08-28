@@ -4,6 +4,7 @@
 import { DistribuicaoDFe } from 'node-mde';
 import supabase from '../config/supabase.js';
 import { carregarCertificados } from '../config/sefazCerts.js';
+import { FILIAIS, filialPorCnpj } from '../config/sefazFiliais.js';
 
 const TP_AMB = process.env.SEFAZ_TP_AMB || '1'; // 1 = produção
 // A SEFAZ bloqueia por ~1h em caso de consumo indevido (cStat 656)
@@ -61,10 +62,11 @@ function parseDoc(doc, cnpjDest) {
     const prot = json.nfeProc.protNFe?.infProt || {};
     const chave =
       val(prot.chNFe) || String(inf.$?.Id || inf.Id || '').replace(/^NFe/, '');
+    const destReal = somenteDigitos(val(inf.dest?.CNPJ)) || null;
     return {
       tipo: 'nota',
       registro: {
-        cnpj_destinatario: cnpjDest,
+        cnpj_destinatario: destReal || cnpjDest,
         chave_acesso: chave,
         nsu,
         emitente_cnpj: val(inf.emit?.CNPJ) || val(inf.emit?.CPF),
@@ -131,6 +133,21 @@ async function aplicarEvento(cnpjDest, evento) {
     .eq('chave_acesso', evento.chave);
 }
 
+let temColunaNome = null;
+async function colunaEmpresaNomeExiste() {
+  if (temColunaNome !== null) return temColunaNome;
+  const { error } = await supabase
+    .from('sefaz_dfe_notas')
+    .select('empresa_nome')
+    .limit(1);
+  temColunaNome = !error;
+  if (!temColunaNome)
+    console.warn(
+      '⚠️ [SefazDFe] coluna empresa_nome ausente — gravando só o código da filial (rode migrations/sefaz_dfe_empresa_nome.sql)',
+    );
+  return temColunaNome;
+}
+
 async function getControle(cnpj) {
   const { data } = await supabase
     .from('sefaz_dfe_controle')
@@ -149,12 +166,13 @@ async function salvarControle(cnpj, patch) {
     );
 }
 
-export async function sincronizarCertificado(cert) {
-  const cnpj = somenteDigitos(cert.cnpj);
+export async function sincronizarFilial(filial, cert) {
+  const cnpj = somenteDigitos(filial.cnpj);
   const inicio = Date.now();
   const resultado = {
     cnpj,
-    descricao: cert.descricao,
+    codigo: filial.codigo,
+    descricao: `${filial.codigo} - ${filial.nome}`,
     novosDocs: 0,
     eventos: 0,
     erro: null,
@@ -216,7 +234,7 @@ export async function sincronizarCertificado(cert) {
       const cStat = String(d.cStat || '');
 
       await salvarControle(cnpj, {
-        descricao: cert.descricao,
+        descricao: `${filial.codigo} - ${filial.nome}`,
         ultima_consulta: new Date().toISOString(),
         ultimo_cstat: cStat,
         ultimo_xmotivo: d.xMotivo || '',
@@ -233,13 +251,20 @@ export async function sincronizarCertificado(cert) {
       }
 
       if (cStat === '137') {
-        // Nenhum documento novo
+        // Nenhum documento NESTE TRECHO. Quando ha um vao de NSUs expirados,
+        // a SEFAZ responde 137 e avanca o ponteiro ~100 por vez — parar aqui
+        // deixaria a filial travada bem antes do fim da fila. So encerramos
+        // quando chegamos ao maxNSU ou quando o ponteiro para de andar.
+        const anterior = ultNSU;
         ultNSU = BigInt(d.ultNSU || ultNSU);
+        const maxNSU = BigInt(d.maxNSU || 0);
         await salvarControle(cnpj, {
           ult_nsu: ultNSU.toString(),
-          max_nsu: (d.maxNSU || ultNSU).toString(),
+          max_nsu: (maxNSU || ultNSU).toString(),
         });
-        break;
+        if (ultNSU <= anterior || ultNSU >= maxNSU) break;
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
       }
 
       if (cStat !== '138') {
@@ -260,9 +285,14 @@ export async function sincronizarCertificado(cert) {
           const parsed = parseDoc(doc, cnpj);
           if (!parsed) continue;
           if (parsed.tipo === 'nota' && parsed.registro.chave_acesso) {
+            // A filial e a do destinatario de fato, nao a do CNPJ consultado
+            // Se o destinatario nao e uma filial nossa, a nota chegou por
+            // <autXML>: ficamos com o registro, mas sem dono no grupo.
+            const filialReal = filialPorCnpj(parsed.registro.cnpj_destinatario);
             const registro = {
               ...parsed.registro,
-              empresa_codigo: cert.empresaCodigo || null,
+              empresa_codigo: filialReal ? filialReal.codigo : null,
+              empresa_nome: filialReal ? filialReal.nome : null,
               atualizado_em: new Date().toISOString(),
             };
             const chave = registro.chave_acesso;
@@ -281,7 +311,10 @@ export async function sincronizarCertificado(cert) {
         }
       }
 
-      const notas = [...notasPorChave.values()];
+      let notas = [...notasPorChave.values()];
+      if (!(await colunaEmpresaNomeExiste())) {
+        notas = notas.map(({ empresa_nome, ...resto }) => resto);
+      }
       if (notas.length > 0) {
         const { error } = await supabase
           .from('sefaz_dfe_notas')
@@ -303,49 +336,77 @@ export async function sincronizarCertificado(cert) {
 
       if (BigInt(d.ultNSU || 0) >= BigInt(d.maxNSU || 0)) break;
 
-      // Pequena pausa entre lotes para não estressar o serviço
-      await new Promise((r) => setTimeout(r, 800));
+      // Pausa entre lotes; um pouco maior na carga inicial, que encadeia
+      // muitas chamadas seguidas para o mesmo CNPJ
+      await new Promise((r) => setTimeout(r, loop > 3 ? 1500 : 800));
     }
   } catch (e) {
     resultado.erro = e.message;
   }
 
   console.log(
-    `${resultado.erro ? '⚠️' : '✅'} [SefazDFe] ${cert.descricao} (${cnpj}): ` +
+    `${resultado.erro ? '⚠️' : '✅'} [SefazDFe] ${resultado.descricao} (${cnpj}): ` +
       `${resultado.novosDocs} notas, ${resultado.eventos} eventos em ${Date.now() - inicio}ms` +
       `${resultado.erro ? ` | erro: ${resultado.erro}` : ''}`,
   );
   return resultado;
 }
 
-export async function sincronizarTodos({ cnpj = null } = {}) {
-  const certs = carregarCertificados();
-  const alvo = cnpj
-    ? certs.filter((c) => somenteDigitos(c.cnpj) === somenteDigitos(cnpj))
-    : certs;
+// O certificado A1 da matriz vale para qualquer CNPJ da mesma raiz
+function certificadoDaFilial(filial, certs) {
+  return (
+    certs.find((c) => c.arquivo === filial.cert) ||
+    certs.find(
+      (c) => somenteDigitos(c.cnpj).slice(0, 8) === filial.cnpj.slice(0, 8),
+    ) ||
+    null
+  );
+}
 
-  if (alvo.length === 0) {
+export async function sincronizarTodos({ cnpj = null, codigo = null } = {}) {
+  const certs = carregarCertificados();
+  if (certs.length === 0) {
     return {
       ok: false,
-      erro: 'Nenhum certificado configurado (verifique certs/certificados.json e as senhas)',
+      erro: 'Nenhum certificado configurado (verifique SEFAZ_CERTIFICADOS ou certs/certificados.json)',
       resultados: [],
     };
   }
 
+  let alvo = FILIAIS;
+  if (cnpj) alvo = alvo.filter((f) => f.cnpj === somenteDigitos(cnpj));
+  if (codigo) alvo = alvo.filter((f) => f.codigo === parseInt(codigo));
+
   const resultados = [];
-  for (const cert of alvo) {
-    resultados.push(await sincronizarCertificado(cert));
+  for (const filial of alvo) {
+    const cert = certificadoDaFilial(filial, certs);
+    if (!cert) {
+      resultados.push({
+        cnpj: filial.cnpj,
+        codigo: filial.codigo,
+        descricao: `${filial.codigo} - ${filial.nome}`,
+        novosDocs: 0,
+        eventos: 0,
+        erro: 'Sem certificado para a raiz deste CNPJ',
+      });
+      continue;
+    }
+    resultados.push(await sincronizarFilial(filial, cert));
+    // Respiro entre filiais — drenar 20 CNPJs em rajada e o que mais se
+    // parece com abuso do ponto de vista da SEFAZ
+    if (alvo.length > 1) await new Promise((r) => setTimeout(r, 2500));
   }
   return { ok: true, resultados };
 }
 
+// Filiais consultadas na SEFAZ, com o dado do cadastro do TOTVS
 export function listarEmpresas() {
   const certs = carregarCertificados();
-  return certs.map((c) => ({
-    cnpj: somenteDigitos(c.cnpj),
-    descricao: c.descricao,
-    razaoSocial: c.razaoSocial,
-    empresaCodigo: c.empresaCodigo || null,
-    validade: c.validade,
+  return FILIAIS.map((f) => ({
+    cnpj: f.cnpj,
+    codigo: f.codigo,
+    nome: f.nome,
+    descricao: `${f.codigo} - ${f.nome}`,
+    temCertificado: !!certificadoDaFilial(f, certs),
   }));
 }
