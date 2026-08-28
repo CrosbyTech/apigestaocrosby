@@ -8,8 +8,14 @@ import { carregarCertificados } from '../config/sefazCerts.js';
 const TP_AMB = process.env.SEFAZ_TP_AMB || '1'; // 1 = produção
 // A SEFAZ bloqueia por ~1h em caso de consumo indevido (cStat 656)
 const BLOQUEIO_MS = 65 * 60 * 1000;
-// Intervalo mínimo entre consultas do mesmo CNPJ sem NSU pendente
+// Intervalo mínimo entre consultas do mesmo CNPJ sem NSU pendente.
+// A Distribuição DFe não aceita filtro por data: ela entrega o que veio depois
+// do último NSU. Quem limita o consumo é o intervalo entre as chamadas — e
+// insistir com o mesmo NSU sem novidade é justamente o que gera o 656.
+// Por isso o intervalo é adaptativo: 1h quando houve movimento na última
+// consulta, 3h quando a SEFAZ respondeu 137 (nada novo).
 const INTERVALO_MIN_MS = 61 * 60 * 1000;
+const INTERVALO_OCIOSO_MS = 3 * 60 * 60 * 1000 + 60 * 1000;
 const MAX_LOOPS = 200; // 200 × 50 docs = 10.000 docs por sync — mais que suficiente
 
 const somenteDigitos = (v) => String(v || '').replace(/\D/g, '');
@@ -165,22 +171,26 @@ export async function sincronizarCertificado(cert) {
     return resultado;
   }
 
-  // Regra anti-abuso da SEFAZ: re-consultar com o mesmo ultNSU em menos de 1h
-  // gera 656. Só permite nova consulta se passou 1h da última OU se ainda há
-  // NSUs pendentes para baixar (ult_nsu < max_nsu, onde o NSU avança).
+  // Regra anti-abuso da SEFAZ: re-consultar com o mesmo ultNSU sem novidade
+  // gera 656. Só permite nova consulta se passou o intervalo mínimo OU se
+  // ainda há NSUs pendentes para baixar (drenar a fila em sequência é
+  // permitido, o NSU avança a cada chamada).
   const temPendencia =
     BigInt(controle?.max_nsu || 0) > BigInt(controle?.ult_nsu || 0);
+  const intervaloMs =
+    controle?.ultimo_cstat === '137' ? INTERVALO_OCIOSO_MS : INTERVALO_MIN_MS;
   if (controle?.ultima_consulta && !temPendencia) {
     const decorridoMs = Date.now() - new Date(controle.ultima_consulta).getTime();
-    if (decorridoMs < INTERVALO_MIN_MS) {
+    if (decorridoMs < intervaloMs) {
       const liberaEm = new Date(
-        new Date(controle.ultima_consulta).getTime() + INTERVALO_MIN_MS,
+        new Date(controle.ultima_consulta).getTime() + intervaloMs,
       ).toLocaleTimeString('pt-BR', {
         timeZone: 'America/Sao_Paulo',
         hour: '2-digit',
         minute: '2-digit',
       });
-      resultado.erro = `Consulta recente — a SEFAZ exige intervalo de 1h por CNPJ (próxima liberada às ${liberaEm})`;
+      const janela = Math.round(intervaloMs / 3600000);
+      resultado.erro = `Sem novidade na SEFAZ — próxima consulta às ${liberaEm} (intervalo de ${janela}h)`;
       return resultado;
     }
   }
@@ -210,6 +220,8 @@ export async function sincronizarCertificado(cert) {
         ultima_consulta: new Date().toISOString(),
         ultimo_cstat: cStat,
         ultimo_xmotivo: d.xMotivo || '',
+        // resposta válida = não há mais pausa pendente
+        ...(cStat === '656' ? {} : { bloqueado_ate: null }),
       });
 
       if (cStat === '656') {
