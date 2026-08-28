@@ -4,6 +4,7 @@
 // GET  /api/sefaz/dfe/notas    — notas destinadas aos CNPJs (com filtros)
 // POST /api/sefaz/dfe/sync     — dispara sincronização com a SEFAZ
 import express from 'express';
+import multer from 'multer';
 import {
   asyncHandler,
   successResponse,
@@ -14,8 +15,15 @@ import {
   sincronizarTodos,
   listarEmpresas,
 } from '../services/sefazDfe.js';
+import { importarEscrituradas } from '../services/sefazEscrituracao.js';
 
 const router = express.Router();
+
+// CSV de manifestacoes do TOTVS fica so em memoria
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
 
 router.get(
   '/empresas',
@@ -47,6 +55,7 @@ router.get(
       tipoOperacao, // '0' ou '1'
       situacao, // '1', '2' ou '3'
       origem, // 'sefaz' ou 'totvs'
+      escrituracao, // 'escriturada' ou 'pendente'
       limit,
     } = req.query;
 
@@ -59,7 +68,7 @@ router.get(
       let query = supabase
         .from('sefaz_dfe_notas')
         .select(
-          'cnpj_destinatario, empresa_codigo, empresa_nome, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
+          'cnpj_destinatario, empresa_codigo, empresa_nome, escriturada, nr_fatura, dt_fatura, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
         )
         .order('data_emissao', { ascending: false })
         .range(offset, offset + PAGINA - 1);
@@ -83,6 +92,9 @@ router.get(
       if (tipoOperacao) query = query.eq('tipo_operacao', tipoOperacao);
       if (situacao) query = query.eq('situacao', situacao);
       // Origem do registro: SEFAZ (resNFe/procNFe) ou TOTVS (CSV do FISFP153)
+      if (escrituracao === 'escriturada') query = query.eq('escriturada', true);
+      else if (escrituracao === 'pendente')
+        query = query.or('escriturada.is.null,escriturada.eq.false');
       if (origem === 'sefaz')
         query = query.in('schema_origem', ['resNFe', 'procNFe']);
       else if (origem === 'totvs')
@@ -107,6 +119,22 @@ router.post(
     if (!resultado.ok)
       return errorResponse(res, resultado.erro, 400, 'SEFAZ_SYNC_ERROR');
     successResponse(res, resultado.resultados, 'Sincronização concluída');
+  }),
+);
+
+// Importa o export de manifestacoes do TOTVS e marca o que ja foi escriturado
+router.post(
+  '/importar-escrituradas',
+  upload.single('arquivo'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return errorResponse(res, 'Envie o arquivo no campo "arquivo"', 400, 'ARQUIVO_AUSENTE');
+    }
+    // O export do TOTVS vem em ISO-8859-1
+    const texto = req.file.buffer.toString('latin1');
+    const r = await importarEscrituradas(texto);
+    if (!r.ok) return errorResponse(res, r.erro, 400, 'CSV_INVALIDO');
+    successResponse(res, r.resumo, 'Escrituracao atualizada');
   }),
 );
 
