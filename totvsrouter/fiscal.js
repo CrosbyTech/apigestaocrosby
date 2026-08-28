@@ -2639,4 +2639,171 @@ router.get(
   }),
 );
 
+// ==========================================
+// MANIFESTAÇÃO DO DESTINATÁRIO
+// POST /invoices/manifestations
+// Proxy paginado para fiscal/v2/invoices/manifestations na API TOTVS Moda.
+// Filtros: branchCodeList, startDate/endDate (emissão), operationType, invoiceStatusList
+// ==========================================
+router.post(
+  '/invoices/manifestations',
+  asyncHandler(async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(
+          res,
+          'Não foi possível obter token de autenticação TOTVS',
+          503,
+          'TOKEN_UNAVAILABLE',
+        );
+      }
+
+      let token = tokenData.access_token;
+
+      const {
+        startDate,
+        endDate,
+        branchCodeList,
+        operationType,
+        invoiceStatusList,
+        maxPages: maxPagesParam,
+      } = req.body;
+
+      if (!startDate || !endDate) {
+        return errorResponse(
+          res,
+          'Os campos startDate e endDate são obrigatórios (formato YYYY-MM-DD)',
+          400,
+          'MISSING_REQUIRED_FIELDS',
+        );
+      }
+
+      const MAX_PAGES = Math.min(parseInt(maxPagesParam) || 100, 200);
+
+      const branches =
+        branchCodeList && branchCodeList.length > 0
+          ? branchCodeList
+          : await getBranchCodes(token);
+
+      const endpoint = `${TOTVS_BASE_URL}/fiscal/v2/invoices/manifestations`;
+      const filter = {
+        branchCodeList: branches,
+        issueDate: {
+          startDate: `${startDate}T00:00:00.000Z`,
+          endDate: `${endDate}T23:59:59.999Z`,
+        },
+      };
+      if (operationType) filter.operationType = operationType;
+      if (invoiceStatusList?.length > 0)
+        filter.invoiceStatusList = invoiceStatusList;
+
+      const PAGE_SIZE = 100;
+      const PARALLEL_BATCH = 10;
+
+      console.log(
+        `📑 [Manifestations] ${branches.length} branches | emissão ${startDate}→${endDate}` +
+          `${operationType ? ` | tipo: ${operationType}` : ''}` +
+          `${invoiceStatusList?.length ? ` | status: ${invoiceStatusList.join(',')}` : ''}`,
+      );
+
+      const makeRequest = async (accessToken, pageNum) =>
+        axios.post(
+          endpoint,
+          { filter, page: pageNum, pageSize: PAGE_SIZE },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+              Connection: 'keep-alive',
+            },
+            timeout: 60000,
+            httpsAgent,
+            httpAgent,
+          },
+        );
+
+      let firstResponse;
+      try {
+        firstResponse = await makeRequest(token, 1);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const newTokenData = await getToken(true);
+          token = newTokenData.access_token;
+          firstResponse = await makeRequest(token, 1);
+        } else {
+          throw error;
+        }
+      }
+
+      const apiTotalPages = firstResponse.data?.totalPages || 1;
+      const totalPages = Math.min(apiTotalPages, MAX_PAGES);
+      const totalCount = firstResponse.data?.count || 0;
+      let allItems = [...(firstResponse.data?.items || [])];
+
+      if (totalPages > 1) {
+        const remainingPages = [];
+        for (let p = 2; p <= totalPages; p++) remainingPages.push(p);
+
+        for (let i = 0; i < remainingPages.length; i += PARALLEL_BATCH) {
+          const batch = remainingPages.slice(i, i + PARALLEL_BATCH);
+          const results = await Promise.all(
+            batch.map((p) =>
+              makeRequest(token, p).catch((err) => {
+                if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+                  console.warn(`⚠️ [Manifestations] Retry pg ${p} (timeout)`);
+                  return makeRequest(token, p).catch(() => null);
+                }
+                console.warn(`⚠️ [Manifestations] Erro pg ${p}: ${err.message}`);
+                return null;
+              }),
+            ),
+          );
+          for (const r of results) {
+            if (r?.data?.items) allItems = allItems.concat(r.data.items);
+          }
+        }
+      }
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `✅ [Manifestations] ${allItems.length} itens | ${totalPages} pgs | ${totalTime}ms`,
+      );
+
+      return successResponse(
+        res,
+        {
+          items: allItems,
+          count: totalCount,
+          totalPages,
+          totalItems: allItems.length,
+          queryTime: totalTime,
+        },
+        `${allItems.length} manifestações em ${totalTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ [Manifestations] Erro:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+
+      if (error.response) {
+        return res.status(error.response.status || 400).json({
+          success: false,
+          message:
+            error.response.data?.message ||
+            'Erro ao buscar manifestações na API TOTVS',
+          error: 'TOTVS_API_ERROR',
+          details: error.response.data,
+        });
+      }
+
+      throw new Error(`Erro ao buscar manifestações: ${error.message}`);
+    }
+  }),
+);
+
 export default router;

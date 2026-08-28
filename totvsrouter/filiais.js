@@ -811,7 +811,7 @@ let cachedResellerClients = null;
 let resellerCacheTimestamp = 0;
 const RESELLER_CACHE_TTL = 60 * 60 * 1000; // 60 minutos
 const RESELLER_PAGE_SIZE = 500;
-const RESELLER_CONCURRENCY = 6;
+const RESELLER_CONCURRENCY = 4;
 
 /**
  * @route GET /totvs/reseller-clients
@@ -875,15 +875,20 @@ router.get(
             },
             timeout: 120000,
           });
-        try {
-          return await chamar(token);
-        } catch (error) {
-          if (error.response?.status === 401) {
-            const novoToken = await getToken(true);
-            token = novoToken.access_token;
-            return chamar(token);
+        for (let tentativa = 1; tentativa <= 3; tentativa++) {
+          try {
+            return await chamar(token);
+          } catch (error) {
+            if (error.response?.status === 401) {
+              const novoToken = await getToken(true);
+              token = novoToken.access_token;
+              continue;
+            }
+            // O TOTVS derruba a conexao sob carga ("stream has been aborted");
+            // espera um pouco e tenta de novo antes de desistir
+            if (tentativa === 3) throw error;
+            await new Promise((r) => setTimeout(r, 2000 * tentativa));
           }
-          throw error;
         }
       };
 
@@ -934,12 +939,12 @@ router.get(
         '🔍 Buscando clientes REVENDA na API TOTVS (PJ + PF, tipo 7/code 1 e tipo 20/code 3)...',
       );
 
-      const [pj7, pj20, pf7, pf20] = await Promise.all([
-        fetchAllPages(endpointPJ, 'PJ', 7, '1'),
-        fetchAllPages(endpointPJ, 'PJ', 20, '3'),
-        fetchAllPages(endpointPF, 'PF', 7, '1'),
-        fetchAllPages(endpointPF, 'PF', 20, '3'),
-      ]);
+      // Sequencial de proposito: cada busca ja usa RESELLER_CONCURRENCY paginas
+      // em paralelo, e somar as quatro derrubava a conexao com o TOTVS
+      const pj7 = await fetchAllPages(endpointPJ, 'PJ', 7, '1');
+      const pj20 = await fetchAllPages(endpointPJ, 'PJ', 20, '3');
+      const pf7 = await fetchAllPages(endpointPF, 'PF', 7, '1');
+      const pf20 = await fetchAllPages(endpointPF, 'PF', 20, '3');
 
       // Mesclar e deduplicar por code
       const codesSet = new Set();
@@ -969,6 +974,115 @@ router.get(
       );
     } catch (error) {
       console.error('❌ Erro ao buscar clientes de revenda:', error.message);
+      return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
+    }
+  }),
+);
+
+// ==========================================
+// ROTA: CLASSIFICACOES DE UMA LISTA DE CLIENTES
+// Usada pela inadimplencia de revenda: em vez de listar os ~25 mil clientes
+// classificados (lento e instavel), busca-se as faturas primeiro e so os
+// clientes que aparecem sao classificados aqui.
+// ==========================================
+const CLASSIF_CHUNK = 200;
+
+/**
+ * @route POST /totvs/clients-classifications
+ * @desc Dados cadastrais + classificacoes de uma lista de codigos de cliente
+ * @body { personCodes: number[] }
+ */
+router.post(
+  '/clients-classifications',
+  asyncHandler(async (req, res) => {
+    const { personCodes } = req.body || {};
+    if (!Array.isArray(personCodes) || personCodes.length === 0) {
+      return errorResponse(
+        res,
+        'personCodes (array) e obrigatorio',
+        400,
+        'MISSING_PERSON_CODES',
+      );
+    }
+
+    const codes = [
+      ...new Set(
+        personCodes.map((c) => parseInt(c, 10)).filter((c) => !isNaN(c)),
+      ),
+    ];
+
+    const startTime = Date.now();
+    try {
+      const tokenData = await getToken();
+      if (!tokenData?.access_token) {
+        return errorResponse(res, 'Token indisponivel', 503, 'TOKEN_UNAVAILABLE');
+      }
+      let token = tokenData.access_token;
+
+      const buscar = async (endpoint, personType, lote) => {
+        const payload = {
+          filter: { personCodeList: lote },
+          expand: 'classifications',
+          page: 1,
+          pageSize: lote.length,
+        };
+        const chamar = (accessToken) =>
+          axios.post(endpoint, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+            timeout: 120000,
+          });
+        let resp;
+        try {
+          resp = await chamar(token);
+        } catch (error) {
+          if (error.response?.status !== 401) throw error;
+          const novoToken = await getToken(true);
+          token = novoToken.access_token;
+          resp = await chamar(token);
+        }
+        return (resp.data?.items || []).map((item) => ({
+          code: item.code,
+          name: item.name || '',
+          fantasyName: item.fantasyName || '',
+          cnpj: item.cnpj || '',
+          cpf: item.cpf || '',
+          cpfCnpj: item.cnpj || item.cpf || '',
+          personType,
+          isInactive: item.isInactive === true,
+          customerStatus: item.customerStatus || '',
+          branchInsertCode: item.branchInsertCode || null,
+          classifications: (item.classifications || []).map((c) => ({
+            typeCode: c.typeCode,
+            code: String(c.code),
+          })),
+        }));
+      };
+
+      const encontrados = new Map();
+      for (let i = 0; i < codes.length; i += CLASSIF_CHUNK) {
+        const lote = codes.slice(i, i + CLASSIF_CHUNK);
+        const [pj, pf] = await Promise.all([
+          buscar(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, 'PJ', lote),
+          buscar(`${TOTVS_BASE_URL}/person/v2/individuals/search`, 'PF', lote),
+        ]);
+        [...pj, ...pf].forEach((c) => encontrados.set(c.code, c));
+      }
+
+      const lista = Array.from(encontrados.values());
+      console.log(
+        `🏷️ Classificacoes: ${lista.length} de ${codes.length} clientes em ${Date.now() - startTime}ms`,
+      );
+      successResponse(
+        res,
+        lista,
+        `${lista.length} clientes classificados em ${Date.now() - startTime}ms`,
+      );
+    } catch (error) {
+      console.error('❌ Erro ao buscar classificacoes:', error.message);
       return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
     }
   }),

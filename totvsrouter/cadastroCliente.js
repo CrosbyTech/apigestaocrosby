@@ -583,4 +583,134 @@ router.post(
   }),
 );
 
+/**
+ * @route POST /api/totvs/cliente/limite-filial
+ * @desc Altera o limite de credito do cliente em UMA filial.
+ *       Body: { cpf | cnpj, branchCode, limitValue, saleLimitValue, name? }
+ *
+ *       Campos (validado contra a API 2.8.25 desta instalacao):
+ *         limitValue     -> limite FINANCEIRO
+ *         saleLimitValue -> limite COMERCIAL
+ *       O limite mensal nao e enviado: o parametro IN_USA_LIMITE_MENSAL esta
+ *       desabilitado e o TOTVS recusa o payload inteiro se ele vier.
+ *       O campo financialLimitValue NAO existe nesta versao — se enviado, e
+ *       ignorado e o limite acaba zerado.
+ *
+ *       Gravar uma filial nao apaga as demais (o TOTVS faz merge).
+ */
+router.post(
+  '/cliente/limite-filial',
+  asyncHandler(async (req, res) => {
+    const { personType, cpf, cnpj, name, branchCode, limitValue, saleLimitValue } =
+      req.body || {};
+
+    const branch = parseInt(branchCode, 10);
+    if (isNaN(branch) || branch <= 0) {
+      return errorResponse(res, 'branchCode e obrigatorio', 400, 'MISSING_BRANCH');
+    }
+
+    const isPJ = personType === 'PJ' || !!cnpj;
+    const docField = isPJ ? 'cnpj' : 'cpf';
+    const docValue = isPJ ? cnpj : cpf;
+    if (!docValue) {
+      return errorResponse(
+        res,
+        `${docField.toUpperCase()} e obrigatorio`,
+        400,
+        'MISSING_DOC',
+      );
+    }
+    const docCheck = isPJ ? validarCNPJ(docValue) : validarCPF(docValue);
+    if (!docCheck.ok) {
+      return errorResponse(res, docCheck.error, 400, 'INVALID_DOC');
+    }
+    const doc = isPJ ? docCheck.cnpj : docCheck.cpf;
+
+    const financeiro = parseFloat(limitValue);
+    const comercial = parseFloat(saleLimitValue);
+    if (isNaN(financeiro) || financeiro < 0) {
+      return errorResponse(
+        res,
+        'limitValue (financeiro) e obrigatorio e nao pode ser negativo',
+        400,
+        'INVALID_LIMIT',
+      );
+    }
+    if (isNaN(comercial) || comercial < 0) {
+      return errorResponse(
+        res,
+        'saleLimitValue (comercial) e obrigatorio e nao pode ser negativo',
+        400,
+        'INVALID_LIMIT',
+      );
+    }
+
+    // Nome e empresa de cadastro sao obrigatorios no payload do TOTVS
+    let nomeCliente = name;
+    let branchInsert = null;
+    try {
+      const buscaEndpoint = isPJ
+        ? '/person/v2/legal-entities/search'
+        : '/person/v2/individuals/search';
+      const filtro = isPJ ? { cnpjList: [doc] } : { cpfList: [doc] };
+      const busca = await postToTotvs(buscaEndpoint, {
+        filter: filtro,
+        page: 1,
+        pageSize: 1,
+      });
+      const cliente = busca.data?.items?.[0];
+      nomeCliente = nomeCliente || cliente?.name;
+      branchInsert = parseInt(cliente?.branchInsertCode, 10) || null;
+    } catch (e) {
+      console.error('[limite-filial] falha ao buscar cliente:', e.message);
+    }
+    if (!nomeCliente) {
+      return errorResponse(
+        res,
+        'Cliente nao encontrado no TOTVS para este CPF/CNPJ',
+        404,
+        'CUSTOMER_NOT_FOUND',
+      );
+    }
+
+    const payload = sanitizePayload({
+      [docField]: doc,
+      name: nomeCliente,
+      branchInsertCode: branchInsert || branch,
+      insertDate: new Date().toISOString(),
+      limits: [
+        {
+          branchCode: branch,
+          limitValue: financeiro,
+          saleLimitValue: comercial,
+        },
+      ],
+    });
+
+    const endpoint = isPJ
+      ? '/person/v2/legal-customers'
+      : '/person/v2/individual-customers';
+
+    try {
+      console.log(
+        `[limite-filial] ${docField}=${doc} filial=${branch} financeiro=${financeiro} comercial=${comercial}`,
+      );
+      const response = await postToTotvs(endpoint, payload);
+      return successResponse(
+        res,
+        {
+          [docField]: doc,
+          branchCode: branch,
+          limitValue: financeiro,
+          saleLimitValue: comercial,
+          totvs: response.data,
+        },
+        `Limite da filial ${branch} atualizado no TOTVS`,
+      );
+    } catch (error) {
+      return handleTotvsError(res, error, payload);
+    }
+  }),
+);
+
 export default router;
