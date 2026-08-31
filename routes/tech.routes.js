@@ -9,6 +9,7 @@ import { createClient } from '@supabase/supabase-js';
 import supabase from '../config/supabase.js';
 import supabaseFiscal from '../config/supabaseFiscal.js';
 import { getToken } from '../utils/totvsTokenManager.js';
+import { listUazapiInstancesRaw } from '../config/uazapi.js';
 import {
   asyncHandler,
   successResponse,
@@ -177,6 +178,122 @@ router.get(
     const { data, error } = await query;
     if (error) return errorResponse(res, error.message, 500);
     return successResponse(res, { chips: data || [], total: (data || []).length });
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
+// POST /api/tech/chips/verificar-whatsapp
+// Checa CADA número dos chips na uazapi (existe no WhatsApp?), atualiza
+// o campo tem_whatsapp e retorna a lista dos que NÃO têm. Usa a primeira
+// instância uazapi conectada só para consultar (não envia mensagem).
+// Body opcional: { somenteAtivos: true } — checa só chips ativos.
+// ──────────────────────────────────────────────────────────────
+router.post(
+  '/chips/verificar-whatsapp',
+  asyncHandler(async (req, res) => {
+    const BASE = process.env.UAZAPI_BASE_URL || '';
+    if (!BASE) {
+      return errorResponse(res, 'UAZAPI_BASE_URL não configurado', 503, 'NO_UAZAPI');
+    }
+    const somenteAtivos = req.body?.somenteAtivos !== false; // default: só ativos
+
+    // 1) Instância conectada (para consultar números)
+    const instancias = await listUazapiInstancesRaw();
+    const conectada = (instancias || []).find((i) => i.status === 'connected');
+    if (!conectada?.token) {
+      return errorResponse(
+        res,
+        'Nenhuma instância uazapi conectada para verificar os números',
+        503,
+        'NO_INSTANCE',
+      );
+    }
+
+    // 2) Carrega chips
+    let query = supabase.from('tech_chips').select('id, numero, tem_whatsapp');
+    if (somenteAtivos) query = query.eq('status', 'ativo');
+    const { data: chips, error } = await query;
+    if (error) return errorResponse(res, error.message, 500);
+
+    // Normaliza para 55 + DDD + número (só dígitos)
+    const norm = (n) => {
+      let d = String(n || '').replace(/\D/g, '');
+      if (!d) return null;
+      if (!d.startsWith('55')) d = '55' + d;
+      return d;
+    };
+
+    // 3) Checa um a um na uazapi (concorrência limitada para não sobrecarregar)
+    const semWhatsapp = [];
+    const comWhatsapp = [];
+    const erros = [];
+    let atualizados = 0;
+
+    const checarNumero = async (chip) => {
+      const num = norm(chip.numero);
+      if (!num) {
+        erros.push({ numero: chip.numero, motivo: 'número inválido' });
+        return;
+      }
+      try {
+        const { data } = await axios.post(
+          `${BASE}/chat/check`,
+          { numbers: [num] },
+          {
+            headers: { token: conectada.token, 'Content-Type': 'application/json' },
+            timeout: 12000,
+          },
+        );
+        // Resposta tolerante: array direto, ou {result|numbers|data:[...]}
+        const arr = Array.isArray(data)
+          ? data
+          : data?.result || data?.numbers || data?.data || [];
+        const item = Array.isArray(arr) ? arr[0] : arr;
+        const flag =
+          item?.isInWhatsapp ??
+          item?.isInWhatsApp ??
+          item?.exists ??
+          item?.onWhatsapp;
+        const isIn = typeof flag === 'boolean' ? flag : null;
+        if (isIn === null || item == null) {
+          erros.push({ numero: chip.numero, motivo: 'resposta inesperada da uazapi' });
+          return;
+        }
+        // Atualiza no banco se mudou
+        if (Boolean(chip.tem_whatsapp) !== isIn) {
+          await supabase
+            .from('tech_chips')
+            .update({ tem_whatsapp: isIn })
+            .eq('id', chip.id);
+          atualizados += 1;
+        }
+        if (isIn) comWhatsapp.push(chip.numero);
+        else semWhatsapp.push(chip.numero);
+      } catch (e) {
+        const motivo =
+          e.response?.data?.error || e.response?.data?.message || e.message;
+        erros.push({ numero: chip.numero, motivo: String(motivo).slice(0, 200) });
+      }
+    };
+
+    // Pool de concorrência = 4 (checa "um a um", mas 4 em paralelo p/ ser viável)
+    const CONC = 4;
+    for (let i = 0; i < (chips || []).length; i += CONC) {
+      await Promise.all((chips || []).slice(i, i + CONC).map(checarNumero));
+    }
+
+    semWhatsapp.sort();
+    comWhatsapp.sort();
+    return successResponse(res, {
+      total: (chips || []).length,
+      com_whatsapp: comWhatsapp.length,
+      sem_whatsapp: semWhatsapp.length,
+      atualizados,
+      erros: erros.length,
+      numeros_sem_whatsapp: semWhatsapp,
+      detalhe_erros: erros,
+      instancia: conectada.name,
+    });
   }),
 );
 
