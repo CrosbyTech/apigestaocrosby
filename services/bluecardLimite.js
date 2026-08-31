@@ -153,14 +153,31 @@ export async function levantarTitulos(customerCode) {
  * /cliente/update-limit: se o TOTVS recusar um campo (parâmetro IN_USA_*
  * desligado), remove o campo de todas as branches e tenta de novo.
  */
-export async function definirLimiteTotvs({ cpf, nome, valorReais, branchCodes }) {
+export async function definirLimiteTotvs({
+  cpf,
+  nome,
+  valorReais,
+  branchCodes,
+  valoresPorBranch = null,
+}) {
   if (!branchCodes?.length) throw new Error('branchCodes vazio');
-  let campos = ['saleLimitValue', 'monthlyLimitValue', 'financialLimitValue'];
+  // limitValue (financeiro) e saleLimitValue (comercial) SEMPRE juntos: o POST
+  // substitui o registro de limite da filial por inteiro, entao mandar so o
+  // comercial ZERAVA o financeiro como efeito colateral — era isso que engolia
+  // limites definidos manualmente. monthlyLimitValue fica de fora
+  // (IN_USA_LIMITE_MENSAL=0 nesta instalacao: o TOTVS recusa o payload todo se
+  // ele vier) e financialLimitValue nao existe na API 2.8.25.
+  // valoresPorBranch ({ branch: valor }) permite valor diferente por filial —
+  // e como o zerar restaura o snapshot; sem ele, valorReais vale para todas.
+  let campos = ['limitValue', 'saleLimitValue'];
 
   for (let tentativa = 1; tentativa <= 3; tentativa++) {
     const limits = branchCodes.map((bc) => {
       const o = { branchCode: Number(bc) };
-      for (const c of campos) o[c] = valorReais;
+      const valor = valoresPorBranch
+        ? Number(valoresPorBranch[bc] ?? valoresPorBranch[String(bc)] ?? 0)
+        : valorReais;
+      for (const c of campos) o[c] = valor;
       return o;
     });
     // sanitizePayload preserva 0 (só remove '', null, undefined, NaN)
@@ -185,8 +202,9 @@ export async function definirLimiteTotvs({ cpf, nome, valorReais, branchCodes })
           ['salelimit', 'saleLimitValue'],
           ['limite_mensal', 'monthlyLimitValue'],
           ['monthlylimit', 'monthlyLimitValue'],
-          ['limite_financeiro', 'financialLimitValue'],
-          ['financiallimit', 'financialLimitValue'],
+          ['limite_financeiro', 'limitValue'],
+          ['financiallimit', 'limitValue'],
+          ['limitvalue', 'limitValue'],
         ]) {
           if (msg.includes(flag) && campos.includes(campo)) {
             campos = campos.filter((c) => c !== campo);
@@ -198,6 +216,27 @@ export async function definirLimiteTotvs({ cpf, nome, valorReais, branchCodes })
     }
   }
   throw new Error('TOTVS recusou o limite após múltiplas tentativas');
+}
+
+/**
+ * Limite FINANCEIRO vigente por filial ({ branch: valor }). E o unico campo de
+ * limite legivel na API — o comercial nao aparece em consulta nenhuma. O
+ * snapshot disto e o que o zerar restaura.
+ */
+export async function lerLimitesFinanceiros(customerCode, branchCodes) {
+  const resp = await postTotvs('/person/v2/individuals/search', {
+    filter: { personCodeList: [Number(customerCode)] },
+    option: { branchStaticDataList: branchCodes.map(Number) },
+    expand: 'statistics',
+    page: 1,
+    pageSize: 1,
+  });
+  const stats = resp.data?.items?.[0]?.statistics || [];
+  const mapa = {};
+  for (const st of stats) {
+    if (st.limitValue) mapa[st.branchCode] = Number(st.limitValue);
+  }
+  return mapa;
 }
 
 /**
@@ -236,6 +275,19 @@ export async function liberarLimiteParaCompra(compra) {
   const limiteReais = Math.round((valorReais + abertosReais) * 100) / 100;
 
   const branchCodes = await listarBranchesLimite();
+
+  // Fotografa o financeiro vigente ANTES de subir — o zerar restaura isto em
+  // vez de deixar 0, senao qualquer limite definido manualmente (Analise de
+  // Credito, tela de Creditos Clientes) era destruido ao fim de cada compra.
+  let limitesAnteriores = {};
+  try {
+    limitesAnteriores = await lerLimitesFinanceiros(cliente.code, branchCodes);
+  } catch (e) {
+    console.warn(
+      `⚠️ [bluecard-limite] snapshot do limite anterior falhou (${e.message}) — o zerar voltara a 0`,
+    );
+  }
+
   await definirLimiteTotvs({
     cpf,
     nome: cliente.name,
@@ -243,8 +295,7 @@ export async function liberarLimiteParaCompra(compra) {
     branchCodes,
   });
 
-  const { error } = await supabase.from('bluecard_liberacoes').upsert(
-    {
+  const registro = {
       compra_id: compra.id,
       documento: compra.documento || null,
       cpf,
@@ -258,9 +309,22 @@ export async function liberarLimiteParaCompra(compra) {
       status: 'liberado',
       liberado_em: new Date().toISOString(),
       atualizado_em: new Date().toISOString(),
-    },
-    { onConflict: 'compra_id' },
-  );
+      limites_anteriores: limitesAnteriores,
+  };
+  let { error } = await supabase
+    .from('bluecard_liberacoes')
+    .upsert(registro, { onConflict: 'compra_id' });
+  if (error && /limites_anteriores/i.test(error.message || '')) {
+    // Coluna ainda nao criada (migrations/bluecard_limites_anteriores.sql):
+    // segue sem snapshot para nao segurar a venda no caixa.
+    console.warn(
+      '⚠️ [bluecard-limite] coluna limites_anteriores ausente — rode a migration; liberando sem snapshot',
+    );
+    delete registro.limites_anteriores;
+    ({ error } = await supabase
+      .from('bluecard_liberacoes')
+      .upsert(registro, { onConflict: 'compra_id' }));
+  }
   if (error) {
     // Limite JÁ subiu no TOTVS — sem o registro o watchdog não zera depois.
     // Loga alto: precisa de intervenção manual se persistir.
@@ -277,13 +341,34 @@ export async function liberarLimiteParaCompra(compra) {
   return { cliente, limiteReais, branchCodes };
 }
 
-/** Zera o limite do cliente (nas mesmas branches da regra atual) e marca a liberação. */
+/**
+ * Fecha a janela de limite: RESTAURA o financeiro/comercial que existia antes
+ * da liberacao (snapshot em limites_anteriores) e marca a liberacao. Sem
+ * snapshot (liberacoes antigas ou falha na leitura), zera como antes — cliente
+ * crediario vive zerado por padrao, entao o fallback e o comportamento
+ * historico.
+ */
 export async function zerarLimite(liberacao, novoStatus) {
+  let anteriores = liberacao?.limites_anteriores || null;
+  if (!anteriores) {
+    try {
+      const { data } = await supabase
+        .from('bluecard_liberacoes')
+        .select('limites_anteriores')
+        .eq('compra_id', liberacao.compra_id)
+        .maybeSingle();
+      anteriores = data?.limites_anteriores || null;
+    } catch {
+      anteriores = null;
+    }
+  }
+  const temSnapshot = anteriores && Object.keys(anteriores).length > 0;
   await definirLimiteTotvs({
     cpf: liberacao.cpf,
     nome: liberacao.nome,
     valorReais: 0,
     branchCodes: await listarBranchesLimite(),
+    valoresPorBranch: temSnapshot ? anteriores : null,
   });
   await supabase
     .from('bluecard_liberacoes')
@@ -294,6 +379,6 @@ export async function zerarLimite(liberacao, novoStatus) {
     })
     .eq('compra_id', liberacao.compra_id);
   console.log(
-    `💳 [bluecard-limite] limite zerado: cpf=${liberacao.cpf} compra=${liberacao.compra_id} (${novoStatus})`,
+    `💳 [bluecard-limite] limite ${temSnapshot ? 'restaurado ao anterior' : 'zerado'}: cpf=${liberacao.cpf} compra=${liberacao.compra_id} (${novoStatus})`,
   );
 }
