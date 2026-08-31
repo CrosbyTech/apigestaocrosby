@@ -1162,11 +1162,14 @@ router.post(
     const fetchSellerNames = async () => {
       const names = new Map();
       try {
+        // ⚠️ O PostgREST corta em 1000 linhas (max-rows), então isto cobre
+        // só os dias mais recentes. Quem não vendeu nesses dias fica sem
+        // nome aqui e é resolvido depois, por código (passo 6.1).
         const { data, error } = await supabase
           .from('forecast_painel_vendas')
           .select('seller_code, seller_name, data')
           .order('data', { ascending: false })
-          .limit(5000);
+          .limit(1000);
         if (error) throw new Error(error.message);
         for (const r of data || []) {
           const code = Number(r.seller_code);
@@ -1707,6 +1710,50 @@ router.post(
       });
       cur.valor += p.valor;
       bySeller.set(code, cur);
+    }
+
+    // ─── 6.1) Nomes faltantes: busca dirigida por código ────────────────────
+    // A varredura geral (passo 3) é limitada às linhas mais recentes; um
+    // vendedor que não vendeu nesses dias chegaria aqui como "Vend. 26".
+    // Uma query por código (a lista de faltantes é curta) resolve sem
+    // depender da janela de datas.
+    const semNome = [...bySeller.values()]
+      .filter((s) => !s.seller_name && Number(s.seller_code) > 0)
+      .map((s) => Number(s.seller_code));
+    if (semNome.length > 0) {
+      const CONC = 8;
+      for (let i = 0; i < semNome.length; i += CONC) {
+        await Promise.all(
+          semNome.slice(i, i + CONC).map(async (code) => {
+            try {
+              const { data } = await supabase
+                .from('forecast_painel_vendas')
+                .select('seller_name')
+                .eq('seller_code', code)
+                .not('seller_name', 'is', null)
+                .order('data', { ascending: false })
+                .limit(1);
+              const nome = data?.[0]?.seller_name;
+              if (nome) sellerNames.set(code, nome);
+            } catch (e) {
+              console.warn(`[fat-vendedor/nome ${code}] ${e.message}`);
+            }
+          }),
+        );
+      }
+      let resolvidos = 0;
+      for (const s of bySeller.values()) {
+        if (!s.seller_name) {
+          const nome = sellerNames.get(Number(s.seller_code));
+          if (nome) {
+            s.seller_name = nome;
+            resolvidos++;
+          }
+        }
+      }
+      console.log(
+        `[fat-vendedor] nomes resolvidos por código: ${resolvidos}/${semNome.length}`,
+      );
     }
 
     const dataRow = [...bySeller.values()]
