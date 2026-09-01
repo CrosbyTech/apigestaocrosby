@@ -259,14 +259,22 @@ router.post(
           erros.push({ numero: chip.numero, motivo: 'resposta inesperada da uazapi' });
           return;
         }
-        // Atualiza no banco se mudou
-        if (Boolean(chip.tem_whatsapp) !== isIn) {
-          await supabase
+        // Sempre carimba a data da verificação; conta como "atualizado" só
+        // quando o status mudou. Se a coluna whatsapp_verificado_em ainda não
+        // existir no banco, refaz o update sem ela (não quebra a verificação).
+        const mudou = Boolean(chip.tem_whatsapp) !== isIn;
+        const nowIso = new Date().toISOString();
+        let upd = await supabase
+          .from('tech_chips')
+          .update({ tem_whatsapp: isIn, whatsapp_verificado_em: nowIso })
+          .eq('id', chip.id);
+        if (upd.error && /whatsapp_verificado_em/i.test(upd.error.message || '')) {
+          upd = await supabase
             .from('tech_chips')
             .update({ tem_whatsapp: isIn })
             .eq('id', chip.id);
-          atualizados += 1;
         }
+        if (mudou) atualizados += 1;
         if (isIn) comWhatsapp.push(chip.numero);
         else semWhatsapp.push(chip.numero);
       } catch (e) {
