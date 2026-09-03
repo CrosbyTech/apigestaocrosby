@@ -16,13 +16,13 @@ if "%PORTALIP%"=="" (
   echo config.json atualizado para %PORTALIP%
 )
 
-:: Tarefa agendada: roda o agente no logon do usuario (janela oculta)
-schtasks /Create /F /TN "CrosbyPortalRFID" /SC ONLOGON /RL LIMITED ^
-  /TR "wscript.exe \"%~dp0iniciar-oculto.vbs\"" >nul
-if %errorlevel% neq 0 (
-  echo AVISO: nao consegui criar a tarefa agendada. Rode iniciar.bat manualmente.
+:: Inicializacao automatica: atalho na pasta Startup do usuario (sem admin)
+set STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%STARTUP%\CrosbyPortalRFID.lnk'); $s.TargetPath='wscript.exe'; $s.Arguments='\"%~dp0iniciar-oculto.vbs\"'; $s.WorkingDirectory='%~dp0'; $s.Save()"
+if exist "%STARTUP%\CrosbyPortalRFID.lnk" (
+  echo Atalho criado na pasta Startup — o agente inicia junto com o Windows.
 ) else (
-  echo Tarefa "CrosbyPortalRFID" criada — o agente inicia junto com o Windows.
+  echo AVISO: nao consegui criar o atalho de inicializacao. Rode iniciar.bat manualmente.
 )
 
 :: Inicia agora
