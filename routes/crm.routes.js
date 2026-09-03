@@ -4122,7 +4122,7 @@ router.get(
     while (totalLidos < MAX_NFS) {
       let q = supabaseFiscal
         .from('notas_fiscais')
-        .select('person_code, person_name, total_value, issue_date, dealer_code, items')
+        .select('person_code, person_name, total_value, issue_date, dealer_code')
         .eq('operation_type', 'Output')
         .not('invoice_status', 'eq', 'Canceled')
         .not('invoice_status', 'eq', 'Deleted')
@@ -4147,27 +4147,12 @@ router.get(
       totalLidos += data.length;
 
       for (const nf of data) {
-        // Validação extra: confere se items tem dealer dominante diferente
-        // (caso a NF do dealer X seja na verdade dominada por outro vendedor)
-        let dealerDominante = parseInt(nf.dealer_code) || null;
-        if (Array.isArray(nf.items) && nf.items.length > 0) {
-          const netByDealer = {};
-          for (const it of nf.items) {
-            const prods = Array.isArray(it.products) ? it.products : [];
-            for (const p of prods) {
-              const dc = parseInt(p.dealerCode);
-              if (!isNaN(dc)) {
-                netByDealer[dc] =
-                  (netByDealer[dc] || 0) + (parseFloat(p.netValue) || 0);
-              }
-            }
-          }
-          const top = Object.entries(netByDealer).sort(
-            (a, b) => b[1] - a[1],
-          )[0];
-          if (top) dealerDominante = Number(top[0]);
-        }
-        // Mesmo com dealer_code filtrado no SQL, exige dominância correta
+        // Atribuição pelo dealer_code do cabeçalho (já filtrado no SQL). A
+        // revalidação por items[] foi REMOVIDA: carregar o JSONB items de
+        // milhares de NFs estourava o statement timeout (500 → lista sumia).
+        // O filtro .eq('dealer_code', vendedor_code) no SQL já garante a
+        // atribuição correta.
+        const dealerDominante = parseInt(nf.dealer_code) || null;
         if (vendedor_code && dealerDominante !== vendedor_code) continue;
 
         const pc = nf.person_code;
