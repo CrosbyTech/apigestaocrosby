@@ -187,6 +187,10 @@ const server = http.createServer(async (req, res) => {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
+      // Chrome Private Network Access: obrigatório para página HTTPS
+      // (headcoach em produção) poder falar com 127.0.0.1
+      'Access-Control-Allow-Private-Network': 'true',
+      'Access-Control-Allow-Local-Network': 'true',
     });
     return res.end();
   }
