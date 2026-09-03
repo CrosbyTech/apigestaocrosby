@@ -28,6 +28,6 @@ if exist "%STARTUP%\CrosbyPortalRFID.lnk" (
 :: Inicia agora e CONFERE se subiu de verdade
 start "" wscript.exe "%~dp0iniciar-oculto.vbs"
 echo Aguardando o agente subir...
-powershell -NoProfile -Command "Start-Sleep 3; try { $r = Invoke-RestMethod 'http://127.0.0.1:7070/health' -TimeoutSec 5; Write-Host ''; Write-Host ('AGENTE FUNCIONANDO! Portal configurado: ' + $r.data.portalHost) -ForegroundColor Green; Write-Host 'Abra o HeadCoach > Orcamento RFID e clique LIGAR PORTAL.' } catch { Write-Host ''; Write-Host 'ERRO: o agente NAO subiu.' -ForegroundColor Red; Write-Host 'Rode iniciar.bat (nesta pasta) para ver a mensagem de erro.'; Write-Host 'Causas comuns: Node.js muito antigo (instale o LTS de nodejs.org)' }"
+powershell -NoProfile -Command "Start-Sleep 3; $ok = $false; foreach ($p in 7070,7171,27070) { try { $r = Invoke-RestMethod ('http://127.0.0.1:' + $p + '/health') -TimeoutSec 3; Write-Host ''; Write-Host ('AGENTE FUNCIONANDO na porta ' + $p + '! Portal: ' + $r.data.portalHost) -ForegroundColor Green; Write-Host 'Abra o HeadCoach > Orcamento RFID e clique LIGAR PORTAL.'; $ok = $true; break } catch {} }; if (-not $ok) { Write-Host ''; Write-Host 'ERRO: o agente NAO subiu.' -ForegroundColor Red; Write-Host 'Rode iniciar.bat (nesta pasta) para ver a mensagem de erro.'; Write-Host 'Causas comuns: Node.js muito antigo (instale o LTS de nodejs.org)' }"
 echo.
 pause
