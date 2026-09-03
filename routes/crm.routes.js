@@ -4177,19 +4177,40 @@ router.get(
       off += PAGE;
     }
 
-    // Enriquece com telefone/cidade/uf
+    // Enriquece com telefone/cidade/uf. O telefone raramente está na coluna
+    // `telefone` (fica no array phones[]/contacts[]), então extraímos com
+    // fallback — senão o WhatsApp do Lead Generation fica sem número.
+    const extrairTelefone = (p) => {
+      if (p?.telefone && String(p.telefone).trim())
+        return String(p.telefone).replace(/\D/g, '');
+      for (const key of ['phones', 'contacts']) {
+        const lista = p?.[key];
+        if (Array.isArray(lista)) {
+          for (const ph of lista) {
+            if (typeof ph === 'string' && ph.trim())
+              return ph.replace(/\D/g, '');
+            if (ph && typeof ph === 'object') {
+              for (const k of ['number', 'phone', 'telefone', 'fone', 'ddd_number']) {
+                if (ph[k]) return String(ph[k]).replace(/\D/g, '');
+              }
+            }
+          }
+        }
+      }
+      return '';
+    };
     const codes = [...persons.keys()];
     if (codes.length > 0) {
       for (let i = 0; i < codes.length; i += 500) {
         const chunk = codes.slice(i, i + 500);
         const { data: peps } = await supabase
           .from('pes_pessoa')
-          .select('code, telefone, cidade, uf, fantasy_name, nm_pessoa')
+          .select('code, telefone, phones, contacts, cidade, uf, fantasy_name, nm_pessoa')
           .in('code', chunk);
         for (const p of peps || []) {
           const ex = persons.get(Number(p.code));
           if (ex) {
-            ex.person_telefone = p.telefone || '';
+            ex.person_telefone = extrairTelefone(p);
             ex.person_cidade = p.cidade || '';
             ex.person_uf = p.uf || '';
             if (!ex.person_nome) ex.person_nome = p.fantasy_name || p.nm_pessoa;
