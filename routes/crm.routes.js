@@ -4129,7 +4129,10 @@ router.get(
         .gte('issue_date', inicio)
         .gt('total_value', 0)
         .lt('person_code', 100000000)
-        .order('issue_date', { ascending: false })
+        // Sem ORDER BY: a agregação é independente de ordem e o sort do
+        // issue_date sobre o conjunto filtrado estourava o statement timeout
+        // do Postgres (causava 500 e a lista sumia no front). O last_purchase
+        // é calculado por cliente no loop, não precisa de ordenação global.
         .range(off, off + PAGE - 1);
       if (opCodes) q = q.in('operation_code', opCodes);
       // FILTRO CHAVE: filtra dealer_code direto no SQL (drasticamente reduz dados)
