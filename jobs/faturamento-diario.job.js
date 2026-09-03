@@ -159,8 +159,10 @@ function mapNfToRow(nf) {
     document_type_code: parseIntOrNull(nf.documentType),
     operation_type: nf.operationType ?? null,
     operation_code: parseIntOrNull(nf.operationCode),
-    // dealer_code é GENERATED no Supabase (calculado de items[].products[].dealerCode).
-    // NÃO inserir explicitamente — Postgres rejeita.
+    // dealer_code: vendedor predominante dos items[].products[].dealerCode.
+    // Antes era coluna GENERATED no Supabase, mas ao recriar a tabela a
+    // geração se perdeu (ficou null). Agora o app preenche explicitamente.
+    dealer_code: getDominantDealer(nf),
     operation_name: nf.operatioName ?? nf.operationName ?? null,
     inclusion_component_code: nf.inclusionComponentCode ?? null,
     peripheral_pdv_code: nf.peripheralPdvCode ?? null,

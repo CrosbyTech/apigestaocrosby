@@ -2350,10 +2350,28 @@ router.post(
       return isNaN(n) ? null : n;
     };
 
+    // Vendedor predominante dos items[].products[].dealerCode (mesma regra do
+    // sync diário). dealer_code deixou de ser coluna gerada ao recriar a
+    // tabela, então preenchemos explicitamente.
+    const domDealer = (nf) => {
+      const its = Array.isArray(nf?.items) ? nf.items : [];
+      const cnt = new Map();
+      for (const it of its) {
+        for (const p of Array.isArray(it?.products) ? it.products : []) {
+          const n = Number(p?.dealerCode ?? p?.sellerCode);
+          if (Number.isFinite(n)) cnt.set(n, (cnt.get(n) || 0) + 1);
+        }
+      }
+      let best = null;
+      let max = 0;
+      for (const [k, v] of cnt) if (v > max) { max = v; best = k; }
+      return best;
+    };
     const rows = items
       .map((nf) => ({
         // --- IdentificaÃ§Ã£o ---
         branch_code: parseIntOrNull(nf.branchCode),
+        dealer_code: domDealer(nf),
         branch_cnpj: nf.branchCnpj ?? null,
         transaction_code: parseIntOrNull(nf.transactionCode),
         transaction_branch_code: parseIntOrNull(nf.transactionBranchCode),
