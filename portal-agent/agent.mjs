@@ -187,6 +187,10 @@ const server = http.createServer(async (req, res) => {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
+      // Chrome Private Network Access: obrigatório para página HTTPS
+      // (headcoach em produção) poder falar com 127.0.0.1
+      'Access-Control-Allow-Private-Network': 'true',
+      'Access-Control-Allow-Local-Network': 'true',
     });
     return res.end();
   }
@@ -260,11 +264,34 @@ const server = http.createServer(async (req, res) => {
   res.end('{"success":false,"message":"rota desconhecida"}');
 });
 
-server.listen(config.listenPort, '127.0.0.1', () => {
-  console.log('==============================================');
-  console.log(' AGENTE DO PORTAL RFID — Crosby');
-  console.log(` Escutando em http://127.0.0.1:${config.listenPort}`);
-  console.log(` Portal configurado: ${hostCfg}:${portCfg}`);
-  console.log(' (edite config.json para trocar o IP do portal)');
-  console.log('==============================================');
-});
+// Algumas máquinas têm faixas de porta reservadas pelo Windows (Hyper-V/WSL)
+// que causam EACCES — tenta a porta do config e cai para as alternativas.
+// A página do HeadCoach procura o agente nas mesmas portas.
+const PORT_CANDIDATES = [
+  ...new Set([config.listenPort, 7070, 7171, 27070]),
+];
+
+function tryListen(idx = 0) {
+  if (idx >= PORT_CANDIDATES.length) {
+    console.error('ERRO: nenhuma porta disponível', PORT_CANDIDATES);
+    process.exit(1);
+  }
+  const porta = PORT_CANDIDATES[idx];
+  server.once('error', (e) => {
+    if (e.code === 'EACCES' || e.code === 'EADDRINUSE') {
+      console.log(`porta ${porta} indisponível (${e.code}) — tentando a próxima...`);
+      tryListen(idx + 1);
+    } else {
+      throw e;
+    }
+  });
+  server.listen(porta, '127.0.0.1', () => {
+    console.log('==============================================');
+    console.log(' AGENTE DO PORTAL RFID — Crosby');
+    console.log(` Escutando em http://127.0.0.1:${porta}`);
+    console.log(` Portal configurado: ${hostCfg}:${portCfg}`);
+    console.log(' (edite config.json para trocar o IP do portal)');
+    console.log('==============================================');
+  });
+}
+tryListen();
