@@ -1,0 +1,5 @@
+{
+  "portalHost": "192.168.0.202",
+  "portalPort": 8888,
+  "listenPort": 7070
+}

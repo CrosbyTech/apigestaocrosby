@@ -552,6 +552,60 @@ router.post('/send-document', async (req, res) => {
   }
 });
 
+// POST /api/whatsapp/send-pdf-base64 — envia um PDF gerado na hora (base64)
+// Usado pelo Orçamento RFID: o frontend gera o PDF (jsPDF) e envia direto.
+router.post('/send-pdf-base64', async (req, res) => {
+  try {
+    const { telefone, nomeArquivo, base64, mensagem } = req.body;
+    if (!telefone || !nomeArquivo || !base64) {
+      return res
+        .status(400)
+        .json({ error: 'telefone, nomeArquivo e base64 são obrigatórios' });
+    }
+    if (!/^[a-zA-Z0-9_\-\.]+\.pdf$/i.test(nomeArquivo)) {
+      return res.status(400).json({ error: 'Nome de arquivo inválido (.pdf)' });
+    }
+    // ~10 MB de PDF em base64
+    if (base64.length > 14 * 1024 * 1024) {
+      return res.status(413).json({ error: 'PDF muito grande (máx ~10MB)' });
+    }
+    if (!isReady()) {
+      return res.status(503).json({
+        error: 'WhatsApp não está conectado',
+        status: getStatus(),
+        fallback: true,
+      });
+    }
+
+    const media = new MessageMedia('application/pdf', base64, nomeArquivo);
+
+    let telefoneLimpo = telefone.replace(/\D/g, '');
+    if (!(telefoneLimpo.startsWith('55') && telefoneLimpo.length >= 12)) {
+      telefoneLimpo = `55${telefoneLimpo}`;
+    }
+    const numberId = await client.getNumberId(telefoneLimpo);
+    if (!numberId) {
+      return res.status(400).json({
+        error: `Número ${telefoneLimpo} não possui WhatsApp`,
+        fallback: true,
+      });
+    }
+    await client.sendMessage(numberId._serialized, media, {
+      caption: mensagem || '',
+    });
+    logger.info(
+      `📤 [Orçamento] PDF enviado via WhatsApp para ${numberId._serialized}: ${nomeArquivo}`,
+    );
+    res.json({ success: true, destinatario: numberId._serialized });
+  } catch (error) {
+    const errMsg = error?.message || String(error);
+    logger.error(`Erro ao enviar PDF base64 WhatsApp: ${errMsg}`);
+    res
+      .status(500)
+      .json({ error: 'Erro ao enviar PDF', details: errMsg, fallback: true });
+  }
+});
+
 // POST /api/whatsapp/register-nf-request — registra solicitação de NF pendente
 router.post('/register-nf-request', async (req, res) => {
   try {

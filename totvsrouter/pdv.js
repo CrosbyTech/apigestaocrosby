@@ -54,6 +54,110 @@ async function callTotvs(method, url, { data, params, timeout } = {}) {
   }
 }
 
+// Cache dos cabeçalhos de tabela de preço (tipo + percentual de variação)
+const tableHeaderCache = new Map(); // code → { header, at }
+const TABLE_HEADER_TTL = 30 * 60 * 1000;
+
+async function getTableHeader(tableCode) {
+  const cached = tableHeaderCache.get(tableCode);
+  if (cached && Date.now() - cached.at < TABLE_HEADER_TTL) return cached.header;
+  const resp = await callTotvs(
+    'get',
+    `${TOTVS_BASE_URL}/product/v2/price-tables-headers`,
+    { params: { PriceTableCodeList: tableCode, Page: 1, PageSize: 5 } },
+  );
+  const header = (resp.data?.items || []).find((h) => h.code === tableCode) || null;
+  tableHeaderCache.set(tableCode, { header, at: Date.now() });
+  return header;
+}
+
+// Preço-base para tabelas "capa de pedido": 4=ATACADO; se zerado, 1=VAREJO
+const BASE_PRICE_CODE = parseInt(process.env.PDV_BASE_PRICE_CODE || '4', 10);
+
+async function fetchPrice(productCode, branch, priceCode) {
+  try {
+    const resp = await callTotvs(
+      'post',
+      `${TOTVS_BASE_URL}/product/v2/prices/search`,
+      {
+        data: {
+          filter: { productCodeList: [productCode] },
+          option: {
+            prices: [
+              { branchCode: branch, priceCodeList: [priceCode], isPromotionalPrice: true },
+            ],
+          },
+          page: 1,
+          pageSize: 5,
+        },
+      },
+    );
+    const p = resp.data?.items?.[0]?.prices?.[0];
+    if (!p) return 0;
+    return p.promotionalPrice > 0 ? p.promotionalPrice : p.price || 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Resolve o preço do produto na tabela do cliente (por item OU capa de pedido)
+async function resolveTablePrice(productCode, branch, tableCode) {
+  // 1) Tabela por item — preço direto
+  try {
+    const ptResp = await callTotvs(
+      'post',
+      `${TOTVS_BASE_URL}/product/v2/price-tables/search`,
+      {
+        data: {
+          filter: { productCodeList: [productCode] },
+          option: { branchCodeList: [branch], priceTableCode: tableCode },
+          page: 1,
+          pageSize: 5,
+        },
+      },
+    );
+    const pt = ptResp.data?.items?.[0]?.prices?.[0];
+    if (pt && (pt.price > 0 || pt.originalPrice > 0)) {
+      return {
+        priceTableCode: tableCode,
+        price: pt.price > 0 ? pt.price : pt.originalPrice,
+        method: 'item',
+      };
+    }
+  } catch {
+    // tabela tipo OrderHeader cai aqui ("Field Type ... invalid value OrderHeader")
+  }
+
+  // 2) Tabela capa de pedido — variação % sobre o preço-base (atacado)
+  try {
+    const header = await getTableHeader(tableCode);
+    if (header && header.variationPercentage != null) {
+      let base = await fetchPrice(productCode, branch, BASE_PRICE_CODE);
+      let baseCode = BASE_PRICE_CODE;
+      if (!(base > 0)) {
+        base = await fetchPrice(productCode, branch, 1);
+        baseCode = 1;
+      }
+      if (base > 0) {
+        const price = Math.round(base * (1 + header.variationPercentage / 100) * 100) / 100;
+        return {
+          priceTableCode: tableCode,
+          price,
+          method: 'variacao',
+          basePriceCode: baseCode,
+          basePrice: base,
+          variationPercentage: header.variationPercentage,
+        };
+      }
+    }
+  } catch (err) {
+    console.log(
+      `⚠️ [PDV] Tabela ${tableCode} (capa) indisponível p/ produto ${productCode}: ${err.message}`,
+    );
+  }
+  return null;
+}
+
 // =============================================================================
 // GET /pdv/product/:code?branch=2&priceCodes=1,2
 // Consulta produto por código interno, EAN ou EPC RFID + preço na filial.
@@ -99,7 +203,19 @@ router.get(
       );
     }
 
-    // Preço do produto na filial (não bloqueia a resposta se falhar —
+    // Preço pela TABELA DO CLIENTE (?priceTable=N) — usado pelo Orçamento.
+    // Dois tipos de tabela no TOTVS:
+    //  - por ITEM: price-tables/search devolve o preço direto;
+    //  - "capa de pedido" (OrderHeader, ex.: TABELA REVENDEDOR GERAL 80%):
+    //    o preço é o ATACADO (código 4) × (1 + variationPercentage/100).
+    //    Validado com produto 67379: atacado 94,50 × 1,1111 = 105,00.
+    const priceTable = parseInt(req.query.priceTable, 10);
+    let tablePrice = null;
+    if (priceTable) {
+      tablePrice = await resolveTablePrice(item.productCode, branch, priceTable);
+    }
+
+    // Preço padrão do produto na filial (não bloqueia a resposta se falhar —
     // a tela permite digitar o valor manualmente)
     let prices = [];
     try {
@@ -130,7 +246,70 @@ router.get(
       );
     }
 
-    return successResponse(res, { product: item, prices }, 'Produto encontrado');
+    return successResponse(
+      res,
+      { product: item, prices, tablePrice },
+      'Produto encontrado',
+    );
+  }),
+);
+
+// =============================================================================
+// GET /pdv/customer/:code — dados do cliente p/ orçamento: tabela de preço
+// (preferências do cadastro), telefone e documento. Tenta PJ e PF.
+// =============================================================================
+router.get(
+  '/pdv/customer/:code',
+  asyncHandler(async (req, res) => {
+    const code = parseInt(req.params.code, 10);
+    if (!code) {
+      return errorResponse(res, 'Código inválido', 400, 'INVALID_CODE');
+    }
+    const payload = {
+      filter: { personCodeList: [code] },
+      expand: 'phones,preferences',
+      page: 1,
+      pageSize: 1,
+    };
+    const [pj, pf] = await Promise.allSettled([
+      callTotvs('post', `${TOTVS_BASE_URL}/person/v2/legal-entities/search`, {
+        data: payload,
+      }),
+      callTotvs('post', `${TOTVS_BASE_URL}/person/v2/individuals/search`, {
+        data: payload,
+      }),
+    ]);
+    const item =
+      (pj.status === 'fulfilled' && pj.value.data?.items?.[0]) ||
+      (pf.status === 'fulfilled' && pf.value.data?.items?.[0]) ||
+      null;
+    if (!item) {
+      return errorResponse(
+        res,
+        `Cliente ${code} não encontrado`,
+        404,
+        'CUSTOMER_NOT_FOUND',
+      );
+    }
+    const phone =
+      (item.phones || [])
+        .map((p) => p.number || p.phoneNumber || p.phone)
+        .find(Boolean) || null;
+    return successResponse(
+      res,
+      {
+        code,
+        name: item.name || item.fantasyName,
+        cpfCnpj: item.cpf || item.cnpj || null,
+        phone,
+        priceTableCode: item.preferences?.priceTableCode ?? null,
+        priceTableDescription:
+          item.preferences?.priceTableDescription ?? null,
+        paymentConditionCode:
+          item.preferences?.paymentConditionCode ?? null,
+      },
+      'Dados do cliente',
+    );
   }),
 );
 
@@ -628,6 +807,286 @@ router.get(
         items: enriched,
       },
       `Transação ${code} com ${enriched.length} item(ns)`,
+    );
+  }),
+);
+
+// =============================================================================
+// PRÉ-VENDA (Orçamento RFID → Fechar Pré-Venda)
+// Fluxo: escolhe forma de pagamento → PIX/cartão geram link Pagar.me;
+// boleto confere o limite do cliente no TOTVS; dinheiro segue direto.
+// Em todos os casos gera a transação "em andamento" no TOTVS para o
+// faturista emitir a nota.
+// =============================================================================
+const PAGARME_SK = process.env.PAGARME_SECRET_KEY || '';
+const pagarmeAuth = () =>
+  'Basic ' + Buffer.from(`${PAGARME_SK}:`).toString('base64');
+
+async function criarLinkPagamento({
+  nome,
+  valorCentavos,
+  metodo,
+  cardType = 'credito',
+  installments = 1,
+  lockInstallments = false,
+}) {
+  const paymentSettings = {};
+  if (metodo === 'pix') {
+    paymentSettings.accepted_payment_methods = ['pix'];
+    paymentSettings.pix_settings = { expires_in: 60 * 60 * 48 };
+  } else if (cardType === 'debito') {
+    paymentSettings.accepted_payment_methods = ['debit_card'];
+    paymentSettings.debit_card_settings = {};
+  } else {
+    // Crédito: lockInstallments=true trava EXATAMENTE em N parcelas;
+    // false oferece de 1x até Nx (sempre sem juros — total = valor cheio)
+    const n = Math.min(Math.max(parseInt(installments, 10) || 1, 1), 12);
+    const lista = lockInstallments
+      ? [{ number: n, total: valorCentavos }]
+      : Array.from({ length: n }, (_, i) => ({
+          number: i + 1,
+          total: valorCentavos,
+        }));
+    paymentSettings.accepted_payment_methods = ['credit_card'];
+    paymentSettings.credit_card_settings = {
+      operation_type: 'auth_and_capture',
+      installments: lista,
+    };
+  }
+  const body = {
+    is_building: false,
+    type: 'order',
+    name: nome.slice(0, 64),
+    payment_settings: paymentSettings,
+    cart_settings: {
+      items: [
+        { amount: valorCentavos, name: nome.slice(0, 64), default_quantity: 1 },
+      ],
+    },
+  };
+  const r = await fetch('https://api.pagar.me/core/v5/paymentlinks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: pagarmeAuth() },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  if (!r.ok) {
+    throw new Error(
+      `Pagar.me recusou o link: ${j?.message || JSON.stringify(j).slice(0, 200)}`,
+    );
+  }
+  return { id: j.id, url: j.url };
+}
+
+// POST /pdv/prevenda/fechar
+// Body: { branchCode, customerCode, customerName, sellerCode, total,
+//         paymentMethod: 'pix'|'cartao'|'dinheiro'|'boleto',
+//         operationCode, paymentConditionCode, cfop,
+//         items: [{ productCode, quantity, value, discountValue? }],
+//         orcamentoId? }
+router.post(
+  '/pdv/prevenda/fechar',
+  asyncHandler(async (req, res) => {
+    const {
+      branchCode,
+      customerCode,
+      customerName,
+      sellerCode,
+      total,
+      paymentMethod,
+      operationCode,
+      paymentConditionCode,
+      cfop,
+      items,
+      orcamentoId,
+    } = req.body || {};
+
+    if (
+      !branchCode ||
+      !customerCode ||
+      !sellerCode ||
+      !total ||
+      !paymentMethod ||
+      !operationCode ||
+      !paymentConditionCode ||
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
+      return errorResponse(res, 'Payload incompleto', 400, 'INVALID_PAYLOAD');
+    }
+
+    // ── BOLETO: confere o limite do cliente no TOTVS ─────────────────────────
+    // A rota EXIGE option.branchCodeList (sem ele, 500 "Object reference").
+    // O limite pode estar cadastrado na empresa da venda ou na matriz (1) —
+    // consulta a empresa da venda e cai para a matriz se não houver limite lá.
+    let limite = null;
+    if (paymentMethod === 'boleto') {
+      const consultarLimite = async (branches) => {
+        const balResp = await callTotvs(
+          'post',
+          `${TOTVS_BASE_URL}/accounts-receivable/v2/customer-financial-balance/search`,
+          {
+            data: {
+              filter: { customerCodeList: [customerCode] },
+              option: { branchCodeList: branches },
+              page: 1,
+              pageSize: 5,
+            },
+          },
+        );
+        const values = balResp.data?.items?.[0]?.values || [];
+        const limitValue = values.reduce((s, v) => s + (v.limitValue || 0), 0);
+        const emAberto = values.reduce(
+          (s, v) => s + (v.openInvoiceValue || 0),
+          0,
+        );
+        return { limitValue, emAberto, disponivel: limitValue - emAberto };
+      };
+
+      limite = await consultarLimite([parseInt(branchCode, 10)]);
+      if (limite.limitValue <= 0 && parseInt(branchCode, 10) !== 1) {
+        const matriz = await consultarLimite([1]);
+        if (matriz.limitValue > 0) limite = { ...matriz, origem: 'matriz' };
+      }
+
+      if (limite.limitValue <= 0 || limite.disponivel < total) {
+        return errorResponse(
+          res,
+          limite.limitValue <= 0
+            ? 'Cliente sem limite para boleto'
+            : `Limite insuficiente: disponível R$ ${limite.disponivel.toFixed(2)}, orçamento R$ ${Number(total).toFixed(2)}`,
+          422,
+          'SEM_LIMITE_BOLETO',
+          limite,
+        );
+      }
+    }
+
+    // ── PIX / CARTÃO: cria o link de pagamento na Pagar.me ─────────────────
+    let paymentLink = null;
+    if (paymentMethod === 'pix' || paymentMethod === 'cartao') {
+      if (!PAGARME_SK) {
+        return errorResponse(
+          res,
+          'PAGARME_SECRET_KEY não configurada no backend',
+          500,
+          'PAGARME_NOT_CONFIGURED',
+        );
+      }
+      paymentLink = await criarLinkPagamento({
+        nome: `Pedido Crosby${orcamentoId ? ` #${String(orcamentoId).slice(-6)}` : ''} - ${customerName || customerCode}`,
+        valorCentavos: Math.round(Number(total) * 100),
+        metodo: paymentMethod,
+        cardType: req.body.cardType,
+        installments: req.body.installments,
+        lockInstallments: req.body.lockInstallments,
+      });
+    }
+
+    // ── Transação "em andamento" no TOTVS (p/ o faturista) ──────────────────
+    const trxPayload = {
+      branchCode: parseInt(branchCode, 10),
+      customerCode: parseInt(customerCode, 10),
+      sellerCode: parseInt(sellerCode, 10),
+      operationCode: parseInt(operationCode, 10),
+      paymentConditionCode: parseInt(paymentConditionCode, 10),
+      isPreSale: false,
+      status: 1,
+      totalAmountTransaction: Number(Number(total).toFixed(2)),
+      items: items.map((i) => ({
+        productCode: i.productCode,
+        quantity: i.quantity,
+        value: Number(Number(i.value).toFixed(3)),
+        ...(i.discountValue > 0
+          ? { discountValue: Number(Number(i.discountValue).toFixed(3)) }
+          : {}),
+        cfop: parseInt(cfop || '5102', 10),
+      })),
+    };
+
+    console.log(
+      `🧾 [PréVenda] Fechando: filial ${branchCode}, cliente ${customerCode}, ${items.length} itens, ${paymentMethod}, total ${total}`,
+    );
+
+    try {
+      const resp = await callTotvs(
+        'post',
+        `${TOTVS_BASE_URL}/general/v2/transactions`,
+        { data: trxPayload },
+      );
+      console.log(`✅ [PréVenda] Transação: ${JSON.stringify(resp.data)}`);
+      return successResponse(
+        res,
+        { transaction: resp.data, paymentLink, limite, paymentMethod },
+        'Pré-venda fechada',
+      );
+    } catch (err) {
+      const detail = err.response?.data;
+      console.error(
+        `❌ [PréVenda] TOTVS recusou a transação:`,
+        JSON.stringify(detail || err.message).slice(0, 400),
+      );
+      return errorResponse(
+        res,
+        Array.isArray(detail)
+          ? detail.map((d) => d.message || d.detailedMessage).join('; ')
+          : detail?.message || err.message,
+        err.response?.status || 502,
+        'TOTVS_TRANSACTION_ERROR',
+        { detail, paymentLink },
+      );
+    }
+  }),
+);
+
+// GET /pdv/prevenda/pagamento/:linkId — status do pagamento do link
+// Quando pago (cartão), devolve autorização e NSU para conciliação.
+router.get(
+  '/pdv/prevenda/pagamento/:linkId',
+  asyncHandler(async (req, res) => {
+    const { linkId } = req.params;
+    if (!/^pl_[A-Za-z0-9]+$/.test(linkId)) {
+      return errorResponse(res, 'linkId inválido', 400, 'INVALID_LINK');
+    }
+    const r = await fetch(
+      `https://api.pagar.me/core/v5/orders?code=${encodeURIComponent(linkId)}`,
+      { headers: { Authorization: pagarmeAuth() } },
+    );
+    const j = await r.json();
+    if (!r.ok) {
+      return errorResponse(
+        res,
+        j?.message || 'Falha ao consultar Pagar.me',
+        502,
+        'PAGARME_ERROR',
+      );
+    }
+    const orders = j?.data || [];
+    if (orders.length === 0) {
+      return successResponse(
+        res,
+        { paid: false, status: 'aguardando' },
+        'Ainda sem pagamento',
+      );
+    }
+    // Pega o pedido mais recente do link
+    const order = orders[0];
+    const charge = (order.charges || [])[0] || null;
+    const tx = charge?.last_transaction || null;
+    return successResponse(
+      res,
+      {
+        paid: order.status === 'paid',
+        status: order.status,
+        method: charge?.payment_method || null,
+        amount: (order.amount || 0) / 100,
+        authCode: tx?.acquirer_auth_code || null,
+        nsu: tx?.acquirer_nsu || null,
+        tid: tx?.acquirer_tid || null,
+        cardBrand: tx?.card?.brand || null,
+        cardLast4: tx?.card?.last_four_digits || null,
+      },
+      'Status do pagamento',
     );
   }),
 );
