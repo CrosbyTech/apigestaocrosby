@@ -6869,27 +6869,11 @@ router.post(
     const categoria =
       getClickupField(task, 'Categoria do Lead') || 'Sem Categoria';
 
-    // 5) Atualiza Vendedor no ClickUp
-    try {
-      await axios.post(
-        `https://api.clickup.com/api/v2/task/${taskId}/field/${VENDOR_FIELD_ID}`,
-        { value: paraVendedorClickupId },
-        {
-          headers: {
-            Authorization: CLICKUP_API_KEY,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000,
-        },
-      );
-    } catch (err) {
-      return errorResponse(
-        res,
-        `Falha ao atualizar vendedor no ClickUp: ${err.response?.data?.err || err.message}`,
-        err.response?.status || 500,
-        'CLICKUP_UPDATE_FAIL',
-      );
-    }
+    // 5) Escrita no ClickUp DESATIVADA: o board não é mais usado, então não
+    // reatribuímos o vendedor lá. A transferência é registrada apenas
+    // internamente (crm_roubos, abaixo) para os cards de Ganho/Perdido.
+    // Leitura/validação (steps 1-4) seguem valendo enquanto o CRM lê do ClickUp.
+    // await axios.post(`.../task/${taskId}/field/${VENDOR_FIELD_ID}`, { value: paraVendedorClickupId }, ...)
 
     // 6) Registra em crm_roubos (status='cedido' → conta como Ganho/Perdido nos cards)
     const phoneById = (() => {

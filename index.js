@@ -211,7 +211,9 @@ app.listen(PORT, async () => {
   iniciarPainelVendasSyncJob();
   iniciarCronWixSync();
   iniciarCronSefazDfe();
-  iniciarCronSyncLeadsCompras();
+  // ClickUp fora de uso: cron de sync de leads→compras DESATIVADO para não
+  // escrever (status "comprou" + custom fields) num board abandonado.
+  // iniciarCronSyncLeadsCompras();
   iniciarCronUazapiSync();
   iniciarUazapiMonitor();
   iniciarJobPesPessoaSync();
