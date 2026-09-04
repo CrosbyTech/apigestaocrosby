@@ -1219,14 +1219,11 @@ router.post(
 //     Retorna: { [code]: { cpf, balance, raw } }
 //     Apenas clientes com balance > 0 são incluídos.
 // ---------------------------------------------------------------------------
-router.post(
-  '/cashback-balances',
-  asyncHandler(async (req, res) => {
-    const { persons, modulo } = req.body;
-    if (!Array.isArray(persons) || persons.length === 0) {
-      return errorResponse(res, 'persons obrigatório', 400, 'MISSING_PERSONS');
-    }
-
+// Helper reutilizável: consulta saldo de bônus/cashback no TOTVS para uma
+// lista de persons [{code, branches?}]. Passe modulo='revenda' para o
+// pré-filtro por NFs de revenda; undefined pula o pré-filtro (quando os
+// persons já vêm escopados por vendedor). Devolve { total, clientes }.
+async function computeCashbackForPersons(persons, modulo) {
     // 0) Em revenda: filtra persons pra quem tem NF com ops de revenda em
     // QUALQUER filial 1-990 (não só 99 — cobre vendas em CD, JPA, etc).
     let personsFiltered = persons;
@@ -1265,7 +1262,7 @@ router.post(
     }
 
     if (personsFiltered.length === 0) {
-      return successResponse(res, { total: 0, clientes: {} });
+      return { total: 0, clientes: {} };
     }
 
     // 1) Bulk lookup CPF + telefone por person_code
@@ -1275,14 +1272,23 @@ router.post(
     const codeToCpf = new Map();
     const codeToName = new Map();
     const codeToFone = new Map();
-    for (let i = 0; i < codes.length; i += 500) {
-      const chunk = codes.slice(i, i + 500);
-      const { data, error } = await supabase
-        .from('pes_pessoa')
-        .select('code, cpf, nm_pessoa, fantasy_name, telefone')
-        .in('code', chunk);
+    for (let i = 0; i < codes.length; i += 300) {
+      const chunk = codes.slice(i, i + 300);
+      let data = null;
+      let error = null;
+      for (let tent = 0; tent < 2; tent++) {
+        ({ data, error } = await supabase
+          .from('pes_pessoa')
+          .select('code, cpf, nm_pessoa, fantasy_name, telefone')
+          .in('code', chunk));
+        if (!error) break;
+      }
       if (error) {
-        return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
+        // Sob carga, o Postgres pode cancelar por statement timeout. Em vez de
+        // derrubar a requisição inteira, pula o chunk (esses clientes ficam sem
+        // CPF resolvido e saem da lista) e segue.
+        console.warn('[cashback] chunk pes_pessoa falhou:', error.message);
+        continue;
       }
       for (const row of data || []) {
         const cpf = String(row.cpf || '').replace(/\D/g, '');
@@ -1300,12 +1306,10 @@ router.post(
     // 2) Token TOTVS
     const tokenData = await getToken();
     if (!tokenData?.access_token) {
-      return errorResponse(
-        res,
-        'Não foi possível obter token TOTVS',
-        503,
-        'TOKEN_UNAVAILABLE',
-      );
+      const e = new Error('Não foi possível obter token TOTVS');
+      e.httpStatus = 503;
+      e.httpCode = 'TOKEN_UNAVAILABLE';
+      throw e;
     }
     let token = tokenData.access_token;
 
@@ -1408,10 +1412,137 @@ router.post(
       console.warn('[cashback] último vendedor falhou:', err.message);
     }
 
-    return successResponse(res, {
+    return {
       total: Object.keys(out).length,
       clientes: out,
-    });
+    };
+}
+
+// POST /api/crm/cashback-balances — persons vêm do front (carteira do ERP).
+router.post(
+  '/cashback-balances',
+  asyncHandler(async (req, res) => {
+    const { persons, modulo } = req.body;
+    if (!Array.isArray(persons) || persons.length === 0) {
+      return errorResponse(res, 'persons obrigatório', 400, 'MISSING_PERSONS');
+    }
+    try {
+      const result = await computeCashbackForPersons(persons, modulo);
+      return successResponse(res, result);
+    } catch (e) {
+      return errorResponse(
+        res,
+        e.message || 'Falha no cashback',
+        e.httpStatus || 500,
+        e.httpCode || 'CASHBACK_ERROR',
+      );
+    }
+  }),
+);
+
+// GET /api/crm/lead-generation/cashback-vendedor
+//   Monta a lista de clientes do vendedor a partir do Supabase
+//   (notas_fiscais.dealer_code), sem depender da carteira do ERP, e consulta
+//   os saldos de cashback no TOTVS. Query: vendedor_code, modulo, months?
+router.get(
+  '/lead-generation/cashback-vendedor',
+  asyncHandler(async (req, res) => {
+    const vendedor_code = req.query.vendedor_code
+      ? Number(req.query.vendedor_code)
+      : null;
+    const modulo = String(req.query.modulo || '').toLowerCase();
+    if (!vendedor_code) {
+      return errorResponse(
+        res,
+        'vendedor_code obrigatório',
+        400,
+        'MISSING_VENDEDOR',
+      );
+    }
+    // Default 6 meses: cashback é de clientes recentes/ativos e janelas
+    // maiores estouram o statement timeout do Postgres em dealers grandes.
+    const months = Math.min(Math.max(parseInt(req.query.months) || 6, 1), 36);
+
+    // Ops por módulo (mesma tabela do top-clientes)
+    let opCodes = null;
+    if (
+      modulo === 'multimarcas' ||
+      modulo === 'inbound_david' ||
+      modulo === 'inbound_rafael'
+    )
+      opCodes = [7235, 7241, 9127, 200];
+    else if (modulo === 'revenda')
+      opCodes = [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279];
+    else if (modulo === 'business') opCodes = [7237, 7269, 7279, 7277];
+    else if (modulo === 'franquia') opCodes = [7234, 7240, 7802];
+    else if (modulo === 'varejo')
+      opCodes = [
+        545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1, 5919,
+      ];
+
+    const dataLimite = new Date();
+    dataLimite.setMonth(dataLimite.getMonth() - months);
+    const inicio = dataLimite.toISOString().slice(0, 10);
+
+    // Junta os person_codes distintos atendidos pelo vendedor (dealer_code).
+    const PAGE = 1000;
+    const MAX_NFS = 50000;
+    const personCodes = new Set();
+    let off = 0;
+    let totalLidos = 0;
+    while (totalLidos < MAX_NFS) {
+      let q = supabaseFiscal
+        .from('notas_fiscais')
+        .select('person_code')
+        .eq('operation_type', 'Output')
+        .not('invoice_status', 'eq', 'Canceled')
+        .not('invoice_status', 'eq', 'Deleted')
+        .gte('issue_date', inicio)
+        .gt('total_value', 0)
+        .lt('person_code', 100000000)
+        .eq('dealer_code', vendedor_code)
+        .range(off, off + PAGE - 1);
+      if (opCodes) q = q.in('operation_code', opCodes);
+      const { data, error } = await q;
+      if (error) {
+        console.error('[cashback-vendedor] erro:', error.message);
+        return errorResponse(res, error.message, 500, 'DB_ERROR');
+      }
+      if (!data || data.length === 0) break;
+      totalLidos += data.length;
+      for (const nf of data) {
+        if (nf.person_code != null) personCodes.add(Number(nf.person_code));
+      }
+      if (data.length < PAGE) break;
+      off += PAGE;
+    }
+
+    const persons = [...personCodes].map((code) => ({ code }));
+    if (persons.length === 0) {
+      return successResponse(res, {
+        vendedor_code,
+        modulo,
+        total: 0,
+        clientes: {},
+      });
+    }
+
+    try {
+      // modulo undefined pula o re-filtro de revenda: os persons já são do vendedor.
+      const result = await computeCashbackForPersons(persons, undefined);
+      console.log(
+        `[cashback-vendedor] modulo=${modulo} vendedor=${vendedor_code} ` +
+          `nfs=${totalLidos} clientes=${persons.length} com_saldo=${result.total}`,
+      );
+      return successResponse(res, { vendedor_code, modulo, ...result });
+    } catch (e) {
+      return errorResponse(
+        res,
+        e.message || 'Falha no cashback',
+        e.httpStatus || 500,
+        e.httpCode || 'CASHBACK_ERROR',
+      );
+    }
   }),
 );
 
