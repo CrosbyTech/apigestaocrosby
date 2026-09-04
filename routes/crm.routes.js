@@ -4203,16 +4203,22 @@ router.get(
     if (codes.length > 0) {
       for (let i = 0; i < codes.length; i += 500) {
         const chunk = codes.slice(i, i + 500);
+        // NÃO selecionar `cidade`: essa coluna NÃO existe em pes_pessoa (a
+        // cidade fica no JSONB addresses). Selecionar cidade fazia a query
+        // inteira falhar → enriquecimento vazio (telefone sempre sumia).
         const { data: peps } = await supabase
           .from('pes_pessoa')
-          .select('code, telefone, phones, contacts, cidade, uf, fantasy_name, nm_pessoa')
+          .select('code, telefone, phones, contacts, uf, fantasy_name, nm_pessoa, addresses')
           .in('code', chunk);
         for (const p of peps || []) {
-          const ex = persons.get(Number(p.code));
+          const ex = persons.get(p.code) ?? persons.get(Number(p.code));
           if (ex) {
             ex.person_telefone = extrairTelefone(p);
-            ex.person_cidade = p.cidade || '';
             ex.person_uf = p.uf || '';
+            // cidade: primeiro endereço do array addresses (city/cityName)
+            const addr = Array.isArray(p.addresses) ? p.addresses[0] : null;
+            ex.person_cidade =
+              (addr && (addr.city || addr.cityName || addr.cidade)) || '';
             if (!ex.person_nome) ex.person_nome = p.fantasy_name || p.nm_pessoa;
           }
         }
