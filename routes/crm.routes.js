@@ -11582,57 +11582,13 @@ const analyticsHandler = asyncHandler(async (req, res) => {
   // abertura com a info do lead que originou (lead_name, status, url) —
   // não filtra a contagem. Aberturas sem lead ainda contam (cliente
   // entrou pela loja/balcão/outro canal).
+  // Cruzamento de aberturas com ClickUp DESATIVADO: o ClickUp não é mais
+  // usado. Antes, cada requisição carregava o histórico completo do ClickUp
+  // (allHistory, ~6,7k leads, lento e com rate limit) só para marcar a origem
+  // "CRM/tráfego pago" das aberturas — era o custo fixo restante do endpoint.
+  // Mantido o Map vazio: downstream vira clickup_lead: null (degrada limpo).
   const aberturasClickupMatch = new Map(); // personCode → { lead_name, status, url, origem, lead_date }
-  if (CLICKUP_API_KEY && aberturasAtualPCs.size > 0) {
-    try {
-      // Índice reverso telefone → personCode das aberturas
-      const phoneToPC = new Map();
-      for (const pc of aberturasAtualPCs) {
-        const pinfo = personInfo.get(pc);
-        for (const rawPhone of pinfo?.phones || []) {
-          for (const v of buildPhoneVariants(rawPhone)) {
-            if (v && !phoneToPC.has(v)) phoneToPC.set(v, pc);
-          }
-        }
-      }
-      if (phoneToPC.size > 0) {
-        const clickupData = await loadClickupLeads({ allHistory: true });
-        const allLeads = (clickupData?.canais || []).flatMap(
-          (c) => c?.tarefas || [],
-        );
-        for (const lead of allLeads) {
-          if (!lead.telefone) continue;
-          let matchedPC = null;
-          for (const v of buildPhoneVariants(lead.telefone)) {
-            if (phoneToPC.has(v)) {
-              matchedPC = phoneToPC.get(v);
-              break;
-            }
-          }
-          if (!matchedPC) continue;
-          const existing = aberturasClickupMatch.get(matchedPC);
-          const leadDate = lead.dataCriacao
-            ? lead.dataCriacao.slice(0, 10)
-            : '';
-          if (!existing || leadDate < existing.lead_date) {
-            aberturasClickupMatch.set(matchedPC, {
-              lead_name: lead.nome || '',
-              status: lead.status || '',
-              url: lead.clickupUrl || `https://app.clickup.com/t/${lead.id}`,
-              origem: lead.origem || '',
-              lead_date: leadDate,
-            });
-          }
-        }
-      }
-      console.log(
-        `[analytics] ${aberturasAtualPCs.size} aberturas total | ` +
-          `${aberturasClickupMatch.size} com match ClickUp (origem CRM/tráfego pago)`,
-      );
-    } catch (err) {
-      console.warn('[analytics] ClickUp match falhou:', err.message);
-    }
-  }
+  console.log(`[analytics] ${aberturasAtualPCs.size} aberturas total`);
 
   // Ticket médio das aberturas
   var ticketMedioAbertura = null;
