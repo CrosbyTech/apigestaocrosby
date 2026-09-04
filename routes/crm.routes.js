@@ -10520,10 +10520,13 @@ const ANALYTICS_CACHE_VERSION = 'v50-per-seller-net-credev-aligned-painel';
 const ANALYTICS_CACHE = new Map(); // key → { data, ts, ver }
 const ANALYTICS_CACHE_TTL = 5 * 60 * 1000;
 
-// Cache separado para o histórico de 12 meses (lastPurchaseItems)
-// TTL maior (30 min) pois dados históricos raramente mudam
+// Cache separado para o histórico de 12 meses (lastPurchaseItems).
+// TTL longo (6h): o histórico é a janela [datemin-12m, datemin-1] — dados
+// imutáveis (compras antigas não mudam). O fetch é o gargalo do endpoint
+// (~124 páginas / 123k itens no TOTVS movement), então mantê-lo quente por
+// mais tempo evita re-buscar a cada 30 min ao revisitar o mesmo período.
 const HISTORY_CACHE = new Map(); // key → { items, ts }
-const HISTORY_CACHE_TTL = 30 * 60 * 1000;
+const HISTORY_CACHE_TTL = 6 * 60 * 60 * 1000;
 
 const ANALYTICS_OPS_BY_MODULO = {
   revenda: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279],
