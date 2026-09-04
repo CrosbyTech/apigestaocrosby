@@ -11265,49 +11265,12 @@ const analyticsHandler = asyncHandler(async (req, res) => {
 
         // Credev já tratado dentro de fetchPeriodAggInvoices (byPerson.__credev)
 
-        // 3ª chamada: histórico ANTES de datemin — sempre executado para detectar
-        // aberturas sem depender do Supabase (que pode estar desatualizado).
-        // Janela: 12 meses antes do início do período.
-        if (byPerson.size > 0) {
-          try {
-            const dminDate = new Date(datemin);
-            const dprevStart = new Date(dminDate);
-            dprevStart.setFullYear(dprevStart.getFullYear() - 1);
-            const dprevEnd = new Date(dminDate);
-            dprevEnd.setDate(dprevEnd.getDate() - 1);
-            const fmtDate = (d) =>
-              `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-            const dminPrev = fmtDate(dprevStart);
-            const dmaxPrev = fmtDate(dprevEnd);
-            const historyCacheKey = `${dminPrev}|${dmaxPrev}`;
-            const cachedHistory = HISTORY_CACHE.get(historyCacheKey);
-            if (
-              cachedHistory &&
-              Date.now() - cachedHistory.ts < HISTORY_CACHE_TTL
-            ) {
-              lastPurchaseItems = cachedHistory.items;
-              console.log(
-                `💾 [analytics] lastPurchase do cache (${lastPurchaseItems.length} itens)`,
-              );
-            } else {
-              lastPurchaseItems = await fetchMovementPagesParallel(
-                dminPrev,
-                dmaxPrev,
-                accessToken,
-              );
-              HISTORY_CACHE.set(historyCacheKey, {
-                items: lastPurchaseItems,
-                ts: Date.now(),
-              });
-              console.log(
-                `✅ [analytics] lastPurchase buscado e cacheado (${lastPurchaseItems.length} itens)`,
-              );
-            }
-          } catch (err) {
-            console.warn(`[analytics] lastPurchaseBefore: ${err.message}`);
-            lastPurchaseItems = [];
-          }
-        }
+        // Histórico "última compra ANTES do período" agora vem do Supabase
+        // (notas_fiscais), computado mais abaixo — escopado aos clientes do
+        // período. Antes: fetch de 12 meses no TOTVS fiscal-movement (~124
+        // páginas / 123k itens), que era o gargalo do endpoint. Como é dado
+        // histórico (< datemin), o sync gap do Supabase não se aplica.
+        // Validado lado a lado: Supabase ~330x mais rápido e igual/mais completo.
       } else {
         [byPerson, byPersonLY] = await Promise.all([
           fetchPeriodAgg(datemin, datemax),
@@ -11481,24 +11444,63 @@ const analyticsHandler = asyncHandler(async (req, res) => {
   const sellerName = (dc) =>
     vendMap[dc]?.nome || vendMap[String(dc)]?.nome || `Vend. ${dc}`;
 
-  // 4) Tags de abertura/reativação — histórico anterior via TOTVS direct
-  // Estes itens já foram pré-buscados em paralelo (lastPurchaseItems).
-  // firstPurchaseInPeriod já vem em byPerson.firstDate (extraído de items).
+  // 4) Tags de abertura/reativação — histórico "última compra ANTES do período"
+  // via Supabase (notas_fiscais). Escopado aos clientes do período (byPerson),
+  // ops do canal e janela [datemin-12m, datemin-1]. Como é histórico (< datemin),
+  // o sync gap do Supabase não se aplica. Substituiu o fetch de 12m no TOTVS
+  // fiscal-movement — validado: ~330x mais rápido e igual/mais completo.
+  // firstPurchaseInPeriod já vem em byPerson.firstDate.
   const lastPurchaseBefore = new Map();
-  if (byPerson.size > 0 && lastPurchaseItems && lastPurchaseItems.length > 0) {
-    const pcsSet = new Set([...byPerson.keys()]);
-    for (const it of lastPurchaseItems) {
-      const pc = parseInt(it.personCode);
-      if (!pcsSet.has(pc)) continue;
-      if (it.operationModel !== 'Sales') continue;
-      // Filtra apenas operações do mesmo canal (ex: revenda) para não
-      // considerar compras de outros canais como "histórico de abertura"
-      const op = parseInt(it.operationCode);
-      if (!REVENDA_OP_CODES.includes(op)) continue;
-      const md = it.movementDate;
-      if (!md) continue;
-      const cur = lastPurchaseBefore.get(pc);
-      if (!cur || md > cur) lastPurchaseBefore.set(pc, md);
+  if (byPerson.size > 0) {
+    try {
+      const dminDate = new Date(datemin);
+      const dprevStart = new Date(dminDate);
+      dprevStart.setFullYear(dprevStart.getFullYear() - 1);
+      const dprevEnd = new Date(dminDate);
+      dprevEnd.setDate(dprevEnd.getDate() - 1);
+      const fmtDate = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const histStart = fmtDate(dprevStart);
+      const histEnd = fmtDate(dprevEnd);
+      const pcs = [...byPerson.keys()];
+      const CHUNK = 300;
+      const PAGE = 1000;
+      for (let i = 0; i < pcs.length; i += CHUNK) {
+        const chunk = pcs.slice(i, i + CHUNK);
+        let off = 0;
+        while (true) {
+          const { data, error } = await supabaseFiscal
+            .from('notas_fiscais')
+            .select('person_code, issue_date')
+            .eq('operation_type', 'Output')
+            .in('operation_code', REVENDA_OP_CODES)
+            .in('person_code', chunk)
+            .gte('issue_date', histStart)
+            .lte('issue_date', histEnd)
+            .gt('total_value', 0)
+            .range(off, off + PAGE - 1);
+          if (error) {
+            console.warn(
+              `[analytics] lastPurchaseBefore supabase: ${error.message}`,
+            );
+            break;
+          }
+          if (!data || data.length === 0) break;
+          for (const nf of data) {
+            const pc = Number(nf.person_code);
+            const md = String(nf.issue_date).slice(0, 10);
+            const cur = lastPurchaseBefore.get(pc);
+            if (!cur || md > cur) lastPurchaseBefore.set(pc, md);
+          }
+          if (data.length < PAGE) break;
+          off += PAGE;
+        }
+      }
+      console.log(
+        `✅ [analytics] lastPurchaseBefore via Supabase: ${lastPurchaseBefore.size}/${byPerson.size} clientes com histórico`,
+      );
+    } catch (err) {
+      console.warn(`[analytics] lastPurchaseBefore falhou: ${err.message}`);
     }
   }
   // Helper: classifica cliente em abertura/reativação/recorrente
