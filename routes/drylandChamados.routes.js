@@ -96,8 +96,19 @@ const STATUS = [
   { id: 'em_andamento', label: '🟢 Em andamento' },
   { id: 'aguardando_solicitante', label: '🟠 Aguardando solicitante' },
   { id: 'aguardando_responsavel', label: '🟣 Aguardando responsável' },
+  { id: 'aguardando_diretoria', label: '🟡 Aguardando diretoria' },
+  { id: 'aguardando_prestador', label: '🔧 Aguardando prestador' },
+  { id: 'enviado_loja', label: '📦 Enviado para a loja' },
+  { id: 'pausado', label: '⏸️ Pausado' },
   { id: 'concluido', label: '✅ Resolvido' },
   { id: 'cancelado', label: '🚫 Cancelado' },
+];
+
+// Prioridade (campo novo do Dryland, ago/2026)
+const PRIORIDADES = [
+  { id: 'normal', label: 'Normal' },
+  { id: 'alta', label: 'Alta' },
+  { id: 'critica', label: 'Crítica' },
 ];
 
 // campos aceitos no patch do chamado_atualizar (mesmos que o Dryland manda).
@@ -110,6 +121,9 @@ const PATCH_KEYS = [
   'responsavel_nome',
   'comentario',
   'status',
+  'prioridade',
+  // data até quando o chamado fica congelado (anda junto com status 'pausado')
+  'pausado_ate',
 ];
 
 // ──────────────────────────────────────────────────────────────
@@ -155,6 +169,47 @@ function responsavelSugerido(chamado) {
 
 const comSugestao = (c) => ({ ...c, responsavel_sugerido: responsavelSugerido(c) });
 
+// ──────────────────────────────────────────────────────────────
+// Anexos: o Dryland guarda arquivo em QUATRO lugares diferentes.
+// A tela antiga só lia o array `anexos`, então a foto que a loja manda ao
+// ABRIR o chamado (chamado.print_path) nunca aparecia — e ela é a mais
+// comum: 35 dos 120 chamados recentes tinham print, contra 15 com anexos[].
+//   1. chamado.print_path       → foto/PDF enviado na abertura
+//   2. chamado.comprovante_path → comprovante de pagamento
+//   3. anexos[]                 → anexado depois, pela tela do chamado
+//   4. mensagens[].anexo_path   → anexado dentro do chat
+// Junta tudo numa lista só, sem repetir o mesmo arquivo.
+// ──────────────────────────────────────────────────────────────
+function tipoDoArquivo(path) {
+  const ext = String(path || '').split('.').pop().toLowerCase();
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic'].includes(ext)) return 'imagem';
+  if (ext === 'pdf') return 'pdf';
+  return 'arquivo';
+}
+
+function montarAnexos(d) {
+  const c = d?.chamado || {};
+  const vistos = new Set();
+  const out = [];
+  const add = (path, origem, por, criado_em) => {
+    if (!path || vistos.has(path)) return;
+    vistos.add(path);
+    out.push({
+      path,
+      url: fileUrl(path),
+      tipo: tipoDoArquivo(path),
+      origem, // abertura | comprovante | anexo | chat
+      por: por || null,
+      criado_em: criado_em || null,
+    });
+  };
+  add(c.print_path, 'abertura', c.aberto_por, c.criado_em);
+  add(c.comprovante_path, 'comprovante', null, null);
+  for (const a of d?.anexos || []) add(a.path, 'anexo', a.por, a.criado_em);
+  for (const m of d?.mensagens || []) add(m.anexo_path, 'chat', m.por, m.criado_em);
+  return out;
+}
+
 // prazo só-data vira 18:00 de Brasília — mesma regra do core.js do Dryland
 function normalizarPrazo(prazo) {
   if (typeof prazo === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(prazo)) {
@@ -173,6 +228,7 @@ router.get(
       lojas: LOJAS.map(([cd, nome]) => ({ cd, nome })),
       setores: SETORES,
       status: STATUS,
+      prioridades: PRIORIDADES,
       responsaveis_regras: REGRAS_RESPONSAVEL.map((r) => ({
         responsavel: r.responsavel,
         descricao: r.descricao,
@@ -234,7 +290,13 @@ router.get(
       successResponse(res, {
         chamado: comSugestao(d.chamado),
         eventos: d.eventos || [],
-        anexos: (d.anexos || []).map((a) => ({ ...a, url: fileUrl(a.path) })),
+        // conversa com a loja (lado: 'loja' | 'setor')
+        mensagens: (d.mensagens || []).map((m) => ({
+          ...m,
+          anexo_url: m.anexo_path ? fileUrl(m.anexo_path) : null,
+          anexo_tipo: m.anexo_path ? tipoDoArquivo(m.anexo_path) : null,
+        })),
+        anexos: montarAnexos(d),
       });
     } catch (err) {
       errorResponse(res, rpcErrorMessage(err), 502, 'DRYLAND_RPC_ERROR');
@@ -427,6 +489,68 @@ router.post(
         { simulacao: false, total: alvos.length, aplicados, falhas, por_responsavel: resumo },
         `${aplicados.length} chamado(s) atualizados${falhas.length ? `, ${falhas.length} falharam` : ''}`,
       );
+    } catch (err) {
+      errorResponse(res, rpcErrorMessage(err), 502, 'DRYLAND_RPC_ERROR');
+    }
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
+// POST /chamados/:id/mensagem — manda mensagem na conversa com a loja
+// (chamado_msg_add). Depois avisa pela Edge Function chamado-avisar, que é
+// o que faz a loja receber no WhatsApp — sem isso a mensagem fica muda.
+// body: { texto, por?, lado? ('setor' por padrão — é o HeadCoach falando) }
+// ──────────────────────────────────────────────────────────────
+router.post(
+  '/chamados/:id/mensagem',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return errorResponse(res, 'id inválido', 400, 'VALIDATION_ERROR');
+    }
+    const { texto, por, lado } = req.body || {};
+    if (!texto || !String(texto).trim()) {
+      return errorResponse(res, 'texto é obrigatório', 400, 'VALIDATION_ERROR');
+    }
+    const autor = (por && String(por).trim()) || 'headcoach';
+    const msg = String(texto).trim();
+    try {
+      const r = await rpc('chamado_msg_add', {
+        p_id: id,
+        p_texto: msg,
+        p_por: autor,
+        p_lado: lado === 'loja' ? 'loja' : 'setor',
+        p_anexo: null,
+      });
+      if (!r || !r.ok) {
+        return errorResponse(
+          res,
+          (r && (r.mensagem || r.erro)) || 'Dryland recusou a mensagem',
+          502,
+          'DRYLAND_RPC_ERROR',
+          r,
+        );
+      }
+      // aviso é best-effort: se falhar, a mensagem já está gravada
+      let avisado = true;
+      try {
+        await axios.post(
+          `${DRYLAND_URL}/functions/v1/chamado-avisar`,
+          { chamado_id: id, texto: msg, mencoes: [] },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: DRYLAND_KEY,
+              Authorization: `Bearer ${DRYLAND_KEY}`,
+            },
+            timeout: 15000,
+          },
+        );
+      } catch (e) {
+        avisado = false;
+        console.error('[dryland] mensagem gravada mas aviso falhou:', e.message);
+      }
+      successResponse(res, { ...r, avisado }, 'Mensagem enviada', 201);
     } catch (err) {
       errorResponse(res, rpcErrorMessage(err), 502, 'DRYLAND_RPC_ERROR');
     }

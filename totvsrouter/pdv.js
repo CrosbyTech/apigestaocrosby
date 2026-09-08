@@ -1091,4 +1091,160 @@ router.get(
   }),
 );
 
+// =============================================================================
+// CASHBACK (saldo bônus) — PDV Varejo
+// Regra Crosby: venda gera 20% de cashback; para usar, a venda deve ser
+// >= 3x o valor consumido. Saldo é POR EMPRESA no TOTVS (PESFC054).
+// =============================================================================
+const BONUS_TYPE = parseInt(process.env.PDV_BONUS_TYPE || '14', 10);
+const BONUS_VALIDADE_DIAS = parseInt(
+  process.env.PDV_BONUS_VALIDADE_DIAS || '90',
+  10,
+);
+
+// GET /pdv/bonus?cpf=06537964474&branch=99 — saldo do cliente na empresa
+router.get(
+  '/pdv/bonus',
+  asyncHandler(async (req, res) => {
+    const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+    const branch = parseInt(req.query.branch, 10);
+    if (!cpf || !branch) {
+      return errorResponse(res, 'Informe ?cpf=&branch=', 400, 'MISSING_PARAMS');
+    }
+    const resp = await callTotvs(
+      'post',
+      `${TOTVS_BASE_URL}/person/v2/list-balance-bonus`,
+      { data: { personCpf: cpf, branchList: [{ branchCode: branch }] } },
+    );
+    const entry = (resp.data?.balanceBonus || []).find(
+      (b) => b.branchCode === branch,
+    );
+    return successResponse(
+      res,
+      { branchCode: branch, balance: entry?.balanceValue || 0 },
+      'Saldo bônus',
+    );
+  }),
+);
+
+// POST /pdv/bonus/consume — consome saldo (usado como desconto na venda)
+router.post(
+  '/pdv/bonus/consume',
+  asyncHandler(async (req, res) => {
+    const { personCode, branchCode, usedValue } = req.body || {};
+    if (!personCode || !branchCode || !(usedValue > 0)) {
+      return errorResponse(
+        res,
+        'personCode, branchCode e usedValue são obrigatórios',
+        400,
+        'INVALID_PAYLOAD',
+      );
+    }
+    try {
+      const resp = await callTotvs(
+        'post',
+        `${TOTVS_BASE_URL}/person/v2/bonus-consume`,
+        {
+          data: {
+            personCode: parseInt(personCode, 10),
+            branchCode: parseInt(branchCode, 10),
+            usedValue: Number(Number(usedValue).toFixed(2)),
+          },
+        },
+      );
+      console.log(
+        `💰 [Cashback] Consumido R$ ${usedValue} do cliente ${personCode} (empresa ${branchCode})`,
+      );
+      return successResponse(res, resp.data ?? {}, 'Saldo consumido');
+    } catch (err) {
+      const detail = err.response?.data;
+      console.error(
+        `❌ [Cashback] Erro ao consumir:`,
+        JSON.stringify(detail || err.message).slice(0, 300),
+      );
+      return errorResponse(
+        res,
+        Array.isArray(detail)
+          ? detail.map((d) => d.message).join('; ')
+          : detail?.message || err.message,
+        err.response?.status || 502,
+        'BONUS_CONSUME_ERROR',
+        detail,
+      );
+    }
+  }),
+);
+
+// POST /pdv/bonus/add — gera o cashback da venda (após atendida no TOTVS)
+// Body: { personCode, branchCode, value, transactionCode?, transactionDate?, historic? }
+router.post(
+  '/pdv/bonus/add',
+  asyncHandler(async (req, res) => {
+    const {
+      personCode,
+      branchCode,
+      value,
+      transactionCode,
+      transactionDate,
+      historic,
+    } = req.body || {};
+    if (!personCode || !branchCode || !(value > 0)) {
+      return errorResponse(
+        res,
+        'personCode, branchCode e value são obrigatórios',
+        400,
+        'INVALID_PAYLOAD',
+      );
+    }
+    const hoje = new Date();
+    const fim = new Date(hoje.getTime() + BONUS_VALIDADE_DIAS * 86400000);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const payload = {
+      branchCode: parseInt(branchCode, 10),
+      personCode: parseInt(personCode, 10),
+      bonusType: BONUS_TYPE,
+      movementDate: iso(hoje),
+      bonusValue: Number(Number(value).toFixed(2)),
+      startDate: iso(hoje),
+      endDate: iso(fim),
+      ...(transactionCode
+        ? {
+            transactionBranchCode: parseInt(branchCode, 10),
+            transactionNumber: parseInt(transactionCode, 10),
+            ...(transactionDate
+              ? { transactionDate: String(transactionDate).slice(0, 10) }
+              : {}),
+          }
+        : {}),
+      historic: historic || 'Cashback PDV Varejo (HeadCoach)',
+    };
+    try {
+      const resp = await callTotvs(
+        'post',
+        `${TOTVS_BASE_URL}/person/v2/bonus-due-date`,
+        { data: payload },
+      );
+      console.log(
+        `💰 [Cashback] Gerado R$ ${payload.bonusValue} p/ cliente ${personCode} (empresa ${branchCode}, validade ${BONUS_VALIDADE_DIAS}d)`,
+      );
+      return successResponse(res, resp.data ?? {}, 'Cashback gerado');
+    } catch (err) {
+      const detail = err.response?.data;
+      console.error(
+        `❌ [Cashback] Erro ao gerar:`,
+        JSON.stringify(detail || err.message).slice(0, 300),
+      );
+      return errorResponse(
+        res,
+        Array.isArray(detail)
+          ? detail.map((d) => d.message).join('; ')
+          : detail?.message || err.message,
+        err.response?.status || 502,
+        'BONUS_ADD_ERROR',
+        detail,
+      );
+    }
+  }),
+);
+
 export default router;
