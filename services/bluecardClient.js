@@ -77,3 +77,43 @@ export function enviarFaturas(faturas, idempotencyKey) {
 export function notificarPagamento(pagamento, idempotencyKey) {
   return chamar('POST', '/api/v1/pagamentos', pagamento, { idempotencyKey });
 }
+
+/**
+ * Todas as vendas APROVADAS no app BlueCard (GET /api/v1/vendas).
+ *
+ * Paginação por CURSOR "<approved_at>|<id>" (o BlueCard não pagina por
+ * offset de propósito: venda aprovada no meio da varredura não empurra as
+ * outras). Por padrão a rota deles devolve só o que ainda NÃO foi confirmado
+ * como registrado no TOTVS — para o histórico completo precisa de
+ * `incluir_registradas=true`, que é o default aqui.
+ *
+ * Só status "aprovada" existe do lado deles para compra efetivada (nada
+ * avança para faturada/paga em card_purchases — conferido no código em
+ * 2026-09-08), então esta lista É o total vendido pelo app.
+ */
+export async function listarVendas({ incluirRegistradas = true, maxPaginas = 50 } = {}) {
+  const vendas = [];
+  let cursor = null;
+  for (let pagina = 0; pagina < maxPaginas; pagina++) {
+    const qs = new URLSearchParams({ limite: '500' });
+    if (incluirRegistradas) qs.set('incluir_registradas', 'true');
+    if (cursor) qs.set('cursor', cursor);
+    const j = await chamar('GET', `/api/v1/vendas?${qs}`);
+    vendas.push(...(j?.vendas || []));
+    if (!j?.tem_mais || !j?.proximo_cursor) break;
+    cursor = j.proximo_cursor;
+  }
+  return vendas;
+}
+
+/** CPFs distintos (11 dígitos) de quem já comprou pelo app BlueCard. */
+export async function cpfsQueCompraramNoApp() {
+  const vendas = await listarVendas();
+  return [
+    ...new Set(
+      vendas
+        .map((v) => String(v?.cliente?.cpf || '').replace(/\D/g, ''))
+        .filter((c) => c.length === 11),
+    ),
+  ];
+}

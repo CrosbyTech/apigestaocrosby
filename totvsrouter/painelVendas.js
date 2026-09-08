@@ -16,6 +16,7 @@ import {
 } from './totvsHelper.js';
 import supabase from '../config/supabase.js';
 import supabaseFiscal from '../config/supabaseFiscal.js';
+import { cpfsQueCompraramNoApp } from '../services/bluecardClient.js';
 
 // Operações que o TOTVS NÃO classifica como operationModel "Sales", então
 // não retornam no /sale-panel/v2/totals-branch/search mesmo passando elas
@@ -846,10 +847,17 @@ const FAT_VEND_EXPEDICAO_CODE = -50;
 const FAT_VEND_RICARDO_OPS = new Set([512]);
 const FAT_VEND_RICARDO_CODE = -512;
 
-// BLUECRED: clientes com contrato na tabela bluecred_contratos (mesma lista
-// da página /clientes-bluecred, identificada por CPF) que compraram no
-// CREDIÁRIO — faturas com documentType=1 (Fatura). Card próprio no Painel e
-// canal automático no New Forecast.
+// BLUECRED: clientes com contrato que compraram no CREDIÁRIO — faturas com
+// documentType=1 (Fatura). Card próprio no Painel e canal automático no New
+// Forecast. A lista de clientes vem de DUAS fontes, unidas por CPF:
+//   1. bluecred_contratos (Termo assinado pelo HeadCoach/Autentique — a mesma
+//      lista da página /clientes-bluecred);
+//   2. quem já comprou pelo app Crosby BlueCard (projeto do Felipe), lido pela
+//      API deles (GET /api/v1/vendas). Lá, compra aprovada implica contrato
+//      assinado (gate-contrato), e a venda física está no TOTVS como fatura —
+//      então basta somar o CPF ao conjunto: o valor sai do MESMO contas a
+//      receber que o resto do card, sem contar em dobro.
+// Se a API do BlueCard falhar, o card segue só com a fonte 1 (nunca quebra).
 // ⚠️ São vendas de LOJA: o mesmo valor também está dentro do card VAREJO
 // (que vem do painel oficial do TOTVS, sem separar forma de pagamento).
 const FAT_VEND_BLUECRED_CODE = -1000;
@@ -861,7 +869,7 @@ const FAT_VEND_BLUECRED_FILIAIS_FORA = new Set([551]);
 let BLUECRED_CODES_CACHE = { codes: [], ts: 0 };
 const BLUECRED_CODES_TTL = 30 * 60 * 1000;
 
-async function getBlueCredPersonCodes(token) {
+export async function getBlueCredPersonCodes(token) {
   if (
     BLUECRED_CODES_CACHE.codes.length > 0 &&
     Date.now() - BLUECRED_CODES_CACHE.ts < BLUECRED_CODES_TTL
@@ -873,13 +881,23 @@ async function getBlueCredPersonCodes(token) {
       .from('bluecred_contratos')
       .select('cliente_cpf');
     if (error) throw new Error(error.message);
-    const cpfs = [
-      ...new Set(
-        (data || [])
-          .map((c) => String(c.cliente_cpf || '').replace(/\D/g, ''))
-          .filter((c) => c.length >= 11),
-      ),
-    ];
+    const cpfsContratos = (data || [])
+      .map((c) => String(c.cliente_cpf || '').replace(/\D/g, ''))
+      .filter((c) => c.length >= 11);
+
+    // Fonte 2: compradores do app BlueCard. Falha aqui não pode derrubar o
+    // painel — vira aviso no log e o card fica com a fonte 1.
+    let cpfsApp = [];
+    try {
+      cpfsApp = await cpfsQueCompraramNoApp();
+    } catch (e) {
+      console.warn(`[bluecred] API do BlueCard indisponível (${e.message}) — usando só bluecred_contratos`);
+    }
+
+    const cpfs = [...new Set([...cpfsContratos, ...cpfsApp])];
+    console.log(
+      `[bluecred] fontes: ${new Set(cpfsContratos).size} CPF(s) em bluecred_contratos + ${cpfsApp.length} do app BlueCard → ${cpfs.length} únicos`,
+    );
     if (cpfs.length === 0) return [];
     const codes = [];
     for (let i = 0; i < cpfs.length; i += 50) {
@@ -2175,11 +2193,31 @@ router.post(
         put('MTM_RAFAEL', w.s, rowVal(21));
         put('MTM_DAVID', w.s, rowVal(26));
         put('MTM_ARTHUR', w.s, rowVal(259));
-        put(
-          'VAREJO',
-          w.s,
-          (data.varejo || []).reduce((a, b) => a + (b.valor || 0), 0),
+        // ── BLUECRED É SUBCONJUNTO DO VAREJO (regra do gestor, 2026-09-08) ──
+        // A venda do crediário é uma venda de loja: o mesmo valor está no
+        // painel varejo do TOTVS. Mostrar os dois canais cheios no Forecast
+        // contaria em dobro. Então o VAREJO da semana vai LÍQUIDO (varejo −
+        // bluecred) e o BLUECRED fica inteiro. Ex.: varejo 79.000 e bluecred
+        // 2.000 → VAREJO 77.000, BLUECRED 2.000.
+        const bcRow = (data.dataRow || []).find(
+          (x) => Number(x.seller_code) === FAT_VEND_BLUECRED_CODE,
         );
+        const bluecredSemana = Number(bcRow?.valor || 0);
+        const bcPorFilial = bcRow?.por_filial || {};
+        const varejoBruto = (data.varejo || []).reduce((a, b) => a + (b.valor || 0), 0);
+        // O drill (lojas) desconta por filial, para as lojas continuarem
+        // somando o que a célula mostra. Loja sem BlueCred fica intacta.
+        data.varejo = (data.varejo || []).map((l) => {
+          const desconto = Number(bcPorFilial[String(l.branch_code)]?.valor || 0);
+          if (!desconto) return l;
+          return {
+            ...l,
+            valor_bruto: l.valor,
+            bluecred: Math.round(desconto * 100) / 100,
+            valor: Math.max(0, Math.round((l.valor - desconto) * 100) / 100),
+          };
+        });
+        put('VAREJO', w.s, Math.max(0, varejoBruto - bluecredSemana));
         let novidades = 0;
         let showroom = 0;
         let bazar = 0;
