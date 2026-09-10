@@ -686,39 +686,15 @@ router.get(
   }),
 );
 
-// GET /api/tech/_groq-models  (diagnóstico temporário)
-const GROQ_API_KEY_DIAG = process.env.GROQ_API_KEY || '';
-router.get(
-  '/_groq-models',
-  asyncHandler(async (_req, res) => {
-    if (!GROQ_API_KEY_DIAG)
-      return successResponse(res, { configurado: false, models: [] });
-    try {
-      const { data } = await axios.get(
-        'https://api.groq.com/openai/v1/models',
-        {
-          headers: { Authorization: `Bearer ${GROQ_API_KEY_DIAG}` },
-          timeout: 15000,
-        },
-      );
-      const models = (data?.data || []).map((m) => m.id).sort();
-      return successResponse(res, { configurado: true, models });
-    } catch (e) {
-      return errorResponse(
-        res,
-        e.response?.data?.error?.message || e.message,
-        e.response?.status || 500,
-      );
-    }
-  }),
-);
-
 // POST /api/tech/patrimonio/estimar-valor
 //   Estima o valor de mercado de um item de patrimônio via IA (Groq/OpenAI).
 //   Body: { tipo, marca, modelo, descricao, ano? }
 //   Retorna: { valor_estimado: <number|null>, faixa: "min-max", justificativa }
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+// Modelo Groq p/ estimativa (configurável por env). A conta atual não tem
+// modelos llama-3.x; gpt-oss-120b é o mais capaz disponível para chat/JSON.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 router.post(
   '/patrimonio/estimar-valor',
   asyncHandler(async (req, res) => {
@@ -746,7 +722,7 @@ router.post(
     const baseUrl = isGroq
       ? 'https://api.groq.com/openai/v1/chat/completions'
       : 'https://api.openai.com/v1/chat/completions';
-    const model = isGroq ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
+    const model = isGroq ? GROQ_MODEL : 'gpt-4o-mini';
 
     const prompt = `Estime o valor de mercado ATUAL no Brasil (em reais, R$), do seguinte item de patrimônio, considerando que é um item USADO em bom estado de conservação para uso corporativo:
 Tipo: ${tipo || 'Não informado'}
@@ -778,7 +754,8 @@ Responda EXATAMENTE em JSON com estas chaves:
             { role: 'user', content: prompt },
           ],
           temperature: 0.3,
-          max_tokens: 300,
+          max_tokens: 600,
+          response_format: { type: 'json_object' },
         },
         {
           headers: {
