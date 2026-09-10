@@ -589,7 +589,7 @@ const PATRIMONIO_STATUS = new Set([
 router.get(
   '/patrimonio',
   asyncHandler(async (req, res) => {
-    const { tipo, status, setor, local, responsavel, q } = req.query;
+    const { tipo, status, setor, filial, local, responsavel, q } = req.query;
     let query = supabase
       .from('tech_patrimonio')
       .select('*')
@@ -597,6 +597,7 @@ router.get(
     if (tipo) query = query.eq('tipo', tipo);
     if (status) query = query.eq('status', status);
     if (setor) query = query.eq('setor', setor);
+    if (filial) query = query.eq('filial', filial);
     if (local) query = query.ilike('local', `%${local}%`);
     if (responsavel) query = query.ilike('responsavel', `%${responsavel}%`);
     if (q) {
@@ -620,7 +621,7 @@ router.get(
     const { data, error } = await supabase
       .from('tech_patrimonio')
       .select(
-        'tipo, status, setor, local, valor_aquisicao, data_aquisicao',
+        'tipo, status, setor, filial, local, valor_aquisicao, data_aquisicao',
       );
     if (error) return errorResponse(res, error.message, 500);
     const list = data || [];
@@ -636,6 +637,7 @@ router.get(
     const por_tipo = counter('tipo');
     const por_status = counter('status');
     const por_setor = counter('setor');
+    const por_filial = counter('filial');
     const por_local = counter('local');
 
     const valor_total = list.reduce(
@@ -651,6 +653,7 @@ router.get(
       por_tipo,
       por_status,
       por_setor,
+      por_filial,
       por_local,
       valor_total: Number(valor_total.toFixed(2)),
       valor_ativos: Number(valor_ativos.toFixed(2)),
@@ -710,6 +713,7 @@ router.post(
       marca,
       modelo,
       numero_serie,
+      filial,
       local,
       setor,
       responsavel,
@@ -763,6 +767,7 @@ router.post(
       marca: marca || null,
       modelo: modelo || null,
       numero_serie: numero_serie || null,
+      filial: filial || null,
       local: local || null,
       setor: setor || null,
       responsavel: responsavel || null,
