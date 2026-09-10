@@ -7308,7 +7308,9 @@ router.post(
     const baseUrl = isGroq
       ? 'https://api.groq.com/openai/v1/chat/completions'
       : 'https://api.openai.com/v1/chat/completions';
-    const model = isGroq ? 'llama-3.1-70b-versatile' : 'gpt-4o-mini';
+    const model = isGroq
+      ? process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
+      : 'gpt-4o-mini';
 
     const comprasTexto = Array.isArray(compras)
       ? compras
