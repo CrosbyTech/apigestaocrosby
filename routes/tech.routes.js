@@ -686,6 +686,119 @@ router.get(
   }),
 );
 
+// POST /api/tech/patrimonio/estimar-valor
+//   Estima o valor de mercado de um item de patrimônio via IA (Groq/OpenAI).
+//   Body: { tipo, marca, modelo, descricao, ano? }
+//   Retorna: { valor_estimado: <number|null>, faixa: "min-max", justificativa }
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+router.post(
+  '/patrimonio/estimar-valor',
+  asyncHandler(async (req, res) => {
+    const { tipo, marca, modelo, descricao, ano } = req.body || {};
+    if (!marca && !modelo && !descricao && !tipo) {
+      return errorResponse(
+        res,
+        'Informe ao menos tipo, marca, modelo ou descrição',
+        400,
+      );
+    }
+
+    const apiKey = GROQ_API_KEY || OPENAI_API_KEY;
+    if (!apiKey) {
+      return successResponse(res, {
+        valor_estimado: null,
+        faixa: null,
+        justificativa:
+          'IA não configurada (defina GROQ_API_KEY ou OPENAI_API_KEY no servidor).',
+        ia_indisponivel: true,
+      });
+    }
+
+    const isGroq = !!GROQ_API_KEY;
+    const baseUrl = isGroq
+      ? 'https://api.groq.com/openai/v1/chat/completions'
+      : 'https://api.openai.com/v1/chat/completions';
+    const model = isGroq ? 'llama-3.1-8b-instant' : 'gpt-4o-mini';
+
+    const prompt = `Estime o valor de mercado ATUAL no Brasil (em reais, R$), do seguinte item de patrimônio, considerando que é um item USADO em bom estado de conservação para uso corporativo:
+Tipo: ${tipo || 'Não informado'}
+Marca: ${marca || 'Não informada'}
+Modelo: ${modelo || 'Não informado'}
+Descrição: ${descricao || 'Não informada'}
+Ano/idade aproximada: ${ano || 'Não informado'}
+
+Baseie-se em preços de mercado de seminovos no Brasil. Se não houver informação suficiente para uma estimativa razoável, retorne valor_estimado null.
+Responda EXATAMENTE em JSON com estas chaves:
+{
+  "valor_estimado": <número em reais, sem símbolo, ex: 1250.00, ou null>,
+  "faixa_min": <número, menor valor plausível, ou null>,
+  "faixa_max": <número, maior valor plausível, ou null>,
+  "justificativa": "explicação curta (1 frase) da estimativa"
+}`;
+
+    try {
+      const { data } = await axios.post(
+        baseUrl,
+        {
+          model,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Você é um avaliador de patrimônio e equipamentos usados no mercado brasileiro. Responda apenas em JSON válido.',
+            },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.3,
+          max_tokens: 300,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+        },
+      );
+
+      const content = data.choices?.[0]?.message?.content || '{}';
+      let parsed;
+      try {
+        // remove cercas de código eventualmente retornadas
+        const clean = content.replace(/```json|```/g, '').trim();
+        parsed = JSON.parse(clean);
+      } catch {
+        parsed = { valor_estimado: null, justificativa: content };
+      }
+
+      const toNum = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      const min = toNum(parsed.faixa_min);
+      const max = toNum(parsed.faixa_max);
+      return successResponse(res, {
+        valor_estimado: toNum(parsed.valor_estimado),
+        faixa: min && max ? `${min} - ${max}` : null,
+        faixa_min: min,
+        faixa_max: max,
+        justificativa: parsed.justificativa || null,
+        modelo_ia: model,
+      });
+    } catch (error) {
+      console.error('Erro ao estimar valor (IA):', error.message);
+      return errorResponse(
+        res,
+        error.response?.data?.error?.message ||
+          error.message ||
+          'Erro ao estimar valor',
+        error.response?.status || 500,
+      );
+    }
+  }),
+);
+
 // GET /api/tech/patrimonio/:id
 router.get(
   '/patrimonio/:id',
