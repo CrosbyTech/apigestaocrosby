@@ -2327,6 +2327,350 @@ router.delete(
   }),
 );
 
+// ═══════════════════════════════════════════════════════════════════════
+// X1 — Competição VENDEDOR × VENDEDOR (varejo). Uma "programação" tem até 10
+// confrontos 1v1 (vendedores de filiais diferentes) num período. Vencedor de
+// cada confronto = maior faturamento. Tabela: crm_varejo_x1.
+//   GET/POST/PATCH/DELETE /api/crm/varejo/x1
+// ═══════════════════════════════════════════════════════════════════════
+
+// Operações varejo usadas no TOTVS sale-panel/sellers (mesma lista do sellers-totals)
+const X1_OPERATIONS_VAREJO = [
+  1, 2, 55, 510, 511, 1511, 521, 1521, 522, 960, 9001, 9009, 9027, 9017, 9400,
+  9401, 9402, 9403, 9404, 9005, 545, 546, 555, 548, 1210, 9405, 1205, 1101,
+  9065, 9064, 9063, 9062, 9061, 9420, 9026, 9067, 7234, 7236, 7240, 7241, 7242,
+  7235, 7237, 7254, 7259, 7255, 7243, 7245, 7244, 5919,
+];
+
+// Faturamento por vendedor (dealer) nas filiais dadas + período (TOTVS live).
+// Retorna Map<seller_code, { invoice_value, invoice_qty, seller_name, branch_* }>.
+async function fetchX1SellerTotals(branchCodes, datemin, datemax) {
+  const branches = [...new Set((branchCodes || []).map(Number).filter(Boolean))];
+  const agg = new Map();
+  const CONC = 3;
+  for (let i = 0; i < branches.length; i += CONC) {
+    const batch = branches.slice(i, i + CONC);
+    const responses = await Promise.all(
+      batch.map(async (b) => {
+        try {
+          const r = await callTotvsSellersSearch({
+            branchs: [b],
+            datemin,
+            datemax,
+            operations: X1_OPERATIONS_VAREJO,
+          });
+          return {
+            b,
+            branch_name: r?.branch_name || VAREJO_STORE_MAP[b]?.name || `Filial ${b}`,
+            sellers: Array.isArray(r?.dataRow) ? r.dataRow : [],
+          };
+        } catch (err) {
+          console.warn(`[x1/seller-totals branch ${b}] ${err.message}`);
+          return { b, sellers: [] };
+        }
+      }),
+    );
+    for (const { b, branch_name, sellers } of responses) {
+      for (const r of sellers) {
+        const code = Number(r.seller_code ?? r.sellerCode ?? 0);
+        if (!code) continue;
+        const iv = Number(r.seller_sale_value || 0);
+        const iq = Number(r.seller_sale_qty || 0);
+        if (!agg.has(code)) {
+          agg.set(code, {
+            seller_code: code,
+            seller_name: r.seller_name || r.sellerName || `Vendedor ${code}`,
+            invoice_value: 0,
+            invoice_qty: 0,
+            branch_code: b,
+            branch_name,
+          });
+        }
+        const acc = agg.get(code);
+        acc.invoice_value += iv;
+        acc.invoice_qty += iq;
+      }
+    }
+  }
+  return agg;
+}
+
+// Resolve cada confronto com o faturamento de A e B + vencedor.
+function computeX1Confrontos(confrontos, totals) {
+  return (confrontos || []).map((c, idx) => {
+    const mk = (p) => {
+      const code = p?.seller_code != null ? Number(p.seller_code) : null;
+      const t = code != null ? totals.get(code) : null;
+      return {
+        seller_code: code,
+        seller_name:
+          p?.seller_name || t?.seller_name || (code ? `Vendedor ${code}` : '—'),
+        branch_code: p?.branch_code ?? t?.branch_code ?? null,
+        branch_name: p?.branch_name || t?.branch_name || '',
+        invoice_value: t?.invoice_value || 0,
+        invoice_qty: t?.invoice_qty || 0,
+      };
+    };
+    const a = mk(c?.a);
+    const b = mk(c?.b);
+    let vencedor = null; // 'a' | 'b' | 'empate' | null (sem vendas)
+    if (a.invoice_value > b.invoice_value) vencedor = 'a';
+    else if (b.invoice_value > a.invoice_value) vencedor = 'b';
+    else if (a.invoice_value > 0) vencedor = 'empate';
+    return { idx, a, b, vencedor };
+  });
+}
+
+// Coleta os branch_codes envolvidos nos confrontos (pra saber quais filiais buscar).
+function x1BranchCodesFromConfrontos(confrontos) {
+  const set = new Set();
+  for (const c of confrontos || []) {
+    for (const p of [c?.a, c?.b]) {
+      const bc = Number(p?.branch_code);
+      if (bc) set.add(bc);
+    }
+  }
+  // Fallback: se nenhum branch informado, usa todas as varejo
+  if (set.size === 0) Object.keys(VAREJO_STORE_MAP).forEach((k) => set.add(Number(k)));
+  return [...set];
+}
+
+router.get(
+  '/varejo/x1',
+  asyncHandler(async (req, res) => {
+    const { status, includeRanking } = req.query;
+    let q = supabase
+      .from('crm_varejo_x1')
+      .select('*')
+      .order('data_inicio', { ascending: false });
+    if (status) q = q.eq('status', String(status).toLowerCase());
+    const { data, error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+
+    let x1s = data || [];
+    if (includeRanking === 'true' || includeRanking === '1') {
+      x1s = await Promise.all(
+        x1s.map(async (x) => {
+          if (x.status !== 'ativa') return x;
+          try {
+            const totals = await fetchX1SellerTotals(
+              x1BranchCodesFromConfrontos(x.confrontos),
+              x.data_inicio,
+              x.data_fim,
+            );
+            return { ...x, resultados: computeX1Confrontos(x.confrontos, totals) };
+          } catch (err) {
+            return { ...x, resultados_error: err.message };
+          }
+        }),
+      );
+    }
+    return successResponse(res, { x1s });
+  }),
+);
+
+router.get(
+  '/varejo/x1/:id',
+  asyncHandler(async (req, res) => {
+    const { data: x, error } = await supabase
+      .from('crm_varejo_x1')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (error) return errorResponse(res, error.message, 404, 'NOT_FOUND');
+
+    let resultados;
+    if (x.status === 'encerrada' && x.ranking_final) {
+      resultados = x.ranking_final;
+    } else {
+      try {
+        const totals = await fetchX1SellerTotals(
+          x1BranchCodesFromConfrontos(x.confrontos),
+          x.data_inicio,
+          x.data_fim,
+        );
+        resultados = computeX1Confrontos(x.confrontos, totals);
+      } catch (err) {
+        resultados = [];
+        x.resultados_error = err.message;
+      }
+    }
+    return successResponse(res, { ...x, resultados });
+  }),
+);
+
+router.post(
+  '/varejo/x1',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+    const {
+      nome,
+      descricao,
+      premiacao,
+      data_inicio,
+      data_fim,
+      confrontos,
+      user_login,
+    } = req.body || {};
+
+    if (!nome || !data_inicio || !data_fim || !Array.isArray(confrontos)) {
+      return errorResponse(
+        res,
+        'nome, data_inicio, data_fim e confrontos obrigatórios',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    if (confrontos.length < 1 || confrontos.length > 10) {
+      return errorResponse(res, 'X1 precisa de 1 a 10 confrontos', 400, 'INVALID_PARAM');
+    }
+    for (const c of confrontos) {
+      if (!c?.a?.seller_code || !c?.b?.seller_code) {
+        return errorResponse(res, 'Cada confronto precisa de 2 vendedores', 400, 'INVALID_PARAM');
+      }
+      if (Number(c.a.seller_code) === Number(c.b.seller_code)) {
+        return errorResponse(res, 'Um confronto não pode ter o mesmo vendedor dos dois lados', 400, 'INVALID_PARAM');
+      }
+    }
+    if (new Date(data_fim) < new Date(data_inicio)) {
+      return errorResponse(res, 'data_fim deve ser >= data_inicio', 400, 'INVALID_PARAM');
+    }
+
+    const row = {
+      nome: String(nome).slice(0, 200),
+      descricao: descricao ? String(descricao).slice(0, 1000) : null,
+      premiacao: premiacao ? String(premiacao).slice(0, 200) : null,
+      data_inicio,
+      data_fim,
+      confrontos: confrontos.map((c) => ({
+        a: {
+          seller_code: Number(c.a.seller_code),
+          seller_name: c.a.seller_name || null,
+          branch_code: c.a.branch_code != null ? Number(c.a.branch_code) : null,
+          branch_name: c.a.branch_name || null,
+        },
+        b: {
+          seller_code: Number(c.b.seller_code),
+          seller_name: c.b.seller_name || null,
+          branch_code: c.b.branch_code != null ? Number(c.b.branch_code) : null,
+          branch_name: c.b.branch_name || null,
+        },
+      })),
+      status: 'ativa',
+      criado_por: user_login || req.headers['x-user-login'] || 'desconhecido',
+    };
+
+    const { data, error } = await supabase
+      .from('crm_varejo_x1')
+      .insert(row)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, data, 'X1 criado');
+  }),
+);
+
+router.patch(
+  '/varejo/x1/:id',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+    const { acao } = req.body || {};
+    const { data: x, error: e0 } = await supabase
+      .from('crm_varejo_x1')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (e0) return errorResponse(res, e0.message, 404, 'NOT_FOUND');
+
+    const patch = {};
+    if (acao === 'cancelar') {
+      patch.status = 'cancelada';
+    } else if (acao === 'encerrar') {
+      patch.status = 'encerrada';
+      // Snapshot imutável do resultado no momento do encerramento
+      try {
+        const totals = await fetchX1SellerTotals(
+          x1BranchCodesFromConfrontos(x.confrontos),
+          x.data_inicio,
+          x.data_fim,
+        );
+        patch.ranking_final = computeX1Confrontos(x.confrontos, totals);
+      } catch (err) {
+        console.warn('[x1 encerrar] snapshot falhou:', err.message);
+      }
+    } else {
+      return errorResponse(res, 'acao inválida (encerrar|cancelar)', 400, 'INVALID_PARAM');
+    }
+
+    const { data, error } = await supabase
+      .from('crm_varejo_x1')
+      .update(patch)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, data, 'X1 atualizado');
+  }),
+);
+
+router.delete(
+  '/varejo/x1/:id',
+  asyncHandler(async (req, res) => {
+    const userRole = String(req.headers['x-user-role'] || '').toLowerCase();
+    if (userRole !== 'admin' && userRole !== 'owner') {
+      return errorResponse(res, 'Apenas administradores', 403, 'FORBIDDEN');
+    }
+    const { error } = await supabase
+      .from('crm_varejo_x1')
+      .delete()
+      .eq('id', req.params.id);
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    return successResponse(res, { deleted: true }, 'X1 removido');
+  }),
+);
+
+// Lista de vendedores de varejo (com a loja) para montar os confrontos do X1.
+// Fonte: TOTVS sale-panel/sellers dos últimos ~90 dias (quem vendeu). Cache 10min.
+let X1_VENDEDORES_CACHE = { ts: 0, data: null };
+router.get(
+  '/varejo/x1-vendedores',
+  asyncHandler(async (req, res) => {
+    if (
+      X1_VENDEDORES_CACHE.data &&
+      Date.now() - X1_VENDEDORES_CACHE.ts < 10 * 60 * 1000
+    ) {
+      return successResponse(res, {
+        vendedores: X1_VENDEDORES_CACHE.data,
+        cached: true,
+      });
+    }
+    const hoje = new Date();
+    const ini = new Date(hoje);
+    ini.setDate(ini.getDate() - 90);
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    const branches = Object.keys(VAREJO_STORE_MAP).map(Number);
+    const totals = await fetchX1SellerTotals(branches, fmt(ini), fmt(hoje));
+    const vendedores = [...totals.values()]
+      .map((v) => ({
+        seller_code: v.seller_code,
+        seller_name: v.seller_name,
+        branch_code: v.branch_code,
+        branch_name: v.branch_name,
+      }))
+      .sort((a, b) =>
+        (a.seller_name || '').localeCompare(b.seller_name || '', 'pt-BR'),
+      );
+    X1_VENDEDORES_CACHE = { ts: Date.now(), data: vendedores };
+    return successResponse(res, { vendedores });
+  }),
+);
+
 // ─── /api/crm/varejo/metas-reuniao ────────────────────────────────────
 // Retorna metas mensais (Bronze/Prata/Ouro/Diamante) por loja + faturamento
 // real do mês + nível alcançado.
