@@ -686,6 +686,33 @@ router.get(
   }),
 );
 
+// GET /api/tech/_groq-models  (diagnóstico temporário)
+const GROQ_API_KEY_DIAG = process.env.GROQ_API_KEY || '';
+router.get(
+  '/_groq-models',
+  asyncHandler(async (_req, res) => {
+    if (!GROQ_API_KEY_DIAG)
+      return successResponse(res, { configurado: false, models: [] });
+    try {
+      const { data } = await axios.get(
+        'https://api.groq.com/openai/v1/models',
+        {
+          headers: { Authorization: `Bearer ${GROQ_API_KEY_DIAG}` },
+          timeout: 15000,
+        },
+      );
+      const models = (data?.data || []).map((m) => m.id).sort();
+      return successResponse(res, { configurado: true, models });
+    } catch (e) {
+      return errorResponse(
+        res,
+        e.response?.data?.error?.message || e.message,
+        e.response?.status || 500,
+      );
+    }
+  }),
+);
+
 // POST /api/tech/patrimonio/estimar-valor
 //   Estima o valor de mercado de um item de patrimônio via IA (Groq/OpenAI).
 //   Body: { tipo, marca, modelo, descricao, ano? }
