@@ -6608,6 +6608,16 @@ async function atualizarLeadClickUp(u) {
 router.post(
   '/sync-leads-compras',
   asyncHandler(async (req, res) => {
+    // ClickUp fora de uso: sync de leads→compras DESATIVADO para não escrever
+    // ("comprou" + custom fields) num board abandonado. Cron e transferir-lead
+    // também já foram desativados. Para reativar, remova este early return.
+    return errorResponse(
+      res,
+      'Sincronização com ClickUp desativada (board fora de uso).',
+      410,
+      'CLICKUP_SYNC_DISABLED',
+    );
+    // eslint-disable-next-line no-unreachable
     if (!CLICKUP_API_KEY || !CLICKUP_LIST_ID) {
       return errorResponse(res, 'ClickUp não configurado', 503, 'CLICKUP_OFF');
     }
