@@ -648,6 +648,17 @@ router.get(
       .filter((r) => r.status === 'ativo')
       .reduce((s, r) => s + (Number(r.valor_aquisicao) || 0), 0);
 
+    // Soma de valor por filial (para relatório por unidade)
+    const valor_por_filial = {};
+    for (const r of list) {
+      const k = r.filial || 'sem_info';
+      valor_por_filial[k] =
+        (valor_por_filial[k] || 0) + (Number(r.valor_aquisicao) || 0);
+    }
+    for (const k of Object.keys(valor_por_filial)) {
+      valor_por_filial[k] = Number(valor_por_filial[k].toFixed(2));
+    }
+
     return successResponse(res, {
       total: list.length,
       por_tipo,
@@ -655,6 +666,7 @@ router.get(
       por_setor,
       por_filial,
       por_local,
+      valor_por_filial,
       valor_total: Number(valor_total.toFixed(2)),
       valor_ativos: Number(valor_ativos.toFixed(2)),
     });
