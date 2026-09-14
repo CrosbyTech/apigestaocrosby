@@ -305,6 +305,44 @@ router.post(
   }),
 );
 
+// GET /api/tech/chips/_wa-probe?numero=...  (DIAGNÓSTICO TEMPORÁRIO)
+// Mostra o retorno cru da uazapi para descobrir se dá pra puxar o nome do
+// perfil (pushname/verifiedName) de um número.
+router.get(
+  '/chips/_wa-probe',
+  asyncHandler(async (req, res) => {
+    const BASE = process.env.UAZAPI_BASE_URL || '';
+    if (!BASE) return errorResponse(res, 'UAZAPI_BASE_URL não configurado', 503);
+    const instancias = await listUazapiInstancesRaw();
+    const conectada = (instancias || []).find((i) => i.status === 'connected');
+    if (!conectada?.token)
+      return errorResponse(res, 'Nenhuma instância conectada', 503);
+    let d = String(req.query.numero || '').replace(/\D/g, '');
+    if (!d) return errorResponse(res, 'informe ?numero=', 400);
+    if (!d.startsWith('55')) d = '55' + d;
+    const headers = { token: conectada.token, 'Content-Type': 'application/json' };
+    const out = { instancia: conectada.name, numero: d };
+    const tenta = async (label, fn) => {
+      try {
+        const { data } = await fn();
+        out[label] = data;
+      } catch (e) {
+        out[label] = { _erro: e.response?.status || e.message, corpo: e.response?.data };
+      }
+    };
+    await tenta('chat_check', () =>
+      axios.post(`${BASE}/chat/check`, { numbers: [d] }, { headers, timeout: 12000 }),
+    );
+    await tenta('chat_details', () =>
+      axios.post(`${BASE}/chat/details`, { number: d }, { headers, timeout: 12000 }),
+    );
+    await tenta('chat_GetNameAndImageURL', () =>
+      axios.post(`${BASE}/chat/GetNameAndImageURL`, { number: d }, { headers, timeout: 12000 }),
+    );
+    return successResponse(res, out);
+  }),
+);
+
 // GET /api/tech/chips/:id
 router.get(
   '/chips/:id',
