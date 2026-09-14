@@ -228,6 +228,24 @@ router.post(
     const comWhatsapp = [];
     const erros = [];
     let atualizados = 0;
+    let comNome = 0;
+
+    // Busca nome do perfil + foto via /chat/details (só p/ quem tem WhatsApp)
+    const buscarDetalhes = async (num) => {
+      try {
+        const { data } = await axios.post(
+          `${BASE}/chat/details`,
+          { number: num },
+          { headers: { token: conectada.token, 'Content-Type': 'application/json' }, timeout: 12000 },
+        );
+        const d = data || {};
+        const nome = d.name || d.wa_name || d.wa_contactName || d.lead_fullName || '';
+        const foto = d.image || d.imagePreview || '';
+        return { nome: nome || null, foto: foto || null };
+      } catch {
+        return { nome: null, foto: null };
+      }
+    };
 
     const checarNumero = async (chip) => {
       const num = norm(chip.numero);
@@ -264,15 +282,33 @@ router.post(
         // existir no banco, refaz o update sem ela (não quebra a verificação).
         const mudou = Boolean(chip.tem_whatsapp) !== isIn;
         const nowIso = new Date().toISOString();
-        let upd = await supabase
-          .from('tech_chips')
-          .update({ tem_whatsapp: isIn, whatsapp_verificado_em: nowIso })
-          .eq('id', chip.id);
-        if (upd.error && /whatsapp_verificado_em/i.test(upd.error.message || '')) {
-          upd = await supabase
-            .from('tech_chips')
-            .update({ tem_whatsapp: isIn })
-            .eq('id', chip.id);
+        // Se tem WhatsApp, busca nome + foto do perfil
+        let nome = null;
+        let foto = null;
+        if (isIn) {
+          const det = await buscarDetalhes(num);
+          nome = det.nome;
+          foto = det.foto;
+          if (nome) comNome += 1;
+        }
+        const patch = {
+          tem_whatsapp: isIn,
+          whatsapp_verificado_em: nowIso,
+          whatsapp_nome: nome,
+          whatsapp_foto: foto,
+        };
+        let upd = await supabase.from('tech_chips').update(patch).eq('id', chip.id);
+        // Tolerância a colunas ainda não criadas: remove a que a mensagem citar e refaz
+        let guard = 0;
+        while (upd.error && guard < 4) {
+          const msg = upd.error.message || '';
+          const col = ['whatsapp_foto', 'whatsapp_nome', 'whatsapp_verificado_em'].find(
+            (c) => new RegExp(c, 'i').test(msg),
+          );
+          if (!col) break;
+          delete patch[col];
+          upd = await supabase.from('tech_chips').update(patch).eq('id', chip.id);
+          guard += 1;
         }
         if (mudou) atualizados += 1;
         if (isIn) comWhatsapp.push(chip.numero);
@@ -296,50 +332,13 @@ router.post(
       total: (chips || []).length,
       com_whatsapp: comWhatsapp.length,
       sem_whatsapp: semWhatsapp.length,
+      com_nome: comNome,
       atualizados,
       erros: erros.length,
       numeros_sem_whatsapp: semWhatsapp,
       detalhe_erros: erros,
       instancia: conectada.name,
     });
-  }),
-);
-
-// GET /api/tech/chips/_wa-probe?numero=...  (DIAGNÓSTICO TEMPORÁRIO)
-// Mostra o retorno cru da uazapi para descobrir se dá pra puxar o nome do
-// perfil (pushname/verifiedName) de um número.
-router.get(
-  '/chips/_wa-probe',
-  asyncHandler(async (req, res) => {
-    const BASE = process.env.UAZAPI_BASE_URL || '';
-    if (!BASE) return errorResponse(res, 'UAZAPI_BASE_URL não configurado', 503);
-    const instancias = await listUazapiInstancesRaw();
-    const conectada = (instancias || []).find((i) => i.status === 'connected');
-    if (!conectada?.token)
-      return errorResponse(res, 'Nenhuma instância conectada', 503);
-    let d = String(req.query.numero || '').replace(/\D/g, '');
-    if (!d) return errorResponse(res, 'informe ?numero=', 400);
-    if (!d.startsWith('55')) d = '55' + d;
-    const headers = { token: conectada.token, 'Content-Type': 'application/json' };
-    const out = { instancia: conectada.name, numero: d };
-    const tenta = async (label, fn) => {
-      try {
-        const { data } = await fn();
-        out[label] = data;
-      } catch (e) {
-        out[label] = { _erro: e.response?.status || e.message, corpo: e.response?.data };
-      }
-    };
-    await tenta('chat_check', () =>
-      axios.post(`${BASE}/chat/check`, { numbers: [d] }, { headers, timeout: 12000 }),
-    );
-    await tenta('chat_details', () =>
-      axios.post(`${BASE}/chat/details`, { number: d }, { headers, timeout: 12000 }),
-    );
-    await tenta('chat_GetNameAndImageURL', () =>
-      axios.post(`${BASE}/chat/GetNameAndImageURL`, { number: d }, { headers, timeout: 12000 }),
-    );
-    return successResponse(res, out);
   }),
 );
 
