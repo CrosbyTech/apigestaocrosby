@@ -66,6 +66,7 @@ import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
 import pdvRouter from './totvsrouter/pdv.js';
+import bluecredInadimplenciaRouter from './totvsrouter/bluecredInadimplencia.js';
 import portalRfidRoutes from './routes/portalRfid.routes.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
 import { iniciarJobForecastRefYoy } from './jobs/forecast-ref-yoy.job.js';
@@ -96,6 +97,7 @@ import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
+import { iniciarResellerCacheWarm } from './jobs/reseller-cache-warm.job.js';
 import { iniciarJobEsteiraProtesto } from './jobs/esteira-protesto.job.js';
 import {
   iniciarJobContratoAluguelVencimento,
@@ -142,6 +144,7 @@ app.use('/api/totvs', estoqueRouter); // best-selling-products, product-balances
 app.use('/api/totvs', painelVendasRouter); // sale-panel/*, seller-panel/*
 app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
 app.use('/api/totvs', pdvRouter); // PDV RFID — produto por código/EPC, condições, transação
+app.use('/api/totvs', bluecredInadimplenciaRouter); // BlueCred — inadimplência (faturas vencidas dos clientes do crediário)
 app.use('/api/portal-rfid', portalRfidRoutes); // Portal RFID Chainway UR4 (bridge TCP)
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
@@ -222,6 +225,7 @@ app.listen(PORT, async () => {
   iniciarJobBoletoCobranca();
   iniciarBluecardPagamentosSync();
   iniciarBluecardLimiteWatchdog();
+  iniciarResellerCacheWarm();
   iniciarJobEsteiraProtesto();
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();

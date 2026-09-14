@@ -924,7 +924,14 @@ export async function getBlueCredPersonCodes(token) {
         console.warn(`[bluecred] lookup CPF falhou: ${e.message}`);
       }
     }
-    BLUECRED_CODES_CACHE = { codes, ts: Date.now() };
+    BLUECRED_CODES_CACHE = {
+      codes,
+      ts: Date.now(),
+      // Origem por CPF: quem veio do contrato antigo (HeadCoach/Autentique) e
+      // quem comprou pelo app BlueCard — a Inadimplência BlueCred marca cada um.
+      cpfsContratos: new Set(cpfsContratos),
+      cpfsApp: new Set(cpfsApp),
+    };
     console.log(
       `[bluecred] ${codes.length}/${cpfs.length} clientes resolvidos no TOTVS`,
     );
@@ -933,6 +940,19 @@ export async function getBlueCredPersonCodes(token) {
     console.warn(`[bluecred] lista de clientes falhou: ${e.message}`);
     return [];
   }
+}
+
+/**
+ * Conjuntos de CPF por origem, do último getBlueCredPersonCodes (cache).
+ * Chamar DEPOIS de getBlueCredPersonCodes no mesmo processo.
+ *   cpfsContratos → clientes ANTIGOS (bluecred_contratos, HeadCoach)
+ *   cpfsApp       → clientes NOVOS (compraram pelo app BlueCard do Felipe)
+ */
+export function getBlueCredCpfOrigens() {
+  return {
+    cpfsContratos: BLUECRED_CODES_CACHE.cpfsContratos || new Set(),
+    cpfsApp: BLUECRED_CODES_CACHE.cpfsApp || new Set(),
+  };
 }
 
 // Docs que são MEIO DE PAGAMENTO: quando a fatura inteira não tem NF

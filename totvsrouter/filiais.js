@@ -6,6 +6,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+import supabase from '../config/supabase.js';
 import {
   httpsAgent,
   httpAgent,
@@ -815,163 +816,230 @@ const RESELLER_CONCURRENCY = 4;
 
 /**
  * @route GET /totvs/reseller-clients
- * @desc Retorna lista de clientes REVENDA (classificacao TOTVS), PJ + PF
- * Classificacoes: type 7 codeList ["1"] e/ou type 20 codeList ["3"]
+ * @desc Lista de clientes REVENDA (classificacao TOTVS), PJ + PF.
+ *       Classificacoes: type 7 codeList ["1"] e/ou type 20 codeList ["3"]
+ *
+ * ── CACHE EM TRÊS CAMADAS (2026-09) ──
+ * Montar esta lista a frio passa de 3 minutos (4 varreduras paginadas no
+ * TOTVS). Antes o cache vivia só na memória do processo: cada restart zerava
+ * e a primeira tela pagava os 3 minutos — ou desistia. Agora:
+ *   1. memória do processo (TTL RESELLER_CACHE_TTL) → resposta imediata;
+ *   2. Supabase (tabela totvs_listas_cache) → resposta imediata mesmo depois
+ *      de restart; se estiver velha, dispara a renovação em SEGUNDO PLANO e
+ *      devolve a versão salva (o meta diz de quando é);
+ *   3. TOTVS → só quando não há nada salvo (primeira vez) ou com ?refresh=true
+ *      (é o que o job reseller-cache-warm usa para manter a lista fresca).
+ * Resposta: { data: [...clientes], meta: { origem, atualizado_em, total } }.
  */
+const RESELLER_CACHE_CHAVE = 'reseller-clients';
+
+async function lerListaPersistida(chave) {
+  try {
+    const { data, error } = await supabase
+      .from('totvs_listas_cache')
+      .select('payload, total, atualizado_em, duracao_ms')
+      .eq('chave', chave)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data || !Array.isArray(data.payload)) return null;
+    return {
+      lista: data.payload,
+      total: data.total,
+      atualizadoEm: data.atualizado_em,
+      duracaoMs: data.duracao_ms,
+    };
+  } catch (e) {
+    console.warn(
+      `⚠️ [reseller] cache persistido indisponível (${e.message}) — rode migrations/totvs_listas_cache.sql`,
+    );
+    return null;
+  }
+}
+
+async function salvarListaPersistida(chave, lista, duracaoMs) {
+  try {
+    const { error } = await supabase.from('totvs_listas_cache').upsert(
+      {
+        chave,
+        payload: lista,
+        total: lista.length,
+        duracao_ms: duracaoMs,
+        atualizado_em: new Date().toISOString(),
+      },
+      { onConflict: 'chave' },
+    );
+    if (error) throw error;
+  } catch (e) {
+    console.warn(`⚠️ [reseller] não consegui persistir o cache: ${e.message}`);
+  }
+}
+
+// Monta a lista no TOTVS (a parte lenta). Devolve { lista, duracaoMs }.
+async function carregarResellerDoTotvs() {
+  const startTime = Date.now();
+  const tokenData = await getToken();
+  if (!tokenData?.access_token) throw new Error('Token TOTVS indisponivel');
+  let token = tokenData.access_token;
+  const endpointPJ = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
+  const endpointPF = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
+
+  const doRequest = async (endpoint, classificationType, codeList, page) => {
+    const payload = {
+      filter: { classifications: [{ type: classificationType, codeList }] },
+      page,
+      pageSize: RESELLER_PAGE_SIZE,
+      order: 'code',
+    };
+    const chamar = (accessToken) =>
+      axios.post(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        timeout: 120000,
+      });
+    for (let tentativa = 1; tentativa <= 3; tentativa++) {
+      try {
+        return await chamar(token);
+      } catch (error) {
+        if (error.response?.status === 401) {
+          const novoToken = await getToken(true);
+          token = novoToken.access_token;
+          continue;
+        }
+        // O TOTVS derruba a conexao sob carga ("stream has been aborted");
+        // espera um pouco e tenta de novo antes de desistir
+        if (tentativa === 3) throw error;
+        await new Promise((r) => setTimeout(r, 2000 * tentativa));
+      }
+    }
+    return { data: { items: [], totalPages: 1 } };
+  };
+
+  const mapear = (item, personType) => ({
+    code: item.code,
+    name: item.name || '',
+    fantasyName: item.fantasyName || '',
+    cnpj: item.cnpj || '',
+    cpf: item.cpf || '',
+    cpfCnpj: item.cnpj || item.cpf || '',
+    personType,
+    isInactive: item.isInactive === true,
+    customerStatus: item.customerStatus || '',
+    branchInsertCode: item.branchInsertCode || null,
+  });
+
+  // A primeira pagina informa o total; as demais vao em paralelo — a busca
+  // sequencial passava de 20 min no volume de pessoa fisica
+  const fetchAllPages = async (endpoint, personType, tipo, code) => {
+    const primeira = await doRequest(endpoint, tipo, [code], 1);
+    const itens = (primeira.data?.items || []).map((i) => mapear(i, personType));
+    const totalPaginas = primeira.data?.totalPages || 1;
+    for (let inicio = 2; inicio <= totalPaginas; inicio += RESELLER_CONCURRENCY) {
+      const paginas = [];
+      for (let p = inicio; p < inicio + RESELLER_CONCURRENCY && p <= totalPaginas; p++) {
+        paginas.push(p);
+      }
+      const respostas = await Promise.all(paginas.map((p) => doRequest(endpoint, tipo, [code], p)));
+      respostas.forEach((r) => {
+        (r.data?.items || []).forEach((i) => itens.push(mapear(i, personType)));
+      });
+    }
+    console.log(`📄 ${personType} tipo ${tipo}/code ${code}: ${itens.length} clientes (${totalPaginas} paginas)`);
+    return itens;
+  };
+
+  console.log('🔍 Buscando clientes REVENDA na API TOTVS (PJ + PF, tipo 7/code 1 e tipo 20/code 3)...');
+  // Sequencial de proposito: cada busca ja usa RESELLER_CONCURRENCY paginas
+  // em paralelo, e somar as quatro derrubava a conexao com o TOTVS
+  const pj7 = await fetchAllPages(endpointPJ, 'PJ', 7, '1');
+  const pj20 = await fetchAllPages(endpointPJ, 'PJ', 20, '3');
+  const pf7 = await fetchAllPages(endpointPF, 'PF', 7, '1');
+  const pf20 = await fetchAllPages(endpointPF, 'PF', 20, '3');
+
+  const codesSet = new Set();
+  const lista = [];
+  [...pj7, ...pj20, ...pf7, ...pf20].forEach((item) => {
+    if (!codesSet.has(item.code)) {
+      codesSet.add(item.code);
+      lista.push(item);
+    }
+  });
+  const duracaoMs = Date.now() - startTime;
+  const qtdPJ = lista.filter((c) => c.personType === 'PJ').length;
+  console.log(`✅ ${lista.length} clientes de revenda (${qtdPJ} PJ / ${lista.length - qtdPJ} PF) em ${duracaoMs}ms`);
+  return { lista, duracaoMs };
+}
+
+// Single-flight: varias telas pedindo ao mesmo tempo disparam UMA carga.
+let resellerCarregando = null;
+async function atualizarResellerCache() {
+  if (resellerCarregando) return resellerCarregando;
+  resellerCarregando = (async () => {
+    try {
+      const { lista, duracaoMs } = await carregarResellerDoTotvs();
+      cachedResellerClients = lista;
+      resellerCacheTimestamp = Date.now();
+      await salvarListaPersistida(RESELLER_CACHE_CHAVE, lista, duracaoMs);
+      return { lista, atualizadoEm: new Date(resellerCacheTimestamp).toISOString() };
+    } finally {
+      resellerCarregando = null;
+    }
+  })();
+  return resellerCarregando;
+}
+
 router.get(
   '/reseller-clients',
   asyncHandler(async (req, res) => {
-    const now = Date.now();
+    req.setTimeout(20 * 60 * 1000);
     const forceRefresh = req.query.refresh === 'true';
-
-    // Retornar cache se valido
-    if (
-      !forceRefresh &&
-      cachedResellerClients &&
-      now - resellerCacheTimestamp < RESELLER_CACHE_TTL
-    ) {
-      console.log(
-        `📋 Reseller clients (cache): ${cachedResellerClients.length} clientes`,
-      );
-      return successResponse(
-        res,
-        cachedResellerClients,
-        `${cachedResellerClients.length} clientes de revenda (cache)`,
-      );
-    }
-
-    const startTime = Date.now();
-
-    try {
-      const tokenData = await getToken();
-      if (!tokenData?.access_token) {
-        return errorResponse(res, 'Token indisponivel', 503, 'TOKEN_UNAVAILABLE');
-      }
-
-      let token = tokenData.access_token;
-      const endpointPJ = `${TOTVS_BASE_URL}/person/v2/legal-entities/search`;
-      const endpointPF = `${TOTVS_BASE_URL}/person/v2/individuals/search`;
-
-      const doRequest = async (endpoint, classificationType, codeList, page) => {
-        const payload = {
-          filter: {
-            classifications: [
-              {
-                type: classificationType,
-                codeList: codeList,
-              },
-            ],
-          },
-          page,
-          pageSize: RESELLER_PAGE_SIZE,
-          order: 'code',
-        };
-        const chamar = (accessToken) =>
-          axios.post(endpoint, payload, {
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-              Authorization: `Bearer ${accessToken}`,
-            },
-            timeout: 120000,
-          });
-        for (let tentativa = 1; tentativa <= 3; tentativa++) {
-          try {
-            return await chamar(token);
-          } catch (error) {
-            if (error.response?.status === 401) {
-              const novoToken = await getToken(true);
-              token = novoToken.access_token;
-              continue;
-            }
-            // O TOTVS derruba a conexao sob carga ("stream has been aborted");
-            // espera um pouco e tenta de novo antes de desistir
-            if (tentativa === 3) throw error;
-            await new Promise((r) => setTimeout(r, 2000 * tentativa));
-          }
-        }
-      };
-
-      const mapear = (item, personType) => ({
-        code: item.code,
-        name: item.name || '',
-        fantasyName: item.fantasyName || '',
-        cnpj: item.cnpj || '',
-        cpf: item.cpf || '',
-        cpfCnpj: item.cnpj || item.cpf || '',
-        personType,
-        isInactive: item.isInactive === true,
-        customerStatus: item.customerStatus || '',
-        branchInsertCode: item.branchInsertCode || null,
-      });
-
-      // A primeira pagina informa o total; as demais vao em paralelo — a busca
-      // sequencial passava de 20 min no volume de pessoa fisica
-      const fetchAllPages = async (endpoint, personType, tipo, code) => {
-        const primeira = await doRequest(endpoint, tipo, [code], 1);
-        const itens = (primeira.data?.items || []).map((i) => mapear(i, personType));
-        const totalPaginas = primeira.data?.totalPages || 1;
-
-        for (let inicio = 2; inicio <= totalPaginas; inicio += RESELLER_CONCURRENCY) {
-          const paginas = [];
-          for (
-            let p = inicio;
-            p < inicio + RESELLER_CONCURRENCY && p <= totalPaginas;
-            p++
-          ) {
-            paginas.push(p);
-          }
-          const respostas = await Promise.all(
-            paginas.map((p) => doRequest(endpoint, tipo, [code], p)),
-          );
-          respostas.forEach((r) => {
-            (r.data?.items || []).forEach((i) => itens.push(mapear(i, personType)));
-          });
-        }
-
-        console.log(
-          `📄 ${personType} tipo ${tipo}/code ${code}: ${itens.length} clientes (${totalPaginas} paginas)`,
-        );
-        return itens;
-      };
-
-      console.log(
-        '🔍 Buscando clientes REVENDA na API TOTVS (PJ + PF, tipo 7/code 1 e tipo 20/code 3)...',
-      );
-
-      // Sequencial de proposito: cada busca ja usa RESELLER_CONCURRENCY paginas
-      // em paralelo, e somar as quatro derrubava a conexao com o TOTVS
-      const pj7 = await fetchAllPages(endpointPJ, 'PJ', 7, '1');
-      const pj20 = await fetchAllPages(endpointPJ, 'PJ', 20, '3');
-      const pf7 = await fetchAllPages(endpointPF, 'PF', 7, '1');
-      const pf20 = await fetchAllPages(endpointPF, 'PF', 20, '3');
-
-      // Mesclar e deduplicar por code
-      const codesSet = new Set();
-      const allReseller = [];
-
-      [...pj7, ...pj20, ...pf7, ...pf20].forEach((item) => {
-        if (!codesSet.has(item.code)) {
-          codesSet.add(item.code);
-          allReseller.push(item);
-        }
-      });
-
-      // Salvar no cache
-      cachedResellerClients = allReseller;
-      resellerCacheTimestamp = Date.now();
-
-      const totalTime = Date.now() - startTime;
-      const qtdPJ = allReseller.filter((c) => c.personType === 'PJ').length;
-      console.log(
-        `✅ ${allReseller.length} clientes de revenda (${qtdPJ} PJ / ${allReseller.length - qtdPJ} PF) em ${totalTime}ms`,
-      );
-
+    const responder = (lista, origem, atualizadoEm) =>
       successResponse(
         res,
-        allReseller,
-        `${allReseller.length} clientes de revenda encontrados em ${totalTime}ms`,
+        {
+          data: lista,
+          meta: {
+            origem, // memoria | supabase | totvs
+            atualizado_em: atualizadoEm,
+            total: lista.length,
+            ttl_min: Math.round(RESELLER_CACHE_TTL / 60000),
+          },
+        },
+        `${lista.length} clientes de revenda (${origem})`,
       );
+
+    try {
+      if (forceRefresh) {
+        const r = await atualizarResellerCache();
+        return responder(r.lista, 'totvs', r.atualizadoEm);
+      }
+
+      const now = Date.now();
+      if (cachedResellerClients && now - resellerCacheTimestamp < RESELLER_CACHE_TTL) {
+        return responder(cachedResellerClients, 'memoria', new Date(resellerCacheTimestamp).toISOString());
+      }
+
+      const persistido = await lerListaPersistida(RESELLER_CACHE_CHAVE);
+      if (persistido) {
+        const idade = now - Date.parse(persistido.atualizadoEm);
+        // Devolve o que está salvo NA HORA; se envelheceu, renova em segundo plano
+        if (idade < RESELLER_CACHE_TTL) {
+          cachedResellerClients = persistido.lista;
+          resellerCacheTimestamp = Date.parse(persistido.atualizadoEm);
+        } else {
+          atualizarResellerCache().catch((e) =>
+            console.warn(`⚠️ [reseller] renovação em background falhou: ${e.message}`),
+          );
+        }
+        return responder(persistido.lista, 'supabase', persistido.atualizadoEm);
+      }
+
+      // Primeira vez (nada salvo): carrega sincrono — o job de aquecimento
+      // evita que uma tela pague este custo depois do primeiro deploy.
+      const r = await atualizarResellerCache();
+      return responder(r.lista, 'totvs', r.atualizadoEm);
     } catch (error) {
       console.error('❌ Erro ao buscar clientes de revenda:', error.message);
       return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
