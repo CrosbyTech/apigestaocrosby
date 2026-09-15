@@ -307,14 +307,22 @@ router.get(
 // ──────────────────────────────────────────────────────────────
 // POST /chamados — abre um chamado novo (chamado_abrir)
 // body: { loja_cd, assunto, texto?, setor?, direcao? ('adm'|'loja'), por?,
-//         responsavel_nome? (se vazio, aplica a regra automática) }
+//         responsavel_nome? (se vazio, aplica a regra automática),
+//         loja_nome? (obrigatório quando loja_cd não é uma das lojas fixas —
+//         ex.: chamado administrativo da matriz/empresa que não é loja) }
 // ──────────────────────────────────────────────────────────────
 router.post(
   '/chamados',
   asyncHandler(async (req, res) => {
-    const { loja_cd, assunto, texto, setor, direcao, por, responsavel_nome } = req.body || {};
+    const { loja_cd, assunto, texto, setor, direcao, por, responsavel_nome, loja_nome } =
+      req.body || {};
     const cd = Number(loja_cd);
-    const loja = LOJAS.find(([c]) => c === cd);
+    let loja = LOJAS.find(([c]) => c === cd);
+    // Empresa fora da lista fixa (matriz, CD, etc.): aceita se vier o nome —
+    // já existem chamados assim nos dados do Dryland (loja_cd 0 "PATRIMONIO / GERAL").
+    if (!loja && Number.isInteger(cd) && cd >= 0 && loja_nome && String(loja_nome).trim()) {
+      loja = [cd, String(loja_nome).trim()];
+    }
     if (!loja) {
       return errorResponse(res, 'loja_cd inválido', 400, 'VALIDATION_ERROR');
     }
