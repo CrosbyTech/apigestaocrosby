@@ -150,3 +150,56 @@ BlueCard mostra fallback.
    `branchCode` do próprio título.
 6. Limite de crédito: `disponível = limite − em aberto` → liberar limite
    exige somar os títulos em aberto do cliente.
+
+## Pix Pagar.me no app → Solicitação de Baixa no HeadCoach (15/09/2026)
+
+O app BlueCard passou a cobrar a fatura pelo Pix da conta Pagar.me da Crosby
+(mesma conta do PDV). Quando a Pagar.me confirma, o app baixa a fatura lá
+(parcelas, limite) e manda o evento `pagamento.pix` para
+`POST /api/bluecard/webhook` (assinado HMAC, pela mesma outbox dos outros eventos).
+
+O HeadCoach transforma esse evento em **solicitações de baixa** — uma por
+título/parcela do TOTVS — na página Financeiro › Contas a Receber › Solicitação
+de Baixa, com:
+
+- solicitante `BlueCard · Pix Pagar.me`, forma de pagamento `pix_pagarme`,
+  origem `bluecard_pagarme`;
+- observação com o pedido da Pagar.me, a cobrança, a parcela do app e como o
+  título foi localizado (pelo `TOTVS-<título>-<parcela>` ou por
+  vencimento + valor entre os títulos em aberto do CPF);
+- encargos do app (multa/juros) rateados em `vl_juros`;
+- se o título não for localizado, a solicitação é aberta mesmo assim com o
+  aviso "TÍTULO NÃO LOCALIZADO NO TOTVS" na observação, para conferência manual.
+
+O financeiro processa a baixa pelo botão de sempre (invoices-settle), escolhendo
+a forma `Pix Pagar.me (BlueCard)` (paidType 4).
+
+**Implantação**
+
+1. Rodar `migrations/solicitacoes_baixa_origem.sql` no Supabase do HeadCoach
+   (colunas `origem`, `ref_externa` + índice único de idempotência). Sem a
+   migração o código funciona em modo degradado (dedupe pela observação).
+2. Deploy do HeadCoach (`services/bluecardBaixaPagarme.js`, webhook).
+3. Do lado do app (PR `feat/pix-pagarme` no credit-crosby): envs
+   `PAGARME_SECRET_KEY`, `PAGARME_WEBHOOK_TOKEN` na Vercel, migration
+   `card_pix_cobrancas`, webhook da Pagar.me apontando para
+   `/api/webhooks/pagarme?token=…`.
+
+Payload do evento:
+
+```json
+{
+  "evento": "pagamento.pix",
+  "em": "2026-09-15T14:03:00.000Z",
+  "pagamento": {
+    "cobranca_id": "uuid", "order_id": "or_…", "charge_id": "ch_…",
+    "cpf": "06537964474", "nome": "…", "customer_id": "uuid",
+    "invoice_id": "uuid|null", "ciclo": "2026-09",
+    "valor_cents": 12345, "encargos_cents": 0, "pago_em": "2026-09-15T14:02:58Z",
+    "parcelas": [
+      { "parcela_id": "uuid", "titulo": "TOTVS-247122-1", "numero": 1, "de": 3,
+        "valor_cents": 4115, "vencimento": "2026-10-10", "compra_documento": "247118" }
+    ]
+  }
+}
+```

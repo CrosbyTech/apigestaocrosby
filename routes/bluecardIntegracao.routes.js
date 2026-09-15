@@ -3,7 +3,9 @@
  *
  *   POST /api/bluecard/webhook     — recebe eventos do BlueCard (assinado HMAC):
  *                                    compra.aprovada | compra.recusada |
- *                                    parcelamento.aceito | compra.cancelada
+ *                                    parcelamento.aceito | compra.cancelada |
+ *                                    pagamento.pix (Pix Pagar.me pago no app →
+ *                                    abre solicitações de baixa no HeadCoach)
  *                                    Responde 200 imediato e processa depois —
  *                                    webhook lento vira reenvio (retry deles por 24h).
  *   GET  /api/bluecard/pagamentos  — reconciliação (assinado HMAC): títulos
@@ -27,6 +29,7 @@ import {
   TOTVS_STATUS_NORMAL,
   TOTVS_STATUS_NOME,
 } from '../services/bluecardLimite.js';
+import { abrirSolicitacoesBaixaPix } from '../services/bluecardBaixaPagarme.js';
 
 const router = express.Router();
 
@@ -42,6 +45,7 @@ router.post('/webhook', exigirAssinaturaBluecard, async (req, res) => {
     'compra.recusada',
     'parcelamento.aceito',
     'compra.cancelada',
+    'pagamento.pix',
   ];
   if (!CONHECIDOS.includes(evento)) {
     // Evento novo do lado deles não pode virar retry infinito: aceita e loga.
@@ -130,6 +134,22 @@ async function processarEvento(id, evento, body) {
             `substitui ${substituidos.length} título(s): ${substituidos.join(', ')} ` +
             `→ PENDENTE: cancelar títulos no TOTVS e emitir os novos boletos`,
         );
+        break;
+      }
+
+      case 'pagamento.pix': {
+        // Cliente pagou a fatura pelo Pix da Pagar.me dentro do app. O app já
+        // baixou lá (parcelas, limite). Aqui abrimos as SOLICITAÇÕES DE BAIXA
+        // (Financeiro › Contas a Receber › Solicitação de Baixa) — uma por
+        // título do TOTVS — para o financeiro conferir o crédito e baixar no
+        // ERP pelo fluxo de sempre. Idempotente por ref_externa.
+        const r = await abrirSolicitacoesBaixaPix(body);
+        if (r.sem_titulo > 0) {
+          console.warn(
+            `⚠️ [bluecard] pagamento.pix cobrança=${body?.pagamento?.cobranca_id}: ` +
+              `${r.sem_titulo} parcela(s) sem título localizado no TOTVS — ver observação da solicitação`,
+          );
+        }
         break;
       }
 
