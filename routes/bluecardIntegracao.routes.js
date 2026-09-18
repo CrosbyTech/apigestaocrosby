@@ -6,6 +6,9 @@
  *                                    parcelamento.aceito | compra.cancelada |
  *                                    pagamento.pix (Pix Pagar.me pago no app →
  *                                    abre solicitações de baixa no HeadCoach)
+ *   GET  /api/bluecard/clientes    — cadastro + estatísticas de compra do
+ *                                    cliente no TOTVS (?cpf= ou ?cnpj=)
+ *   POST /api/bluecard/clientes/lote — o mesmo para até 50 documentos
  *                                    Responde 200 imediato e processa depois —
  *                                    webhook lento vira reenvio (retry deles por 24h).
  *   GET  /api/bluecard/pagamentos  — reconciliação (assinado HMAC): títulos
@@ -30,6 +33,10 @@ import {
   TOTVS_STATUS_NOME,
 } from '../services/bluecardLimite.js';
 import { abrirSolicitacoesBaixaPix } from '../services/bluecardBaixaPagarme.js';
+import {
+  consultarClienteBluecard,
+  consultarClientesBluecardLote,
+} from '../services/bluecardClientes.js';
 
 const router = express.Router();
 
@@ -524,6 +531,92 @@ router.get('/pix', exigirAssinaturaBluecard, async (req, res) => {
     console.error(`❌ [bluecard/pix] ${externoId}:`, e.message, totvsMsg.slice(0, 300));
     res.status(500).json({
       erro: { codigo: 'erro_interno', mensagem: 'Não foi possível gerar o Pix agora', detalhe: null },
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/bluecard/clientes?cpf=06451367435      (ou ?cnpj=...)
+//     &refresh=1                                  (opcional: fura o cache de 15 min)
+//
+// Cadastro + ESTATÍSTICAS do cliente no TOTVS: quanto já comprou, quantas
+// compras, ticket médio, primeira/última/maior compra, atraso médio e máximo,
+// parcelas pagas / em atraso / em aberto, e o limite gravado por filial.
+// Fontes: person/v2/individuals|legal-entities/search + person-statistics
+// (ver services/bluecardClientes.js para o porquê das duas chamadas).
+// Valores em centavos, datas YYYY-MM-DD — igual ao resto da integração.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/clientes', exigirAssinaturaBluecard, async (req, res) => {
+  const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+  const cnpj = String(req.query.cnpj || '').replace(/\D/g, '');
+  const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+
+  if ((!cpf && !cnpj) || (cpf && cnpj)) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'informe cpf OU cnpj', detalhe: null },
+    });
+  }
+  if ((cpf && cpf.length !== 11) || (cnpj && cnpj.length !== 14)) {
+    return res.status(400).json({
+      erro: {
+        codigo: 'campo_invalido',
+        mensagem: 'cpf deve ter 11 dígitos e cnpj 14',
+        detalhe: null,
+      },
+    });
+  }
+
+  try {
+    const dados = await consultarClienteBluecard(cpf || cnpj, { refresh });
+    if (!dados) {
+      return res.status(404).json({
+        erro: {
+          codigo: 'cliente_nao_encontrado',
+          mensagem: `${cpf ? 'CPF' : 'CNPJ'} sem cadastro no TOTVS`,
+          detalhe: null,
+        },
+      });
+    }
+    return res.json(dados);
+  } catch (e) {
+    console.error('❌ [bluecard/clientes]', e.response?.status || '', e.message);
+    return res.status(502).json({
+      erro: { codigo: 'erro_totvs', mensagem: 'Falha ao consultar o TOTVS', detalhe: e.message },
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/bluecard/clientes/lote
+//   body: { "documentos": ["06451367435", "12345678000190", ...], "refresh": false }
+//
+// Mesmo retorno do GET, para até 50 CPFs/CNPJs por chamada (4 em paralelo no
+// TOTVS). Cada item traz `encontrado`; falha de um documento não derruba o
+// lote. A assinatura HMAC cobre o corpo cru, como no webhook.
+// ─────────────────────────────────────────────────────────────────────
+router.post('/clientes/lote', exigirAssinaturaBluecard, async (req, res) => {
+  const documentos = Array.isArray(req.body?.documentos) ? req.body.documentos : null;
+  if (!documentos?.length) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'documentos deve ser uma lista não vazia', detalhe: null },
+    });
+  }
+  if (documentos.length > 50) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'máximo de 50 documentos por chamada', detalhe: null },
+    });
+  }
+  try {
+    const clientes = await consultarClientesBluecardLote(documentos, { refresh: !!req.body?.refresh });
+    return res.json({
+      total: clientes.length,
+      encontrados: clientes.filter((c) => c.encontrado).length,
+      clientes,
+    });
+  } catch (e) {
+    console.error('❌ [bluecard/clientes/lote]', e.message);
+    return res.status(502).json({
+      erro: { codigo: 'erro_totvs', mensagem: 'Falha ao consultar o TOTVS', detalhe: e.message },
     });
   }
 });

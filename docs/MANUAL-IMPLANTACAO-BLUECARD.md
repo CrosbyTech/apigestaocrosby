@@ -203,3 +203,69 @@ Payload do evento:
   }
 }
 ```
+
+## Dados e estatísticas do cliente para o app (18/09/2026)
+
+Duas rotas novas, assinadas com HMAC como as demais (`X-Cc-Key`, `X-Cc-Timestamp`,
+`X-Cc-Signature` sobre `"<ts>.<corpo cru>"`; no GET o corpo é vazio).
+
+### `GET /api/bluecard/clientes?cpf=<11 dígitos>` (ou `?cnpj=<14 dígitos>`)
+
+Opcional: `&refresh=1` fura o cache de 15 min.
+
+Fontes no TOTVS: `person/v2/individuals/search` (PF) ou
+`person/v2/legal-entities/search` (PJ) para o cadastro e o limite por filial, e
+`person/v2/person-statistics` para o histórico. O `expand: statistics` da busca
+**não** traz histórico de compra, só o registro de limite por filial.
+Filiais consideradas: as do Ranking de Faturamento tipo FILIAL.
+
+Resposta (valores em centavos, datas `YYYY-MM-DD`):
+
+```json
+{
+  "cliente": {
+    "tipo": "pf", "codigo_totvs": 31385, "documento": "06537964474", "nome": "…",
+    "ativo": true, "situacao_cliente": "Ativo", "cadastrado_em": "2024-04-08",
+    "filial_cadastro": 4, "nascimento": "…", "genero": "Male", "estado_civil": "Single",
+    "ocupacao": null, "local_trabalho": null, "admissao": null, "renda_mensal_cents": null,
+    "telefone": { "tipo": "WHATSAPP", "numero": "…" }, "telefones": [ … ],
+    "email": "…", "endereco": { "logradouro": "…", "numero": "…", "complemento": null,
+      "bairro": "…", "cidade": "NATAL", "uf": "RN", "cep": "…" },
+    "classificacoes": [ { "tipo": "TIPO DE CLIENTE", "valor": "VAREJO" } ]
+  },
+  "estatisticas": {
+    "qtd_compras": 38, "qtd_pecas": 229,
+    "total_comprado_cents": 1220350, "ticket_medio_cents": 32114,
+    "primeira_compra": { "data": "2024-04-24", "valor_cents": 30375 },
+    "ultima_compra":   { "data": "2026-07-08", "valor_cents": 30000 },
+    "maior_compra":    { "data": "2026-04-17", "valor_cents": 134500 },
+    "atraso_medio_dias": 2, "atraso_maximo_dias": 2,
+    "parcelas_pagas":     { "qtd": 9, "total_cents": 5000, "media_cents": 556 },
+    "parcelas_em_atraso": { "qtd": 1, "total_cents": 5000, "atraso_medio_dias": 50 },
+    "parcelas_em_aberto": { "qtd": 5, "total_cents": 25000, "media_cents": 5000 },
+    "ultimo_pagamento": { "data": null, "valor_cents": null },
+    "maior_divida":     { "data": null, "valor_cents": null },
+    "ultimo_aviso_debito": null
+  },
+  "limite_totvs": { "por_filial": [], "maior_cents": 0 },
+  "filiais_consideradas": 63,
+  "cache": { "origem": "totvs|memoria", "atualizado_em": "…" }
+}
+```
+
+Erros: `400 campo_invalido`, `401 nao_autorizado`, `404 cliente_nao_encontrado`,
+`502 erro_totvs`. RG, CTPS e filiação não são expostos.
+
+`limite_totvs` vazio é o normal no crediário: o cliente vive com limite 0 e só
+sobe na hora da compra aprovada.
+
+### `POST /api/bluecard/clientes/lote`
+
+Body: `{ "documentos": ["06537964474", "12345678000190"], "refresh": false }` — até 50
+documentos, CPFs e CNPJs misturados. Resposta:
+`{ total, encontrados, clientes: [{ documento, encontrado, ...mesmo formato do GET }] }`.
+Documento inválido ou falha pontual vem como `encontrado: false` com `erro`; o lote
+não cai por causa de um item. A assinatura cobre o corpo cru.
+
+Tempo: ~3–4 s por cliente na primeira consulta (duas chamadas ao TOTVS), 4 em paralelo
+no lote, instantâneo dentro dos 15 min de cache.
