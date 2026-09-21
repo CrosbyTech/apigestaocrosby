@@ -794,6 +794,25 @@ router.get(
         `${allMultibrand.length} multimarcas encontrados em ${totalTime}ms`,
       );
     } catch (error) {
+      // TOTVS engasgou (stream abortado, ECONNRESET, timeout). A lista de
+      // multimarcas quase não muda de uma hora para outra, então servir a
+      // última versão boa — mesmo vencida — é muito melhor do que um 500,
+      // que no Call Center vira "0 clientes na fila" e parece que não há
+      // ninguém devendo. Só devolve erro se nunca houve lista em memória.
+      if (cachedMultibrandClients && cachedMultibrandClients.length > 0) {
+        const idadeMin = Math.round(
+          (Date.now() - multibrandCacheTimestamp) / 60000,
+        );
+        console.warn(
+          `⚠️ Erro ao buscar multimarcas (${error.message}) — servindo cache ` +
+            `vencido de ${idadeMin} min (${cachedMultibrandClients.length} clientes)`,
+        );
+        return successResponse(
+          res,
+          cachedMultibrandClients,
+          `${cachedMultibrandClients.length} multimarcas (cache vencido há ${idadeMin} min — TOTVS indisponível)`,
+        );
+      }
       console.error('❌ Erro ao buscar multimarcas:', error.message);
       return errorResponse(res, error.message, 500, 'INTERNAL_ERROR');
     }
