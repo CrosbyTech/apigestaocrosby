@@ -1315,7 +1315,7 @@ async function computeCashbackForPersons(persons, modulo) {
 
     // Branches default (varejo) — caso o front não passe
     const defaultBranches = [
-      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 99, 1,
+      2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98, 99, 1,
     ].map((c) => ({ branchCode: c }));
 
     // 3) Concurrent fetch — limit pra não estourar TOTVS
@@ -3289,7 +3289,7 @@ router.post(
     // Pra alinhar com a fonte de verdade que o usuário compara, buscamos o
     // ranking-faturamento das 12 filiais varejo (incluindo Shopping Recife 98).
     try {
-      const VAREJO_BRANCHES = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97];
+      const VAREJO_BRANCHES = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
       const internalBase = `http://localhost:${process.env.PORT || 4100}`;
       const r = await axios.post(
         `${internalBase}/api/totvs/sale-panel/ranking-faturamento`,
@@ -3580,7 +3580,7 @@ router.post(
     // devolucaoOps: ops de DEVOLUÇÃO (operation_type=Input) — subtraídas
     // pra calcular receita LÍQUIDA por cliente.
     const CONFIGS = {
-      varejo:           { ops: [545,546,548,510,511,521,522,9001,9009,9017,9027,1,5919], devolucaoOps: [66,555,1152,360,20], branchs: [2,5,55,65,87,88,90,93,94,95,97], sellers: null },
+      varejo:           { ops: [545,546,548,510,511,521,522,9001,9009,9017,9027,1,5919], devolucaoOps: [66,555,1152,360,20], branchs: [2,5,55,65,87,88,90,93,94,95,97,98], sellers: null },
       revenda:          { ops: [7236,9122,5102,7242,9061,9001,9121,512,7279], devolucaoOps: [7245,20,1214,7790], branchs: [2,5,75,99,200], sellers: [25,15,161,165,241,779,288,251,131,94,1924,7044] },
       multimarcas:      { ops: [7235,7241,9127,200], devolucaoOps: [7244,7245,1214], branchs: [99,2,95,87,88,90,94,97], excludeSellers: [21,26,69] },
       inbound_david:    { ops: [7235,7241,9127], devolucaoOps: [7244,7245,1214], branchs: [99,2,95,87,88,90,94,97], sellers: [26,69] },
@@ -3767,7 +3767,7 @@ router.post(
     const CFG = {
       varejo: {
         ops: [545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1, 5919],
-        branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97],
+        branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98],
         dim: 'branch',
         labelDim: 'Loja',
       },
@@ -3966,7 +3966,7 @@ router.post(
     const CFG = {
       varejo: {
         ops: [545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1, 5919],
-        branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97],
+        branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98],
       },
       revenda: {
         ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279],
@@ -4166,7 +4166,7 @@ router.post(
     const CFG = {
       varejo: {
         ops: [545, 546, 548, 510, 511, 521, 522, 9001, 9009, 9017, 9027, 1, 5919],
-        branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97],
+        branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98],
       },
       revenda: {
         ops: [7236, 9122, 5102, 7242, 9061, 9001, 9121, 512, 7279],
@@ -5798,7 +5798,7 @@ router.get(
           //    Se data não veio, usa últimos 12 meses como janela default
           //    (evita varredura completa do banco mas mantém escopo amplo).
           if (leadPersonCodes.size > 0) {
-            const VAREJO_BRANCHES_NF = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97];
+            const VAREJO_BRANCHES_NF = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
             const nfMin = datemin || (() => {
               const d = new Date(); d.setMonth(d.getMonth() - 12);
               return d.toISOString().slice(0, 10);
@@ -5962,7 +5962,7 @@ router.get(
       }
 
       // 3) NFs Output das pessoas em branches do varejo (com data se houver)
-      const VAREJO_BRANCHES_NF = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97];
+      const VAREJO_BRANCHES_NF = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
       const nfMin = datemin || (() => {
         const d = new Date(); d.setMonth(d.getMonth() - 12);
         return d.toISOString().slice(0, 10);
@@ -9846,7 +9846,7 @@ router.post(
 const CANAL_CONFIG = {
   varejo: {
     source: 'totvs-totals-branch',
-    branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97],
+    branchs: [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98],
     operations: null,
   },
   revenda: {
@@ -16587,7 +16587,7 @@ router.post(
       queryBranches = [11, 111];
       queryOpCodes = null; // sem filtro de op — busca tudo e exclui depois
     } else if (canal === 'varejo') {
-      queryBranches = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97];
+      queryBranches = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
       queryOpCodes = [...allOpCodesArr, ...BUSINESS_OP_CODES_ARR];
     } else if (canal === 'revenda') {
       queryBranches = [2, 99];
