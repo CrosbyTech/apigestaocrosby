@@ -168,6 +168,12 @@ function recalcTotal(dataRow) {
   return summed;
 }
 
+import {
+  faturamentoPorPeriodo,
+  faturamentoPorVendedorJanelas,
+  fecharMesesPendentes,
+} from '../services/faturamentoVendedorMensal.js';
+
 const router = express.Router();
 
 // =============================================================================
@@ -3841,6 +3847,94 @@ router.post(
         totais_por_segmento: totaisPorSegmento,
       },
       `${transacoes.length} NFs (${compras.length} compras, ${credevs.length} credev)`,
+    );
+  }),
+);
+
+// =============================================================================
+// FATURAMENTO POR VENDEDOR — PERÍODO LONGO (usa o cache mensal do banco)
+// GET /api/totvs/sale-panel/faturamento-vendedor-periodo?datemin=&datemax=
+//
+// A rota /faturamento-vendedor custa 50-110 s por mês e não responde em
+// janelas longas (jan→set estourou 542 s). Esta aqui lê os meses FECHADOS
+// de faturamento_vendedor_mensal e só vai ao TOTVS para o mês ainda aberto,
+// o que deixa "janeiro até hoje" em poucos segundos depois do 1º fechamento.
+//
+// POST /api/totvs/sale-panel/faturamento-vendedor-fechar força o fechamento
+// dos meses pendentes (é o mesmo que o job noturno faz).
+// =============================================================================
+router.get(
+  '/sale-panel/faturamento-vendedor-periodo',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
+    const { datemin, datemax } = req.query || {};
+    const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+    if (!isYmd(datemin) || !isYmd(datemax) || datemin > datemax) {
+      return errorResponse(
+        res,
+        'datemin e datemax (YYYY-MM-DD) obrigatórios',
+        400,
+        'MISSING_DATES',
+      );
+    }
+    const t0 = Date.now();
+    const r = await faturamentoPorPeriodo(datemin, datemax);
+    return successResponse(
+      res,
+      { ...r, timeMs: Date.now() - t0 },
+      `${r.vendedores.length} vendedor(es) — ${r.meses_do_banco.length} mês(es) do banco, ${r.meses_do_totvs.length} do TOTVS`,
+    );
+  }),
+);
+
+router.post(
+  '/sale-panel/faturamento-vendedor-fechar',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(900000);
+    res.setTimeout(900000);
+    const desde = /^\d{4}-\d{2}$/.test(String(req.body?.desde || ''))
+      ? req.body.desde
+      : '2026-01';
+    const r = await fecharMesesPendentes(desde);
+    return successResponse(
+      res,
+      r,
+      `${r.gravados.length} mês(es) gravado(s), ${r.falhas.length} falha(s)`,
+    );
+  }),
+);
+
+// =============================================================================
+// FATURAMENTO POR VENDEDOR — JANELA PROPRIA DE CADA UM
+// POST /api/totvs/sale-panel/faturamento-vendedor-janelas
+// Body: { vendedores: [{ seller_code, datemin, datemax? }], datemax? }
+//
+// Cada vendedor entrou numa data diferente, entao somar todos a partir de
+// uma data unica inflaria quem entrou depois. As consultas sao agrupadas
+// por janela e reaproveitadas entre vendedores — o mes aberto e uma
+// consulta so para todo mundo.
+// =============================================================================
+router.post(
+  '/sale-panel/faturamento-vendedor-janelas',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(600000);
+    res.setTimeout(600000);
+    const { vendedores, datemax } = req.body || {};
+    if (!Array.isArray(vendedores) || vendedores.length === 0) {
+      return errorResponse(
+        res,
+        'vendedores: [{ seller_code, datemin }] obrigatorio',
+        400,
+        'MISSING_PARAMS',
+      );
+    }
+    const t0 = Date.now();
+    const r = await faturamentoPorVendedorJanelas(vendedores, datemax);
+    return successResponse(
+      res,
+      { ...r, timeMs: Date.now() - t0 },
+      `${r.vendedores.length} vendedor(es) — ${r.consultas_totvs.length} consulta(s) ao TOTVS`,
     );
   }),
 );

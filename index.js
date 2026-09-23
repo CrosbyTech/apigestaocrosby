@@ -99,6 +99,7 @@ import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.j
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
 import { iniciarResellerCacheWarm } from './jobs/reseller-cache-warm.job.js';
 import { iniciarJobEsteiraProtesto } from './jobs/esteira-protesto.job.js';
+import { iniciarJobFaturamentoVendedorMensal } from './jobs/faturamento-vendedor-mensal.job.js';
 import {
   iniciarJobContratoAluguelVencimento,
   executarContratoAluguelVencimento,
@@ -227,6 +228,7 @@ app.listen(PORT, async () => {
   iniciarBluecardLimiteWatchdog();
   iniciarResellerCacheWarm();
   iniciarJobEsteiraProtesto();
+  iniciarJobFaturamentoVendedorMensal();
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
 
