@@ -118,12 +118,13 @@ router.get(
     const branch = Number(req.query.branch || 99);
     const datemin = req.query.datemin || '2026-09-01';
     const datemax = req.query.datemax || '2026-09-25';
+    const SO = `${TOTVS_BASE_URL}/sales-order/v2/orders/search`;
     const candidatos = [
-      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/orders/search`, body: { branchs: [branch], datemin, datemax, page: 1, pageSize: 2 } },
-      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/sales-orders/search`, body: { branchs: [branch], datemin, datemax, page: 1, pageSize: 2 } },
-      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/orders/search`, body: { filter: { branchCode: branch, startDate: datemin, endDate: datemax }, page: 1, pageSize: 2 } },
-      { url: `${TOTVS_BASE_URL}/sales-order/v2/orders/search`, body: { branchs: [branch], datemin, datemax, page: 1, pageSize: 2 } },
-      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/orders`, body: null },
+      { url: SO, body: { filter: { branchCodeList: [branch], startDate: datemin, endDate: datemax }, page: 1, pageSize: 2, expand: 'items' } },
+      { url: SO, body: { filter: { branchCode: branch, orderStartDate: datemin, orderEndDate: datemax }, page: 1, pageSize: 2, expand: 'items' } },
+      { url: SO, body: { filter: { branchCode: branch, startDate: datemin, endDate: datemax }, page: 1, pageSize: 2 } },
+      { url: SO, body: { filter: { branchCodeList: [branch] }, page: 1, pageSize: 2, expand: 'items' } },
+      { url: SO, body: { filter: { change: { startDate: datemin, endDate: datemax } }, page: 1, pageSize: 2 } },
     ];
     const out = { branch, datemin, datemax, tentativas: [] };
     for (const c of candidatos) {
