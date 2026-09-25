@@ -110,6 +110,72 @@ function buildQueryString(params) {
 //  POST ROUTES — Busca com filtro (search)
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ─── Pedidos de Venda (PEDFM001) ──────────────────────────────────────────────
+// POST /api/totvs/pedidos-venda
+//   body: { branchs:[..], datemin, datemax, pageSize?, maxPages? }
+//   Retorna os pedidos de venda (cabeçalho) do TOTVS sales-order/v2/orders/search:
+//   nº pedido, data, cliente, representante, vendedor, valores e status.
+router.post(
+  '/pedidos-venda',
+  asyncHandler(async (req, res) => {
+    const { branchs, datemin, datemax } = req.body;
+    const pageSize = Math.min(Number(req.body?.pageSize) || 200, 500);
+    const maxPages = Math.min(Number(req.body?.maxPages) || 50, 200);
+    if (!Array.isArray(branchs) || branchs.length === 0) {
+      return errorResponse(res, 'branchs (array) obrigatório', 400, 'MISSING_BRANCHS');
+    }
+    if (!datemin || !datemax) {
+      return errorResponse(res, 'datemin e datemax obrigatórios', 400, 'MISSING_DATES');
+    }
+    const url = `${TOTVS_BASE_URL}/sales-order/v2/orders/search`;
+    const todos = [];
+    try {
+      for (let page = 1; page <= maxPages; page++) {
+        const body = {
+          filter: { branchCodeList: branchs.map(Number), startDate: datemin, endDate: datemax },
+          page,
+          pageSize,
+          expand: 'items',
+        };
+        const data = await withRetry(async (token) =>
+          (await totvsPost(url, body, token, 90000)).data,
+        );
+        const items = data?.items || data?.dataRow || [];
+        for (const o of items) {
+          todos.push({
+            branchCode: o.branchCode,
+            orderCode: o.orderCode,
+            customerOrderCode: o.customerOrderCode,
+            orderDate: o.orderDate,
+            insertDate: o.insertDate,
+            customerCode: o.customerCode,
+            customerName: o.customerName,
+            representativeCode: o.representativeCode,
+            representativeName: o.representativeName,
+            sellerCode: o.sellerCode,
+            operationCode: o.operationCode,
+            operationName: o.operationName,
+            paymentConditionName: o.paymentConditionName,
+            quantity: o.quantity,
+            grossValue: o.grossValue,
+            discountValue: o.discountValue,
+            netValue: o.netValue,
+            freightValue: o.freightValue,
+            totalAmountOrder: o.totalAmountOrder,
+            statusOrder: o.statusOrder,
+            itemsCount: Array.isArray(o.items) ? o.items.length : null,
+          });
+        }
+        // Para quando a página veio incompleta (fim) ou hasNext=false
+        if (items.length < pageSize || data?.hasNext === false) break;
+      }
+      return successResponse(res, { total: todos.length, pedidos: todos });
+    } catch (error) {
+      return handleTotvsError(res, error, 'ao buscar pedidos de venda');
+    }
+  }),
+);
+
 // ─── 1. Produtos Mais Vendidos ───────────────────────────────────────────────
 router.post(
   '/best-selling-products',
