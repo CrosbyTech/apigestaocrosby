@@ -132,7 +132,7 @@ router.post(
     try {
       const baseFilter = req.body?.filter
         ? req.body.filter
-        : { branchCodeList: branchs.map(Number), startDate: datemin, endDate: datemax };
+        : { branchCodeList: branchs.map(Number), startOrderDate: datemin, endOrderDate: datemax };
       for (let page = 1; page <= maxPages; page++) {
         const body = {
           filter: baseFilter,
