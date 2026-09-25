@@ -110,55 +110,6 @@ function buildQueryString(params) {
 //  POST ROUTES — Busca com filtro (search)
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── PROBE TEMPORÁRIO: descobrir endpoint de pedidos de venda + comissão ──────
-// GET /api/totvs/_pedido-probe?branch=99&datemin=2026-09-01&datemax=2026-09-25
-router.get(
-  '/_pedido-probe',
-  asyncHandler(async (req, res) => {
-    const branch = Number(req.query.branch || 99);
-    const datemin = req.query.datemin || '2026-09-01';
-    const datemax = req.query.datemax || '2026-09-25';
-    const SO = `${TOTVS_BASE_URL}/sales-order/v2/orders/search`;
-    const orderCode = req.query.orderCode ? Number(req.query.orderCode) : null;
-    const filter = orderCode
-      ? { branchCodeList: [branch], orderCodeList: [orderCode] }
-      : { branchCodeList: [branch], startDate: datemin, endDate: datemax };
-    const body = { filter, page: 1, pageSize: 50, expand: 'commissioneds,items' };
-    const out = { branch, datemin, datemax, orderCode };
-    try {
-      const data = await withRetry(async (token) =>
-        (await totvsPost(SO, body, token, 60000)).data,
-      );
-      const items = data?.items || data?.dataRow || data?.data || [];
-      out.total = Array.isArray(items) ? items.length : 0;
-      // Acha o 1o pedido com commissioneds preenchido; senão o 1o com valor
-      const comOrder =
-        (items || []).find((o) => Array.isArray(o.commissioneds) && o.commissioneds.length) ||
-        (items || []).find((o) => Number(o.totalAmountOrder) > 0) ||
-        (items || [])[0];
-      if (comOrder) {
-        out.pedido = {
-          orderCode: comOrder.orderCode,
-          orderDate: comOrder.orderDate,
-          customerName: comOrder.customerName,
-          representativeCode: comOrder.representativeCode,
-          representativeName: comOrder.representativeName,
-          sellerCode: comOrder.sellerCode,
-          netValue: comOrder.netValue,
-          totalAmountOrder: comOrder.totalAmountOrder,
-          statusOrder: comOrder.statusOrder,
-          commissioneds: comOrder.commissioneds,
-          item0keys: Array.isArray(comOrder.items) && comOrder.items[0] ? Object.keys(comOrder.items[0]) : null,
-        };
-      }
-    } catch (e) {
-      out.erro = e.response?.status || e.message;
-      out.corpo = typeof e.response?.data === 'object' ? e.response.data : String(e.response?.data || '').slice(0, 300);
-    }
-    return successResponse(res, out);
-  }),
-);
-
 // ─── 1. Produtos Mais Vendidos ───────────────────────────────────────────────
 router.post(
   '/best-selling-products',
