@@ -130,9 +130,12 @@ router.post(
     const url = `${TOTVS_BASE_URL}/sales-order/v2/orders/search`;
     const todos = [];
     try {
+      const baseFilter = req.body?.filter
+        ? req.body.filter
+        : { branchCodeList: branchs.map(Number), startDate: datemin, endDate: datemax };
       for (let page = 1; page <= maxPages; page++) {
         const body = {
-          filter: { branchCodeList: branchs.map(Number), startDate: datemin, endDate: datemax },
+          filter: baseFilter,
           page,
           pageSize,
           expand: 'items',
