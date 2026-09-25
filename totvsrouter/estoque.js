@@ -119,42 +119,41 @@ router.get(
     const datemin = req.query.datemin || '2026-09-01';
     const datemax = req.query.datemax || '2026-09-25';
     const SO = `${TOTVS_BASE_URL}/sales-order/v2/orders/search`;
-    const candidatos = [
-      { url: SO, body: { filter: { branchCodeList: [branch], startDate: datemin, endDate: datemax }, page: 1, pageSize: 2, expand: 'items' } },
-      { url: SO, body: { filter: { branchCode: branch, orderStartDate: datemin, orderEndDate: datemax }, page: 1, pageSize: 2, expand: 'items' } },
-      { url: SO, body: { filter: { branchCode: branch, startDate: datemin, endDate: datemax }, page: 1, pageSize: 2 } },
-      { url: SO, body: { filter: { branchCodeList: [branch] }, page: 1, pageSize: 2, expand: 'items' } },
-      { url: SO, body: { filter: { change: { startDate: datemin, endDate: datemax } }, page: 1, pageSize: 2 } },
-    ];
-    const out = { branch, datemin, datemax, tentativas: [] };
-    for (const c of candidatos) {
-      try {
-        const data = await withRetry(async (token) =>
-          (c.body
-            ? await totvsPost(c.url, c.body, token, 40000)
-            : await totvsGet(`${c.url}${buildQueryString({ branchCode: branch, page: 1, pageSize: 2 })}`, token, 40000)
-          ).data,
-        );
-        // resume: pega o 1o item e lista as chaves
-        const items = data?.items || data?.dataRow || data?.data || (Array.isArray(data) ? data : []);
-        const amostra = Array.isArray(items) && items.length ? items[0] : data;
-        out.tentativas.push({
-          url: c.url,
-          body: c.body,
-          ok: true,
-          total: Array.isArray(items) ? items.length : null,
-          chaves: amostra && typeof amostra === 'object' ? Object.keys(amostra) : null,
-          amostra,
-        });
-        // se retornou item, para (achamos)
-        if (Array.isArray(items) && items.length) break;
-      } catch (e) {
-        out.tentativas.push({
-          url: c.url,
-          erro: e.response?.status || e.message,
-          corpo: typeof e.response?.data === 'object' ? e.response.data : String(e.response?.data || '').slice(0, 200),
-        });
+    const orderCode = req.query.orderCode ? Number(req.query.orderCode) : null;
+    const filter = orderCode
+      ? { branchCodeList: [branch], orderCodeList: [orderCode] }
+      : { branchCodeList: [branch], startDate: datemin, endDate: datemax };
+    const body = { filter, page: 1, pageSize: 50, expand: 'commissioneds,items' };
+    const out = { branch, datemin, datemax, orderCode };
+    try {
+      const data = await withRetry(async (token) =>
+        (await totvsPost(SO, body, token, 60000)).data,
+      );
+      const items = data?.items || data?.dataRow || data?.data || [];
+      out.total = Array.isArray(items) ? items.length : 0;
+      // Acha o 1o pedido com commissioneds preenchido; senão o 1o com valor
+      const comOrder =
+        (items || []).find((o) => Array.isArray(o.commissioneds) && o.commissioneds.length) ||
+        (items || []).find((o) => Number(o.totalAmountOrder) > 0) ||
+        (items || [])[0];
+      if (comOrder) {
+        out.pedido = {
+          orderCode: comOrder.orderCode,
+          orderDate: comOrder.orderDate,
+          customerName: comOrder.customerName,
+          representativeCode: comOrder.representativeCode,
+          representativeName: comOrder.representativeName,
+          sellerCode: comOrder.sellerCode,
+          netValue: comOrder.netValue,
+          totalAmountOrder: comOrder.totalAmountOrder,
+          statusOrder: comOrder.statusOrder,
+          commissioneds: comOrder.commissioneds,
+          item0keys: Array.isArray(comOrder.items) && comOrder.items[0] ? Object.keys(comOrder.items[0]) : null,
+        };
       }
+    } catch (e) {
+      out.erro = e.response?.status || e.message;
+      out.corpo = typeof e.response?.data === 'object' ? e.response.data : String(e.response?.data || '').slice(0, 300);
     }
     return successResponse(res, out);
   }),
