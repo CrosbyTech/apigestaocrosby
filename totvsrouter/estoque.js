@@ -110,6 +110,55 @@ function buildQueryString(params) {
 //  POST ROUTES — Busca com filtro (search)
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ─── PROBE TEMPORÁRIO: descobrir endpoint de pedidos de venda + comissão ──────
+// GET /api/totvs/_pedido-probe?branch=99&datemin=2026-09-01&datemax=2026-09-25
+router.get(
+  '/_pedido-probe',
+  asyncHandler(async (req, res) => {
+    const branch = Number(req.query.branch || 99);
+    const datemin = req.query.datemin || '2026-09-01';
+    const datemax = req.query.datemax || '2026-09-25';
+    const candidatos = [
+      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/orders/search`, body: { branchs: [branch], datemin, datemax, page: 1, pageSize: 2 } },
+      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/sales-orders/search`, body: { branchs: [branch], datemin, datemax, page: 1, pageSize: 2 } },
+      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/orders/search`, body: { filter: { branchCode: branch, startDate: datemin, endDate: datemax }, page: 1, pageSize: 2 } },
+      { url: `${TOTVS_BASE_URL}/sales-order/v2/orders/search`, body: { branchs: [branch], datemin, datemax, page: 1, pageSize: 2 } },
+      { url: `${TOTVS_BASE_URL}/ecommerce-sales-order/v2/orders`, body: null },
+    ];
+    const out = { branch, datemin, datemax, tentativas: [] };
+    for (const c of candidatos) {
+      try {
+        const data = await withRetry(async (token) =>
+          (c.body
+            ? await totvsPost(c.url, c.body, token, 40000)
+            : await totvsGet(`${c.url}${buildQueryString({ branchCode: branch, page: 1, pageSize: 2 })}`, token, 40000)
+          ).data,
+        );
+        // resume: pega o 1o item e lista as chaves
+        const items = data?.items || data?.dataRow || data?.data || (Array.isArray(data) ? data : []);
+        const amostra = Array.isArray(items) && items.length ? items[0] : data;
+        out.tentativas.push({
+          url: c.url,
+          body: c.body,
+          ok: true,
+          total: Array.isArray(items) ? items.length : null,
+          chaves: amostra && typeof amostra === 'object' ? Object.keys(amostra) : null,
+          amostra,
+        });
+        // se retornou item, para (achamos)
+        if (Array.isArray(items) && items.length) break;
+      } catch (e) {
+        out.tentativas.push({
+          url: c.url,
+          erro: e.response?.status || e.message,
+          corpo: typeof e.response?.data === 'object' ? e.response.data : String(e.response?.data || '').slice(0, 200),
+        });
+      }
+    }
+    return successResponse(res, out);
+  }),
+);
+
 // ─── 1. Produtos Mais Vendidos ───────────────────────────────────────────────
 router.post(
   '/best-selling-products',
