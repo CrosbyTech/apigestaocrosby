@@ -12,7 +12,16 @@ import { fileURLToPath } from 'url';
 import forge from 'node-forge';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CERTS_DIR = path.resolve(__dirname, '../certs');
+// Diretório dos .pfx: SEFAZ_CERTS_DIR (env) > apigestaocrosby/certs >
+// gestaocrosby/backend/certs (cópia local que roda na porta 4100)
+const CANDIDATOS_DIR = [
+  process.env.SEFAZ_CERTS_DIR,
+  path.resolve(__dirname, '../certs'),
+  path.resolve(__dirname, '../../gestaocrosby/backend/certs'),
+].filter(Boolean);
+const CERTS_DIR =
+  CANDIDATOS_DIR.find((d) => fs.existsSync(path.join(d, 'certificados.json'))) ||
+  CANDIDATOS_DIR[0];
 
 let cache = null;
 
@@ -68,7 +77,12 @@ function lerConfiguracao() {
   }
 
   const configPath = path.join(CERTS_DIR, 'certificados.json');
-  if (!fs.existsSync(configPath)) return { origem: 'nenhuma', lista: [] };
+  if (!fs.existsSync(configPath)) {
+    console.warn(
+      `⚠️ [SefazCerts] certificados.json não encontrado. Procurado em: ${CANDIDATOS_DIR.join(' | ')} — defina SEFAZ_CERTS_DIR ou SEFAZ_CERTIFICADOS`,
+    );
+    return { origem: 'nenhuma', lista: [] };
+  }
   return {
     origem: 'arquivo',
     lista: JSON.parse(fs.readFileSync(configPath, 'utf8')),
@@ -96,7 +110,8 @@ function lerPfx(arquivo, origem) {
 }
 
 export function carregarCertificados({ forcar = false } = {}) {
-  if (cache && !forcar) return cache;
+  // Lista vazia não fica em cache: permite corrigir a configuração sem reiniciar
+  if (cache && cache.length > 0 && !forcar) return cache;
 
   const { origem, lista } = lerConfiguracao();
   if (lista.length === 0) {

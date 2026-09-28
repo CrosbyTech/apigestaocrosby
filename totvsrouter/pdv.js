@@ -1102,6 +1102,111 @@ const BONUS_VALIDADE_DIAS = parseInt(
   10,
 );
 
+// =============================================================================
+// GET /pdv/customer-balance?code=31385&branch=95[&cpf=]
+// Saldos do cliente que podem abater a venda:
+//   • cashback     — saldo bônus (person/v2/list-balance-bonus, PESFC054)
+//   • credev       — crédito de devolução (refundCreditValue)
+//   • adiantamento — adiantamento do cliente (advanceAmountValue)
+// Credev e adiantamento são POR FILIAL: devolve o saldo da filial da venda e
+// também o de outras filiais, para o operador saber que existe (mas o uso
+// direto só vale na própria filial).
+// =============================================================================
+const BALANCE_OPTIONS = {
+  isLimit: true,
+  isOpenInvoice: true,
+  isRefundCredit: true,
+  isAdvanceAmount: true,
+};
+
+router.get(
+  '/pdv/customer-balance',
+  asyncHandler(async (req, res) => {
+    const code = parseInt(req.query.code, 10);
+    const branch = parseInt(req.query.branch, 10);
+    if (!code || !branch) {
+      return errorResponse(res, 'Informe ?code=&branch=', 400, 'MISSING_PARAMS');
+    }
+    const cpfQuery = String(req.query.cpf || '').replace(/\D/g, '');
+    // Filiais consultadas: a da venda + as matrizes onde ficam os saldos
+    const outras = [1, 2, 99].filter((b) => b !== branch);
+    const branchCodeList = [branch, ...outras];
+
+    const [saldoRes, cpfRes] = await Promise.allSettled([
+      callTotvs(
+        'post',
+        `${TOTVS_BASE_URL}/accounts-receivable/v2/customer-financial-balance/search`,
+        {
+          data: {
+            filter: { customerCodeList: [code] },
+            option: { branchCodeList, ...BALANCE_OPTIONS },
+            page: 1,
+            pageSize: 20,
+          },
+        },
+      ),
+      cpfQuery
+        ? Promise.resolve(null)
+        : callTotvs('post', `${TOTVS_BASE_URL}/person/v2/individuals/search`, {
+            data: { filter: { personCodeList: [code] }, page: 1, pageSize: 1 },
+          }),
+    ]);
+
+    const item = saldoRes.status === 'fulfilled' ? saldoRes.value.data?.items?.[0] : null;
+    const valores = item?.values || [];
+    const num = (v) => Number(v || 0);
+    const daFilial = valores.find((v) => Number(v.branchCode) === branch) || {};
+    const credevFilial = num(daFilial.refundCreditValue);
+    const adiantFilial = num(daFilial.advanceAmountValue);
+    const porFilial = valores
+      .map((v) => ({
+        branchCode: Number(v.branchCode),
+        credev: num(v.refundCreditValue),
+        adiantamento: num(v.advanceAmountValue),
+        limite: num(v.limitValue),
+        emAberto: num(v.openInvoiceValue),
+      }))
+      .filter((v) => v.credev !== 0 || v.adiantamento !== 0);
+
+    // CPF para o saldo bônus: da query, do balance ou do cadastro
+    let cpf = cpfQuery || String(item?.cpfCnpj || '').replace(/\D/g, '');
+    if (!cpf && cpfRes.status === 'fulfilled' && cpfRes.value) {
+      cpf = String(cpfRes.value.data?.items?.[0]?.cpf || '').replace(/\D/g, '');
+    }
+
+    let cashback = 0;
+    if (cpf) {
+      try {
+        const rb = await callTotvs('post', `${TOTVS_BASE_URL}/person/v2/list-balance-bonus`, {
+          data: { personCpf: cpf, branchList: [{ branchCode: branch }] },
+        });
+        const entry = (rb.data?.balanceBonus || []).find((b) => b.branchCode === branch);
+        cashback = num(entry?.balanceValue);
+      } catch (err) {
+        console.log(`⚠️ [PDV] Saldo bônus indisponível p/ cliente ${code}: ${err.message}`);
+      }
+    }
+
+    return successResponse(
+      res,
+      {
+        customerCode: code,
+        branchCode: branch,
+        cpf: cpf || null,
+        nome: item?.name || null,
+        cashback,
+        credev: credevFilial,
+        adiantamento: adiantFilial,
+        // saldos existentes em outras filiais (informativo)
+        porFilial,
+        outrasFiliais: porFilial.filter((v) => v.branchCode !== branch),
+        total: cashback + credevFilial + adiantFilial,
+      },
+      'Saldos do cliente',
+    );
+  }),
+);
+
 // GET /pdv/bonus?cpf=06537964474&branch=99 — saldo do cliente na empresa
 router.get(
   '/pdv/bonus',

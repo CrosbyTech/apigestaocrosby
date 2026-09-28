@@ -26,10 +26,13 @@ import techRoutes from './routes/tech.routes.js';
 import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import automacaoRoutes from './routes/automacao.routes.js';
 import smsRoutes from './routes/sms.routes.js';
+import cobrancaRoutes from './routes/cobranca.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
+import extratoStoneRoutes from './routes/extratoStone.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
+import devolucoesRoutes from './routes/devolucoes.routes.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
 import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
@@ -66,6 +69,7 @@ import estoqueRouter from './totvsrouter/estoque.js';
 import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
 import pdvRouter from './totvsrouter/pdv.js';
+import pdvCrosbyRoutes from './routes/pdvCrosby.routes.js';
 import bluecredInadimplenciaRouter from './totvsrouter/bluecredInadimplencia.js';
 import portalRfidRoutes from './routes/portalRfid.routes.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
@@ -95,6 +99,7 @@ import {
 } from './jobs/provisao-liberacao.job.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
+import { iniciarJobDevolucoesSync } from './jobs/devolucoes-sync.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
 import { iniciarResellerCacheWarm } from './jobs/reseller-cache-warm.job.js';
@@ -170,11 +175,15 @@ app.use('/api/faturamento-transacao', faturamentoTransacaoRoutes); // Faturament
 app.use('/api/tech', techRoutes); // Tecnologia — Controle de chips, etc
 app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/conciliacao-stone', conciliacaoStoneRoutes); // Conciliação Stone (cartões)
+app.use('/api/extrato-stone', extratoStoneRoutes); // Extrato Stone: OFX → leitura + CNAB 240 p/ TOTVS
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
 app.use('/api/sms', smsRoutes); // SMS DisparoPro — Call Center de cobrança
+app.use('/api/cobranca', cobrancaRoutes); // Cobrança — devedores consolidados (MTM/Revenda/Franquias/BlueCred) para disparo externo de WhatsApp
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
+app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
+app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -231,6 +240,7 @@ app.listen(PORT, async () => {
   iniciarJobFaturamentoVendedorMensal();
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
+  iniciarJobDevolucoesSync();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {

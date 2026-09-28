@@ -125,8 +125,24 @@ export const asyncHandler = (fn) => {
         const duration = Date.now() - startTime;
         console.log(`✅ [${requestId}] ${req.method} ${req.path} - Concluído em ${duration}ms`);
       }
-    } catch (error) {
+    } catch (erroBruto) {
       const duration = Date.now() - startTime;
+      // Bibliotecas de terceiros às vezes rejeitam com string/objeto puro
+      // (ex.: node-sped-nfe faz `reject("Biblioteca xmllint não encontrada!")`).
+      // Em ESM (strict mode) anexar propriedades a uma string LANÇA TypeError
+      // dentro deste catch — a promise do handler ficava rejeitada sem nunca
+      // chamar next(), e a requisição pendurava até o cliente desistir.
+      const error =
+        erroBruto instanceof Error
+          ? erroBruto
+          : Object.assign(
+              new Error(
+                typeof erroBruto === 'string'
+                  ? erroBruto
+                  : erroBruto?.message || JSON.stringify(erroBruto) || 'Erro desconhecido',
+              ),
+              { original: erroBruto, code: erroBruto?.code },
+            );
       console.error(`❌ [${requestId}] ${req.method} ${req.path} - Erro após ${duration}ms:`, error.message);
       
       // Adicionar contexto ao erro

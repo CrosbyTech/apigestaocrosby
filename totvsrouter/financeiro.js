@@ -16,6 +16,109 @@ import {
 
 const router = express.Router();
 
+// ─── Helpers compartilhados pelas rotas de contas a pagar (duplicatas) ───────
+// TOTVS exige os enums Document/Prevision/Stage como inteiros.
+export const DOCUMENT_TYPE_MAP = {
+  Duplicate: 1,
+  InvoicePrint: 2,
+  Commission: 3,
+  Guide: 4,
+  Financing: 5,
+  Voucher: 6,
+  Invoice: 7,
+  AccountDiscountNote: 8,
+  AdministrationFee: 9,
+  InterestWithoutFinancing: 10,
+  Bonus: 11,
+  BankDeposit: 12,
+  Compror: 13,
+  Vendor: 14,
+  Receipt: 15,
+  TedDoc: 16,
+  Loan: 17,
+  FreightKnowledge: 18,
+  ProLabore: 19,
+  AdvanceMoney: 20,
+  OutherTitle: 50,
+};
+const PREVISION_TYPE_MAP = { Forecast: 1, Real: 2, Consignment: 3 };
+const STAGE_TYPE_MAP = {
+  InvoiceNotConfered: 1,
+  ReleasedForPayment: 2,
+  AuthorizedCheck: 3,
+  CheckIssued: 4,
+  InvoiceAccept: 5,
+  Endossado: 10,
+  PaymentInBank: 20,
+  Reserved: 30,
+  PaymentAutomatic: 40,
+  Finished: 90,
+};
+
+// Aceita inteiro, string numérica ou nome do enum; senão usa o fallback.
+export const toEnumInt = (map, val, fallback) => {
+  if (val === undefined || val === null || val === '') return fallback;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') {
+    const num = parseInt(val, 10);
+    if (!isNaN(num)) return num;
+    return map[val] ?? fallback;
+  }
+  return fallback;
+};
+
+// Normalizar datas para ISO 8601 com Z.
+// TOTVS aceita APENAS o horário T15:00:00.000Z — qualquer outro é rejeitado.
+export const normalizeDate = (d) => {
+  if (!d) return d;
+  let datePart;
+  if (typeof d === 'string') {
+    datePart = d.slice(0, 10);
+  } else if (d instanceof Date) {
+    datePart = d.toISOString().slice(0, 10);
+  } else {
+    return d;
+  }
+  return `${datePart}T15:00:00.000Z`;
+};
+
+// Traduz erro do axios numa resposta HTTP no padrão das rotas TOTVS.
+// Lança de volta quando não é erro HTTP nem de conexão (cai no asyncHandler).
+const respondTotvsError = (res, error, defaultMessage) => {
+  if (error.response) {
+    let errorMessage = defaultMessage;
+    const data = error.response.data;
+    if (typeof data === 'string') {
+      errorMessage = data || errorMessage;
+    } else if (data && typeof data === 'object') {
+      errorMessage =
+        data?.message ||
+        data?.error_description ||
+        data?.error ||
+        data?.title ||
+        errorMessage;
+    }
+    return res.status(error.response.status || 400).json({
+      success: false,
+      message: errorMessage,
+      error: 'TOTVS_API_ERROR',
+      status: error.response.status,
+      details: error.response.data || null,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  if (error.request) {
+    const errorMessage =
+      error.code === 'ENOTFOUND'
+        ? 'URL da API TOTVS não encontrada.'
+        : error.code === 'ECONNREFUSED'
+          ? 'Conexão recusada pela API TOTVS.'
+          : `Não foi possível conectar à API TOTVS (${error.code || 'erro desconhecido'})`;
+    return errorResponse(res, errorMessage, 503, 'TOTVS_CONNECTION_ERROR');
+  }
+  throw new Error(`Erro ao chamar API TOTVS: ${error.message}`);
+};
+
 router.post(
   '/accounts-receivable/search',
   asyncHandler(async (req, res) => {
@@ -1782,21 +1885,6 @@ router.post(
 
       const payload = req.body || {};
 
-      // Normalizar datas para ISO 8601 com Z.
-      // TOTVS aceita APENAS o horário T15:00:00.000Z — qualquer outro é rejeitado.
-      const normalizeDate = (d) => {
-        if (!d) return d;
-        let datePart;
-        if (typeof d === 'string') {
-          datePart = d.slice(0, 10);
-        } else if (d instanceof Date) {
-          datePart = d.toISOString().slice(0, 10);
-        } else {
-          return d;
-        }
-        return `${datePart}T15:00:00.000Z`;
-      };
-
       // issueDate/arrivalDate devem estar no passado (TOTVS rejeita quando = hoje).
       // Se a data recebida for hoje ou futura, recua para ontem.
       const todayUTC = new Date().toISOString().slice(0, 10);
@@ -1822,53 +1910,7 @@ router.post(
 
       // Normalizar installments — normalizar datas e converter enums para o formato TOTVS
       // TOTVS exige Document, Prevision, Stage em PascalCase como inteiros (são OBRIGATÓRIOS)
-      const DOCUMENT_TYPE_MAP = {
-        Duplicate: 1,
-        InvoicePrint: 2,
-        Commission: 3,
-        Guide: 4,
-        Financing: 5,
-        Voucher: 6,
-        Invoice: 7,
-        AccountDiscountNote: 8,
-        AdministrationFee: 9,
-        InterestWithoutFinancing: 10,
-        Bonus: 11,
-        BankDeposit: 12,
-        Compror: 13,
-        Vendor: 14,
-        Receipt: 15,
-        TedDoc: 16,
-        Loan: 17,
-        FreightKnowledge: 18,
-        ProLabore: 19,
-        AdvanceMoney: 20,
-        OutherTitle: 50,
-      };
-      const PREVISION_TYPE_MAP = { Forecast: 1, Real: 2, Consignment: 3 };
-      const STAGE_TYPE_MAP = {
-        InvoiceNotConfered: 1,
-        ReleasedForPayment: 2,
-        AuthorizedCheck: 3,
-        CheckIssued: 4,
-        InvoiceAccept: 5,
-        Endossado: 10,
-        PaymentInBank: 20,
-        Reserved: 30,
-        PaymentAutomatic: 40,
-        Finished: 90,
-      };
-
-      const toEnumInt = (map, val, fallback) => {
-        if (val === undefined || val === null || val === '') return fallback;
-        if (typeof val === 'number') return val;
-        if (typeof val === 'string') {
-          const num = parseInt(val, 10);
-          if (!isNaN(num)) return num;
-          return map[val] ?? fallback;
-        }
-        return fallback;
-      };
+      // (mapas e helpers no topo do módulo, compartilhados com /duplicates/group)
 
       // Chaves "antigas" que serão removidas (variações que já existem nos payloads salvos)
       const LEGACY_KEYS = new Set([
@@ -2268,6 +2310,200 @@ router.post(
       addresses,
       email: item.email || item.emails?.[0]?.address || '',
     });
+  }),
+);
+
+/**
+ * @route POST /totvs/accounts-payable/duplicates/group
+ * @desc Agrupa parcelas de duplicatas em uma nova duplicata na API TOTVS
+ *       (POST /accounts-payable/v2/group-duplicates)
+ * @body Formato GroupDuplicatesCommand da TOTVS:
+ *       {
+ *         branchCnpj, supplierCpfCnpj, duplicateCode,   // duplicata resultante
+ *         document: 'Duplicate' | 1, dueDate,
+ *         groupInstallments: [
+ *           { branchCnpj, supplierCpfCnpj, duplicateCode, installmentCode }
+ *         ]
+ *       }
+ */
+router.post(
+  '/accounts-payable/duplicates/group',
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const onlyDigits = (v) => String(v ?? '').replace(/\D/g, '');
+
+    const branchCnpj = onlyDigits(body.branchCnpj);
+    const supplierCpfCnpj = onlyDigits(body.supplierCpfCnpj);
+    if (branchCnpj.length !== 14) {
+      return errorResponse(
+        res,
+        'branchCnpj é obrigatório (CNPJ com 14 dígitos)',
+        400,
+        'VALIDATION',
+      );
+    }
+    if (supplierCpfCnpj.length !== 11 && supplierCpfCnpj.length !== 14) {
+      return errorResponse(
+        res,
+        'supplierCpfCnpj é obrigatório (CPF com 11 ou CNPJ com 14 dígitos)',
+        400,
+        'VALIDATION',
+      );
+    }
+    // No swagger (GroupDuplicateCommand) duplicateCode é integer de até 10 dígitos.
+    const duplicateCode = Number(body.duplicateCode);
+    if (
+      body.duplicateCode === undefined ||
+      body.duplicateCode === null ||
+      body.duplicateCode === '' ||
+      !Number.isInteger(duplicateCode) ||
+      duplicateCode <= 0
+    ) {
+      return errorResponse(
+        res,
+        'duplicateCode é obrigatório e deve ser um inteiro positivo',
+        400,
+        'VALIDATION',
+      );
+    }
+    if (String(duplicateCode).length > 10) {
+      return errorResponse(
+        res,
+        `O código da duplicata "${duplicateCode}" excede 10 dígitos.`,
+        400,
+        'VALIDATION',
+      );
+    }
+    if (!body.dueDate) {
+      return errorResponse(res, 'dueDate é obrigatório', 400, 'VALIDATION');
+    }
+    if (
+      !Array.isArray(body.groupInstallments) ||
+      body.groupInstallments.length === 0
+    ) {
+      return errorResponse(
+        res,
+        'É necessário informar pelo menos uma parcela em groupInstallments[]',
+        400,
+        'VALIDATION',
+      );
+    }
+
+    const groupInstallments = [];
+    for (let i = 0; i < body.groupInstallments.length; i++) {
+      const inst = body.groupInstallments[i] || {};
+      // Se a parcela não informar filial/fornecedor, herda os da duplicata resultante.
+      const instBranch = onlyDigits(inst.branchCnpj) || branchCnpj;
+      const instSupplier = onlyDigits(inst.supplierCpfCnpj) || supplierCpfCnpj;
+      const instDup = Number(inst.duplicateCode);
+      const instCode = Number(inst.installmentCode);
+      if (
+        inst.duplicateCode === undefined ||
+        inst.duplicateCode === null ||
+        inst.duplicateCode === '' ||
+        !Number.isInteger(instDup) ||
+        instDup <= 0
+      ) {
+        return errorResponse(
+          res,
+          `groupInstallments[${i}].duplicateCode é obrigatório e deve ser um inteiro positivo`,
+          400,
+          'VALIDATION',
+        );
+      }
+      if (!Number.isInteger(instCode) || instCode <= 0) {
+        return errorResponse(
+          res,
+          `groupInstallments[${i}].installmentCode deve ser um inteiro positivo`,
+          400,
+          'VALIDATION',
+        );
+      }
+      groupInstallments.push({
+        branchCnpj: instBranch,
+        supplierCpfCnpj: instSupplier,
+        duplicateCode: instDup,
+        installmentCode: instCode,
+      });
+    }
+
+    // GroupDocumentType aceita só Duplicate (1) e FreightBill (18).
+    const GROUP_DOCUMENT_TYPE_MAP = { Duplicate: 1, FreightBill: 18 };
+    const payload = {
+      branchCnpj,
+      supplierCpfCnpj,
+      duplicateCode,
+      document: toEnumInt(GROUP_DOCUMENT_TYPE_MAP, body.document, 1),
+      dueDate: normalizeDate(body.dueDate),
+      groupInstallments,
+    };
+
+    const tokenData = await getToken();
+    if (!tokenData || !tokenData.access_token) {
+      return errorResponse(
+        res,
+        'Não foi possível obter token de autenticação TOTVS',
+        503,
+        'TOKEN_UNAVAILABLE',
+      );
+    }
+
+    const endpoint = `${TOTVS_BASE_URL}/accounts-payable/v2/group-duplicates`;
+    console.log('🧾 Agrupando duplicatas na API TOTVS:', {
+      endpoint,
+      branchCnpj,
+      supplierCpfCnpj,
+      duplicateCode: payload.duplicateCode,
+      dueDate: payload.dueDate,
+      installmentsCount: groupInstallments.length,
+    });
+
+    const doRequest = (accessToken) =>
+      axios.post(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        httpsAgent,
+        httpAgent,
+        timeout: 60000,
+      });
+
+    try {
+      let response;
+      try {
+        response = await doRequest(tokenData.access_token);
+      } catch (error) {
+        if (error.response?.status !== 401) throw error;
+        console.log('🔄 Token inválido. Renovando...');
+        const newTokenData = await getToken(true);
+        response = await doRequest(newTokenData.access_token);
+      }
+
+      console.log('✅ Duplicatas agrupadas com sucesso na TOTVS');
+      return successResponse(
+        res,
+        {
+          sent: payload,
+          totvsResponse: response.data ?? null,
+          totvsStatus: response.status,
+        },
+        'Duplicatas agrupadas com sucesso na TOTVS',
+      );
+    } catch (error) {
+      console.error('❌ Erro ao agrupar duplicatas na API TOTVS:', {
+        message: error.message,
+        code: error.code,
+        status: error.response?.status,
+        response: JSON.stringify(error.response?.data ?? null),
+      });
+      return respondTotvsError(
+        res,
+        error,
+        'Erro ao agrupar duplicatas na API TOTVS',
+      );
+    }
   }),
 );
 
