@@ -2328,6 +2328,51 @@ router.post(
 );
 
 // =============================================================================
+// GET /api/totvs/sale-panel/closing?mes=YYYY-MM
+// Leitura do painel de FECHAMENTO DE MÊS (TVs). Lê a tabela
+// sales_closing_records (alimentada pelo job sales-closing-sync). Sem `mes`,
+// usa o mês corrente no fuso de Natal (America/Fortaleza).
+// Devolve { mes, fechado, atualizado_em, total_geral, canais: [...] }.
+// =============================================================================
+router.get(
+  '/sale-panel/closing',
+  asyncHandler(async (req, res) => {
+    let mes = String(req.query?.mes || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(mes)) {
+      // mês corrente em America/Fortaleza (UTC-3, Natal/RN)
+      const p = Object.fromEntries(
+        new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Fortaleza',
+          year: 'numeric',
+          month: '2-digit',
+        })
+          .formatToParts(new Date())
+          .map((x) => [x.type, x.value]),
+      );
+      mes = `${p.year}-${p.month}`;
+    }
+    const { data, error } = await supabase
+      .from('sales_closing_records')
+      .select('*')
+      .eq('mes', mes)
+      .order('total_mes', { ascending: false });
+    if (error) {
+      return errorResponse(res, `Supabase: ${error.message}`, 500);
+    }
+    const rows = data || [];
+    const total = rows.find((r) => r.canal === 'TOTAL_GERAL') || null;
+    const canais = rows.filter((r) => r.canal !== 'TOTAL_GERAL');
+    return successResponse(res, {
+      mes,
+      fechado: rows[0]?.fechado || false,
+      atualizado_em: rows[0]?.atualizado_em || null,
+      total_geral: total,
+      canais,
+    });
+  }),
+);
+
+// =============================================================================
 // POST /api/totvs/seller-panel/totals
 // Proxy direto pra TOTVS Analytics v2: /seller-panel/totals/search
 // Retorna faturamento agregado por vendedor (TM, PA, PMPV) já calculado.

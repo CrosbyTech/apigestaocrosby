@@ -81,6 +81,7 @@ import { iniciarPessoasBluecredSync } from './jobs/pessoas-bluecred-sync.job.js'
 import { iniciarCanalTotalsCacheJob } from './jobs/canal-totals-cache.job.js';
 import { iniciarForecastPerSellerCacheJob } from './jobs/forecast-per-seller-cache.job.js';
 import { iniciarPainelVendasSyncJob } from './jobs/painel-vendas-sync.job.js';
+import { iniciarSalesClosingSyncJob } from './jobs/sales-closing-sync.job.js';
 import { iniciarCronWixSync } from './jobs/wix-sync.job.js';
 import { iniciarCronSefazDfe } from './jobs/sefaz-dfe-sync.job.js';
 import sefazDfeRoutes from './routes/sefazDfe.routes.js';
@@ -222,6 +223,7 @@ app.listen(PORT, async () => {
   iniciarCanalTotalsCacheJob();
   iniciarForecastPerSellerCacheJob();
   iniciarPainelVendasSyncJob();
+  iniciarSalesClosingSyncJob();
   iniciarCronWixSync();
   iniciarCronSefazDfe();
   // ClickUp fora de uso: cron de sync de leads→compras DESATIVADO para não
