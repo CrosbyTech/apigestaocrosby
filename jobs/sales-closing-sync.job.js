@@ -119,6 +119,11 @@ export async function syncMes(mes, { force = false } = {}) {
   //   REVENDA   -> por vendedor (sellers 161/241/165)
   //   FRANQUIAS -> por vendedor (seller 40)
   // (Multimarcas é montado no front a partir dos 3 canais MTM.)
+  const VAREJO_LOJAS = {
+    2: 'João Pessoa', 5: 'Nova Cruz', 55: 'Parnamirim', 65: 'Canguaretama',
+    87: 'Cidade Jardim', 88: 'Guararapes', 90: 'Ayrton Senna', 93: 'Imperatriz',
+    94: 'Patos', 95: 'Midway', 97: 'Teresina', 98: 'Shopping Recife',
+  };
   const drill = payload.drill || {};
   const vendAcc = {}; // seller_code -> { nome, valor }
   const lojaAcc = {}; // branch_code -> { nome, branch_code, valor }
@@ -131,7 +136,7 @@ export async function syncMes(mes, { force = false } = {}) {
     for (const l of semana?.varejo || []) {
       const bc = Number(l.branch_code);
       if (!Number.isFinite(bc)) continue;
-      if (!lojaAcc[bc]) lojaAcc[bc] = { nome: l.branch_name || l.name || `Filial ${bc}`, branch_code: bc, valor: 0 };
+      if (!lojaAcc[bc]) lojaAcc[bc] = { nome: VAREJO_LOJAS[bc] || l.branch_name || l.name || `Filial ${bc}`, branch_code: bc, valor: 0 };
       lojaAcc[bc].valor += Number(l.valor || 0);
     }
   }
