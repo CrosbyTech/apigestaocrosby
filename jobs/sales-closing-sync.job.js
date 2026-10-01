@@ -114,6 +114,43 @@ export async function syncMes(mes, { force = false } = {}) {
   const now = new Date().toISOString();
   const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
+  // 1b) Detalhe por canal, somando as semanas do drill (sem bater no TOTVS de novo):
+  //   VAREJO    -> por loja     [{ nome, branch_code, valor }]
+  //   REVENDA   -> por vendedor (sellers 161/241/165)
+  //   FRANQUIAS -> por vendedor (seller 40)
+  // (Multimarcas é montado no front a partir dos 3 canais MTM.)
+  const drill = payload.drill || {};
+  const vendAcc = {}; // seller_code -> { nome, valor }
+  const lojaAcc = {}; // branch_code -> { nome, branch_code, valor }
+  for (const semana of Object.values(drill)) {
+    for (const [code, v] of Object.entries(semana?.vendedores || {})) {
+      if (!vendAcc[code]) vendAcc[code] = { nome: v.seller_name || `Vendedor ${code}`, valor: 0 };
+      vendAcc[code].valor += Number(v.valor || 0);
+      if (!vendAcc[code].nome && v.seller_name) vendAcc[code].nome = v.seller_name;
+    }
+    for (const l of semana?.varejo || []) {
+      const bc = Number(l.branch_code);
+      if (!Number.isFinite(bc)) continue;
+      if (!lojaAcc[bc]) lojaAcc[bc] = { nome: l.branch_name || l.name || `Filial ${bc}`, branch_code: bc, valor: 0 };
+      lojaAcc[bc].valor += Number(l.valor || 0);
+    }
+  }
+  const porVendedor = (codes) =>
+    codes
+      .map((c) => vendAcc[c])
+      .filter(Boolean)
+      .map((v) => ({ nome: v.nome, valor: r2(v.valor) }))
+      .filter((x) => x.valor > 0)
+      .sort((a, b) => b.valor - a.valor);
+  const detalhePorCanal = {
+    VAREJO: Object.values(lojaAcc)
+      .map((l) => ({ nome: l.nome, branch_code: l.branch_code, valor: r2(l.valor) }))
+      .filter((x) => x.valor > 0)
+      .sort((a, b) => b.valor - a.valor),
+    REVENDA: porVendedor([161, 241, 165]),
+    FRANQUIAS: porVendedor([40]),
+  };
+
   // 2) Normaliza cada canal -> uma linha; calcula total do mês.
   const rows = [];
   const totalGeral = { s1: 0, s2: 0, s3: 0, s4: 0, s5: 0, total: 0 };
@@ -133,6 +170,7 @@ export async function syncMes(mes, { force = false } = {}) {
       canal,
       ...s,
       total_mes: total,
+      detalhe: detalhePorCanal[canal] || [],
       fechado: encerrado,
       datemin,
       datemax,
@@ -150,6 +188,7 @@ export async function syncMes(mes, { force = false } = {}) {
     s4: totalGeral.s4,
     s5: totalGeral.s5,
     total_mes: totalGeral.total,
+    detalhe: [],
     fechado: encerrado,
     datemin,
     datemax,

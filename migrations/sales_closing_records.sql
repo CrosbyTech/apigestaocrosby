@@ -27,6 +27,13 @@ create table if not exists public.sales_closing_records (
   s5             numeric(14,2) not null default 0,
   total_mes      numeric(14,2) not null default 0,
 
+  -- Detalhe do canal (para a visão rotativa do painel):
+  --   VAREJO    -> por loja     [{ nome, branch_code, valor }]
+  --   REVENDA   -> por vendedor [{ nome, valor }]
+  --   FRANQUIAS -> por vendedor [{ nome, valor }]
+  -- (Multimarcas é montado no front a partir dos 3 canais MTM.)
+  detalhe        jsonb       not null default '[]'::jsonb,
+
   fechado        boolean     not null default false,  -- trava da meia-noite: mês encerrado
   datemin        date,
   datemax        date,
