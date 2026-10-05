@@ -2235,6 +2235,10 @@ router.post(
         put('MTM_RAFAEL', w.s, rowVal(21));
         put('MTM_DAVID', w.s, rowVal(26));
         put('MTM_ARTHUR', w.s, rowVal(259));
+        // Valor por vendedor (VEND_<codigo>) — o New Forecast abre
+        // MULTIMARCAS e REVENDA por vendedor a partir destas chaves.
+        for (const code of [40, 161, 165, 241, 21, 26, 259])
+          put(`VEND_${code}`, w.s, rowVal(code));
         // ── BLUECRED É SUBCONJUNTO DO VAREJO (regra do gestor, 2026-09-08) ──
         // A venda do crediário é uma venda de loja: o mesmo valor está no
         // painel varejo do TOTVS. Mostrar os dois canais cheios no Forecast
