@@ -843,6 +843,13 @@ const FAT_VEND_EXPEDICAO_OPS = new Set([
   887, 888, 889, // bazar
 ]);
 const FAT_VEND_BAZAR_OPS = new Set([887, 888, 889]);
+
+// YAGO SMITH (vendedor 241) vendia pela REVENDA e passou a ser canal próprio
+// (MTM YAGO) a partir de 01/10/2026. A régua é a data de início da semana:
+// semanas que começam antes disso continuam somando no REVENDA, para o
+// histórico não mudar retroativamente.
+const MTM_YAGO_CODE = 241;
+const MTM_YAGO_DESDE = '2026-10-01';
 const FAT_VEND_EXPEDICAO_CODE = -50;
 
 // RICARDO ELETRO: card próprio no Painel (pseudo-vendedor -512) e canal
@@ -1607,6 +1614,7 @@ router.post(
         cliente_nome: nf.personName || null,
         valor: Math.round(valor * 100) / 100,
         op: opNf, // operação — o New Forecast separa novidades/bazar/showroom
+        op_nome: nf.operationName || null, // rótulo da operação no drill
       });
     }
     vendasExp.sort(
@@ -1734,7 +1742,7 @@ router.post(
         seller_code: code,
         seller_name:
           code === FAT_VEND_RICARDO_CODE
-            ? 'RICARDO ELETRO'
+            ? 'MAGAZINE JESUS'
             : sellerNames.get(code) || null,
         valor: 0,
         faturas: new Map(), // receivableKey → venda (fatura)
@@ -2082,7 +2090,8 @@ router.post(
 // S3=15-21, S4=22-28, S5=29+ — mesma régua do PlanejamentoMensalModal) via
 // chamada interna (aproveita o cache de 30min de cada semana) e devolve os
 // canais do New Forecast já mapeados:
-//   FRANQUIAS(40) · REVENDA(161/241/165) · MTM_RAFAEL(21) · MTM_DAVID(26)
+//   FRANQUIAS(40) · REVENDA(161/165, +241 até 09/2026) · MTM_YAGO(241, de
+//   10/2026) · MTM_RAFAEL(21) · MTM_DAVID(26)
 //   MTM_ARTHUR(259) · VAREJO(painel oficial) · NOVIDADES(exp op 7255)
 //   SHOWROOM(demais ops de expedição)
 // =============================================================================
@@ -2215,7 +2224,14 @@ router.post(
               ?.valor || 0,
           );
         put('FRANQUIAS', w.s, rowVal(40));
-        put('REVENDA', w.s, rowVal(161) + rowVal(241) + rowVal(165));
+        // YAGO (241): REVENDA até 30/09/2026, canal próprio a partir de 01/10
+        const yagoEhMtm = String(w.datemin) >= MTM_YAGO_DESDE;
+        put(
+          'REVENDA',
+          w.s,
+          rowVal(161) + rowVal(165) + (yagoEhMtm ? 0 : rowVal(MTM_YAGO_CODE)),
+        );
+        put('MTM_YAGO', w.s, yagoEhMtm ? rowVal(MTM_YAGO_CODE) : 0);
         put('MTM_RAFAEL', w.s, rowVal(21));
         put('MTM_DAVID', w.s, rowVal(26));
         put('MTM_ARTHUR', w.s, rowVal(259));
