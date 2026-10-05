@@ -2094,6 +2094,9 @@ router.post(
 //   10/2026) · MTM_RAFAEL(21) · MTM_DAVID(26)
 //   MTM_ARTHUR(259) · VAREJO(painel oficial) · NOVIDADES(exp op 7255)
 //   SHOWROOM(demais ops de expedição)
+// Blocos de datas repetidos na mesma coluna `s` somam (período de vários
+// meses). Com `usarCache` os blocos fechados vêm do Supabase; com `salvar`
+// o que vier do TOTVS é gravado lá (tabela new_forecast_semana_cache).
 // =============================================================================
 router.post(
   '/sale-panel/faturamento-vendedor-semanal',
@@ -2198,6 +2201,77 @@ router.post(
       };
     };
 
+    // Dois blocos podem cair na MESMA coluna (período de vários meses):
+    // junta vendedores, lojas e expedição dos dois.
+    const mesclaDrill = (a, b) => {
+      const vendedores = { ...(a.vendedores || {}) };
+      for (const [code, v] of Object.entries(b.vendedores || {})) {
+        const cur = vendedores[code];
+        vendedores[code] = cur
+          ? {
+              ...cur,
+              qtd: (cur.qtd || 0) + (v.qtd || 0),
+              valor: Math.round(((cur.valor || 0) + (v.valor || 0)) * 100) / 100,
+              vendas: [...(cur.vendas || []), ...(v.vendas || [])],
+            }
+          : v;
+      }
+      const lojas = new Map();
+      for (const l of [...(a.varejo || []), ...(b.varejo || [])]) {
+        const cur = lojas.get(l.branch_code);
+        if (!cur) {
+          lojas.set(l.branch_code, { ...l, sellers: [...(l.sellers || [])] });
+          continue;
+        }
+        cur.qtd = (cur.qtd || 0) + (l.qtd || 0);
+        cur.valor = Math.round(((cur.valor || 0) + (l.valor || 0)) * 100) / 100;
+        const sel = new Map(cur.sellers.map((x) => [x.seller_code, { ...x }]));
+        for (const x of l.sellers || []) {
+          const c2 = sel.get(x.seller_code);
+          if (!c2) sel.set(x.seller_code, { ...x });
+          else {
+            c2.qtd = (c2.qtd || 0) + (x.qtd || 0);
+            c2.valor = Math.round(((c2.valor || 0) + (x.valor || 0)) * 100) / 100;
+          }
+        }
+        cur.sellers = [...sel.values()];
+      }
+      return {
+        vendedores,
+        varejo: [...lojas.values()],
+        expedicao: [...(a.expedicao || []), ...(b.expedicao || [])],
+      };
+    };
+
+    // ─── Cache no Supabase (new_forecast_semana_cache) ─────────────────────
+    // Guarda os VALORES de um bloco de datas já fechado (não guarda drill).
+    // `usarCache` (padrão true) serve do banco o que já estiver salvo;
+    // `salvar` grava o que veio do TOTVS. Só bloco FECHADO entra/sai do
+    // cache: datemax com 2 dias de folga, porque o dia corrente ainda recebe
+    // venda e cancelamento e o servidor roda em UTC.
+    const usarCache = req.body?.usarCache !== false;
+    const salvar = req.body?.salvar === true;
+    const limiteCache = addDays(new Date().toISOString().slice(0, 10), -2);
+    const blocoFechado = (w) => String(w.datemax) <= limiteCache;
+    const doCache = new Map();
+    if (usarCache) {
+      const chaves = SEMANAS_DEF.filter(blocoFechado).map(
+        (w) => `${w.datemin}|${w.datemax}`,
+      );
+      if (chaves.length) {
+        const { data: rows, error } = await supabase
+          .from('new_forecast_semana_cache')
+          .select('periodo_key, canais')
+          .in('periodo_key', chaves);
+        if (error) console.warn(`[fat-vend-semanal] cache: ${error.message}`);
+        for (const r of rows || []) doCache.set(r.periodo_key, r.canais || {});
+      }
+    }
+    const paraSalvar = [];
+    const aplicar = (valores, s) => {
+      for (const [k, v] of Object.entries(valores || {})) put(k, s, v);
+    };
+
     // 2 semanas em paralelo: corta o tempo frio pela metade sem sobrecarregar
     const drill = {};
     let idxSem = 0;
@@ -2206,6 +2280,12 @@ router.post(
         const i = idxSem++;
         if (i >= SEMANAS_DEF.length) return;
         const w = SEMANAS_DEF[i];
+        const chaveBloco = `${w.datemin}|${w.datemax}`;
+        // Bloco fechado já salvo: vem do banco, sem tocar no TOTVS
+        if (doCache.has(chaveBloco)) {
+          aplicar(doCache.get(chaveBloco), w.s);
+          continue;
+        }
         let data;
         try {
           const r = await axios.post(
@@ -2223,6 +2303,13 @@ router.post(
             (data.dataRow || []).find((x) => Number(x.seller_code) === code)
               ?.valor || 0,
           );
+        // Valores DESTE bloco: vão para o acumulado da coluna (aplicar) e,
+        // se o pedido mandou salvar, para o cache do Supabase.
+        const valores = {};
+        const put = (key, _s, valor) => {
+          valores[key] =
+            Math.round(((valores[key] || 0) + (valor || 0)) * 100) / 100;
+        };
         put('FRANQUIAS', w.s, rowVal(40));
         // YAGO (241): REVENDA até 30/09/2026, canal próprio a partir de 01/10
         const yagoEhMtm = String(w.datemin) >= MTM_YAGO_DESDE;
@@ -2278,15 +2365,48 @@ router.post(
         put('BAZAR', w.s, bazar);
         put('RICARDO_ELETRO', w.s, rowVal(FAT_VEND_RICARDO_CODE));
         put('BLUECRED', w.s, rowVal(FAT_VEND_BLUECRED_CODE));
-        drill[`s${w.s}`] = harvestDrill(w, data);
+        aplicar(valores, w.s);
+        const dBloco = harvestDrill(w, data);
+        const kDrill = `s${w.s}`;
+        drill[kDrill] = drill[kDrill]
+          ? mesclaDrill(drill[kDrill], dBloco)
+          : dBloco;
+        if (salvar && blocoFechado(w))
+          paraSalvar.push({
+            periodo_key: chaveBloco,
+            datemin: w.datemin,
+            datemax: w.datemax,
+            canais: valores,
+          });
       }
     };
     await Promise.all([worker(), worker()]);
 
+    let salvos = 0;
+    if (paraSalvar.length) {
+      const { error } = await supabase
+        .from('new_forecast_semana_cache')
+        .upsert(paraSalvar, { onConflict: 'periodo_key' });
+      if (error) console.warn(`[fat-vend-semanal] salvar cache: ${error.message}`);
+      else salvos = paraSalvar.length;
+    }
+
     return successResponse(
       res,
-      { datemin: dminP, datemax: dmaxP, semanas: SEMANAS_DEF, canais, drill },
-      `Semanal de ${dminP} a ${dmaxP} (${SEMANAS_DEF.length} semanas)`,
+      {
+        datemin: dminP,
+        datemax: dmaxP,
+        semanas: SEMANAS_DEF,
+        canais,
+        drill,
+        cache: {
+          doBanco: [...doCache.keys()],
+          salvos,
+          // bloco mais recente que o cache pode cobrir
+          limite: limiteCache,
+        },
+      },
+      `Semanal de ${dminP} a ${dmaxP} (${SEMANAS_DEF.length} blocos, ${doCache.size} do banco, ${salvos} salvos)`,
     );
   }),
 );
