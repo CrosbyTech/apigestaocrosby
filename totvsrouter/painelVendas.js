@@ -844,12 +844,13 @@ const FAT_VEND_EXPEDICAO_OPS = new Set([
 ]);
 const FAT_VEND_BAZAR_OPS = new Set([887, 888, 889]);
 
-// YAGO SMITH (vendedor 241) vendia pela REVENDA e passou a ser canal próprio
-// (MTM YAGO) a partir de 01/10/2026. A régua é a data de início da semana:
-// semanas que começam antes disso continuam somando no REVENDA, para o
-// histórico não mudar retroativamente.
+// YAGO SMITH (vendedor 241) vendia pela REVENDA e passou a vender
+// MULTIMARCAS a partir de 06/10/2026. A régua é a data da VENDA: o bloco que
+// pega a virada é dividido por dia (venda até 05/10 é revenda, de 06/10 em
+// diante é multimarcas). O semanal publica os dois lados separados:
+//   VEND_241_REV → parte revenda · VEND_241_MTM → parte multimarcas
 const MTM_YAGO_CODE = 241;
-const MTM_YAGO_DESDE = '2026-10-01';
+const MTM_YAGO_DESDE = '2026-10-06';
 const FAT_VEND_EXPEDICAO_CODE = -50;
 
 // RICARDO ELETRO: card próprio no Painel (pseudo-vendedor -512) e canal
@@ -2311,14 +2312,37 @@ router.post(
             Math.round(((valores[key] || 0) + (valor || 0)) * 100) / 100;
         };
         put('FRANQUIAS', w.s, rowVal(40));
-        // YAGO (241): REVENDA até 30/09/2026, canal próprio a partir de 01/10
-        const yagoEhMtm = String(w.datemin) >= MTM_YAGO_DESDE;
-        put(
-          'REVENDA',
-          w.s,
-          rowVal(161) + rowVal(165) + (yagoEhMtm ? 0 : rowVal(MTM_YAGO_CODE)),
-        );
-        put('MTM_YAGO', w.s, yagoEhMtm ? rowVal(MTM_YAGO_CODE) : 0);
+        // YAGO (241) virou MULTIMARCAS em 06/10/2026: divide o bloco por dia
+        // de venda. Sem o detalhe das vendas em cache, cai na data de início
+        // do bloco (mesma régua de antes).
+        const totalYago = rowVal(MTM_YAGO_CODE);
+        let yagoMtm = 0;
+        if (String(w.datemin) >= MTM_YAGO_DESDE) {
+          yagoMtm = totalYago;
+        } else if (String(w.datemax) >= MTM_YAGO_DESDE) {
+          let vendasYago = null;
+          for (const [k, v] of FAT_VEND_CACHE.entries()) {
+            if (k.startsWith(`${w.datemin}|${w.datemax}|`)) {
+              vendasYago = v?.detalhes?.[MTM_YAGO_CODE] || [];
+              break;
+            }
+          }
+          if (vendasYago?.length) {
+            const soma = vendasYago.reduce(
+              (a, v) =>
+                String(v.data || '').slice(0, 10) >= MTM_YAGO_DESDE
+                  ? a + (v.valor || 0)
+                  : a,
+              0,
+            );
+            yagoMtm = Math.min(Math.round(soma * 100) / 100, totalYago);
+          }
+        }
+        const yagoRev = Math.round((totalYago - yagoMtm) * 100) / 100;
+        put('REVENDA', w.s, rowVal(161) + rowVal(165) + yagoRev);
+        put('MTM_YAGO', w.s, yagoMtm);
+        put('VEND_241_REV', w.s, yagoRev);
+        put('VEND_241_MTM', w.s, yagoMtm);
         put('MTM_RAFAEL', w.s, rowVal(21));
         put('MTM_DAVID', w.s, rowVal(26));
         put('MTM_ARTHUR', w.s, rowVal(259));
@@ -2464,6 +2488,70 @@ router.post(
       return errorResponse(res, `Supabase: ${error.message}`, 500);
     }
     return successResponse(res, row, 'Config salva');
+  }),
+);
+
+
+// =============================================================================
+// NEW FORECAST — canais extras criados na própria tela
+// Tabela new_forecast_canais_extra (migrations/new_forecast_canais_extra.sql).
+// Valem para TODOS os períodos; os valores digitados continuam no
+// new_forecast_config de cada período (bucket `manual`), como nos demais
+// canais manuais.
+// GET    /api/totvs/new-forecast/canais
+// POST   /api/totvs/new-forecast/canais { nome, qtd? }   (qtd = contado em UND)
+// DELETE /api/totvs/new-forecast/canais?nome=
+// =============================================================================
+router.get(
+  '/new-forecast/canais',
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase
+      .from('new_forecast_canais_extra')
+      .select('nome, qtd, criado_em')
+      .order('criado_em', { ascending: true });
+    if (error) {
+      return errorResponse(res, `Supabase: ${error.message}`, 500);
+    }
+    return successResponse(res, { canais: data || [] });
+  }),
+);
+
+router.post(
+  '/new-forecast/canais',
+  asyncHandler(async (req, res) => {
+    const nome = String(req.body?.nome || '')
+      .trim()
+      .toUpperCase()
+      .slice(0, 40);
+    if (!nome) {
+      return errorResponse(res, 'nome obrigatório', 400, 'MISSING_NOME');
+    }
+    const row = { nome, qtd: req.body?.qtd === true };
+    const { error } = await supabase
+      .from('new_forecast_canais_extra')
+      .upsert(row, { onConflict: 'nome' });
+    if (error) {
+      return errorResponse(res, `Supabase: ${error.message}`, 500);
+    }
+    return successResponse(res, row, 'Canal salvo');
+  }),
+);
+
+router.delete(
+  '/new-forecast/canais',
+  asyncHandler(async (req, res) => {
+    const nome = String(req.query?.nome || '').trim();
+    if (!nome) {
+      return errorResponse(res, 'nome obrigatório', 400, 'MISSING_NOME');
+    }
+    const { error } = await supabase
+      .from('new_forecast_canais_extra')
+      .delete()
+      .eq('nome', nome);
+    if (error) {
+      return errorResponse(res, `Supabase: ${error.message}`, 500);
+    }
+    return successResponse(res, { nome }, 'Canal removido');
   }),
 );
 
