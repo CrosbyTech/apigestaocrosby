@@ -269,3 +269,7 @@ não cai por causa de um item. A assinatura cobre o corpo cru.
 
 Tempo: ~3–4 s por cliente na primeira consulta (duas chamadas ao TOTVS), 4 em paralelo
 no lote, instantâneo dentro dos 15 min de cache.
+
+## Vendas do PDV com formas de pagamento (06/10/2026)
+
+`GET /api/bluecard/vendas?cpf=&desde=` — vendas do cliente com ou sem BlueCard, formas de pagamento por venda e o titulo BlueCard gerado. Base para a "venda extra" do app. Contrato completo em [BLUECARD-ROTA-VENDAS.md](BLUECARD-ROTA-VENDAS.md). Implementacao em `services/bluecardVendas.js` (janelas de 6 meses em paralelo, filiais proprias, cache 5 min).

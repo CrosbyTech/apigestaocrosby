@@ -9,6 +9,8 @@
  *   GET  /api/bluecard/clientes    — cadastro + estatísticas de compra do
  *                                    cliente no TOTVS (?cpf= ou ?cnpj=)
  *   POST /api/bluecard/clientes/lote — o mesmo para até 50 documentos
+ *   GET  /api/bluecard/vendas      — vendas do PDV com formas de pagamento
+ *                                    (?cpf=&desde=) → "venda extra" além do cartão
  *                                    Responde 200 imediato e processa depois —
  *                                    webhook lento vira reenvio (retry deles por 24h).
  *   GET  /api/bluecard/pagamentos  — reconciliação (assinado HMAC): títulos
@@ -37,6 +39,7 @@ import {
   consultarClienteBluecard,
   consultarClientesBluecardLote,
 } from '../services/bluecardClientes.js';
+import { listarVendasCliente } from '../services/bluecardVendas.js';
 
 const router = express.Router();
 
@@ -617,6 +620,57 @@ router.post('/clientes/lote', exigirAssinaturaBluecard, async (req, res) => {
     console.error('❌ [bluecard/clientes/lote]', e.message);
     return res.status(502).json({
       erro: { codigo: 'erro_totvs', mensagem: 'Falha ao consultar o TOTVS', detalhe: e.message },
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/bluecard/vendas?cpf=06451367435&desde=2026-01-01
+//     &formato=lista     (opcional: devolve só o array de vendas, como no
+//                         exemplo do pedido; default é { cliente, resumo, vendas })
+//     &refresh=1         (opcional: fura o cache de 5 min)
+//
+// Todas as vendas do cliente no PDV desde a data, com ou sem BlueCard, cada
+// uma com as formas de pagamento e o título BlueCard que ela gerou. É como o
+// app mede a "venda extra": o que o cliente comprou além do cartão.
+// CPF sem venda → lista vazia (200). CPF sem cadastro no TOTVS → 404.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/vendas', exigirAssinaturaBluecard, async (req, res) => {
+  const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+  const desde = String(req.query.desde || '').slice(0, 10);
+  const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+  const soLista = req.query.formato === 'lista';
+
+  if (cpf.length !== 11) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'cpf deve ter 11 dígitos', detalhe: null },
+    });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(desde) || isNaN(Date.parse(desde))) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'desde deve ser AAAA-MM-DD', detalhe: null },
+    });
+  }
+  if (Date.parse(desde) > Date.now()) {
+    return res.json(soLista ? [] : { cliente: null, desde, resumo: null, vendas: [] });
+  }
+
+  try {
+    const dados = await listarVendasCliente(cpf, desde, { refresh });
+    if (!dados) {
+      return res.status(404).json({
+        erro: { codigo: 'cliente_nao_encontrado', mensagem: 'CPF sem cadastro no TOTVS', detalhe: null },
+      });
+    }
+    return res.json(soLista ? dados.vendas : dados);
+  } catch (e) {
+    console.error('❌ [bluecard/vendas]', e.response?.status || '', e.message);
+    return res.status(502).json({
+      erro: {
+        codigo: 'erro_totvs',
+        mensagem: 'Falha ao consultar o TOTVS',
+        detalhe: e.response?.data?.[0]?.message || e.message,
+      },
     });
   }
 });
