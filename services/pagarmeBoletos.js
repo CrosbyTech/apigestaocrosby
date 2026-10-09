@@ -42,6 +42,35 @@ const PAID_TYPE_CONTA_CORRENTE = 4;
 const soDigitos = (s) => String(s || '').replace(/\D/g, '');
 const reais = (cents) => Math.round(Number(cents || 0)) / 100;
 
+/**
+ * Erro de emissão em linguagem do financeiro. Recebe a mensagem técnica
+ * gravada em pagarme_boletos.erro (ou o motivo de /gerar) e devolve o que
+ * aconteceu e o que fazer.
+ */
+export function descreverErro(msg) {
+  const m = String(msg || '');
+  const t = (texto) => texto;
+  if (!m) return '';
+  if (/email/i.test(m)) return t('E-mail do cliente inválido. Corrija no cadastro (olhinho) e reenvie.');
+  if (/zip_code|\bcep\b/i.test(m)) return t('CEP do cliente inválido. Corrija o endereço no cadastro e reenvie.');
+  if (/address|line_1|city|state/i.test(m)) return t('Endereço do cliente incompleto ou inválido. Corrija no cadastro e reenvie.');
+  if (/area_code|mobile_phone|home_phone|phone/i.test(m)) return t('Telefone do cliente inválido (precisa de DDD + número). Corrija no cadastro e reenvie.');
+  if (/document_type|"document"|\bdocument\b|cpf|cnpj/i.test(m) && !/document_number/i.test(m)) return t('CPF/CNPJ do cliente inválido. Corrija no cadastro e reenvie.');
+  if (/\bname\b/i.test(m)) return t('Nome do cliente inválido ou longo demais para a Pagar.me.');
+  if (/amount/i.test(m)) return t('Valor do boleto abaixo do mínimo aceito pela Stone.');
+  if (/due_at|expir/i.test(m)) return t('Data de vencimento não aceita pela Pagar.me (já passou ou é inválida).');
+  if (/REFUSED/i.test(m)) return t('Boleto recusado pela Stone sem detalhe. Reenvie; se repetir, confira valor e cadastro do cliente.');
+  if (/PAGARME_SECRET_KEY/.test(m)) return t('Chave da Pagar.me não estava configurada no servidor. Reenvie.');
+  if (/request is invalid/i.test(m)) return t('A Pagar.me recusou os dados sem detalhar (costuma ser endereço, telefone ou nome do cliente). Confira o cadastro e reenvie.');
+  if (/inacess|fetch failed|ECONN|ETIMEDOUT|timeout|socket/i.test(m)) return t('Falha de comunicação com a Pagar.me. Reenvie.');
+  if (/interrompida/i.test(m)) return t('Envio interrompido antes de criar o boleto. Reenvie.');
+  if (/já tem boleto/i.test(m)) return t('Esta fatura já tem boleto Pagar.me.');
+  if (/cadastro incompleto/i.test(m)) return t(m.replace(/^cadastro incompleto:/i, 'Cadastro incompleto no TOTVS:') + '. Corrija no olhinho e reenvie.');
+  if (/não está mais em aberto/i.test(m)) return t('Fatura não está mais em aberto ou a vencer no TOTVS.');
+  if (/portador .* não entra/i.test(m)) return t('Portador da fatura não entra na remessa.');
+  return t('Erro não identificado: ' + m.slice(0, 160));
+}
+
 export function tabelaAusente(error) {
   return (
     error?.code === '42P01' ||
@@ -87,6 +116,50 @@ export async function boletosAtivosPorTitulo(nrFaturas) {
     for (const b of data || []) mapa[`${b.cd_empresa}-${b.nr_fatura}-${b.nr_parcela}`] = b;
   }
   return { mapa, tabelaAusente: false };
+}
+
+/** Última tentativa que FALHOU por fatura (para a tela mostrar o erro e permitir reenviar). */
+export async function ultimosErrosPorTitulo(nrFaturas) {
+  const mapa = {};
+  const lista = [...new Set(nrFaturas.map(Number).filter(Boolean))];
+  for (let i = 0; i < lista.length; i += 300) {
+    const { data, error } = await supabase
+      .from(TABELA)
+      .select('id, cd_empresa, nr_fatura, nr_parcela, erro, remessa_id, created_at')
+      .in('nr_fatura', lista.slice(i, i + 300))
+      .eq('status', 'failed')
+      .order('id', { ascending: false });
+    if (error) {
+      if (tabelaAusente(error)) return mapa;
+      throw new Error(`pagarme_boletos: ${error.message}`);
+    }
+    for (const b of data || []) {
+      const k = `${b.cd_empresa}-${b.nr_fatura}-${b.nr_parcela}`;
+      if (!mapa[k]) {
+        mapa[k] = {
+          quando: b.created_at,
+          remessa_id: b.remessa_id,
+          tecnico: b.erro,
+          descricao: descreverErro(b.erro),
+        };
+      }
+    }
+  }
+  return mapa;
+}
+
+// Pagar.me devolve 400 com { message: "The request is invalid.", errors: { "customer.address.zip_code": [...] } }
+// — o detalhe útil está em errors, não em message.
+function detalharErroPagarme(order, tx) {
+  const gw = (tx?.gateway_response?.errors || []).map((x) => x.message).join('; ');
+  if (gw) return gw;
+  if (order?.errors && typeof order.errors === 'object') {
+    const partes = Object.entries(order.errors).map(
+      ([campo, msgs]) => `${campo}: ${[].concat(msgs).join(', ')}`,
+    );
+    if (partes.length) return partes.join(' | ').slice(0, 500);
+  }
+  return order?.message || JSON.stringify(order).slice(0, 300);
 }
 
 function montarPedido(fatura, cliente, code) {
@@ -222,10 +295,7 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
   const charge = (order.charges || [])[0] || {};
   const tx = charge.last_transaction || {};
   if (!resp.ok || order.status === 'failed' || !tx.line) {
-    const motivo =
-      (tx.gateway_response?.errors || []).map((x) => x.message).join('; ') ||
-      order.message ||
-      JSON.stringify(order.errors || order).slice(0, 300);
+    const motivo = detalharErroPagarme(order, tx);
     await gravar({ status: 'failed', erro: motivo, order_id: order.id || null });
     return { ok: false, chave, motivo: `Pagar.me recusou: ${motivo}` };
   }
@@ -419,6 +489,7 @@ export async function listarBoletos({ branches, dt_inicio, dt_fim, modo = 'venci
   const hoje = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10); // dia em Brasília
   const items = (data || []).map((b) => ({
     ...b,
+    erro_descricao: b.status === 'failed' ? descreverErro(b.erro) : null,
     situacao:
       b.status === 'paid'
         ? 'pago'
