@@ -402,15 +402,22 @@ async function baixarBoletoPago(b) {
 export async function sincronizarRetorno({ retentarErros = false } = {}) {
   const r = { consultados: 0, pagos: 0, cancelados: 0, baixados: 0, errosBaixa: 0, errosConsulta: 0 };
 
-  const { data: pendentes, error } = await supabase
-    .from(TABELA)
-    .select('*')
-    .eq('status', 'pending')
-    .not('order_id', 'is', null)
-    .limit(1000);
-  if (error) {
-    if (tabelaAusente(error)) return { ...r, tabelaAusente: true };
-    throw new Error(`pagarme_boletos: ${error.message}`);
+  // PostgREST corta em 1000 linhas por resposta — pagina até esgotar.
+  const pendentes = [];
+  for (let de = 0; ; de += 1000) {
+    const { data: lote, error } = await supabase
+      .from(TABELA)
+      .select('*')
+      .eq('status', 'pending')
+      .not('order_id', 'is', null)
+      .order('id', { ascending: true })
+      .range(de, de + 999);
+    if (error) {
+      if (tabelaAusente(error)) return { ...r, tabelaAusente: true };
+      throw new Error(`pagarme_boletos: ${error.message}`);
+    }
+    pendentes.push(...(lote || []));
+    if (!lote || lote.length < 1000) break;
   }
 
   for (const b of pendentes || []) {
@@ -475,16 +482,45 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
 }
 
 /** Lista os boletos para a página Retorno Boleto. */
-export async function listarBoletos({ branches, dt_inicio, dt_fim, modo = 'vencimento' }) {
+export async function listarBoletos({
+  branches,
+  dt_inicio,
+  dt_fim,
+  modo = 'vencimento',
+  cd_cliente,
+  nr_fatura,
+  documento,
+  order_id,
+  id,
+} = {}) {
   const coluna = modo === 'emissao' ? 'created_at' : modo === 'pagamento' ? 'dt_pagamento' : 'dt_vencimento';
-  let q = supabase.from(TABELA).select('*').order('dt_vencimento', { ascending: true }).limit(5000);
-  if (branches?.length) q = q.in('cd_empresa', branches);
-  if (dt_inicio) q = q.gte(coluna, coluna === 'dt_vencimento' ? dt_inicio : `${dt_inicio}T00:00:00-03:00`);
-  if (dt_fim) q = q.lte(coluna, coluna === 'dt_vencimento' ? dt_fim : `${dt_fim}T23:59:59-03:00`);
-  const { data, error } = await q;
-  if (error) {
-    if (tabelaAusente(error)) return { items: [], tabelaAusente: true };
-    throw new Error(`pagarme_boletos: ${error.message}`);
+  const montar = () => {
+    let q = supabase
+      .from(TABELA)
+      .select('*')
+      .order('dt_vencimento', { ascending: true })
+      .order('id', { ascending: true });
+    if (branches?.length) q = q.in('cd_empresa', branches);
+    if (cd_cliente) q = q.eq('cd_cliente', cd_cliente);
+    if (nr_fatura) q = q.eq('nr_fatura', nr_fatura);
+    if (documento) q = q.eq('nr_documento', documento);
+    if (order_id) q = q.eq('order_id', order_id);
+    if (id) q = q.eq('id', id);
+    if (dt_inicio) q = q.gte(coluna, coluna === 'dt_vencimento' ? dt_inicio : `${dt_inicio}T00:00:00-03:00`);
+    if (dt_fim) q = q.lte(coluna, coluna === 'dt_vencimento' ? dt_fim : `${dt_fim}T23:59:59-03:00`);
+    return q;
+  };
+  // O PostgREST devolve no máximo 1000 linhas por resposta — pagina por range até esgotar.
+  const PAGINA = 1000;
+  const data = [];
+  for (let de = 0; ; de += PAGINA) {
+    const { data: lote, error } = await montar().range(de, de + PAGINA - 1);
+    if (error) {
+      if (tabelaAusente(error)) return { items: [], tabelaAusente: true };
+      throw new Error(`pagarme_boletos: ${error.message}`);
+    }
+    data.push(...(lote || []));
+    if (!lote || lote.length < PAGINA) break;
   }
   const hoje = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10); // dia em Brasília
   const items = (data || []).map((b) => ({

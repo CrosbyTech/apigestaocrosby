@@ -27,6 +27,7 @@ import uazapiSyncRoutes from './routes/uazapiSync.routes.js';
 import automacaoRoutes from './routes/automacao.routes.js';
 import smsRoutes from './routes/sms.routes.js';
 import cobrancaRoutes from './routes/cobranca.routes.js';
+import pagarmeBoletosApiRoutes from './routes/pagarmeBoletosApi.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import extratoStoneRoutes from './routes/extratoStone.routes.js';
@@ -72,6 +73,7 @@ import pdvRouter from './totvsrouter/pdv.js';
 import pdvCrosbyRoutes from './routes/pdvCrosby.routes.js';
 import bluecredInadimplenciaRouter from './totvsrouter/bluecredInadimplencia.js';
 import remessaBoletosRouter from './totvsrouter/remessaBoletos.js';
+import mixCanaisRouter from './totvsrouter/mixCanais.js';
 import portalRfidRoutes from './routes/portalRfid.routes.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
 import { iniciarJobForecastRefYoy } from './jobs/forecast-ref-yoy.job.js';
@@ -155,6 +157,7 @@ app.use('/api/totvs', voucherRouter); // vouchers/usage-enriched
 app.use('/api/totvs', pdvRouter); // PDV RFID — produto por código/EPC, condições, transação
 app.use('/api/totvs', bluecredInadimplenciaRouter); // BlueCred — inadimplência (faturas vencidas dos clientes do crediário)
 app.use('/api/totvs', remessaBoletosRouter); // Remessa Boletos (Pagar.me) — faturas a vencer + cadastro do cliente
+app.use('/api/totvs', mixCanaisRouter); // Mix de Canais — participação por canal mês a mês (histórico + New Forecast)
 app.use('/api/portal-rfid', portalRfidRoutes); // Portal RFID Chainway UR4 (bridge TCP)
 
 // ─── Demais rotas ───────────────────────────────────────────────────────────────────────────
@@ -183,6 +186,7 @@ app.use('/api/extrato-stone', extratoStoneRoutes); // Extrato Stone: OFX → lei
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
 app.use('/api/sms', smsRoutes); // SMS DisparoPro — Call Center de cobrança
+app.use('/api/pagarme-boletos', pagarmeBoletosApiRoutes); // API externa — boletos Pagar.me (Retorno Boleto) p/ outros sistemas
 app.use('/api/cobranca', cobrancaRoutes); // Cobrança — devedores consolidados (MTM/Revenda/Franquias/BlueCred) para disparo externo de WhatsApp
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
