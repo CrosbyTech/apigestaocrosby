@@ -87,6 +87,10 @@ const SETORES = [
   { id: 'producao', nome: 'Produção', icon: '🏭' },
   { id: 'separar', nome: 'Separar Lote', icon: '✂️' },
   { id: 'gerente-varejo', nome: 'Gerente Varejo', icon: '🧭' },
+  // setores comerciais criados pelo Dryland em set/2026 (chamados de pedido por canal)
+  { id: 'comercial-mtm', nome: 'Comercial MTM (multimarcas)', icon: '🏬' },
+  { id: 'comercial-revenda', nome: 'Comercial Revenda', icon: '🛒' },
+  { id: 'comercial-franquia', nome: 'Comercial Franquia', icon: '🏢' },
   // não é publico:'setor' no core.js, mas existem chamados reais com esse setor
   { id: 'expedicao', nome: 'Expedição', icon: '🚚' },
 ];

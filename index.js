@@ -103,6 +103,7 @@ import {
 } from './jobs/provisao-liberacao.job.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
+import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
 import { iniciarJobDevolucoesSync } from './jobs/devolucoes-sync.job.js';
 import { iniciarJobPagarmeBoletosRetorno } from './jobs/pagarme-boletos-retorno.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
@@ -249,6 +250,7 @@ app.listen(PORT, async () => {
   iniciarJobFaturamentoVendedorMensal();
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
+  iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
 
