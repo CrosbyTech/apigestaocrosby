@@ -14,6 +14,8 @@ import {
   successResponse,
   errorResponse,
 } from '../utils/errorHandler.js';
+import { XMLParser } from 'fast-xml-parser';
+import QRCode from 'qrcode';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
 
@@ -1100,6 +1102,515 @@ const BONUS_TYPE = parseInt(process.env.PDV_BONUS_TYPE || '14', 10);
 const BONUS_VALIDADE_DIAS = parseInt(
   process.env.PDV_BONUS_VALIDADE_DIAS || '90',
   10,
+);
+
+// =============================================================================
+// GET /pdv/customer-invoices?customer=32096&branch=99&de=2026-09-01&ate=2026-10-01
+// Notas fiscais que o CLIENTE emitiu contra a Crosby (ex.: franquia devolvendo
+// compra, CFOP 5202) — é a mesma busca do "Filtro origem" do FISFP082.
+// Só funciona para cliente que é EMPRESA no TOTVS (franquias, código >= 6000):
+// a nota dele está no nosso ERP. Devolve os itens com os valores da nota para a
+// conferência das peças, e marca a nota que já foi recebida na empresa destino.
+// =============================================================================
+let branchesCache = null;
+let branchesCacheAt = 0;
+async function listarFiliais() {
+  if (branchesCache && Date.now() - branchesCacheAt < 30 * 60 * 1000) return branchesCache;
+  const resp = await callTotvs('get', `${TOTVS_BASE_URL}/person/v2/branchesList`, {
+    params: { BranchCodePool: 1, Page: 1, PageSize: 1000 },
+  });
+  branchesCache = (resp.data?.items || []).map((b) => ({
+    code: Number(b.code),
+    personCode: Number(b.personCode),
+    cnpj: b.cnpj || null,
+    nome: b.fantasyName || b.description || b.branchGroupName || `Empresa ${b.code}`,
+  }));
+  branchesCacheAt = Date.now();
+  return branchesCache;
+}
+
+async function buscarNotas(filter, expand) {
+  const out = [];
+  for (let page = 1; page <= 6; page++) {
+    const resp = await callTotvs('post', `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`, {
+      data: { filter, ...(expand ? { expand } : {}), page, pageSize: 100 },
+      timeout: 90000,
+    });
+    out.push(...(resp.data?.items || []));
+    if (!resp.data?.hasNext) break;
+  }
+  return out;
+}
+
+router.get(
+  '/pdv/customer-invoices',
+  asyncHandler(async (req, res) => {
+    const customer = parseInt(req.query.customer, 10);
+    const branch = parseInt(req.query.branch, 10) || null;
+    if (!customer) return errorResponse(res, 'Informe ?customer=', 400, 'MISSING_PARAMS');
+    const hoje = new Date();
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const ate = String(req.query.ate || iso(hoje)).slice(0, 10);
+    const de = String(req.query.de || iso(new Date(hoje.getTime() - 45 * 86400000))).slice(0, 10);
+
+    const filiais = await listarFiliais();
+    const filialCliente = filiais.find((b) => b.personCode === customer);
+    if (!filialCliente) {
+      return errorResponse(
+        res,
+        'Este cliente não é uma empresa do TOTVS (franquia), então a nota fiscal dele não está no ERP. Use a devolução sem nota ou lance pelo FISFP082.',
+        404,
+        'CUSTOMER_NOT_BRANCH',
+      );
+    }
+    // Pessoas das NOSSAS empresas (matriz/lojas próprias): destinatário da nota
+    const nossas = new Map(filiais.filter((b) => b.code < 6000).map((b) => [b.personCode, b]));
+    const pessoaDestino = branch ? filiais.find((b) => b.code === branch)?.personCode : null;
+
+    // A API filtra por data de ALTERAÇÃO; a data de emissão é filtrada aqui
+    const janela = { startDate: `${de}T00:00:00.000Z`, endDate: `${iso(new Date(hoje.getTime() + 86400000))}T23:59:59.999Z` };
+    const [emitidas, recebidas] = await Promise.all([
+      buscarNotas({ branchCodeList: [filialCliente.code], operationType: 'Output', change: janela }, 'items'),
+      branch
+        ? buscarNotas({ branchCodeList: [branch], personCodeList: [customer], change: janela }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+
+    // Notas já lançadas na empresa destino (entrada de terceiros com a mesma chave/número)
+    const jaRecebidas = new Map();
+    for (const n of recebidas) {
+      if (n.operationType !== 'Input' || n.invoiceStatus !== 'Issued') continue;
+      const chave = n.eletronic?.accessKey;
+      const info = { branchCode: n.branchCode, transactionCode: n.transactionCode, invoiceDate: n.invoiceDate, operationCode: n.operationCode };
+      if (chave) jaRecebidas.set(chave, info);
+      jaRecebidas.set(`${n.invoiceCode}/${n.serialCode}`, info);
+    }
+
+    const num = (v) => Number(v || 0);
+    const notas = emitidas
+      .filter((n) => n.invoiceStatus === 'Issued' && nossas.has(Number(n.personCode)))
+      .filter((n) => {
+        const d = String(n.invoiceDate || n.issueDate || '').slice(0, 10);
+        return d >= de && d <= ate;
+      })
+      .map((n) => {
+        const chave = n.eletronic?.accessKey || null;
+        const itens = (n.items || []).map((it) => {
+          const prod = it.products?.[0] || {};
+          return {
+            sequence: it.sequence,
+            productCode: Number(prod.productCode ?? it.code),
+            name: prod.productName || it.name,
+            cfop: it.cfop,
+            ncm: it.ncm || null,
+            quantity: num(it.quantity),
+            unitGross: num(it.unitGrossValue),
+            unitDiscount: num(it.unitDiscountValue),
+            unitNet: num(it.unitNetValue),
+            netValue: num(it.netValue),
+          };
+        });
+        const destino = nossas.get(Number(n.personCode));
+        return {
+          branchCode: n.branchCode,
+          invoiceCode: n.invoiceCode,
+          serialCode: n.serialCode,
+          invoiceSequence: n.invoiceSequence,
+          invoiceDate: String(n.invoiceDate || '').slice(0, 10),
+          accessKey: chave,
+          operationCode: n.operationCode,
+          operationName: n.operatioName || n.operationName || null,
+          totalValue: num(n.totalValue),
+          quantity: num(n.quantity) || itens.reduce((s2, i) => s2 + i.quantity, 0),
+          destinoPersonCode: Number(n.personCode),
+          destinoBranch: destino?.code ?? null,
+          destinoNome: n.personName || destino?.nome || null,
+          paraEstaEmpresa: pessoaDestino ? Number(n.personCode) === pessoaDestino : null,
+          recebida: (chave && jaRecebidas.get(chave)) || jaRecebidas.get(`${n.invoiceCode}/${n.serialCode}`) || null,
+          itens,
+        };
+      })
+      .sort((a, b) => (a.invoiceDate < b.invoiceDate ? 1 : -1));
+
+    return successResponse(
+      res,
+      { cliente: { personCode: customer, branchCode: filialCliente.code, nome: filialCliente.nome, cnpj: filialCliente.cnpj }, de, ate, notas },
+      `${notas.length} nota(s) do cliente`,
+    );
+  }),
+);
+
+// =============================================================================
+// GET /pdv/transaction-invoice?branch=2&code=889714&date=2026-09-28
+// Nota fiscal gerada por uma transação já ATENDIDA no caixa, pronta para
+// impressão no PDV Crosby:
+//   • NFC-e (modelo 65) → dados do XML autorizado no formato do cupom 80mm
+//     ({ nota, venda, emitente } — mesmo formato de utils/documentoFiscalHtml)
+//   • NF-e  (modelo 55) → DANFE oficial em PDF (danfePdfBase64)
+// =============================================================================
+const FORMAS_PAG_NFE = {
+  '01': 'Dinheiro',
+  '02': 'Cheque',
+  '03': 'Cartão de crédito',
+  '04': 'Cartão de débito',
+  '05': 'Crédito loja',
+  10: 'Vale alimentação',
+  11: 'Vale refeição',
+  12: 'Vale presente',
+  13: 'Vale combustível',
+  15: 'Boleto',
+  16: 'Depósito',
+  17: 'PIX',
+  18: 'Transferência / carteira digital',
+  19: 'Fidelidade / cashback',
+  20: 'PIX',
+  21: 'Crédito em loja',
+  90: 'Sem pagamento',
+  99: 'Outros',
+};
+
+router.get(
+  '/pdv/transaction-invoice',
+  asyncHandler(async (req, res) => {
+    const branch = parseInt(req.query.branch, 10);
+    const code = parseInt(req.query.code, 10);
+    const date = String(req.query.date || '').slice(0, 10);
+    if (!branch || !code || !date) {
+      return errorResponse(res, 'Informe ?branch=&code=&date=', 400, 'MISSING_PARAMS');
+    }
+
+    const busca = await callTotvs('post', `${TOTVS_BASE_URL}/fiscal/v2/invoices/search`, {
+      data: {
+        filter: {
+          branchCodeList: [branch],
+          transactionBranchCode: branch,
+          transactionCode: code,
+          transactionDate: `${date}T00:00:00.000Z`,
+        },
+        page: 1,
+        pageSize: 10,
+      },
+      timeout: 60000,
+    });
+    const notas = (busca.data?.items || []).filter((n) => n.invoiceStatus !== 'Canceled');
+    const nf = notas.find((n) => n.eletronic?.accessKey) || notas[0];
+    if (!nf) {
+      return errorResponse(res, `Nenhuma nota fiscal encontrada para a transação ${code}`, 404, 'INVOICE_NOT_FOUND');
+    }
+    const accessKey = nf.eletronic?.accessKey;
+    if (!accessKey) {
+      return errorResponse(res, 'A nota desta transação ainda não foi autorizada na SEFAZ. Tente de novo em instantes.', 409, 'INVOICE_NOT_AUTHORIZED');
+    }
+
+    const xmlResp = await callTotvs('get', `${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${accessKey}`, { timeout: 60000 });
+    const mainInvoiceXml = xmlResp.data?.mainInvoiceXml;
+    if (!mainInvoiceXml) {
+      return errorResponse(res, 'O TOTVS não devolveu o XML da nota', 502, 'XML_NOT_RETURNED');
+    }
+    const xml = Buffer.from(mainInvoiceXml, 'base64').toString('utf8');
+    const doc = new XMLParser({ ignoreAttributes: false, parseTagValue: false, removeNSPrefix: true }).parse(xml);
+    const nfe = doc.nfeProc?.NFe || doc.NFe;
+    const inf = nfe?.infNFe;
+    if (!inf) return errorResponse(res, 'XML da nota em formato inesperado', 502, 'XML_INVALID');
+    const lista = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+    const num = (v) => Number(v || 0);
+    const arred = (v) => Math.round(v * 100) / 100;
+
+    const ide = inf.ide || {};
+    const modelo = Number(ide.mod);
+    const prot = doc.nfeProc?.protNFe?.infProt || {};
+    const emit = inf.emit || {};
+    const end = emit.enderEmit || {};
+    const dest = inf.dest || {};
+    const tot = inf.total?.ICMSTot || {};
+
+    const base = {
+      modelo,
+      invoice: {
+        branchCode: nf.branchCode,
+        invoiceCode: nf.invoiceCode,
+        serialCode: nf.serialCode,
+        invoiceSequence: nf.invoiceSequence,
+        accessKey,
+      },
+    };
+
+    // ?dados=compra → só a nota no formato da troca (mesmo de /pdv/customer-purchases)
+    if (req.query.dados === 'compra') {
+      const compra = {
+        branchCode: nf.branchCode,
+        invoiceCode: nf.invoiceCode,
+        serialCode: nf.serialCode,
+        invoiceSequence: nf.invoiceSequence,
+        invoiceDate: String(nf.invoiceDate || ide.dhEmi || '').slice(0, 10),
+        accessKey,
+        documentType: modelo,
+        totalValue: num(tot.vNF),
+        personCode: nf.personCode ?? null,
+        personName: nf.personName ?? dest.xNome ?? null,
+        itens: lista(inf.det).map((d, idx) => {
+          const p = d.prod || {};
+          const q = num(p.qCom);
+          const unitGross = num(p.vUnCom);
+          const unitDiscount = q > 0 ? num(p.vDesc) / q : 0;
+          return {
+            sequence: Number(d['@_nItem']) || idx + 1,
+            productCode: Number(p.cProd),
+            name: p.xProd,
+            cfop: Number(p.CFOP),
+            quantity: q,
+            unitGross,
+            unitDiscount: arred(unitDiscount),
+            unitNet: arred(unitGross - unitDiscount),
+          };
+        }),
+      };
+      return successResponse(res, { ...base, compra }, 'Nota da transação');
+    }
+
+    // NF-e: DANFE oficial em PDF, gerado pelo TOTVS
+    if (modelo !== 65) {
+      const danfe = await callTotvs('post', `${TOTVS_BASE_URL}/fiscal/v2/danfe-search`, {
+        data: { mainInvoiceXml, nfeDocumentType: 'NFeNormal' },
+        timeout: 60000,
+      });
+      const danfePdfBase64 = danfe.data?.danfePdfBase64;
+      if (!danfePdfBase64) return errorResponse(res, 'DANFE não retornada pelo TOTVS', 502, 'DANFE_NOT_RETURNED');
+      return successResponse(res, { ...base, danfePdfBase64 }, 'DANFE da NF-e');
+    }
+
+    // NFC-e: dados do cupom
+    const itens = lista(inf.det).map((d) => {
+      const p = d.prod || {};
+      const q = num(p.qCom);
+      const vProd = num(p.vProd);
+      const vDesc = num(p.vDesc);
+      return {
+        nome: p.xProd,
+        product_code: p.cProd,
+        sku: p.cEAN && p.cEAN !== 'SEM GTIN' ? p.cEAN : null,
+        quantidade: q,
+        unidade: p.uCom || 'UN',
+        valor_unit: num(p.vUnCom),
+        desconto_unit: q > 0 ? vDesc / q : 0,
+        total: arred(vProd - vDesc),
+      };
+    });
+    const troco = num(inf.pag?.vTroco);
+    const pagamentos = lista(inf.pag?.detPag).map((p, idx) => ({
+      forma: p.xPag || FORMAS_PAG_NFE[p.tPag] || `Forma ${p.tPag}`,
+      valor: num(p.vPag),
+      autorizacao: p.card?.cAut || null,
+      troco: idx === 0 ? troco : 0,
+    }));
+    const qrCode = nfe.infNFeSupl?.qrCode ? String(nfe.infNFeSupl.qrCode).trim() : null;
+    const qrDataUrl = qrCode ? await QRCode.toDataURL(qrCode, { margin: 1, width: 240 }) : null;
+    const docDest = String(dest.CPF || dest.CNPJ || '');
+
+    return successResponse(
+      res,
+      {
+        ...base,
+        nota: {
+          modelo,
+          numero: Number(ide.nNF),
+          serie: Number(ide.serie),
+          ambiente: Number(ide.tpAmb),
+          chave: prot.chNFe || accessKey,
+          protocolo: prot.nProt || null,
+          dh_emissao: ide.dhEmi || null,
+          dh_autorizacao: prot.dhRecbto || null,
+          url_chave: nfe.infNFeSupl?.urlChave || null,
+          cnpj_emitente: emit.CNPJ,
+          inf_cpl: inf.infAdic?.infCpl || null,
+          qrDataUrl,
+        },
+        venda: {
+          itens,
+          pagamentos,
+          qtd_pecas: itens.reduce((s, i) => s + i.quantidade, 0),
+          subtotal: num(tot.vProd),
+          desconto: num(tot.vDesc),
+          total: num(tot.vNF),
+          cliente_cpf_cnpj: docDest || null,
+          cliente_nome: dest.xNome || null,
+          rodape: `Transação ${code} · fatura ${nf.invoiceSequence}`,
+        },
+        emitente: {
+          cnpj: emit.CNPJ,
+          xNome: emit.xNome,
+          xFant: emit.xFant || emit.xNome,
+          ie: emit.IE,
+          endereco: {
+            xLgr: end.xLgr,
+            nro: end.nro,
+            xCpl: end.xCpl,
+            xBairro: end.xBairro,
+            xMun: end.xMun,
+            UF: end.UF,
+            CEP: end.CEP,
+            fone: end.fone,
+          },
+        },
+      },
+      'Cupom da NFC-e',
+    );
+  }),
+);
+
+// =============================================================================
+// GET /pdv/day-movement?branch=2&date=2026-10-02
+// Vendas e devoluções do dia de uma empresa, a partir das notas fiscais do
+// TOTVS (inclui o que foi vendido direto no caixa TOTVS, não só pelo PDV
+// Crosby): cliente, valor, pagamentos, produtos e o vendedor (dealerCode).
+// =============================================================================
+const TIPOS_PAGAMENTO = {
+  Money: 'Dinheiro',
+  CreditCard: 'Cartão de crédito',
+  DebitCard: 'Cartão de débito',
+  Pix: 'PIX',
+  Invoice: 'Fatura',
+  Check: 'Cheque',
+  RefundCredit: 'Credev',
+  Advance: 'Adiantamento',
+};
+
+router.get(
+  '/pdv/day-movement',
+  asyncHandler(async (req, res) => {
+    const branch = parseInt(req.query.branch, 10);
+    if (!branch) return errorResponse(res, 'Informe ?branch=', 400, 'MISSING_PARAMS');
+    const date = String(req.query.date || new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Recife' })).slice(0, 10);
+
+    const brutas = await buscarNotas(
+      {
+        branchCodeList: [branch],
+        startIssueDate: `${date}T00:00:00.000Z`,
+        endIssueDate: `${date}T23:59:59.999Z`,
+      },
+      'items,payments',
+    );
+    const num = (v) => Number(v || 0);
+    const arred = (v) => Math.round(v * 100) / 100;
+
+    const movimentos = brutas
+      .filter((n) => n.invoiceStatus === 'Issued')
+      .map((n) => {
+        const itens = (n.items || []).map((it) => {
+          const prod = it.products?.[0] || {};
+          return {
+            productCode: Number(prod.productCode ?? it.code),
+            name: prod.productName || it.name,
+            quantity: num(it.quantity),
+            unitGross: num(it.unitGrossValue),
+            unitDiscount: num(it.unitDiscountValue),
+            unitNet: num(it.unitNetValue),
+            total: num(it.netValue),
+            sellerCode: prod.dealerCode ?? null,
+          };
+        });
+        // formas de pagamento somadas (as parcelas do cartão viram uma linha)
+        const pag = new Map();
+        for (const p of n.payments || []) {
+          const k = TIPOS_PAGAMENTO[p.documentType] || p.documentType || 'Outros';
+          const cur = pag.get(k) || { forma: k, valor: 0, parcelas: 0 };
+          cur.valor = arred(cur.valor + num(p.paymentValue));
+          cur.parcelas += 1;
+          pag.set(k, cur);
+        }
+        return {
+          tipo: n.operationType === 'Input' ? 'devolucao' : 'venda',
+          origem: 'totvs',
+          branchCode: n.branchCode,
+          invoiceCode: n.invoiceCode,
+          serialCode: n.serialCode,
+          invoiceSequence: n.invoiceSequence,
+          documentType: n.documentType,
+          hora: n.exitTime || String(n.lastchangeDate || '').slice(11, 19) || null,
+          operationCode: n.operationCode,
+          operationName: n.operatioName || n.operationName || null,
+          transactionCode: n.transactionCode ?? null,
+          customerCode: n.personCode,
+          customerName: n.personName,
+          sellerCode: itens.find((i) => i.sellerCode != null)?.sellerCode ?? null,
+          quantity: num(n.quantity) || itens.reduce((s, i) => s + i.quantity, 0),
+          total: num(n.totalValue),
+          pagamentos: [...pag.values()],
+          itens,
+        };
+      })
+      .sort((a, b) => String(b.hora || '').localeCompare(String(a.hora || '')));
+
+    return successResponse(res, { branch, date, movimentos }, `${movimentos.length} movimento(s) no dia`);
+  }),
+);
+
+// =============================================================================
+// GET /pdv/customer-purchases?customer=123&de=2026-07-01&ate=2026-10-02[&branch=2]
+// Compras do cliente (notas de SAÍDA emitidas pelas nossas empresas para ele),
+// com fatura (invoiceSequence), chave e produtos pelo valor pago — usado na
+// TROCA do PDV Crosby para escolher a peça e referenciar a nota no TOTVS.
+// Sem ?branch= procura em todas as empresas próprias (código < 6000).
+// =============================================================================
+router.get(
+  '/pdv/customer-purchases',
+  asyncHandler(async (req, res) => {
+    const customer = parseInt(req.query.customer, 10);
+    if (!customer) return errorResponse(res, 'Informe ?customer=', 400, 'MISSING_PARAMS');
+    const branch = parseInt(req.query.branch, 10) || null;
+    const hoje = new Date();
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const ate = String(req.query.ate || iso(hoje)).slice(0, 10);
+    const de = String(req.query.de || iso(new Date(hoje.getTime() - 90 * 86400000))).slice(0, 10);
+
+    const branchCodeList = branch
+      ? [branch]
+      : (await listarFiliais()).filter((b) => b.code < 6000).map((b) => b.code);
+    const brutas = await buscarNotas(
+      {
+        branchCodeList,
+        personCodeList: [customer],
+        operationType: 'Output',
+        startIssueDate: `${de}T00:00:00.000Z`,
+        endIssueDate: `${ate}T23:59:59.999Z`,
+      },
+      'items',
+    );
+
+    const num = (v) => Number(v || 0);
+    const notas = brutas
+      .filter((n) => n.invoiceStatus === 'Issued')
+      .map((n) => ({
+        branchCode: n.branchCode,
+        invoiceCode: n.invoiceCode,
+        serialCode: n.serialCode,
+        invoiceSequence: n.invoiceSequence,
+        invoiceDate: String(n.invoiceDate || n.issueDate || '').slice(0, 10),
+        accessKey: n.eletronic?.accessKey || null,
+        documentType: n.documentType ?? n.documentTypeCode ?? null,
+        operationCode: n.operationCode,
+        operationName: n.operatioName || n.operationName || null,
+        transactionCode: n.transactionCode ?? null,
+        totalValue: num(n.totalValue),
+        itens: (n.items || []).map((it) => {
+          const prod = it.products?.[0] || {};
+          return {
+            sequence: it.sequence,
+            productCode: Number(prod.productCode ?? it.code),
+            name: prod.productName || it.name,
+            sku: prod.productSku || null,
+            cfop: it.cfop,
+            quantity: num(it.quantity),
+            unitGross: num(it.unitGrossValue),
+            unitDiscount: num(it.unitDiscountValue),
+            unitNet: num(it.unitNetValue),
+          };
+        }),
+      }))
+      .sort((a, b) => (a.invoiceDate < b.invoiceDate ? 1 : -1));
+
+    return successResponse(res, { customer, de, ate, notas }, `${notas.length} compra(s) do cliente`);
+  }),
 );
 
 // =============================================================================

@@ -935,4 +935,111 @@ router.post(
   }),
 );
 
+// ─── Cupons de troca ─────────────────────────────────────────────────────────
+// Toda venda do PDV Crosby gera um cupom (presente): o código leva à transação
+// de origem para a troca ser referenciada sem os dados do comprador.
+//   POST /cupons-troca              cria (ou devolve o já criado) para a transação
+//   GET  /cupons-troca/:codigo      consulta pelo código impresso
+//   POST /cupons-troca/:codigo/uso  registra as peças já trocadas
+const CUPOM_ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sem 0/O e 1/I
+const novoCodigoCupom = () =>
+  Array.from({ length: 8 }, () => CUPOM_ALFABETO[Math.floor(Math.random() * CUPOM_ALFABETO.length)]).join('');
+const erroCupom = (res, error) =>
+  /pdv_cupons_troca.* does not exist|pdv_cupons_troca.* in the schema cache/i.test(error?.message || '')
+    ? errorResponse(res, 'Tabela pdv_cupons_troca não existe — rode migrations/pdv_cupons_troca.sql no Supabase', 503, 'MIGRATION_PENDING')
+    : errorResponse(res, error.message, 500, 'DB_ERROR');
+const comQr = async (cupom) => ({
+  ...cupom,
+  qrDataUrl: await QRCode.toDataURL(cupom.codigo, { margin: 1, width: 240 }),
+});
+
+router.post(
+  '/cupons-troca',
+  asyncHandler(async (req, res) => {
+    const b = req.body || {};
+    const empresa = parseInt(b.empresa, 10);
+    const transacaoCode = Number(b.transacaoCode);
+    const transacaoDate = String(b.transacaoDate || '').slice(0, 10);
+    if (!empresa || !transacaoCode || !transacaoDate) {
+      return errorResponse(res, 'empresa, transacaoCode e transacaoDate são obrigatórios', 400, 'INVALID_PAYLOAD');
+    }
+    // uma venda = um cupom: se já existe, devolve o mesmo
+    const { data: existente, error: e0 } = await supabase
+      .from('pdv_cupons_troca')
+      .select('*')
+      .eq('empresa', empresa)
+      .eq('transacao_code', transacaoCode)
+      .maybeSingle();
+    if (e0) return erroCupom(res, e0);
+    if (existente) return successResponse(res, await comQr(existente), 'Cupom de troca');
+
+    const registro = {
+      empresa,
+      transacao_code: transacaoCode,
+      transacao_date: transacaoDate,
+      total: round2(b.total || 0),
+      cliente_code: b.clienteCode ? Number(b.clienteCode) : null,
+      cliente_nome: b.clienteNome || null,
+      vendedor_code: b.vendedorCode ? Number(b.vendedorCode) : null,
+      vendedor_nome: b.vendedorNome || null,
+      itens: (Array.isArray(b.itens) ? b.itens : []).slice(0, 500).map((i) => ({
+        productCode: Number(i.productCode),
+        name: String(i.name || '').slice(0, 200),
+        quantity: Number(i.quantity) || 0,
+      })),
+      criado_por: b.por || null,
+    };
+    for (let tentativa = 0; tentativa < 5; tentativa++) {
+      const { data, error } = await supabase
+        .from('pdv_cupons_troca')
+        .insert({ ...registro, codigo: novoCodigoCupom() })
+        .select('*')
+        .single();
+      if (!error) return successResponse(res, await comQr(data), 'Cupom de troca gerado', 201);
+      if (error.code !== '23505') return erroCupom(res, error); // 23505 = código repetido: sorteia outro
+    }
+    return errorResponse(res, 'Não foi possível gerar um código único para o cupom', 500, 'CODE_COLLISION');
+  }),
+);
+
+router.get(
+  '/cupons-troca/:codigo',
+  asyncHandler(async (req, res) => {
+    const codigo = String(req.params.codigo || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!codigo) return errorResponse(res, 'Informe o código do cupom', 400, 'INVALID_CODE');
+    const { data, error } = await supabase.from('pdv_cupons_troca').select('*').eq('codigo', codigo).maybeSingle();
+    if (error) return erroCupom(res, error);
+    if (!data) return errorResponse(res, `Cupom ${codigo} não encontrado`, 404, 'NOT_FOUND');
+    return successResponse(res, await comQr(data), 'Cupom de troca');
+  }),
+);
+
+router.post(
+  '/cupons-troca/:codigo/uso',
+  asyncHandler(async (req, res) => {
+    const codigo = String(req.params.codigo || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const b = req.body || {};
+    const novos = (Array.isArray(b.itens) ? b.itens : [])
+      .map((i) => ({
+        productCode: Number(i.productCode),
+        quantity: Number(i.quantity) || 0,
+        transacao_code: b.transacaoCode ? Number(b.transacaoCode) : null,
+        empresa: b.empresa ? Number(b.empresa) : null,
+        em: new Date().toISOString(),
+        por: b.por || null,
+      }))
+      .filter((i) => i.productCode && i.quantity > 0);
+    if (!novos.length) return errorResponse(res, 'Nenhuma peça informada', 400, 'INVALID_PAYLOAD');
+    const { data: cupom, error } = await supabase.from('pdv_cupons_troca').select('id, usos').eq('codigo', codigo).maybeSingle();
+    if (error) return erroCupom(res, error);
+    if (!cupom) return errorResponse(res, `Cupom ${codigo} não encontrado`, 404, 'NOT_FOUND');
+    const { error: e2 } = await supabase
+      .from('pdv_cupons_troca')
+      .update({ usos: [...(cupom.usos || []), ...novos] })
+      .eq('id', cupom.id);
+    if (e2) return erroCupom(res, e2);
+    return successResponse(res, { codigo, registrados: novos.length }, 'Uso do cupom registrado');
+  }),
+);
+
 export default router;
