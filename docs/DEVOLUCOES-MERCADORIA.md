@@ -63,3 +63,30 @@ O formulário público tem limite de 20 envios por IP a cada 10 minutos.
 - A solicitação nunca é perdida por falha no Dryland: fica gravada com `avisoChamado`, e a página oferece *abrir chamado* para tentar de novo.
 - Falha ao subir foto apaga a solicitação e devolve erro ao cliente, para ele reenviar.
 - Sem `pes_pessoa` atualizado, um cliente novo do TOTVS não é reconhecido até o job `pes-pessoa-sync` rodar.
+
+## 6. Devolução com nota fiscal emitida pelo cliente (franquia)
+
+Quando o cliente já emitiu a nota de devolução, a Devolução RFID tem o bloco **"O cliente já emitiu a nota de devolução?"**:
+
+1. Selecione empresa destino, vendedor e cliente; clique em *Buscar nota do cliente* e escolha o período de emissão.
+2. A lista mostra as notas de saída que a empresa do cliente emitiu para empresas Crosby (mesma origem do "Filtro origem" do FISFP082), com operação, peças, total e a situação: *não processada* ou *recebida · trx N* quando já existe entrada na empresa destino com a mesma chave ou número.
+3. Ao clicar em *conferir*, a tabela vira a **conferência**: cada produto da nota mostra quantidade da nota × lida no portal (ou conferida sem etiqueta pelo botão +), com situação ok / falta / sobra. Peças lidas que não estão na nota aparecem em "fora da nota".
+4. *GERAR ENTRADA DA NOTA* só libera com a conferência fechada, ou marcando "Gerar mesmo com divergência". A transação nasce em andamento com **os itens, quantidades e valores da nota** (não da tabela de preço), a operação e o CFOP digitados, e observações `REF NF n/série DE data EMP x` + `CHAVE ...` (limite de 80 caracteres por linha).
+5. O recebimento e o encerramento seguem no TOTVS (TRAFM060 / TRAFP005).
+
+Rota: `GET /api/totvs/pdv/customer-invoices?customer=&branch=&de=&ate=`. Só atende cliente que é **empresa no TOTVS** (franquias); para os demais devolve `CUSTOMER_NOT_BRANCH`.
+
+### O que a API do TOTVS permite e o que não permite
+
+- **Não existe** rota equivalente ao *Gerar* do FISFP082. As entradas feitas por ele ficam com `origin = ThirdParty`, componente `FISFP082`, e carregam o número, a série e a chave **da nota do cliente** (CFOP 1201/2201 nos casos vistos). A inclusão de transação pela API (`POST general/v2/transactions`) não tem campos para número/série/chave de nota de terceiro.
+- Consequência: a transação criada pelo HeadCoach **não marca a nota como processada no FISFP082**. O vínculo com a nota do cliente fica só na observação. Quem finaliza no TRAFM060/TRAFP005 precisa garantir que a entrada seja escriturada com a nota do cliente, e não gere uma segunda nota de emissão própria.
+- Existem na API e ainda não usamos: `POST general/v2/product-counts` (contagem com `accessKey` da NF, componentes GERFM101/GERFM076) e `POST general/v2/relationship-counts` (liga contagem a transação) — correspondem aos botões *Autoriz./Listar/Conferir contagem* do FISFP082 e seriam o caminho para o HeadCoach entregar a contagem do portal e o FISFP082 continuar gerando a entrada. Também há `POST general/v2/devolutions/create` (TRAFM136, controle de devolução com nota, chave e estágios).
+
+## Transações de devolução (recebido / faltando / sobrando)
+
+Tabela `devolucoes_transacoes` (`migrations/devolucoes_transacoes.sql`) — uma linha por transação gerada na Devolução RFID.
+
+- Com nota do cliente, a transação leva **somente as peças conferidas** (lidas e presentes na nota, até a quantidade da nota), pelo valor da nota. Peças faltando (na nota, não lidas) e sobrando (lidas acima da quantidade ou fora da nota) **não entram** no TOTVS; ficam só registradas.
+- Observação da transação: `PARCIAL: RECEBIDAS X DE Y - FALTAM a SOBRAM b` quando há divergência.
+- Rotas (`/api/devolucoes`): `POST /transacoes` (upsert por empresa+transacao_code), `GET /transacoes?de&ate&empresa&busca`, `GET /transacoes/:id`, `POST /transacoes/:id/status`. Sem a tabela → 503 `MIGRATION_PENDING`.
+- Tela: `/devolucoes-mercadoria` → aba **Transações** → botão **detalhar** (três listas com EPCs e valores).

@@ -14,6 +14,12 @@
 //   POST /:id/transacao                 liga a transação gerada na Devolução RFID
 //   POST /sincronizar                   chamados concluídos → aguardando_devolucao
 //   POST /:id/sincronizar               idem, uma só
+//
+// Transações de devolução (aba Transações — o que foi recebido / faltou / sobrou):
+//   POST /transacoes                    registra a transação gerada na Devolução RFID
+//   GET  /transacoes                    lista (de, ate, empresa, busca)
+//   GET  /transacoes/:id                detalhe com as três listas
+//   POST /transacoes/:id/status         atualiza a situação vinda do TOTVS
 // ============================================================================
 import express from 'express';
 import supabase from '../config/supabase.js';
@@ -155,6 +161,156 @@ router.get(
       },
       `${items.length} solicitação(ões)`,
     );
+  }),
+);
+
+// ─── Transações de devolução ─────────────────────────────────────────────────
+// (declaradas antes das rotas /:id para não serem capturadas por elas)
+const erroTrx = (res, error) =>
+  /relation .*devolucoes_transacoes.* does not exist|devolucoes_transacoes.* in the schema cache/i.test(error?.message || '')
+    ? errorResponse(res, 'Tabela devolucoes_transacoes não existe — rode migrations/devolucoes_transacoes.sql', 503, 'MIGRATION_PENDING')
+    : errorResponse(res, error.message, 500, 'DB_ERROR');
+
+const limparLista = (lista) =>
+  (Array.isArray(lista) ? lista : []).slice(0, 2000).map((i) => ({
+    productCode: Number(i.productCode) || null,
+    name: i.name ? String(i.name).slice(0, 200) : null,
+    quantidade: Number(i.quantidade) || 0,
+    esperado: i.esperado != null ? Number(i.esperado) : undefined,
+    lido: i.lido != null ? Number(i.lido) : undefined,
+    unit: i.unit != null ? Number(i.unit) : undefined,
+    total: i.total != null ? Number(i.total) : undefined,
+    motivo: i.motivo || undefined,
+    epcs: Array.isArray(i.epcs) ? i.epcs.map(String) : [],
+  }));
+const somaQtd = (lista) => lista.reduce((s, i) => s + (Number(i.quantidade) || 0), 0);
+
+router.post(
+  '/transacoes',
+  asyncHandler(async (req, res) => {
+    const b = req.body || {};
+    const empresa = parseInt(b.empresa, 10);
+    const transacaoCode = Number(b.transactionCode);
+    if (!empresa || !transacaoCode) {
+      return errorResponse(res, 'empresa e transactionCode são obrigatórios', 400, 'INVALID_PAYLOAD');
+    }
+    const recebidos = limparLista(b.recebidos);
+    const faltando = limparLista(b.faltando);
+    const sobrando = limparLista(b.sobrando);
+    const registro = {
+      devolucao_id: b.devolucaoId ? Number(b.devolucaoId) : null,
+      empresa,
+      transacao_code: transacaoCode,
+      transacao_date: b.transactionDate ? String(b.transactionDate).slice(0, 10) : null,
+      transacao_status: b.status != null ? Number(b.status) : 1,
+      operacao: b.operacao != null ? parseInt(b.operacao, 10) : null,
+      cfop: b.cfop != null ? parseInt(b.cfop, 10) : null,
+      total: Number(b.total) || 0,
+      cliente_code: b.clienteCode ? Number(b.clienteCode) : null,
+      cliente_nome: b.clienteNome || null,
+      vendedor_code: b.vendedorCode ? Number(b.vendedorCode) : null,
+      vendedor_nome: b.vendedorNome || null,
+      nf_numero: b.nf?.invoiceCode ?? null,
+      nf_serie: b.nf?.serialCode != null ? String(b.nf.serialCode) : null,
+      nf_data: b.nf?.invoiceDate || null,
+      nf_empresa: b.nf?.branchCode ?? null,
+      nf_chave: b.nf?.accessKey || null,
+      nf_total: b.nf?.totalValue ?? null,
+      nf_qtd_pecas: b.nf?.quantity ?? null,
+      qtd_recebida: somaQtd(recebidos),
+      qtd_faltando: somaQtd(faltando),
+      qtd_sobrando: somaQtd(sobrando),
+      valor_faltando: Math.round(faltando.reduce((s2, i) => s2 + (Number(i.total) || 0), 0) * 100) / 100,
+      recebidos,
+      faltando,
+      sobrando,
+      criado_por: b.por || null,
+    };
+    const { data, error } = await supabase
+      .from('devolucoes_transacoes')
+      .upsert(registro, { onConflict: 'empresa,transacao_code' })
+      .select('id')
+      .single();
+    if (error) return erroTrx(res, error);
+    console.log(
+      `📦 [Devoluções] transação ${empresa}/${transacaoCode} registrada: ${registro.qtd_recebida} recebida(s), ${registro.qtd_faltando} faltando, ${registro.qtd_sobrando} sobrando`,
+    );
+    return successResponse(res, { id: data.id }, 'Transação registrada', 201);
+  }),
+);
+
+router.get(
+  '/transacoes',
+  asyncHandler(async (req, res) => {
+    const de = req.query.de ? String(req.query.de).slice(0, 10) : null;
+    const ate = req.query.ate ? String(req.query.ate).slice(0, 10) : null;
+    const empresa = parseInt(req.query.empresa, 10) || null;
+    const busca = String(req.query.busca || '').trim();
+    let q = supabase
+      .from('devolucoes_transacoes')
+      .select(
+        'id, devolucao_id, empresa, transacao_code, transacao_date, transacao_status, operacao, cfop, total, cliente_code, cliente_nome, vendedor_nome, nf_numero, nf_serie, nf_empresa, nf_total, nf_qtd_pecas, qtd_recebida, qtd_faltando, qtd_sobrando, valor_faltando, criado_por, criado_em, atendida_em',
+      )
+      .order('id', { ascending: false })
+      .limit(Math.min(parseInt(req.query.limite, 10) || 300, 1000));
+    if (de) q = q.gte('criado_em', `${de}T00:00:00-03:00`);
+    if (ate) q = q.lte('criado_em', `${ate}T23:59:59.999-03:00`);
+    if (empresa) q = q.eq('empresa', empresa);
+    if (busca) {
+      q = /^\d+$/.test(busca)
+        ? q.or(`transacao_code.eq.${busca},cliente_code.eq.${busca},nf_numero.eq.${busca}`)
+        : q.ilike('cliente_nome', `%${busca}%`);
+    }
+    const { data, error } = await q;
+    if (error) return erroTrx(res, error);
+    const items = data || [];
+    return successResponse(
+      res,
+      {
+        items,
+        resumo: {
+          transacoes: items.length,
+          recebidas: items.reduce((s2, i) => s2 + i.qtd_recebida, 0),
+          faltando: items.reduce((s2, i) => s2 + i.qtd_faltando, 0),
+          sobrando: items.reduce((s2, i) => s2 + i.qtd_sobrando, 0),
+          total: Math.round(items.filter((i) => i.transacao_status !== 6).reduce((s2, i) => s2 + Number(i.total), 0) * 100) / 100,
+          comDivergencia: items.filter((i) => i.qtd_faltando > 0 || i.qtd_sobrando > 0).length,
+        },
+      },
+      `${items.length} transação(ões)`,
+    );
+  }),
+);
+
+router.get(
+  '/transacoes/:id',
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase
+      .from('devolucoes_transacoes')
+      .select('*')
+      .eq('id', parseInt(req.params.id, 10))
+      .maybeSingle();
+    if (error) return erroTrx(res, error);
+    if (!data) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
+    return successResponse(res, data, 'Transação de devolução');
+  }),
+);
+
+router.post(
+  '/transacoes/:id/status',
+  asyncHandler(async (req, res) => {
+    const status = Number(req.body?.status);
+    if (!Number.isInteger(status)) return errorResponse(res, 'status inválido', 400, 'INVALID_STATUS');
+    const patch = { transacao_status: status };
+    if (status === 4) patch.atendida_em = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('devolucoes_transacoes')
+      .update(patch)
+      .eq('id', parseInt(req.params.id, 10))
+      .select('id, transacao_status')
+      .single();
+    if (error) return erroTrx(res, error);
+    return successResponse(res, data, 'Situação atualizada');
   }),
 );
 
