@@ -11,6 +11,10 @@
 //   GET  /status              → situação da conexão
 //   GET  /tags                → { status, tags: [{epc, count, rssi, ant, ...}] }
 //   POST /clear               → limpa a lista
+//   GET  /power               → potência de cada antena (dBm)
+//   POST /power {potencia} | {antenas:[{ant,potencia}]} → grava a potência
+//   GET  /beep                → { ligado } buzzer do portal
+//   POST /beep {ligado}       → liga/desliga o apito do portal a cada leitura
 // =============================================================================
 import http from 'http';
 import net from 'net';
@@ -80,6 +84,7 @@ function parseFrames() {
     const frame = rxBuf.subarray(0, total);
     rxBuf = rxBuf.subarray(total);
     const cmd = frame[4];
+    if (cmd !== 0x83) entregarResposta(cmd, frame.subarray(5, total - 3));
     if (cmd === 0x83 && total >= 10) {
       const dataEnd = total - 3;
       const epcBytes = frame.subarray(7, dataEnd - 3);
@@ -108,6 +113,178 @@ function parseFrames() {
       }
     }
   }
+}
+
+// ─── Potência das antenas (decifrado da API oficial Chainway, set/2026) ─────
+//   0x10 definir: 02 + [antena, leitura u16BE, escrita u16BE]* (valor = dBm × 100)
+//        resposta 0x11, data[0] = 1 quando aceito
+//   0x12 ler (sem dados) → resposta 0x13: 1 byte + [antena, leitura, escrita]*
+// O leitor só aceita esses comandos com o inventário PARADO; por isso a
+// sessão de comando para a leitura, conversa e religa se estava lendo.
+const POWER_MIN = 5;
+const POWER_MAX = 30;
+const CMD_TIMEOUT_MS = 3000;
+let aguardando = null; // { cmd, resolve, reject, timer }
+let emComando = false;
+
+function entregarResposta(cmd, data) {
+  if (!aguardando || aguardando.cmd !== cmd) return;
+  clearTimeout(aguardando.timer);
+  const { resolve } = aguardando;
+  aguardando = null;
+  resolve(Buffer.from(data));
+}
+
+function enviarComando(cmd, data, respCmd, timeoutMs = CMD_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    if (!socket) return reject(new Error('sem conexão com o portal'));
+    if (aguardando) return reject(new Error('outro comando em andamento'));
+    const timer = setTimeout(() => {
+      aguardando = null;
+      reject(new Error(`o portal não respondeu ao comando 0x${cmd.toString(16).toUpperCase()}`));
+    }, timeoutMs);
+    aguardando = { cmd: respCmd, resolve, reject, timer };
+    try {
+      socket.write(buildFrame(cmd, data));
+    } catch (e) {
+      clearTimeout(timer);
+      aguardando = null;
+      reject(e);
+    }
+  });
+}
+
+function conectarParaComando(timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    const s = new net.Socket();
+    s.setNoDelay(true);
+    const t = setTimeout(() => {
+      s.destroy();
+      reject(new Error(`portal ${hostCfg}:${portCfg} não respondeu — confira se está ligado e na rede`));
+    }, timeoutMs);
+    s.once('error', (e) => {
+      clearTimeout(t);
+      reject(new Error(`não consegui conectar no portal ${hostCfg}:${portCfg} (${e.message})`));
+    });
+    s.connect(portCfg, hostCfg, () => {
+      clearTimeout(t);
+      s.removeAllListeners('error');
+      s.on('error', () => {});
+      s.on('data', (d) => {
+        rxBuf = Buffer.concat([rxBuf, d]);
+        parseFrames();
+      });
+      resolve(s);
+    });
+  });
+}
+
+// Roda `fn` com o leitor em modo comando e devolve o portal ao estado anterior
+async function sessaoDeComando(fn) {
+  if (emComando) throw new Error('já existe uma configuração em andamento');
+  emComando = true;
+  const estavaLendo = !!socket && status === 'lendo';
+  let temporario = null;
+  try {
+    if (socket) {
+      if (rearmTimer) clearInterval(rearmTimer);
+      rearmTimer = null;
+      await enviarComando(0x8c, [], 0x8d, 1500).catch(() => {});
+      await new Promise((r) => setTimeout(r, 150));
+    } else {
+      rxBuf = Buffer.alloc(0);
+      temporario = await conectarParaComando();
+      socket = temporario;
+      await enviarComando(0x8c, [], 0x8d, 1200).catch(() => {});
+    }
+    return await fn();
+  } finally {
+    if (temporario) {
+      try {
+        temporario.destroy();
+      } catch {
+        /* já fechado */
+      }
+      if (socket === temporario) socket = null;
+    } else if (socket && estavaLendo) {
+      try {
+        socket.write(START_FRAME);
+        rearmTimer = setInterval(() => {
+          try {
+            socket.write(START_FRAME);
+          } catch {
+            /* handler de erro reconecta */
+          }
+        }, REARM_INTERVAL_MS);
+      } catch {
+        /* a reconexão automática cuida */
+      }
+    }
+    emComando = false;
+  }
+}
+
+function interpretarPotencias(data) {
+  const n = Math.floor((data.length - 1) / 5);
+  const antenas = [];
+  for (let k = 0; k < n; k++) {
+    const o = 1 + k * 5;
+    antenas.push({
+      ant: data[o],
+      leitura: data.readUInt16BE(o + 1) / 100,
+      escrita: data.readUInt16BE(o + 3) / 100,
+    });
+  }
+  return antenas.sort((a, b) => a.ant - b.ant);
+}
+
+async function lerPotencia() {
+  return sessaoDeComando(async () => {
+    const data = await enviarComando(0x12, [], 0x13);
+    return { antenas: interpretarPotencias(data), min: POWER_MIN, max: POWER_MAX };
+  });
+}
+
+// Buzzer do portal (API Java, classe j do UR4): cmd 0xA1 [07, on] → 0xA2 [01];
+// estado: 0xA1 [08] → 0xA2 [08, estado]
+async function lerBuzzer() {
+  const data = await enviarComando(0xa1, [0x08], 0xa2);
+  if (data[0] !== 0x08) throw new Error('resposta inesperada do portal ao ler o buzzer');
+  return { ligado: data[1] !== 0 };
+}
+async function definirBuzzer(ligado) {
+  return sessaoDeComando(async () => {
+    const resp = await enviarComando(0xa1, [0x07, ligado ? 0x01 : 0x00], 0xa2);
+    if (resp[0] !== 0x01) throw new Error(`o portal recusou a configuração do buzzer (código ${resp[0]})`);
+    return lerBuzzer().catch(() => ({ ligado: !!ligado }));
+  });
+}
+
+// antenas: [{ ant: 1..n, potencia: dBm }] — grava leitura e escrita iguais
+async function definirPotencia(antenas) {
+  const lista = (antenas || [])
+    .map((a) => ({ ant: parseInt(a.ant, 10), potencia: Number(a.potencia) }))
+    .filter((a) => Number.isInteger(a.ant) && a.ant >= 1 && a.ant <= 16);
+  if (!lista.length) throw new Error('informe ao menos uma antena');
+  for (const a of lista) {
+    if (!(a.potencia >= POWER_MIN && a.potencia <= POWER_MAX)) {
+      throw new Error(`potência da antena ${a.ant} fora da faixa (${POWER_MIN} a ${POWER_MAX} dBm)`);
+    }
+  }
+  return sessaoDeComando(async () => {
+    const data = [0x02];
+    for (const a of lista) {
+      const v = Math.round(a.potencia * 100);
+      data.push(a.ant, (v >> 8) & 0xff, v & 0xff, (v >> 8) & 0xff, v & 0xff);
+    }
+    const resp = await enviarComando(0x10, data, 0x11);
+    if (resp[0] !== 0x01) {
+      throw new Error(`o portal recusou a potência (código ${resp[0]})`);
+    }
+    // confere lendo de volta o que ficou gravado
+    const atual = await enviarComando(0x12, [], 0x13);
+    return { antenas: interpretarPotencias(atual), min: POWER_MIN, max: POWER_MAX };
+  });
 }
 
 function cleanupTimers() {
@@ -181,6 +358,14 @@ const ok = (res, data, message = 'ok') => {
   res.end(JSON.stringify({ success: true, message, data }));
 };
 
+const falha = (res, message, code = 502) => {
+  res.writeHead(code, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(JSON.stringify({ success: false, message }));
+};
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -197,7 +382,7 @@ const server = http.createServer(async (req, res) => {
   const url = req.url.split('?')[0];
 
   if (req.method === 'GET' && url === '/health') {
-    return ok(res, { ok: true, portalHost: hostCfg, version: 1 });
+    return ok(res, { ok: true, portalHost: hostCfg, version: 3, recursos: ['power', 'beep'] });
   }
   if (req.method === 'GET' && url === '/status') {
     return ok(res, getStatus());
@@ -253,6 +438,61 @@ const server = http.createServer(async (req, res) => {
     }
     status = 'desconectado';
     return ok(res, getStatus(), 'Portal desligado');
+  }
+  if (req.method === 'GET' && url === '/beep') {
+    try {
+      return ok(res, await sessaoDeComando(lerBuzzer), 'Buzzer do portal');
+    } catch (e) {
+      return falha(res, e.message);
+    }
+  }
+  if (req.method === 'POST' && url === '/beep') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', async () => {
+      try {
+        const j = body ? JSON.parse(body) : {};
+        const r = await definirBuzzer(!!j.ligado);
+        console.log(`[UR4] Buzzer ${r.ligado ? 'ligado' : 'desligado'}`);
+        ok(res, r, r.ligado ? 'Buzzer ligado' : 'Buzzer desligado');
+      } catch (e) {
+        falha(res, e.message);
+      }
+    });
+    return undefined;
+  }
+  if (req.method === 'GET' && url === '/power') {
+    try {
+      return ok(res, await lerPotencia(), 'Potência do portal');
+    } catch (e) {
+      return falha(res, e.message);
+    }
+  }
+  if (req.method === 'POST' && url === '/power') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', async () => {
+      try {
+        const j = body ? JSON.parse(body) : {};
+        let antenas = Array.isArray(j.antenas) ? j.antenas : null;
+        if (!antenas && j.potencia != null) {
+          // mesma potência em todas: descobre quantas antenas o portal tem
+          const atual = await lerPotencia();
+          const base = atual.antenas.length ? atual.antenas : [1, 2, 3, 4].map((ant) => ({ ant }));
+          antenas = base.map((a) => ({ ant: a.ant, potencia: j.potencia }));
+        }
+        const r = await definirPotencia(antenas);
+        console.log(`[UR4] Potência gravada: ${r.antenas.map((a) => `ant${a.ant}=${a.leitura}dBm`).join(' ')}`);
+        ok(res, r, 'Potência gravada');
+      } catch (e) {
+        falha(res, e.message);
+      }
+    });
+    return;
   }
   if (req.method === 'POST' && url === '/clear') {
     tags.clear();
