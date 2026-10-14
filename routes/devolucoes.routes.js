@@ -166,10 +166,23 @@ router.get(
 
 // ─── Transações de devolução ─────────────────────────────────────────────────
 // (declaradas antes das rotas /:id para não serem capturadas por elas)
-const erroTrx = (res, error) =>
-  /relation .*devolucoes_transacoes.* does not exist|devolucoes_transacoes.* in the schema cache/i.test(error?.message || '')
-    ? errorResponse(res, 'Tabela devolucoes_transacoes não existe — rode migrations/devolucoes_transacoes.sql', 503, 'MIGRATION_PENDING')
-    : errorResponse(res, error.message, 500, 'DB_ERROR');
+const erroTrx = (res, error) => {
+  const msg = error?.message || '';
+  // Tabela/coluna ausente: ora vem com mensagem, ora o PostgREST devolve 404
+  // com corpo vazio (error = {}). Nos dois casos é migração pendente.
+  if (
+    /relation .*devolucoes_transacoes.* does not exist|devolucoes_transacoes.* in the schema cache/i.test(msg) ||
+    (!msg && (error?.code === '42P01' || error == null || Object.keys(error || {}).length === 0))
+  ) {
+    return errorResponse(
+      res,
+      'Tabela/colunas de devolucoes_transacoes ausentes — rode migrations/devolucoes_transacoes.sql e migrations/devolucoes_transacoes_fisfp082.sql no Supabase',
+      503,
+      'MIGRATION_PENDING',
+    );
+  }
+  return errorResponse(res, msg || 'Erro ao gravar a devolução', 500, 'DB_ERROR');
+};
 
 const limparLista = (lista) =>
   (Array.isArray(lista) ? lista : []).slice(0, 2000).map((i) => ({
@@ -190,9 +203,15 @@ router.post(
   asyncHandler(async (req, res) => {
     const b = req.body || {};
     const empresa = parseInt(b.empresa, 10);
+    // origem 'fisfp082' = devolução com nota do cliente: NÃO gera transação no
+    // TOTVS (entrada manual no FISFP082); só recebe/registra aqui.
+    const origem = b.origem === 'fisfp082' ? 'fisfp082' : 'totvs';
     const transacaoCode = Number(b.transactionCode);
-    if (!empresa || !transacaoCode) {
-      return errorResponse(res, 'empresa e transactionCode são obrigatórios', 400, 'INVALID_PAYLOAD');
+    if (!empresa) {
+      return errorResponse(res, 'empresa é obrigatória', 400, 'INVALID_PAYLOAD');
+    }
+    if (origem === 'totvs' && !transacaoCode) {
+      return errorResponse(res, 'transactionCode é obrigatório', 400, 'INVALID_PAYLOAD');
     }
     const recebidos = limparLista(b.recebidos);
     const faltando = limparLista(b.faltando);
@@ -200,7 +219,8 @@ router.post(
     const registro = {
       devolucao_id: b.devolucaoId ? Number(b.devolucaoId) : null,
       empresa,
-      transacao_code: transacaoCode,
+      origem,
+      transacao_code: origem === 'fisfp082' ? null : transacaoCode,
       transacao_date: b.transactionDate ? String(b.transactionDate).slice(0, 10) : null,
       transacao_status: b.status != null ? Number(b.status) : 1,
       operacao: b.operacao != null ? parseInt(b.operacao, 10) : null,
@@ -226,14 +246,14 @@ router.post(
       sobrando,
       criado_por: b.por || null,
     };
-    const { data, error } = await supabase
-      .from('devolucoes_transacoes')
-      .upsert(registro, { onConflict: 'empresa,transacao_code' })
-      .select('id')
-      .single();
+    const op =
+      origem === 'fisfp082'
+        ? supabase.from('devolucoes_transacoes').insert(registro)
+        : supabase.from('devolucoes_transacoes').upsert(registro, { onConflict: 'empresa,transacao_code' });
+    const { data, error } = await op.select('id').single();
     if (error) return erroTrx(res, error);
     console.log(
-      `📦 [Devoluções] transação ${empresa}/${transacaoCode} registrada: ${registro.qtd_recebida} recebida(s), ${registro.qtd_faltando} faltando, ${registro.qtd_sobrando} sobrando`,
+      `📦 [Devoluções] ${origem === 'fisfp082' ? 'recebimento FISFP082' : `transação ${empresa}/${transacaoCode}`} registrado: ${registro.qtd_recebida} recebida(s), ${registro.qtd_faltando} faltando, ${registro.qtd_sobrando} sobrando`,
     );
     return successResponse(res, { id: data.id }, 'Transação registrada', 201);
   }),
@@ -249,7 +269,7 @@ router.get(
     let q = supabase
       .from('devolucoes_transacoes')
       .select(
-        'id, devolucao_id, empresa, transacao_code, transacao_date, transacao_status, operacao, cfop, total, cliente_code, cliente_nome, vendedor_nome, nf_numero, nf_serie, nf_empresa, nf_total, nf_qtd_pecas, qtd_recebida, qtd_faltando, qtd_sobrando, valor_faltando, criado_por, criado_em, atendida_em',
+        'id, devolucao_id, empresa, origem, transacao_code, transacao_date, transacao_status, operacao, cfop, total, cliente_code, cliente_nome, vendedor_nome, nf_numero, nf_serie, nf_empresa, nf_total, nf_qtd_pecas, qtd_recebida, qtd_faltando, qtd_sobrando, valor_faltando, criado_por, criado_em, atendida_em',
       )
       .order('id', { ascending: false })
       .limit(Math.min(parseInt(req.query.limite, 10) || 300, 1000));
