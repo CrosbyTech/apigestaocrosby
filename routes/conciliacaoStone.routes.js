@@ -121,7 +121,8 @@ router.get(
   asyncHandler(async (req, res) => {
     const mapa = await mapaFiliaisSeguro();
     const lojas = getLojasPublic().map((pub) => {
-      const cfg = getLojaByStonecode(pub.stonecode);
+      // por CNPJ: lojas pendentes não têm StoneCode
+      const cfg = STONE_LOJAS.find((l) => l.cnpj === pub.cnpj) || pub;
       const r = resolverFiliaisLoja(cfg, mapa);
       return {
         ...pub,
