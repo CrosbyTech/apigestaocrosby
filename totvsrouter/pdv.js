@@ -256,6 +256,33 @@ router.get(
   }),
 );
 
+const enderecoPrincipal = (addresses) =>
+  (addresses || []).find((a) => a.addressTypeCode === 1 && a.stateAbbreviation) ||
+  (addresses || []).find((a) => a.stateAbbreviation) ||
+  null;
+
+// =============================================================================
+// GET /pdv/branch/:code — UF da empresa (endereço da pessoa da filial no TOTVS)
+// =============================================================================
+const ufFilialCache = new Map();
+router.get(
+  '/pdv/branch/:code',
+  asyncHandler(async (req, res) => {
+    const code = parseInt(req.params.code, 10);
+    if (!code) return errorResponse(res, 'Código inválido', 400, 'INVALID_CODE');
+    if (ufFilialCache.has(code)) return successResponse(res, ufFilialCache.get(code), 'Empresa');
+    const filial = (await listarFiliais()).find((b) => b.code === code);
+    if (!filial) return errorResponse(res, `Empresa ${code} não encontrada`, 404, 'BRANCH_NOT_FOUND');
+    const pj = await callTotvs('post', `${TOTVS_BASE_URL}/person/v2/legal-entities/search`, {
+      data: { filter: { personCodeList: [filial.personCode] }, expand: 'addresses', page: 1, pageSize: 1 },
+    });
+    const end = enderecoPrincipal(pj.data?.items?.[0]?.addresses);
+    const out = { code, personCode: filial.personCode, nome: filial.nome, cnpj: filial.cnpj, uf: end?.stateAbbreviation || null, cidade: end?.cityName || null };
+    if (out.uf) ufFilialCache.set(code, out);
+    return successResponse(res, out, 'Empresa');
+  }),
+);
+
 // =============================================================================
 // GET /pdv/customer/:code — dados do cliente p/ orçamento: tabela de preço
 // (preferências do cadastro), telefone e documento. Tenta PJ e PF.
@@ -269,7 +296,7 @@ router.get(
     }
     const payload = {
       filter: { personCodeList: [code] },
-      expand: 'phones,preferences',
+      expand: 'phones,preferences,addresses',
       page: 1,
       pageSize: 1,
     };
@@ -304,6 +331,10 @@ router.get(
         name: item.name || item.fantasyName,
         cpfCnpj: item.cpf || item.cnpj || null,
         phone,
+        // UF/cidade do endereço principal (comercial, senão o primeiro) — define
+        // o CFOP da devolução (1202 mesmo estado da empresa, 2202 outro estado)
+        uf: enderecoPrincipal(item.addresses)?.stateAbbreviation || null,
+        cidade: enderecoPrincipal(item.addresses)?.cityName || null,
         priceTableCode: item.preferences?.priceTableCode ?? null,
         priceTableDescription:
           item.preferences?.priceTableDescription ?? null,
