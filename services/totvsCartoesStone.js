@@ -127,6 +127,78 @@ export async function buscarParcelasCartaoStone({ branchCodes, inicioIso, fimIso
 }
 
 /**
+ * Número da TRANSAÇÃO do PDV e NOME do cliente — o título do contas a receber
+ * não traz nenhum dos dois (só código do cliente e número da NF). Vêm da nota
+ * fiscal (fiscal/v2/invoices/search), uma consulta por período/filiais,
+ * casada com o título por filial + número da NF. Falha aqui não derruba a
+ * conciliação: os campos só ficam vazios.
+ */
+async function buscarNotasPeriodo({ branchCodes, inicioIso, fimIso }) {
+  const tokenData = await getToken();
+  if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível.');
+  let token = tokenData.access_token;
+  const body = (page) => ({
+    filter: {
+      branchCodeList: branchCodes.map(Number),
+      operationType: 'Output',
+      startIssueDate: `${inicioIso}T00:00:00`,
+      endIssueDate: `${fimIso}T23:59:59`,
+    },
+    page,
+    pageSize: 100, // fiscal/v2 limita a 100 (o contas a receber aceita 200)
+  });
+  const pagina = (page) =>
+    axios.post(`${TOTVS_BASE_URL}/fiscal/v2/invoices/search`, body(page), {
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` },
+      timeout: 60000,
+      httpsAgent,
+    });
+
+  let first;
+  try {
+    first = await pagina(1);
+  } catch (err) {
+    if (err.response?.status !== 401) throw err;
+    token = (await getToken(true)).access_token;
+    first = await pagina(1);
+  }
+  const notas = [...(first.data?.items || [])];
+  const totalPages = Number(first.data?.totalPages) || 1;
+  for (let start = 2; start <= totalPages; start += 5) {
+    const lote = [];
+    for (let p = start; p <= Math.min(start + 4, totalPages); p++) lote.push(pagina(p));
+    for (const r of await Promise.all(lote)) notas.push(...(r.data?.items || []));
+  }
+  const mapa = new Map();
+  for (const nf of notas) {
+    mapa.set(`${nf.branchCode}|${nf.invoiceCode}`, {
+      transacao: nf.transactionCode ?? null,
+      nomeCliente: nf.personName || null,
+      hora: nf.exitTime ? String(nf.exitTime).slice(0, 8) : null,
+    });
+  }
+  return mapa;
+}
+
+export async function enriquecerTitulosComNotas(titulos, params) {
+  if (!titulos.length) return titulos;
+  let mapa;
+  try {
+    mapa = await buscarNotasPeriodo(params);
+  } catch (e) {
+    console.warn(`[stone] notas fiscais indisponíveis (transação/cliente ficam vazios): ${e.response?.data?.[0]?.message || e.message}`);
+    return titulos;
+  }
+  for (const t of titulos) {
+    const nf = t.nf != null ? mapa.get(`${t.filial}|${t.nf}`) : null;
+    t.transacao = nf?.transacao ?? null;
+    t.nomeCliente = nf?.nomeCliente ?? null;
+    t.hora = nf?.hora ?? null;
+  }
+  return titulos;
+}
+
+/**
  * Agrupa parcelas em TÍTULOS (1 título = 1 venda no cartão).
  */
 export function agruparTitulos(parcelas) {
@@ -144,6 +216,8 @@ export function agruparTitulos(parcelas) {
         cpfCnpj: p.customerCpfCnpj || null,
         nf: p.invoice?.[0]?.invoiceCode ?? null,
         nfData: p.invoice?.[0]?.invoiceDate ?? null,
+        transacao: null, // preenchido por enriquecerTitulosComNotas
+        nomeCliente: null,
         dataEmissao: p.issueDate ? String(p.issueDate).slice(0, 10) : null,
         portador: p.bearerName || null,
         portadorCodigo: p.bearerCode ?? null,
@@ -194,7 +268,7 @@ export function agruparTitulos(parcelas) {
 
 export async function buscarTitulosCartaoStone(params) {
   const parcelas = await buscarParcelasCartaoStone(params);
-  return agruparTitulos(parcelas);
+  return enriquecerTitulosComNotas(agruparTitulos(parcelas), params);
 }
 
 // ─── Empresas do TOTVS por CNPJ ───────────────────────────────
