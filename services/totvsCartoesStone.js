@@ -180,6 +180,139 @@ async function buscarNotasPeriodo({ branchCodes, inicioIso, fimIso }) {
   return mapa;
 }
 
+const FORMAS_NF = {
+  Invoice: 'Fatura',
+  Pix: 'PIX',
+  Money: 'Dinheiro',
+  CreditCard: 'Cartão crédito',
+  DebitCard: 'Cartão débito',
+  Check: 'Cheque',
+  RefundCredit: 'Credev',
+  Advance: 'Adiantamento',
+};
+
+/**
+ * TRANSAÇÕES DO DIA no TOTVS (drill-down do vínculo manual): todas as notas de
+ * saída das filiais no dia, com as formas de pagamento. Cada pagamento de
+ * cartão traz o título que gerou (documentNumber) — é esse título que o
+ * usuário vincula à venda da Stone quando o batimento automático não achou
+ * (portador errado no caixa, valor digitado diferente, etc.).
+ */
+export async function buscarTransacoesDia({ branchCodes, dataIso }) {
+  const tokenData = await getToken();
+  if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível.');
+  let token = tokenData.access_token;
+  const body = (page) => ({
+    filter: {
+      branchCodeList: branchCodes.map(Number),
+      operationType: 'Output',
+      startIssueDate: `${dataIso}T00:00:00`,
+      endIssueDate: `${dataIso}T23:59:59`,
+    },
+    expand: 'payments',
+    page,
+    pageSize: 100,
+  });
+  const pagina = (page) =>
+    axios.post(`${TOTVS_BASE_URL}/fiscal/v2/invoices/search`, body(page), {
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` },
+      timeout: 60000,
+      httpsAgent,
+    });
+  let first;
+  try {
+    first = await pagina(1);
+  } catch (err) {
+    if (err.response?.status !== 401) throw err;
+    token = (await getToken(true)).access_token;
+    first = await pagina(1);
+  }
+  const notas = [...(first.data?.items || [])];
+  const totalPages = Number(first.data?.totalPages) || 1;
+  for (let start = 2; start <= totalPages; start += 5) {
+    const lote = [];
+    for (let p = start; p <= Math.min(start + 4, totalPages); p++) lote.push(pagina(p));
+    for (const r of await Promise.all(lote)) notas.push(...(r.data?.items || []));
+  }
+
+  const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
+  return notas
+    .map((nf) => {
+      // parcelas do cartão viram uma linha por forma + título
+      const porChave = new Map();
+      for (const p of nf.payments || []) {
+        const k = `${p.documentType}|${p.documentNumber ?? ''}`;
+        const cur = porChave.get(k) || {
+          forma: FORMAS_NF[p.documentType] || p.documentType || 'Outros',
+          tipoDoc: p.documentType || null,
+          valor: 0,
+          parcelas: 0,
+          titulo: p.documentNumber != null ? Number(p.documentNumber) : null,
+          portador: p.bearerName || null,
+          portadorCodigo: p.bearerCode ?? null,
+          bandeira: p.cardInformation?.cardFlag || null,
+          nsu: p.cardInformation?.nsu || null,
+          autorizacao: p.cardInformation?.authorizationCode || null,
+          cartao: p.documentType === 'CreditCard' || p.documentType === 'DebitCard',
+        };
+        cur.valor = round2(cur.valor + Number(p.paymentValue || 0));
+        cur.parcelas += 1;
+        porChave.set(k, cur);
+      }
+      const pagamentos = [...porChave.values()];
+      return {
+        filial: Number(nf.branchCode),
+        nf: nf.invoiceCode ?? null,
+        sequencia: nf.invoiceSequence ?? null,
+        transacao: nf.transactionCode ?? null,
+        data: String(nf.issueDate || '').slice(0, 10),
+        hora: nf.exitTime ? String(nf.exitTime).slice(0, 8) : null,
+        operacao: nf.operationCode ?? null,
+        cliente: nf.personCode ?? null,
+        nomeCliente: nf.personName || null,
+        valorTotal: round2(nf.totalValue),
+        pagamentos,
+      };
+    })
+    .filter((t) => t.pagamentos.length > 0)
+    .sort((a, b) => String(a.hora || '').localeCompare(String(b.hora || '')));
+}
+
+/**
+ * Títulos específicos (filial + receivableCode) — para vínculos manuais que
+ * apontam para título fora da busca por portador STONE (caixa escolheu outro
+ * portador). O TOTVS ignora receivableCode inexistente e devolve outros:
+ * por isso o refiltro local.
+ */
+export async function buscarTitulosPorCodigo(refs) {
+  if (!refs.length) return [];
+  const tokenData = await getToken();
+  if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível.');
+  const token = tokenData.access_token;
+  const porFilial = new Map();
+  for (const r of refs) {
+    const f = Number(r.filial);
+    if (!porFilial.has(f)) porFilial.set(f, new Set());
+    porFilial.get(f).add(Number(r.titulo));
+  }
+  const parcelas = [];
+  for (const [filial, codigos] of porFilial) {
+    const lista = [...codigos];
+    for (let i = 0; i < lista.length; i += 50) {
+      const bloco = lista.slice(i, i + 50);
+      const r = await buscarPagina({
+        token,
+        filter: { branchCodeList: [filial], receivableCodeList: bloco },
+        page: 1,
+      });
+      for (const it of r.data?.items || []) {
+        if (Number(it.branchCode) === filial && bloco.includes(Number(it.receivableCode))) parcelas.push(it);
+      }
+    }
+  }
+  return agruparTitulos(parcelas);
+}
+
 export async function enriquecerTitulosComNotas(titulos, params) {
   if (!titulos.length) return titulos;
   let mapa;

@@ -34,6 +34,8 @@ import {
 } from '../services/stoneConciliacao.js';
 import {
   buscarTitulosCartaoStone,
+  buscarTitulosPorCodigo,
+  buscarTransacoesDia,
   mapearFiliaisTotvsPorCnpj,
   resolverFiliaisLoja,
 } from '../services/totvsCartoesStone.js';
@@ -253,6 +255,19 @@ router.get(
       }),
     ]);
 
+    // Vínculo manual pode apontar para título que a busca por portador STONE
+    // não traz (caixa lançou com outro portador): busca esses pelo código,
+    // senão o vínculo salvo nunca vira par.
+    const chavesTotvs = new Set(titulosTodos.map((t) => t.chave));
+    const faltam = (vincRes.vinculos || []).filter((v) => !chavesTotvs.has(`${v.filial}|${v.titulo}`));
+    if (faltam.length) {
+      try {
+        titulosTodos.push(...(await buscarTitulosPorCodigo(faltam)));
+      } catch (e) {
+        console.warn(`[stone] títulos dos vínculos manuais: ${e.message}`);
+      }
+    }
+
     const resultado = stonePorLoja.map(({ loja, dias, erros }) => {
       const transacoes = dias.flatMap((d) => d.transacoes);
       // títulos das filiais desta maquininha; fora do período estrito só
@@ -397,6 +412,33 @@ router.get(
     const codes = req.query.stonecode ? String(req.query.stonecode).split(',') : null;
     const r = await listarVinculos(codes);
     return successResponse(res, r);
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
+// GET /transacoes-dia?stonecode=&data=YYYY-MM-DD — drill-down do vínculo
+// manual: todas as vendas do dia no TOTVS (filiais da maquininha) com as
+// formas de pagamento e o título de cada pagamento no cartão.
+// ──────────────────────────────────────────────────────────────
+router.get(
+  '/transacoes-dia',
+  asyncHandler(async (req, res) => {
+    const { stonecode, data } = req.query;
+    if (!stonecode || !ISO_RE.test(String(data || '')))
+      return errorResponse(res, 'Informe stonecode e data (YYYY-MM-DD).', 400);
+    const cfg = getLojaByStonecode(String(stonecode));
+    if (!cfg) return errorResponse(res, 'StoneCode não configurado no servidor.', 404);
+    const loja = comFiliaisTotvs(cfg, await mapaFiliaisSeguro());
+    if (!loja.filiais?.length) return errorResponse(res, 'Loja sem filial TOTVS resolvida.', 422);
+    const t0 = Date.now();
+    const transacoes = await buscarTransacoesDia({ branchCodes: loja.filiais, dataIso: String(data) });
+    return successResponse(res, {
+      loja: { stonecode: loja.stonecode, nome: loja.nome, filiais: loja.filiais },
+      data: String(data),
+      total: transacoes.length,
+      transacoes,
+      ms: Date.now() - t0,
+    });
   }),
 );
 
