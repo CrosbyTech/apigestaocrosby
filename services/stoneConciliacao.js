@@ -339,7 +339,9 @@ const isMissingTable = (error) =>
   !!error &&
   (error.code === '42P01' ||
     error.code === 'PGRST205' ||
-    /does not exist|Could not find the table|schema cache/i.test(error.message || ''));
+    /does not exist|Could not find the table|schema cache/i.test(error.message || '') ||
+    // upsert em tabela inexistente volta 404 com erro vazio ({})
+    (!error.code && !error.message));
 
 const chaveCache = (stonecode, dataStone, layout) => `${stonecode}|${dataStone}|${layout}`;
 
@@ -390,13 +392,18 @@ async function gravarCacheDb(stonecode, dataIso, layout, dia) {
     );
     if (error) {
       if (isMissingTable(error)) {
+        if (!tabelaIndisponivel) {
+          console.warn(
+            `[stone] tabela ${TABELA_ARQUIVOS} não existe — cache só em memória. Rode migrations/stone_conciliacao.sql.`,
+          );
+        }
         tabelaIndisponivel = true;
         return;
       }
       throw error;
     }
   } catch (e) {
-    console.warn(`[stone] falha gravando cache DB (${stonecode}/${dataIso}): ${e.message}`);
+    console.warn(`[stone] falha gravando cache DB (${stonecode}/${dataIso}): ${e.message || JSON.stringify(e)}`);
   }
 }
 

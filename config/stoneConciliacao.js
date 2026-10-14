@@ -25,6 +25,12 @@
 //
 // `filiais` = código(s) da empresa no TOTVS onde os títulos de cartão desta
 // maquininha são lançados (portador "STONE - <bandeira> (C|D)").
+//
+// A Stone dá DOIS StoneCodes por loja: um presencial (maquininha) e um ONLINE
+// (Link de Pagamento / e-commerce). O arquivo de conciliação é por StoneCode,
+// então vendas por link só aparecem no código online. `stonecodesExtras` lista
+// os códigos adicionais do mesmo CNPJ (a chave sk_ é por CNPJ e vale para
+// todos); o batimento junta as transações de todos antes de bater com o TOTVS.
 // ============================================================
 
 const envKey = (stonecode) => {
@@ -156,6 +162,9 @@ export const STONE_LOJAS = [
     nome: 'CROSBY BREJINHO',
     razao: 'CROSBY CR VESTUARIO',
     stonecode: '579299624',
+    // Brejinho vende por Link de Pagamento: o código presencial vem sempre
+    // vazio; as vendas estão no StoneCode ONLINE (informado em 14/10/2026).
+    stonecodesExtras: ['425016393'],
     affiliationKey: '79c5d4e31cee4f6198a738b9ce93c504',
     filiais: [99],
     apiKey: envKey('579299624') || 'sk_c25866725e774e6786b851360ad0d728',
@@ -164,8 +173,16 @@ export const STONE_LOJAS = [
 
 export const getLojaByStonecode = (stonecode) =>
   (stonecode &&
-    STONE_LOJAS.find((l) => l.stonecode && String(l.stonecode) === String(stonecode))) ||
+    STONE_LOJAS.find(
+      (l) =>
+        (l.stonecode && String(l.stonecode) === String(stonecode)) ||
+        (l.stonecodesExtras || []).some((c) => String(c) === String(stonecode)),
+    )) ||
   null;
+
+// Todos os StoneCodes de uma loja (principal + extras), sem nulos
+export const stonecodesDaLoja = (loja) =>
+  [loja?.stonecode, ...(loja?.stonecodesExtras || [])].filter(Boolean).map(String);
 
 // Lojas prontas para consultar a Stone: têm chave E StoneCode
 export const getLojasComChave = () => STONE_LOJAS.filter((l) => !!l.apiKey && !!l.stonecode);
@@ -173,12 +190,13 @@ export const getLojasComChave = () => STONE_LOJAS.filter((l) => !!l.apiKey && !!
 // Lista pública (sem expor as chaves) para o frontend montar o seletor.
 export const getLojasPublic = () =>
   STONE_LOJAS.map(
-    ({ cnpj, cnpjFmt, nome, razao, stonecode, filiais, observacao, apiKey }) => ({
+    ({ cnpj, cnpjFmt, nome, razao, stonecode, stonecodesExtras, filiais, observacao, apiKey }) => ({
       cnpj,
       cnpjFmt,
       nome,
       razao,
       stonecode,
+      stonecodesExtras: stonecodesExtras || [],
       filiais,
       filial: filiais[0],
       observacao: observacao || null,

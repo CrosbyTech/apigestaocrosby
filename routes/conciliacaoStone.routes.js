@@ -20,7 +20,12 @@
 import express from 'express';
 import supabase from '../config/supabase.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
-import { STONE_LOJAS, getLojaByStonecode, getLojasPublic } from '../config/stoneConciliacao.js';
+import {
+  STONE_LOJAS,
+  getLojaByStonecode,
+  getLojasPublic,
+  stonecodesDaLoja,
+} from '../config/stoneConciliacao.js';
 import {
   obterDiaStone,
   obterPeriodoStone,
@@ -103,10 +108,35 @@ const comFiliaisTotvs = (loja, mapa) => {
   return { ...loja, filiais: r.filiais, filialTotvs: r.filialTotvs, nomesFiliais: r.nomesFiliais };
 };
 
+// Baixa o período de TODOS os StoneCodes da loja (presencial + online) e
+// junta: transações marcadas com o código de origem, erros idem.
+async function obterPeriodoLoja(loja, inicioIso, fimIso, opts) {
+  const codes = stonecodesDaLoja(loja);
+  const partes = await Promise.all(
+    codes.map(async (code) => {
+      const r = await obterPeriodoStone({ ...loja, stonecode: code }, inicioIso, fimIso, opts);
+      return { code, ...r };
+    }),
+  );
+  const dias = partes.flatMap((p) =>
+    p.dias.map((d) => ({
+      ...d,
+      stonecode: p.code,
+      transacoes: d.transacoes.map((t) => ({ ...t, stonecode: p.code })),
+    })),
+  );
+  const erros = partes.flatMap((p) =>
+    p.erros.map((e) => ({ ...e, stonecode: p.code, erro: codes.length > 1 ? `[${p.code}] ${e.erro}` : e.erro })),
+  );
+  dias.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : a.stonecode < b.stonecode ? -1 : 1));
+  return { datas: partes[0]?.datas || [], dias, erros, stonecodes: codes };
+}
+
 const lojaPublica = (l) => ({
   nome: l.nome,
   cnpj: l.cnpjFmt,
   stonecode: l.stonecode,
+  stonecodes: stonecodesDaLoja(l),
   filiais: l.filiais,
   filialTotvs: l.filialTotvs || null,
   nomesFiliais: l.nomesFiliais || null,
@@ -152,7 +182,7 @@ router.get(
     const per = validarPeriodo(req);
     if (per.erro) return errorResponse(res, per.erro, 400);
 
-    const { dias, erros } = await obterPeriodoStone(loja, per.inicioIso, per.fimIso, {
+    const { dias, erros } = await obterPeriodoLoja(loja, per.inicioIso, per.fimIso, {
       force: force === '1' || force === 'true',
     });
 
@@ -218,7 +248,7 @@ router.get(
         : Promise.resolve([]),
       listarVinculos(comChave.map((l) => l.stonecode)),
       mapLimit(comChave, 3, async (loja) => {
-        const r = await obterPeriodoStone(loja, per.inicioIso, per.fimIso, { force, concorrencia: 4 });
+        const r = await obterPeriodoLoja(loja, per.inicioIso, per.fimIso, { force, concorrencia: 4 });
         return { loja, ...r };
       }),
     ]);
@@ -246,7 +276,9 @@ router.get(
       };
       b.resumo.diferenca = +(b.resumo.stone.bruto - b.resumo.totvs.valor).toFixed(2);
 
-      const pagamentos = dias.flatMap((d) => d.pagamentos.map((p) => ({ ...p, data: d.data })));
+      const pagamentos = dias.flatMap((d) =>
+        d.pagamentos.map((p) => ({ ...p, data: d.data, stonecode: d.stonecode })),
+      );
       return {
         loja: lojaPublica(loja),
         resumo: {
@@ -256,7 +288,8 @@ router.get(
             valor: +pagamentos.reduce((s, p) => s + p.valorTotal, 0).toFixed(2),
           },
           diasConsultados: per.datas.length,
-          diasOk: dias.length,
+          // com mais de um StoneCode, conta datas distintas (não arquivos)
+          diasOk: new Set(dias.map((d) => d.data)).size,
           diasComErro: erros.length,
         },
         pares: b.pares,

@@ -66,6 +66,18 @@ Resposta de `/lojas`: `{ lojas: [...], totvsOk: bool }`, cada loja com
 A AffiliationKey foi testada como credencial (Basic e Bearer) em 24/09/2026:
 **401** em todos os casos.
 
+## Dois StoneCodes por loja (presencial × online)
+
+A Stone dá um StoneCode para a maquininha e OUTRO para vendas online (Link de
+Pagamento / e-commerce). O arquivo de conciliação é por StoneCode, então a venda
+por link **não aparece** no código presencial (Brejinho, 13/10/2026: venda de
+R$ 2.094,94 8x por link só saiu no código online 425016393; o presencial
+579299624 vem vazio todo dia). No config, `stonecodesExtras` lista os códigos
+adicionais; a mesma chave `sk_` (por CNPJ) vale para todos. `/batimento` e
+`/conciliacao` baixam todos os códigos da loja e juntam as transações (campo
+`stonecode` em cada uma) antes de bater com o TOTVS. O código online aparece no
+Portal Stone; não há endpoint na API para descobri-lo.
+
 ## Lado TOTVS
 
 `POST accounts-receivable/v2/documents/search` com `documentTypeList [4,5]`
