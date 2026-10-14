@@ -11,6 +11,8 @@
  *   POST /api/bluecard/clientes/lote — o mesmo para até 50 documentos
  *   GET  /api/bluecard/vendas      — vendas do PDV com formas de pagamento
  *                                    (?cpf=&desde=) → "venda extra" além do cartão
+ *   GET  /api/bluecard/liberacoes/:compra_id — estado da janela de limite no
+ *                                    TOTVS aberta pela compra.aprovada (o "okay")
  *                                    Responde 200 imediato e processa depois —
  *                                    webhook lento vira reenvio (retry deles por 24h).
  *   GET  /api/bluecard/pagamentos  — reconciliação (assinado HMAC): títulos
@@ -119,11 +121,12 @@ async function processarEvento(id, evento, body) {
         break;
 
       case 'compra.recusada':
-        // Limite nunca subiu — nada a fazer no TOTVS. A venda NÃO deve
-        // ser fechada no PDV.
+        // Cliente disse não no app. Em regra o limite nunca subiu; se por
+        // corrida de eventos houver janela aberta para esta compra, fecha.
         console.log(
           `🔵 [bluecard] compra.recusada — documento=${body?.compra?.documento} cpf=${body?.compra?.cpf}`,
         );
+        await fecharJanelaSeAberta(body?.compra?.id, 'cancelada');
         break;
 
       case 'parcelamento.aceito': {
@@ -166,6 +169,10 @@ async function processarEvento(id, evento, body) {
       case 'compra.cancelada': {
         // Cancelamento autorizado pela matriz — baixar o recebível no TOTVS.
         const compraId = body?.compra?.id;
+        // Se a compra foi cancelada com a janela de limite ainda aberta
+        // (cliente aprovou e a loja cancelou antes de passar), fecha agora em
+        // vez de esperar o timeout de 120 min.
+        await fecharJanelaSeAberta(compraId, 'cancelada');
         if (compraId) {
           const { error: e } = await supabase
             .from('bluecard_titulos')
@@ -671,6 +678,103 @@ router.get('/vendas', exigirAssinaturaBluecard, async (req, res) => {
         mensagem: 'Falha ao consultar o TOTVS',
         detalhe: e.response?.data?.[0]?.message || e.message,
       },
+    });
+  }
+});
+
+// Fecha a janela de limite de uma compra se ela ainda estiver 'liberado'
+// (usado por compra.recusada / compra.cancelada). Sem janela → não faz nada.
+async function fecharJanelaSeAberta(compraId, novoStatus) {
+  if (!compraId || !limiteAutoAtivo()) return;
+  const { data: lib } = await supabase
+    .from('bluecard_liberacoes')
+    .select('*')
+    .eq('compra_id', compraId)
+    .eq('status', 'liberado')
+    .maybeSingle();
+  if (!lib) return;
+  await zerarLimite(lib, novoStatus);
+  console.log(`💳 [bluecard-limite] janela da compra ${compraId} fechada por ${novoStatus}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/bluecard/liberacoes/:compra_id
+//
+// O "okay" do gatilho de limite. O webhook compra.aprovada responde 200 na
+// hora e sobe o limite no TOTVS em segundo plano (a escrita leva alguns
+// segundos em dezenas de filiais). Aqui o app consulta se já subiu, para só
+// então dizer ao cliente "pode passar no caixa".
+//
+// status:
+//   pendente        — evento recebido, limite ainda não subiu (ou gatilho desligado)
+//   liberado        — limite no TOTVS = valor da compra + títulos em aberto; caixa pode fechar
+//   consumido       — venda detectada no TOTVS; limite já voltou ao anterior (0)
+//   zerado_expirado — ninguém fechou a venda em BLUECARD_LIBERACAO_TIMEOUT_MIN; limite voltou a 0
+//   cancelada       — compra recusada/cancelada com a janela aberta; limite voltou a 0
+//   erro            — o HeadCoach não conseguiu subir o limite (detalhe no campo erro); retenta por 24h
+// ─────────────────────────────────────────────────────────────────────
+router.get('/liberacoes/:compra_id', exigirAssinaturaBluecard, async (req, res) => {
+  const compraId = String(req.params.compra_id || '').trim();
+  if (!compraId) {
+    return res.status(400).json({
+      erro: { codigo: 'campo_invalido', mensagem: 'compra_id obrigatório', detalhe: null },
+    });
+  }
+  try {
+    const { data: lib } = await supabase
+      .from('bluecard_liberacoes')
+      .select(
+        'compra_id, cpf, valor_cents, abertos_cents, limite_cents, status, liberado_em, venda_detectada_em, zerado_em',
+      )
+      .eq('compra_id', compraId)
+      .maybeSingle();
+
+    if (lib) {
+      return res.json({
+        compra_id: lib.compra_id,
+        gatilho_ativo: limiteAutoAtivo(),
+        status: lib.status,
+        valor_cents: lib.valor_cents,
+        abertos_cents: lib.abertos_cents,
+        limite_totvs_cents: lib.limite_cents,
+        liberado_em: lib.liberado_em,
+        venda_detectada_em: lib.venda_detectada_em,
+        fechado_em: lib.zerado_em,
+        expira_em: lib.liberado_em
+          ? new Date(
+              new Date(lib.liberado_em).getTime() +
+                Number(process.env.BLUECARD_LIBERACAO_TIMEOUT_MIN || 120) * 60000,
+            ).toISOString()
+          : null,
+      });
+    }
+
+    // Sem liberação: o evento chegou? Se chegou com erro, diz o motivo.
+    const { data: ev } = await supabase
+      .from('bluecard_eventos')
+      .select('status, erro, recebido_em')
+      .eq('evento', 'compra.aprovada')
+      .filter('payload->compra->>id', 'eq', compraId)
+      .order('recebido_em', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!ev) {
+      return res.status(404).json({
+        erro: { codigo: 'compra_nao_encontrada', mensagem: 'compra.aprovada não recebida para este id', detalhe: null },
+      });
+    }
+    return res.json({
+      compra_id: compraId,
+      gatilho_ativo: limiteAutoAtivo(),
+      status: ev.status === 'erro' ? 'erro' : 'pendente',
+      erro: ev.status === 'erro' ? ev.erro : null,
+      recebido_em: ev.recebido_em,
+    });
+  } catch (e) {
+    console.error('❌ [bluecard/liberacoes]', e.message);
+    return res.status(500).json({
+      erro: { codigo: 'erro_interno', mensagem: 'Falha ao consultar a liberação', detalhe: e.message },
     });
   }
 });

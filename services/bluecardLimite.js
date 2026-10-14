@@ -314,16 +314,21 @@ export async function liberarLimiteParaCompra(compra) {
   let { error } = await supabase
     .from('bluecard_liberacoes')
     .upsert(registro, { onConflict: 'compra_id' });
-  if (error && /limites_anteriores/i.test(error.message || '')) {
-    // Coluna ainda nao criada (migrations/bluecard_limites_anteriores.sql):
-    // segue sem snapshot para nao segurar a venda no caixa.
-    console.warn(
-      '⚠️ [bluecard-limite] coluna limites_anteriores ausente — rode a migration; liberando sem snapshot',
-    );
-    delete registro.limites_anteriores;
-    ({ error } = await supabase
-      .from('bluecard_liberacoes')
-      .upsert(registro, { onConflict: 'compra_id' }));
+  // Colunas que podem faltar em producao (migrations bluecard_liberacoes.sql /
+  // bluecard_limites_anteriores.sql ainda nao rodadas): tira a coluna e tenta
+  // de novo, para NUNCA segurar a venda no caixa por causa de schema. O
+  // watchdog trata a ausencia como "sem snapshot" (zera em vez de restaurar;
+  // conta titulo do dia como venda).
+  for (const col of ['limites_anteriores', 'titulos_previos']) {
+    if (error && new RegExp(col, 'i').test(error.message || '')) {
+      console.warn(
+        `⚠️ [bluecard-limite] coluna ${col} ausente — rode as migrations de bluecard_liberacoes; liberando sem ela`,
+      );
+      delete registro[col];
+      ({ error } = await supabase
+        .from('bluecard_liberacoes')
+        .upsert(registro, { onConflict: 'compra_id' }));
+    }
   }
   if (error) {
     // Limite JÁ subiu no TOTVS — sem o registro o watchdog não zera depois.
