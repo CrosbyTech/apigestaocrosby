@@ -76,8 +76,9 @@ async function buscarPagina({ token, filter, page }) {
 }
 
 /**
- * Busca as PARCELAS de cartão (docs 4/5) das filiais no período de EMISSÃO.
- * Retorna só as de portador STONE, já deduplicadas.
+ * Busca as PARCELAS de cartão (docs 4/5) das filiais no período de EMISSÃO,
+ * de QUALQUER portador (o batimento casa por NSU/autorização; o portador
+ * errado no caixa é só uma divergência). Deduplicadas.
  */
 export async function buscarParcelasCartaoStone({ branchCodes, inicioIso, fimIso }) {
   const tokenData = await getToken();
@@ -123,7 +124,7 @@ export async function buscarParcelasCartaoStone({ branchCodes, inicioIso, fimIso
     for (const r of results) absorver(r.data?.items);
   }
 
-  return parcelas.filter(isPortadorStone);
+  return parcelas;
 }
 
 /**
@@ -144,6 +145,7 @@ async function buscarNotasPeriodo({ branchCodes, inicioIso, fimIso }) {
       startIssueDate: `${inicioIso}T00:00:00`,
       endIssueDate: `${fimIso}T23:59:59`,
     },
+    expand: 'payments', // NSU e autorização de cada pagamento no cartão
     page,
     pageSize: 100, // fiscal/v2 limita a 100 (o contas a receber aceita 200)
   });
@@ -170,14 +172,25 @@ async function buscarNotasPeriodo({ branchCodes, inicioIso, fimIso }) {
     for (const r of await Promise.all(lote)) notas.push(...(r.data?.items || []));
   }
   const mapa = new Map();
+  const porTitulo = new Map(); // "filial|receivableCode" → { nsu, autorizacao, bandeira }
   for (const nf of notas) {
     mapa.set(`${nf.branchCode}|${nf.invoiceCode}`, {
       transacao: nf.transactionCode ?? null,
       nomeCliente: nf.personName || null,
       hora: nf.exitTime ? String(nf.exitTime).slice(0, 8) : null,
     });
+    for (const p of nf.payments || []) {
+      if (p.documentNumber == null) continue;
+      const ci = p.cardInformation || {};
+      if (!ci.nsu && !ci.authorizationCode) continue;
+      porTitulo.set(`${nf.branchCode}|${p.documentNumber}`, {
+        nsu: ci.nsu || null,
+        autorizacao: ci.authorizationCode || null,
+        bandeira: ci.cardFlag || null,
+      });
+    }
   }
-  return mapa;
+  return { mapa, porTitulo };
 }
 
 const FORMAS_NF = {
@@ -316,10 +329,11 @@ export async function buscarTitulosPorCodigo(refs) {
 export async function enriquecerTitulosComNotas(titulos, params) {
   if (!titulos.length) return titulos;
   let mapa;
+  let porTitulo;
   try {
-    mapa = await buscarNotasPeriodo(params);
+    ({ mapa, porTitulo } = await buscarNotasPeriodo(params));
   } catch (e) {
-    console.warn(`[stone] notas fiscais indisponíveis (transação/cliente ficam vazios): ${e.response?.data?.[0]?.message || e.message}`);
+    console.warn(`[stone] notas fiscais indisponíveis (NSU/autorização/transação ficam vazios): ${e.response?.data?.[0]?.message || e.message}`);
     return titulos;
   }
   for (const t of titulos) {
@@ -327,6 +341,9 @@ export async function enriquecerTitulosComNotas(titulos, params) {
     t.transacao = nf?.transacao ?? null;
     t.nomeCliente = nf?.nomeCliente ?? null;
     t.hora = nf?.hora ?? null;
+    const pg = porTitulo.get(`${t.filial}|${t.titulo}`);
+    t.nsu = pg?.nsu ?? null;
+    t.autorizacao = pg?.autorizacao ?? null;
   }
   return titulos;
 }
@@ -349,8 +366,11 @@ export function agruparTitulos(parcelas) {
         cpfCnpj: p.customerCpfCnpj || null,
         nf: p.invoice?.[0]?.invoiceCode ?? null,
         nfData: p.invoice?.[0]?.invoiceDate ?? null,
-        transacao: null, // preenchido por enriquecerTitulosComNotas
+        transacao: null, // preenchidos por enriquecerTitulosComNotas
         nomeCliente: null,
+        nsu: null,
+        autorizacao: null,
+        portadorStone: isPortadorStone(p),
         dataEmissao: p.issueDate ? String(p.issueDate).slice(0, 10) : null,
         portador: p.bearerName || null,
         portadorCodigo: p.bearerCode ?? null,

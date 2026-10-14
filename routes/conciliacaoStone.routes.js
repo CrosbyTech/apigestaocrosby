@@ -281,8 +281,10 @@ router.get(
       );
       const somaT = +b.totvsSemStone.reduce((s, t) => s + t.valor, 0).toFixed(2);
       b.resumo.totvsSemStone = { qtd: b.totvsSemStone.length, valor: somaT };
+      // resumo do TOTVS: só portador Stone (título de outra adquirente que
+      // entrou na busca não é conta desta tela)
       const titulosNoPeriodo = titulos.filter(
-        (t) => t.dataEmissao >= per.inicioIso && t.dataEmissao <= per.fimIso,
+        (t) => t.portadorStone !== false && t.dataEmissao >= per.inicioIso && t.dataEmissao <= per.fimIso,
       );
       b.resumo.totvs = {
         qtd: titulosNoPeriodo.length,
