@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self';" />
+  <title>PDV Crosby — HeadCoach</title>
+  <link rel="icon" href="assets/favicon.ico" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ============================ TELA DE LOGIN ============================ -->
+  <section id="tela-login">
+    <form class="login-card" id="form-login" autocomplete="off">
+      <img class="logo" src="assets/crosbyazul.png" alt="Crosby" />
+      <h2>HEADCOACH CROSBY</h2>
+      <div class="welcome">Boas-vindas</div>
+
+      <div class="login-err hidden" id="login-err"></div>
+
+      <div class="field">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+        <input type="email" id="login-email" placeholder="Email" value="yago@crosby.com.br" required />
+      </div>
+
+      <div class="field">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        <input type="password" id="login-pass" placeholder="Senha" value="demo" required />
+        <button type="button" class="toggle" id="toggle-pass" aria-label="mostrar senha">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+
+      <div class="row-between">
+        <label><input type="checkbox" id="remember" checked /> Lembrar de mim</label>
+        <a href="#" style="color:var(--cyan);text-decoration:none">Esqueci a senha</a>
+      </div>
+
+      <button type="submit" class="btn-primary" id="btn-login">Entrar</button>
+      <div class="login-hint">Protótipo Electron · qualquer senha entra · <b>PDV instalável</b> com periféricos locais</div>
+    </form>
+  </section>
+
+  <!-- ============================ APP (pós-login) ========================= -->
+  <section id="tela-app" class="hidden">
+    <aside class="sidebar">
+      <div class="brand"><img src="assets/crosby-branca.png" alt="Crosby" /></div>
+      <button class="nav-item active" data-rota="home"><span class="ico">⌂</span> Home</button>
+      <button class="nav-item" data-rota="devolucao"><span class="ico">↩</span> Devolução de Mercadoria</button>
+      <button class="nav-item" data-rota="ranking"><span class="ico">▦</span> PDV Varejo · Ranking</button>
+      <button class="nav-item" data-rota="forecast"><span class="ico">📈</span> New Forecast</button>
+      <button class="nav-item" data-rota="perifericos"><span class="ico">⚙</span> Periféricos</button>
+      <div class="spacer"></div>
+      <div class="periferico-status" id="perif-status">
+        <div><span class="dot off" id="d-imp"></span> Impressora</div>
+        <div><span class="dot off" id="d-rfid"></span> Portal RFID</div>
+        <div><span class="dot off" id="d-tef"></span> TEF / Pinpad</div>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="title" id="topbar-title">Home</div>
+        <div class="user">
+          <span id="topbar-user">Yago Matias</span>
+          <div class="avatar" id="topbar-avatar">Y</div>
+          <button class="logout" id="btn-logout">Sair</button>
+        </div>
+      </header>
+      <main class="content" id="content"><!-- rotas renderizam aqui --></main>
+    </div>
+  </section>
+
+  <div id="modal-root"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

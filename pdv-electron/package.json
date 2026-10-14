@@ -1,0 +1,75 @@
+{
+  "name": "pdv-crosby-electron",
+  "version": "0.1.1",
+  "description": "Protótipo PDV Crosby (HeadCoach) em Electron — login, home, devolução, ranking de faturamento e new forecast, com periféricos locais (impressora/RFID/TEF).",
+  "main": "main.js",
+  "author": "Crosby",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env HEADCOACH_URL=http://localhost:3000 electron .",
+    "build:web": "node scripts/build-web.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "pack": "electron-builder --dir",
+    "dist": "npm run build:web && electron-builder --win nsis --publish never",
+    "dist:portable": "npm run build:web && electron-builder --win portable --publish never",
+    "release": "node scripts/release.mjs",
+    "release:skip-build": "node scripts/release.mjs --skip-build"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "jimp": "^0.22.12",
+    "png-to-ico": "^2.1.0"
+  },
+  "build": {
+    "appId": "com.crosby.pdv",
+    "productName": "PDV Crosby",
+    "copyright": "© Crosby",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "updater.js",
+      "preload.js",
+      "web/**/*",
+      "renderer/**/*",
+      "build/icon.ico",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "PDV-Crosby-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PDV Crosby",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://dorztqiunewggydvkjnf.supabase.co/storage/v1/object/public/pdv-updates",
+      "useMultipleRangeRequest": false
+    }
+  },
+  "dependencies": {
+    "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.9"
+  }
+}
