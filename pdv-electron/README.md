@@ -106,7 +106,9 @@ npm version patch --no-git-tag-version
 npm run release
 ```
 `npm run release` = `npm run dist` + envio de `PDV-Crosby-Setup-<v>.exe`,
-`.exe.blockmap` e `latest.yml` (este por último, para nenhum caixa ver uma
+`.exe.blockmap`, uma cópia com nome fixo `PDV-Crosby-Setup.exe` (o link
+"Baixar PDV Crosby (app)" do menu Tecnologia do HeadCoach, para instalar em
+caixa novo) e `latest.yml` (este por último, para nenhum caixa ver uma
 versão cujo .exe ainda não subiu). Para só reenviar o que já está em `dist/`:
 `npm run release:skip-build`. Na primeira publicação o script cria o bucket.
 Depois, commitar o bump do package.json.

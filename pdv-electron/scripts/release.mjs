@@ -43,6 +43,9 @@ const nomeExe = `PDV-Crosby-Setup-${versao}.exe`;
 const arquivos = [
   { nome: nomeExe, tipo: 'application/octet-stream', cache: '3600' },
   { nome: `${nomeExe}.blockmap`, tipo: 'application/octet-stream', cache: '3600' },
+  // cópia com nome fixo: é o link "Baixar PDV Crosby (app)" do menu Tecnologia
+  // do HeadCoach (Sidebar.jsx), para instalar em caixa novo sem saber a versão
+  { nome: nomeExe, destino: 'PDV-Crosby-Setup.exe', tipo: 'application/octet-stream', cache: '0' },
   { nome: 'latest.yml', tipo: 'text/yaml', cache: '0' }, // sempre por último
 ];
 for (const a of arquivos) {
@@ -85,9 +88,10 @@ if (!String(supabase.supabaseUrl || '').startsWith(supabaseUrl)) {
 
 for (const a of arquivos) {
   const caminho = path.join(dist, a.nome);
-  const destino = prefixo ? `${prefixo.replace(/\/$/, '')}/${a.nome}` : a.nome;
+  const alvo = a.destino || a.nome;
+  const destino = prefixo ? `${prefixo.replace(/\/$/, '')}/${alvo}` : alvo;
   const tamanho = fs.statSync(caminho).size;
-  process.stdout.write(`▶ ${a.nome} (${(tamanho / 1024 / 1024).toFixed(1)} MB) ... `);
+  process.stdout.write(`▶ ${alvo} (${(tamanho / 1024 / 1024).toFixed(1)} MB) ... `);
   const { error } = await supabase.storage
     .from(bucket)
     .upload(destino, fs.readFileSync(caminho), {
@@ -103,7 +107,7 @@ for (const a of arquivos) {
           '   Aumente em Storage → Settings → Upload file size limit (precisa do plano Pro).',
       );
     }
-    falhar(`enviar ${a.nome}`, error);
+    falhar(`enviar ${alvo}`, error);
   }
   console.log('ok');
 }
