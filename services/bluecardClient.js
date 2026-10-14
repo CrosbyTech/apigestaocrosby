@@ -55,6 +55,45 @@ async function chamar(method, path, body = null, { idempotencyKey } = {}) {
   }
 }
 
+/**
+ * Venda detectada no TOTVS (gatilho de limite): amarra a compra do app ao
+ * título na hora. Contrato do BlueCard: POST /api/v1/vendas/{id}/registrada
+ * { recebivel, registrada_em }.
+ */
+export function notificarVendaRegistrada(compraId, recebivel, registradaEm = new Date().toISOString()) {
+  return chamar(
+    'POST',
+    `/api/v1/vendas/${encodeURIComponent(compraId)}/registrada`,
+    { recebivel: String(recebivel), registrada_em: registradaEm },
+    { idempotencyKey: `registrada:${compraId}:${recebivel}` },
+  );
+}
+
+/**
+ * Janela de limite fechada SEM venda (expirada) ou por cancelamento: avisa o
+ * app na hora para a compra ser desfeita, em vez de esperar a consulta de 15
+ * min deles em GET /liberacoes/{id}. Contrato proposto (issue #2):
+ * POST /api/v1/liberacoes/{compra_id} { evento, compra_id, status, em, ...dados }.
+ * Enquanto o app não tiver a rota, 404 é só log (a rota de status continua).
+ */
+export async function notificarLiberacaoFechada(compraId, evento, dados = {}) {
+  const status = evento === 'liberacao.expirada' ? 'zerado_expirado' : 'cancelada';
+  try {
+    return await chamar(
+      'POST',
+      `/api/v1/liberacoes/${encodeURIComponent(compraId)}`,
+      { evento, compra_id: compraId, status, em: new Date().toISOString(), ...dados },
+      { idempotencyKey: `${evento}:${compraId}` },
+    );
+  } catch (e) {
+    if (e.status === 404 || e.response?.status === 404) {
+      console.log(`ℹ️ [bluecard] app ainda sem POST /api/v1/liberacoes — ${evento} fica só na rota de status`);
+      return { ignorado: true };
+    }
+    throw e;
+  }
+}
+
 /** Registrar a venda (ANTES de fechar no PDV). Valores em centavos. */
 export function criarCompra(compra, idempotencyKey) {
   return chamar('POST', '/api/v1/compras', compra, { idempotencyKey });

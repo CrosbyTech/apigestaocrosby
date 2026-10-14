@@ -42,6 +42,7 @@ import {
   consultarClientesBluecardLote,
 } from '../services/bluecardClientes.js';
 import { listarVendasCliente } from '../services/bluecardVendas.js';
+import { notificarLiberacaoFechada } from '../services/bluecardClient.js';
 
 const router = express.Router();
 
@@ -695,6 +696,9 @@ async function fecharJanelaSeAberta(compraId, novoStatus) {
   if (!lib) return;
   await zerarLimite(lib, novoStatus);
   console.log(`💳 [bluecard-limite] janela da compra ${compraId} fechada por ${novoStatus}`);
+  notificarLiberacaoFechada(compraId, 'liberacao.cancelada', { valor_cents: lib.valor_cents }).catch((e) =>
+    console.warn(`⚠️ [bluecard-limite] aviso liberacao.cancelada falhou: ${e.message}`),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────

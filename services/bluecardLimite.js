@@ -239,9 +239,123 @@ export async function lerLimitesFinanceiros(customerCode, branchCodes) {
   return mapa;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// JANELAS DE LIMITE (compra.aprovada → limite sobe → venda → limite volta)
+//
+// Regras fechadas com o BlueCard em 14/10/2026 (issue #2 do credit-crosby):
+//  • o limite sobe SÓ na filial da compra (`compra.filial`); sem ela, nas
+//    filiais participantes (`compra.filiais_bluecard`); sem nada, na regra
+//    FILIAL do ranking. BLUECARD_LIMITE_BRANCH_CODES, quando definida, é um
+//    piloto: só filiais dessa lista podem receber limite (loja a loja);
+//  • duas compras seguidas somam: limite = títulos em aberto + soma das
+//    janelas abertas do cliente que cobrem aquela filial. Fechar uma janela
+//    recalcula as outras em vez de zerar tudo;
+//  • ao fechar a última janela, cada filial volta ao valor que tinha antes
+//    (snapshot em limites_anteriores) — para o crediário, 0.
+// ─────────────────────────────────────────────────────────────────────
+
+function allowlistPiloto() {
+  return (process.env.BLUECARD_LIMITE_BRANCH_CODES || '')
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !isNaN(n) && n > 0);
+}
+
+/** Filiais onde a janela desta compra abre (ver cabeçalho desta seção). */
+export async function resolverBranchesDaCompra(compra) {
+  const filial = Number(compra?.filial);
+  const participantes = (Array.isArray(compra?.filiais_bluecard) ? compra.filiais_bluecard : [])
+    .map(Number)
+    .filter((n) => n > 0);
+  const piloto = allowlistPiloto();
+
+  let base;
+  let origem;
+  if (filial > 0) {
+    base = [filial];
+    origem = 'filial da compra';
+  } else if (participantes.length) {
+    base = participantes;
+    origem = 'filiais_bluecard';
+  } else if (piloto.length) {
+    base = piloto;
+    origem = 'BLUECARD_LIMITE_BRANCH_CODES';
+  } else {
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) throw new Error('token TOTVS indisponível');
+    base = await getFilialBranchCodes(tokenData.access_token);
+    origem = 'regra FILIAL';
+  }
+
+  if (piloto.length) {
+    const dentro = base.filter((b) => piloto.includes(b));
+    if (!dentro.length) {
+      const e = new Error(
+        `filial ${base.join(',')} fora do piloto (BLUECARD_LIMITE_BRANCH_CODES=${piloto.join(',')})`,
+      );
+      e.codigo = 'fora_do_piloto';
+      throw e;
+    }
+    base = dentro;
+  }
+  return { branches: [...new Set(base)], origem };
+}
+
+function branchesDaJanela(lib) {
+  const lista = Array.isArray(lib?.branch_codes) ? lib.branch_codes.map(Number) : [];
+  if (lista.length) return lista;
+  return lib?.branch_code ? [Number(lib.branch_code)] : [];
+}
+
+async function janelasAbertas(cpf, excetoCompraId = null) {
+  let q = supabase.from('bluecard_liberacoes').select('*').eq('cpf', cpf).eq('status', 'liberado');
+  if (excetoCompraId) q = q.neq('compra_id', excetoCompraId);
+  const { data } = await q;
+  return data || [];
+}
+
 /**
- * Fluxo do webhook compra.aprovada: sobe o limite para
- * (valor aprovado + títulos em aberto) e registra a liberação.
+ * Monta { branch: limite } para o cliente a partir das janelas abertas:
+ * filial coberta por janela → abertos + soma dos valores; filial sem janela
+ * → valor anterior (snapshot) ou 0.
+ */
+function montarMapaDeLimites({ branchesAlvo, janelas, abertosReais, anteriores }) {
+  const mapa = {};
+  for (const b of branchesAlvo) {
+    const cobrem = janelas.filter((j) => branchesDaJanela(j).includes(Number(b)));
+    if (cobrem.length) {
+      const soma = cobrem.reduce((s, j) => s + Number(j.valor_cents || 0), 0) / 100;
+      mapa[b] = Math.round((abertosReais + soma) * 100) / 100;
+    } else {
+      mapa[b] = Number(anteriores?.[b] ?? anteriores?.[String(b)] ?? 0);
+    }
+  }
+  return mapa;
+}
+
+async function upsertLiberacaoTolerante(registro) {
+  let { error } = await supabase
+    .from('bluecard_liberacoes')
+    .upsert(registro, { onConflict: 'compra_id' });
+  // Colunas que podem faltar em producao (migrations ainda nao rodadas): tira
+  // a coluna e tenta de novo, para NUNCA segurar a venda no caixa por schema.
+  for (const col of ['limites_anteriores', 'titulos_previos', 'branch_codes']) {
+    if (error && new RegExp(col, 'i').test(error.message || '')) {
+      console.warn(
+        `⚠️ [bluecard-limite] coluna ${col} ausente — rode migrations/bluecard_liberacoes*.sql; gravando sem ela`,
+      );
+      delete registro[col];
+      ({ error } = await supabase
+        .from('bluecard_liberacoes')
+        .upsert(registro, { onConflict: 'compra_id' }));
+    }
+  }
+  return error;
+}
+
+/**
+ * Fluxo do webhook compra.aprovada: abre a janela desta compra e grava no
+ * TOTVS o limite resultante de TODAS as janelas abertas do cliente.
  */
 export async function liberarLimiteParaCompra(compra) {
   const cpf = String(compra?.cpf || '').replace(/\D/g, '');
@@ -270,69 +384,62 @@ export async function liberarLimiteParaCompra(compra) {
   const cliente = await buscarClientePorCpf(cpf);
   if (!cliente) throw new Error(`CPF ${cpf} não encontrado no TOTVS`);
 
+  const { branches, origem } = await resolverBranchesDaCompra(compra);
   const { abertosReais, titulosHoje } = await levantarTitulos(cliente.code);
-  const valorReais = valorCents / 100;
-  const limiteReais = Math.round((valorReais + abertosReais) * 100) / 100;
+  const outras = await janelasAbertas(cpf, compra.id);
 
-  const branchCodes = await listarBranchesLimite();
-
-  // Fotografa o financeiro vigente ANTES de subir — o zerar restaura isto em
-  // vez de deixar 0, senao qualquer limite definido manualmente (Analise de
-  // Credito, tela de Creditos Clientes) era destruido ao fim de cada compra.
-  let limitesAnteriores = {};
+  // Snapshot do que existia ANTES de qualquer janela: para filial já coberta
+  // por outra janela aberta, o "anterior" é o que ela guardou (o valor atual
+  // no TOTVS já está inflado); para as demais, lê agora.
+  let anteriores = {};
   try {
-    limitesAnteriores = await lerLimitesFinanceiros(cliente.code, branchCodes);
+    anteriores = await lerLimitesFinanceiros(cliente.code, branches);
   } catch (e) {
     console.warn(
-      `⚠️ [bluecard-limite] snapshot do limite anterior falhou (${e.message}) — o zerar voltara a 0`,
+      `⚠️ [bluecard-limite] snapshot do limite anterior falhou (${e.message}) — o fechar voltara a 0`,
     );
   }
+  for (const o of outras) {
+    for (const b of branchesDaJanela(o)) {
+      if (o.limites_anteriores && b in o.limites_anteriores) anteriores[b] = o.limites_anteriores[b];
+      else if (branches.includes(b)) anteriores[b] = anteriores[b] ?? 0;
+    }
+  }
+
+  const janelaNova = { compra_id: compra.id, valor_cents: valorCents, branch_codes: branches };
+  const todas = [...outras, janelaNova];
+  const branchesAlvo = [...new Set(todas.flatMap(branchesDaJanela))];
+  const mapa = montarMapaDeLimites({ branchesAlvo, janelas: todas, abertosReais, anteriores });
 
   await definirLimiteTotvs({
     cpf,
     nome: cliente.name,
-    valorReais: limiteReais,
-    branchCodes,
+    valorReais: 0,
+    branchCodes: branchesAlvo,
+    valoresPorBranch: mapa,
   });
 
+  const limiteDesta = mapa[branches[0]] ?? Math.round((abertosReais + valorCents / 100) * 100) / 100;
   const registro = {
-      compra_id: compra.id,
-      documento: compra.documento || null,
-      cpf,
-      nome: cliente.name,
-      customer_code: cliente.code,
-      branch_code: branchCodes[0],
-      valor_cents: valorCents,
-      abertos_cents: Math.round(abertosReais * 100),
-      limite_cents: Math.round(limiteReais * 100),
-      titulos_previos: titulosHoje,
-      status: 'liberado',
-      liberado_em: new Date().toISOString(),
-      atualizado_em: new Date().toISOString(),
-      limites_anteriores: limitesAnteriores,
+    compra_id: compra.id,
+    documento: compra.documento || null,
+    cpf,
+    nome: cliente.name,
+    customer_code: cliente.code,
+    branch_code: branches[0],
+    branch_codes: branches,
+    valor_cents: valorCents,
+    abertos_cents: Math.round(abertosReais * 100),
+    limite_cents: Math.round(limiteDesta * 100),
+    titulos_previos: titulosHoje,
+    status: 'liberado',
+    liberado_em: new Date().toISOString(),
+    atualizado_em: new Date().toISOString(),
+    limites_anteriores: Object.fromEntries(branches.map((b) => [b, anteriores[b] ?? 0])),
   };
-  let { error } = await supabase
-    .from('bluecard_liberacoes')
-    .upsert(registro, { onConflict: 'compra_id' });
-  // Colunas que podem faltar em producao (migrations bluecard_liberacoes.sql /
-  // bluecard_limites_anteriores.sql ainda nao rodadas): tira a coluna e tenta
-  // de novo, para NUNCA segurar a venda no caixa por causa de schema. O
-  // watchdog trata a ausencia como "sem snapshot" (zera em vez de restaurar;
-  // conta titulo do dia como venda).
-  for (const col of ['limites_anteriores', 'titulos_previos']) {
-    if (error && new RegExp(col, 'i').test(error.message || '')) {
-      console.warn(
-        `⚠️ [bluecard-limite] coluna ${col} ausente — rode as migrations de bluecard_liberacoes; liberando sem ela`,
-      );
-      delete registro[col];
-      ({ error } = await supabase
-        .from('bluecard_liberacoes')
-        .upsert(registro, { onConflict: 'compra_id' }));
-    }
-  }
+  const error = await upsertLiberacaoTolerante(registro);
   if (error) {
-    // Limite JÁ subiu no TOTVS — sem o registro o watchdog não zera depois.
-    // Loga alto: precisa de intervenção manual se persistir.
+    // Limite JÁ subiu no TOTVS — sem o registro o watchdog não fecha depois.
     console.error(
       `🚨 [bluecard-limite] limite liberado no TOTVS mas falhou ao registrar liberação da compra ${compra.id}: ${error.message} — ZERAR MANUALMENTE se o watchdog não pegar`,
     );
@@ -340,40 +447,55 @@ export async function liberarLimiteParaCompra(compra) {
   }
 
   console.log(
-    `💳 [bluecard-limite] limite liberado em ${branchCodes.length} filial(is): cpf=${cpf} compra=${compra.id} ` +
-      `valor=R$${valorReais.toFixed(2)} + abertos=R$${abertosReais.toFixed(2)} → limite=R$${limiteReais.toFixed(2)}`,
+    `💳 [bluecard-limite] janela aberta em ${branches.length} filial(is) [${branches.join(',')}] (${origem}): ` +
+      `cpf=${cpf} compra=${compra.id} valor=R$${(valorCents / 100).toFixed(2)} + abertos=R$${abertosReais.toFixed(2)}` +
+      (outras.length ? ` + ${outras.length} janela(s) já aberta(s)` : '') +
+      ` → limite=R$${limiteDesta.toFixed(2)}`,
   );
-  return { cliente, limiteReais, branchCodes };
+  return { cliente, limiteReais: limiteDesta, branchCodes: branches, janelasAbertas: outras.length + 1 };
 }
 
 /**
- * Fecha a janela de limite: RESTAURA o financeiro/comercial que existia antes
- * da liberacao (snapshot em limites_anteriores) e marca a liberacao. Sem
- * snapshot (liberacoes antigas ou falha na leitura), zera como antes — cliente
- * crediario vive zerado por padrao, entao o fallback e o comportamento
- * historico.
+ * Fecha a janela de uma compra e RECALCULA o limite do cliente: filiais ainda
+ * cobertas por outra janela aberta ficam com (abertos + soma); as demais
+ * voltam ao valor anterior ao gatilho (snapshot) — para o crediário, 0.
  */
 export async function zerarLimite(liberacao, novoStatus) {
+  const outras = await janelasAbertas(liberacao.cpf, liberacao.compra_id);
+  const branchesLib = branchesDaJanela(liberacao).length
+    ? branchesDaJanela(liberacao)
+    : await listarBranchesLimite();
+
   let anteriores = liberacao?.limites_anteriores || null;
   if (!anteriores) {
+    const { data } = await supabase
+      .from('bluecard_liberacoes')
+      .select('limites_anteriores')
+      .eq('compra_id', liberacao.compra_id)
+      .maybeSingle();
+    anteriores = data?.limites_anteriores || {};
+  }
+
+  // Com outra janela aberta o limite dela depende dos títulos em aberto de
+  // AGORA (a venda recém-fechada já virou título) — relê.
+  let abertosReais = 0;
+  if (outras.length && liberacao.customer_code) {
     try {
-      const { data } = await supabase
-        .from('bluecard_liberacoes')
-        .select('limites_anteriores')
-        .eq('compra_id', liberacao.compra_id)
-        .maybeSingle();
-      anteriores = data?.limites_anteriores || null;
+      abertosReais = (await levantarTitulos(liberacao.customer_code)).abertosReais;
     } catch {
-      anteriores = null;
+      abertosReais = Number(liberacao.abertos_cents || 0) / 100;
     }
   }
-  const temSnapshot = anteriores && Object.keys(anteriores).length > 0;
+
+  const branchesAlvo = [...new Set([...branchesLib, ...outras.flatMap(branchesDaJanela)])];
+  const mapa = montarMapaDeLimites({ branchesAlvo, janelas: outras, abertosReais, anteriores });
+
   await definirLimiteTotvs({
     cpf: liberacao.cpf,
     nome: liberacao.nome,
     valorReais: 0,
-    branchCodes: await listarBranchesLimite(),
-    valoresPorBranch: temSnapshot ? anteriores : null,
+    branchCodes: branchesAlvo,
+    valoresPorBranch: mapa,
   });
   await supabase
     .from('bluecard_liberacoes')
@@ -383,7 +505,11 @@ export async function zerarLimite(liberacao, novoStatus) {
       atualizado_em: new Date().toISOString(),
     })
     .eq('compra_id', liberacao.compra_id);
+
+  const restauradas = branchesLib.filter((b) => !outras.some((o) => branchesDaJanela(o).includes(b)));
   console.log(
-    `💳 [bluecard-limite] limite ${temSnapshot ? 'restaurado ao anterior' : 'zerado'}: cpf=${liberacao.cpf} compra=${liberacao.compra_id} (${novoStatus})`,
+    `💳 [bluecard-limite] janela fechada (${novoStatus}): cpf=${liberacao.cpf} compra=${liberacao.compra_id} — ` +
+      `${restauradas.length} filial(is) de volta ao anterior` +
+      (outras.length ? `, ${outras.length} janela(s) seguem abertas (limite recalculado)` : ''),
   );
 }

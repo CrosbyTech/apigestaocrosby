@@ -277,3 +277,7 @@ no lote, instantâneo dentro dos 15 min de cache.
 ## Gatilho de limite: rota de status e fechamento por cancelamento (14/10/2026)
 
 Diagnostico: o app continua enviando `compra.aprovada` (249 eventos ate 14/10); o que faltava era o gatilho LIGADO no Render (`BLUECARD_LIMITE_AUTO_ENABLED=true`) e a coluna `titulos_previos` em producao (`migrations/bluecard_liberacoes.sql`). Novidades: `GET /api/bluecard/liberacoes/:compra_id` (o "okay" para o app), `compra.recusada`/`compra.cancelada` fecham janela aberta, fallback quando colunas faltam. Contrato para o parceiro em [BLUECARD-GATILHO-LIMITE.md](BLUECARD-GATILHO-LIMITE.md).
+
+## Gatilho v2 + correcao da baixa Pagar.me (14/10/2026)
+
+Resposta aos 6 ajustes da issue #2 do credit-crosby: limite so na filial da compra (ou participantes; piloto por BLUECARD_LIMITE_BRANCH_CODES), janelas somam por CPF, aviso POST /api/v1/vendas/{id}/registrada ao consumir, POST /api/v1/liberacoes/{id} ao expirar/cancelar, script `scripts/bluecard-zerar-limites.mjs` para o dia de ligar. Correcao: os 58 avisos pagamento.pix de 15/09 a 14/10 estavam todos em erro (comprovante_url NOT NULL) — reprocessados em 14/10 (48 solicitacoes abertas, 14 titulos ja baixados a mao); retry automatico a cada 15 min. Migration `migrations/bluecard_gatilho_limite_v2.sql`. Detalhes em [BLUECARD-GATILHO-LIMITE.md](BLUECARD-GATILHO-LIMITE.md).

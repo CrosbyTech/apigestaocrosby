@@ -28,6 +28,7 @@ import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 import { notificarPagamento } from '../services/bluecardClient.js';
+import { retentarEventosPagamentoPix } from '../services/bluecardBaixaPagarme.js';
 
 const ENABLED =
   String(process.env.BLUECARD_PAGAMENTOS_SYNC_ENABLED || 'true').toLowerCase() ===
@@ -69,6 +70,11 @@ async function buscarTitulosTotvs(token, receivableCodes) {
 }
 
 export async function executarBluecardPagamentosSync() {
+  // Avisos pagamento.pix que falharam ao abrir a solicitação de baixa (schema,
+  // TOTVS fora) voltam aqui a cada ciclo, dentro de 60 dias.
+  await retentarEventosPagamentoPix({ limite: 30 }).catch((e) =>
+    console.warn('⚠️ [bluecard-pagamentos] retry pagamento.pix falhou:', e.message),
+  );
   if (rodando) {
     console.log('⏭️ [bluecard-pagamentos] ciclo anterior ainda em execução, pulando');
     return { pulado: true };

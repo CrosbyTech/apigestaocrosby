@@ -156,3 +156,72 @@ seguir, sem travar o cliente.
 2. Chamar `GET /api/bluecard/liberacoes/{compra_id}` depois da aprovação e mostrar
    o estado ao cliente conforme a tabela acima.
 3. Não exibir "pode passar no caixa" enquanto o status não for `liberado`.
+
+---
+
+# Resposta aos 6 ajustes (issue #2 · 14/10/2026) — já no HeadCoach
+
+| # | Pedido | Como ficou |
+|---|---|---|
+| 1 | Zerar todos os BlueCard no dia de ligar; novo nasce com zero; qual campo o PDV usa; não mexer em quem não é BlueCard | Script `scripts/bluecard-zerar-limites.mjs` (lista = contratos assinados + compradores do app + arquivo de CPFs que o Felipe exportar; filiais participantes; dry-run por padrão). O PDV usa o **comercial** (`saleLimitValue`, parâmetro `IN_USA_LIMITE_COMERCIAL=1`); o HeadCoach grava **os dois** (`limitValue` e `saleLimitValue`) sempre juntos, porque o POST substitui o registro inteiro. Só CPFs da lista são tocados. "Cliente novo nasce com zero": no TOTVS o cadastro já nasce sem limite; quem der limite manual no HeadCoach a um cliente BlueCard tira a trava dele — regra operacional, não técnica. |
+| 2 | Subir só na filial da compra; sem ela, nas 12 | Feito. Ordem: `compra.filial` → `compra.filiais_bluecard` → `BLUECARD_LIMITE_BRANCH_CODES` → regra FILIAL. A janela guarda em quais filiais abriu e o fechar restaura só essas. |
+| 3 | Duas compras seguidas somam | Feito. Limite por filial = títulos em aberto + soma das janelas abertas do CPF que cobrem a filial. Fechar uma janela recalcula as outras; a última a fechar devolve o valor anterior (0). O vigia casa cada documento novo do TOTVS com a janela de mesmo valor (±R$ 0,05); quando só há uma janela, qualquer documento novo serve. |
+| 4 | Ao detectar a venda, `POST /api/v1/vendas/{compra_id}/registrada` | Feito, com `{ recebivel, registrada_em }` e `Idempotency-Key`. Se o app recusar (409 já registrada etc.), fica no log e a varredura de vocês casa depois. |
+| 5 | Janela expirada/cancelada → POST | Feito, na hora: `POST /api/v1/liberacoes/{compra_id}` (contrato abaixo). Enquanto a rota não existir no app, o HeadCoach registra o 404 e segue; a rota de status continua valendo. |
+| 6 | Render sempre ligado; liberar loja a loja | O serviço do HeadCoach já roda em plano sem hibernação (jobs de minuto em minuto). Piloto: `BLUECARD_LIMITE_BRANCH_CODES=95` (lista) — compra de outra filial responde `erro` com `fora_do_piloto` na rota de status e **não** sobe limite. Para as 12: apagar a variável (o payload já manda as participantes). |
+
+## Contrato novo: `POST /api/v1/liberacoes/{compra_id}` (HeadCoach → BlueCard)
+
+Assinado com a chave do HeadCoach (`X-Cc-Key`, `X-Cc-Timestamp`, `X-Cc-Signature`,
+`Idempotency-Key` = `<evento>:<compra_id>`). Corpo:
+
+```json
+{
+  "evento": "liberacao.expirada",          // ou "liberacao.cancelada"
+  "compra_id": "59a43c37-…",
+  "status": "zerado_expirado",             // ou "cancelada"
+  "em": "2026-10-14T18:10:41.000Z",
+  "valor_cents": 26700,
+  "liberado_em": "2026-10-14T16:10:41.000Z"
+}
+```
+
+Resposta esperada: `200 { ok: true }`. O app desfaz a compra (limite e parcelas) como
+já faz pela consulta de 15 min. O HeadCoach não reenvia em caso de erro: a rota de
+status (`GET /liberacoes/{id}`) é a fonte da verdade, este POST só adianta.
+
+## Campos do `compra.aprovada` que o gatilho lê agora
+
+`compra.id`, `compra.cpf`, `compra.valor_cents`, `compra.filial` (opcional),
+`compra.filiais_bluecard` (opcional). `documento` e `vencimentos` continuam
+ignorados por este mecanismo.
+
+## Novo estado de erro na rota de status
+
+`erro` com mensagem `filial X fora do piloto (...)`: a compra é de uma loja que ainda
+não entrou no piloto. O app deve mostrar que o cartão ainda não vale naquela loja.
+
+## Baixa dos Pix Pagar.me (correção de 14/10/2026)
+
+Nenhum dos 58 avisos `pagamento.pix` recebidos entre 15/09 e 14/10 tinha virado
+solicitação de baixa: a tabela do HeadCoach exigia um arquivo de comprovante e o
+insert era rejeitado em silêncio (só o status `erro` no evento denunciava). Corrigido
+e reprocessado em 14/10: 47 solicitações abertas para o financeiro, 14 títulos já
+tinham sido baixados à mão (não duplicados), 1 sem título localizado (aberta com aviso).
+A partir de agora um aviso que falhar é retentado a cada 15 min por 60 dias.
+
+**Marinalva (cobrança `527e8a6b`, R$ 248,64):** nada havia sido baixado no TOTVS. A
+solicitação foi aberta já apontando para o título de **outubro** (1270-1, venc.
+07/10/2026, R$ 248,62), não para janeiro. Se o app reenviar o `pagamento.pix`
+corrigido, ele é ignorado como repetido (mesma cobrança).
+
+## Variáveis (Render)
+
+| Variável | Uso |
+|---|---|
+| `BLUECARD_LIMITE_AUTO_ENABLED` | `true` liga o gatilho (webhook + vigia) |
+| `BLUECARD_LIMITE_BRANCH_CODES` | piloto: lista de filiais permitidas (ex.: `95`); vazia = sem restrição |
+| `BLUECARD_LIBERACAO_TIMEOUT_MIN` | minutos até expirar a janela (default 120) |
+| `BLUECARD_LIMITE_CRON` | cadência do vigia (default a cada minuto) |
+
+Migration desta rodada: `migrations/bluecard_gatilho_limite_v2.sql`.

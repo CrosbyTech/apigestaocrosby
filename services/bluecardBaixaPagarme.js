@@ -174,6 +174,19 @@ export async function abrirSolicitacoesBaixaPix(body) {
     if (t) usados.add(`${t.receivableCode}-${t.installmentCode}`);
     else resultado.sem_titulo++;
 
+    // Título já baixado no TOTVS (financeiro fez na mão antes do aviso chegar):
+    // não abre solicitação — registra e segue.
+    if (t && !t.aberto) {
+      resultado.ja_baixados = (resultado.ja_baixados || 0) + 1;
+      resultado.detalhes.push({
+        parcela_id: p.parcela_id,
+        titulo: `${t.receivableCode}-${t.installmentCode}`,
+        criterio: achado.criterio,
+        resultado: 'titulo_ja_baixado',
+      });
+      continue;
+    }
+
     const ref = parseTitulo(p.titulo);
     const jurosCents = Math.round((encargos * Number(p.valor_cents || 0)) / somaParcelas);
     const refExterna = `pagarme:${pg.cobranca_id}:${p.parcela_id}`;
@@ -194,11 +207,17 @@ export async function abrirSolicitacoesBaixaPix(body) {
       `[${refExterna}]`,
     ].join(' ');
 
+    // cd_empresa é NOT NULL na tabela: sem título localizado, usa a filial do
+    // título mais recente do cliente (onde ele compra) ou 0 — a observação já
+    // avisa que precisa de conferência manual.
+    const filialFallback =
+      titulos.slice().sort((x, y) => String(y.emissao).localeCompare(String(x.emissao)))[0]?.branchCode ?? 0;
     const row = {
-      cd_empresa: t?.branchCode ?? null,
+      cd_empresa: t?.branchCode ?? filialFallback,
       cd_cliente: t?.customerCode ?? cliente?.code ?? null,
       nm_cliente: t?.customerName || cliente?.name || pg.nome || '',
-      nr_fat: t?.receivableCode ?? ref?.receivableCode ?? null,
+      // nr_fat também é NOT NULL: 0 = "título não localizado" (ver observação)
+      nr_fat: t?.receivableCode ?? ref?.receivableCode ?? 0,
       nr_parcela: t?.installmentCode ?? ref?.installmentCode ?? p.numero ?? 1,
       vl_fatura: t ? centsParaReais(t.valorCents) : centsParaReais(p.valor_cents),
       vl_juros: centsParaReais(jurosCents),
@@ -206,8 +225,11 @@ export async function abrirSolicitacoesBaixaPix(body) {
       dt_emissao: t?.emissao || null,
       cd_portador: t?.cd_portador ?? null,
       nm_portador: t?.nm_portador || (t?.branchCode ? nomeFilial(t.branchCode) : null),
-      comprovante_url: null,
-      comprovante_path: null,
+      // A tabela exige comprovante_url NOT NULL (foi o que segurou 58
+      // pagamentos entre 15/09 e 14/10/2026 sem ninguém ver): vazio, não null.
+      // O comprovante é o pedido na Pagar.me, citado na observação.
+      comprovante_url: '',
+      comprovante_path: '',
       status: 'pendente',
       user_id: null,
       ...SOLICITANTE,
@@ -236,4 +258,54 @@ export async function abrirSolicitacoesBaixaPix(body) {
       `${resultado.sem_titulo} sem título localizado`,
   );
   return resultado;
+}
+
+/**
+ * Reprocessa eventos pagamento.pix que ficaram em 'erro' (ex.: a constraint
+ * comprovante_url NOT NULL, 15/09–14/10/2026). Idempotente: a solicitação tem
+ * ref_externa única. `overrides` permite corrigir o título de um evento
+ * específico ({ [eventoId]: { parcela_id → { titulo, vencimento } } }).
+ */
+export async function retentarEventosPagamentoPix({ maxIdadeDias = 60, limite = 100, overrides = {} } = {}) {
+  const desde = new Date(Date.now() - maxIdadeDias * 86400000).toISOString();
+  const { data: eventos } = await supabase
+    .from('bluecard_eventos')
+    .select('id, payload')
+    .eq('evento', 'pagamento.pix')
+    .eq('status', 'erro')
+    .gte('recebido_em', desde)
+    .order('recebido_em', { ascending: true })
+    .limit(limite);
+
+  const saida = { tentados: 0, ok: 0, falhas: 0, detalhes: [] };
+  for (const ev of eventos || []) {
+    saida.tentados++;
+    const body = JSON.parse(JSON.stringify(ev.payload || {}));
+    const ov = overrides[ev.id];
+    if (ov && Array.isArray(body.pagamento?.parcelas)) {
+      for (const p of body.pagamento.parcelas) {
+        if (ov[p.parcela_id]) Object.assign(p, ov[p.parcela_id]);
+      }
+    }
+    try {
+      const r = await abrirSolicitacoesBaixaPix(body);
+      await supabase
+        .from('bluecard_eventos')
+        .update({ status: 'processado', processado_em: new Date().toISOString(), erro: null })
+        .eq('id', ev.id);
+      saida.ok++;
+      saida.detalhes.push({ evento: ev.id, ...r, detalhes: undefined });
+    } catch (e) {
+      saida.falhas++;
+      await supabase
+        .from('bluecard_eventos')
+        .update({ erro: String(e.message).slice(0, 500) })
+        .eq('id', ev.id);
+      saida.detalhes.push({ evento: ev.id, erro: e.message });
+    }
+  }
+  if (saida.tentados) {
+    console.log(`🔁 [bluecard/baixa] retry pagamento.pix: ${saida.ok} ok, ${saida.falhas} falha(s) de ${saida.tentados}`);
+  }
+  return saida;
 }
