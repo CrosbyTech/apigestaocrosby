@@ -62,7 +62,7 @@ function validarPeriodo(req) {
 
 function resolverLojas(stonecode) {
   if (!stonecode || stonecode === 'all' || stonecode === 'todas') {
-    return STONE_LOJAS.filter((l) => l.apiKey);
+    return STONE_LOJAS.filter((l) => l.apiKey && l.stonecode);
   }
   const codes = String(stonecode)
     .split(',')
@@ -201,8 +201,8 @@ router.get(
     const t0 = Date.now();
     const mapa = await mapaFiliaisSeguro();
     const lojasResolvidas = lojas.map((l) => comFiliaisTotvs(l, mapa));
-    const semChave = lojasResolvidas.filter((l) => !l.apiKey);
-    const comChave = lojasResolvidas.filter((l) => l.apiKey);
+    const semChave = lojasResolvidas.filter((l) => !l.apiKey || !l.stonecode);
+    const comChave = lojasResolvidas.filter((l) => l.apiKey && l.stonecode);
 
     // TOTVS: uma busca só com todas as filiais envolvidas, com 1 dia de folga
     // de cada lado (venda na virada da noite / captura no dia seguinte).
@@ -269,7 +269,12 @@ router.get(
     const agg = (f) => +resultado.reduce((s, r) => s + (Number(f(r.resumo)) || 0), 0).toFixed(2);
     const geral = {
       lojas: resultado.length,
-      lojasSemChave: semChave.map((l) => ({ nome: l.nome, stonecode: l.stonecode, cnpj: l.cnpjFmt })),
+      lojasSemChave: semChave.map((l) => ({
+        nome: l.nome,
+        stonecode: l.stonecode,
+        cnpj: l.cnpjFmt,
+        motivo: !l.stonecode ? 'sem StoneCode' : 'sem chave',
+      })),
       stoneQtd: agg((r) => r.stone.qtd),
       stoneBruto: agg((r) => r.stone.bruto),
       stoneLiquido: agg((r) => r.stone.liquido),

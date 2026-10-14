@@ -111,8 +111,12 @@ DELETE /api/conciliacao-stone/vinculos/:id
 
 ## Pendências
 
-- Chaves `sk_` das 8 lojas sem chave (Matriz, João Pessoa, Nova Cruz, Loja Virtual,
-  Ayrton Senna, Imperatriz, Patos, Teresina) — gerar no Portal Stone de cada CNPJ.
+- Lojas fora da conciliação (14/10/2026): **Parnamirim** (55) e **Nova Cruz** (5)
+  faltam StoneCode/chave. Canguaretama (65, StoneCode 167972584) ativada em 14/10:
+  8 de 8 transações da semana 06–13/10 casaram com o TOTVS.
+  Matriz e Loja Virtual foram removidas (lojas encerradas). Em 14/10 entraram João
+  Pessoa, Ayrton Senna, Imperatriz, Patos e Teresina (testadas contra a API).
+  Loja com `stonecode: null` aparece no seletor como pendente e fica fora de "todas".
 - A Stone informou o **mesmo StoneCode 177781981** para Guararapes (0010-06) e
   Tacaruna (0011-97). Enquanto não vier um StoneCode próprio, o batimento dessa
   maquininha considera as filiais 88 e 89. Confirmar com a Stone.

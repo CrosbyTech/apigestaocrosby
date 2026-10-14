@@ -34,16 +34,6 @@ const envKey = (stonecode) => {
 
 export const STONE_LOJAS = [
   {
-    cnpj: '17177680000116',
-    cnpjFmt: '17.177.680/0001-16',
-    nome: 'CROSBY MATRIZ',
-    razao: 'FERREIRA COMERCIO',
-    stonecode: '142167328',
-    affiliationKey: 'e4d6bf9de6444d41b9d3bc88f6627436',
-    filiais: [1],
-    apiKey: envKey('142167328'),
-  },
-  {
     cnpj: '17177680000205',
     cnpjFmt: '17.177.680/0002-05',
     nome: 'CROSBY JOAO PESSOA',
@@ -51,7 +41,7 @@ export const STONE_LOJAS = [
     stonecode: '864768792',
     affiliationKey: 'a696c14150064fbf950718ae41ae874c',
     filiais: [2],
-    apiKey: envKey('864768792'),
+    apiKey: envKey('864768792') || 'sk_23cc282f1bf34b999eb1c71c2d4cdde1',
   },
   {
     cnpj: '33592092000103',
@@ -64,14 +54,26 @@ export const STONE_LOJAS = [
     apiKey: envKey('187229109'),
   },
   {
-    cnpj: '27728810000891',
-    cnpjFmt: '27.728.810/0008-91',
-    nome: 'CROSBY LOJA VIRTUAL',
-    razao: 'FA MODA & VAREJO (Fabio Ferreira)',
-    stonecode: '505526611',
-    affiliationKey: '73a165f526b24e71a27cec21b19efb77',
-    filiais: [75],
-    apiKey: envKey('505526611'),
+    cnpj: '53661116000138',
+    cnpjFmt: '53.661.116/0001-38',
+    nome: 'CROSBY PARNAMIRIM',
+    razao: 'IRMAOS VAREJO COMERCIAL',
+    // StoneCode e chave ainda não informados (14/10/2026). Sem títulos com
+    // portador STONE no TOTVS nos últimos 30 dias — confirmar se usa Stone.
+    stonecode: null,
+    affiliationKey: null,
+    filiais: [55],
+    apiKey: null,
+  },
+  {
+    cnpj: '27728810000620',
+    cnpjFmt: '27.728.810/0006-20',
+    nome: 'CROSBY CANGUARETAMA',
+    razao: 'FA MODA & VAREJO',
+    stonecode: '167972584',
+    affiliationKey: null,
+    filiais: [65],
+    apiKey: envKey('167972584') || 'sk_bb43846402eb4866868b73c552e80a47',
   },
   {
     cnpj: '27728810000972',
@@ -106,7 +108,7 @@ export const STONE_LOJAS = [
     stonecode: '721608089',
     affiliationKey: 'fa250569b21e4df893c1d76bee479e04',
     filiais: [90],
-    apiKey: envKey('721608089'),
+    apiKey: envKey('721608089') || 'sk_85b1723d2fb34335bf39817188a543be',
   },
   {
     cnpj: '17177680001279',
@@ -116,7 +118,7 @@ export const STONE_LOJAS = [
     stonecode: '134006802',
     affiliationKey: '2248ce4424de44e3bc8ceef4497691c2',
     filiais: [93],
-    apiKey: envKey('134006802'),
+    apiKey: envKey('134006802') || 'sk_e446b100ce22438191f6c25fc89f361a',
   },
   {
     cnpj: '17177680001198',
@@ -126,7 +128,7 @@ export const STONE_LOJAS = [
     stonecode: '168851294',
     affiliationKey: 'fbbb0a8aa0ff4f3f8acf0fc16d526dc6',
     filiais: [94],
-    apiKey: envKey('168851294'),
+    apiKey: envKey('168851294') || 'sk_a21f7b3b8eea4757bd5bc81b85dea9ac',
   },
   {
     cnpj: '27728810000549',
@@ -146,7 +148,7 @@ export const STONE_LOJAS = [
     stonecode: '176584300',
     affiliationKey: 'b402dfa398654cb2bb3c01ae4dc93360',
     filiais: [97],
-    apiKey: envKey('176584300'),
+    apiKey: envKey('176584300') || 'sk_e83da2ff4ab74e0fbe2a93a37b824f95',
   },
   {
     cnpj: '17177680001007',
@@ -161,9 +163,12 @@ export const STONE_LOJAS = [
 ];
 
 export const getLojaByStonecode = (stonecode) =>
-  STONE_LOJAS.find((l) => String(l.stonecode) === String(stonecode)) || null;
+  (stonecode &&
+    STONE_LOJAS.find((l) => l.stonecode && String(l.stonecode) === String(stonecode))) ||
+  null;
 
-export const getLojasComChave = () => STONE_LOJAS.filter((l) => !!l.apiKey);
+// Lojas prontas para consultar a Stone: têm chave E StoneCode
+export const getLojasComChave = () => STONE_LOJAS.filter((l) => !!l.apiKey && !!l.stonecode);
 
 // Lista pública (sem expor as chaves) para o frontend montar o seletor.
 export const getLojasPublic = () =>
@@ -178,5 +183,7 @@ export const getLojasPublic = () =>
       filial: filiais[0],
       observacao: observacao || null,
       temChave: !!apiKey,
+      // sem StoneCode a loja aparece no seletor, mas não pode ser consultada
+      pendente: !stonecode,
     }),
   );
