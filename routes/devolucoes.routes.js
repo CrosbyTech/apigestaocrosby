@@ -266,24 +266,33 @@ router.get(
     const ate = req.query.ate ? String(req.query.ate).slice(0, 10) : null;
     const empresa = parseInt(req.query.empresa, 10) || null;
     const busca = String(req.query.busca || '').trim();
-    let q = supabase
-      .from('devolucoes_transacoes')
-      .select(
-        'id, devolucao_id, empresa, origem, transacao_code, transacao_date, transacao_status, operacao, cfop, total, cliente_code, cliente_nome, vendedor_nome, nf_numero, nf_serie, nf_empresa, nf_total, nf_qtd_pecas, qtd_recebida, qtd_faltando, qtd_sobrando, valor_faltando, criado_por, criado_em, atendida_em',
-      )
-      .order('id', { ascending: false })
-      .limit(Math.min(parseInt(req.query.limite, 10) || 300, 1000));
-    if (de) q = q.gte('criado_em', `${de}T00:00:00-03:00`);
-    if (ate) q = q.lte('criado_em', `${ate}T23:59:59.999-03:00`);
-    if (empresa) q = q.eq('empresa', empresa);
-    if (busca) {
-      q = /^\d+$/.test(busca)
-        ? q.or(`transacao_code.eq.${busca},cliente_code.eq.${busca},nf_numero.eq.${busca}`)
-        : q.ilike('cliente_nome', `%${busca}%`);
+    // Tolerante à migration pendente: se a coluna "origem" ainda não existe
+    // (devolucoes_transacoes_fisfp082.sql não rodou), consulta sem ela e
+    // assume origem 'totvs' — a aba segue mostrando as transações existentes.
+    const COLS = (comOrigem) =>
+      `id, devolucao_id, empresa, ${comOrigem ? 'origem, ' : ''}transacao_code, transacao_date, transacao_status, operacao, cfop, total, cliente_code, cliente_nome, vendedor_nome, nf_numero, nf_serie, nf_empresa, nf_total, nf_qtd_pecas, qtd_recebida, qtd_faltando, qtd_sobrando, valor_faltando, criado_por, criado_em, atendida_em`;
+    const montar = (comOrigem) => {
+      let q = supabase
+        .from('devolucoes_transacoes')
+        .select(COLS(comOrigem))
+        .order('id', { ascending: false })
+        .limit(Math.min(parseInt(req.query.limite, 10) || 300, 1000));
+      if (de) q = q.gte('criado_em', `${de}T00:00:00-03:00`);
+      if (ate) q = q.lte('criado_em', `${ate}T23:59:59.999-03:00`);
+      if (empresa) q = q.eq('empresa', empresa);
+      if (busca) {
+        q = /^\d+$/.test(busca)
+          ? q.or(`transacao_code.eq.${busca},cliente_code.eq.${busca},nf_numero.eq.${busca}`)
+          : q.ilike('cliente_nome', `%${busca}%`);
+      }
+      return q;
+    };
+    let { data, error } = await montar(true);
+    if (error && /origem/i.test(error.message || '')) {
+      ({ data, error } = await montar(false));
     }
-    const { data, error } = await q;
     if (error) return erroTrx(res, error);
-    const items = data || [];
+    const items = (data || []).map((i) => ({ origem: 'totvs', ...i }));
     return successResponse(
       res,
       {
