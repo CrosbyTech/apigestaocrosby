@@ -15,9 +15,12 @@
  *    REVENDA            → comercial-revenda
  *    nenhum reconhecido → comercial-mtm (padrão definido pelo Yago)
  *
+ * Transferência entre lojas (assunto "Pedido TRANSFERÊNCIA … não é venda")
+ * vai para a GERÊNCIA DE VAREJO — estava no setor errado. Justificativa de
+ * prazo: "SETOR ERRADO".
+ *
  * O QUE NÃO É TOCADO (fica no financeiro):
  *  - NOTA FISCAL ... pendente de ESCRITURAÇÃO  → regra explícita do Yago
- *  - Pedido de TRANSFERÊNCIA entre lojas — o próprio assunto diz "não é venda"
  *  - TEF, rede e afins — é chamado de tecnologia parado no financeiro
  *  - Depósito, divergência de caixa, venda sem lançamento, crédito,
  *    cancelamento/duplicidade de NF — financeiro de verdade
@@ -38,6 +41,11 @@ const SETOR_ORIGEM = 'financeiro';
 const PADRAO = 'comercial-mtm';
 const AUTOR = 'HeadCoach (automático)';
 
+// Transferência entre lojas → Gerência de Varejo (estava no setor errado)
+const SETOR_TRANSFERENCIA = 'gerente-varejo';
+const ehTransferencia = (assunto) =>
+  /transferencia/.test(assunto) || /nao e venda/.test(assunto);
+
 // teto por ciclo: se algo der errado na regra, não reorganiza a fila inteira
 const MAX_POR_CICLO = 20;
 
@@ -53,10 +61,6 @@ const semAcento = (s) =>
 // Ordem importa: o primeiro que casar decide, e o motivo vai no relatório.
 const EXCLUSOES = [
   { motivo: 'pendente de escrituração', quando: (t) => /escritura/.test(t) },
-  {
-    motivo: 'transferência entre lojas (não é venda)',
-    quando: (t) => /transferencia/.test(t) || /nao e venda/.test(t),
-  },
   { motivo: 'chamado de TEF/rede', quando: (t) => /\btef\b|acesso da rede/.test(t) },
   { motivo: 'depósito', quando: (t) => /deposito/.test(t) },
   { motivo: 'caixa', quando: (t) => /caixa/.test(t) },
@@ -132,6 +136,19 @@ export function classificar(chamado) {
     if (ex.quando(assunto)) return { rotear: false, motivo: ex.motivo };
   }
 
+  // Transferência entre lojas: vai pra Gerência de Varejo. Vem ANTES dos
+  // padrões comerciais porque o assunto também contém "IE irregular na SEFAZ".
+  if (ehTransferencia(assunto)) {
+    return {
+      rotear: true,
+      tipo: 'transferencia',
+      setor: SETOR_TRANSFERENCIA,
+      canal: 'transferência entre lojas',
+      motivo: 'transferência entre lojas (setor errado)',
+      renovaPrazo: !!chamado.atrasado,
+    };
+  }
+
   const padrao = PADROES_COMERCIAIS.find((p) => p.quando(assunto));
   if (!padrao) return { rotear: false, motivo: 'não é assunto comercial' };
 
@@ -139,6 +156,7 @@ export function classificar(chamado) {
     CANAIS.find((c) => c.quando(assunto)) || CANAIS.find((c) => c.quando(corpo));
   return {
     rotear: true,
+    tipo: 'comercial',
     setor: canal ? canal.setor : PADRAO,
     canal: canal ? canal.setor.replace('comercial-', '') : 'não identificado → mtm',
     motivo: padrao.nome,
@@ -159,11 +177,50 @@ async function rpc(fn, args = {}) {
   return data;
 }
 
+// Monta o p_patch de um chamado roteado. prazoTransferenciaFixo (YYYY-MM-DD),
+// quando passado, força esse prazo em TODA transferência (usado só na limpeza
+// única do acervo que o Yago pediu — terça 20/10 com "SETOR ERRADO").
+function construirPatch(m, novoPrazo, prazoTransferenciaFixo) {
+  if (m.tipo === 'transferencia') {
+    const patch = {
+      setor: m.setor,
+      comentario:
+        'Encaminhado automaticamente do Financeiro para a Gerência de Varejo — transferência entre lojas estava no setor errado.',
+    };
+    let prazoAplicado = null;
+    if (prazoTransferenciaFixo) {
+      patch.prazo = `${prazoTransferenciaFixo}T18:00:00-03:00`;
+      patch.prazo_justificativa = 'SETOR ERRADO';
+      prazoAplicado = prazoTransferenciaFixo;
+    } else if (m.renovaPrazo) {
+      patch.prazo = novoPrazo;
+      patch.prazo_justificativa = 'SETOR ERRADO';
+      prazoAplicado = novoPrazo.slice(0, 10);
+    }
+    return { patch, prazoAplicado };
+  }
+  // comercial
+  const patch = {
+    setor: m.setor,
+    comentario: `Encaminhado automaticamente do Financeiro para ${m.setor} (canal: ${m.canal}).`,
+  };
+  let prazoAplicado = null;
+  if (m.renovaPrazo) {
+    patch.prazo = novoPrazo;
+    patch.prazo_justificativa =
+      'Chamado vencido ao ser encaminhado do Financeiro para o Comercial — prazo renovado em 3 dias úteis.';
+    prazoAplicado = novoPrazo.slice(0, 10);
+  }
+  return { patch, prazoAplicado };
+}
+
 /**
  * @param {Object} opts
  * @param {boolean} opts.simular  true = só devolve o que faria, não grava
+ * @param {string} [opts.prazoTransferenciaFixo]  YYYY-MM-DD; força esse prazo
+ *        em toda transferência (limpeza única do acervo)
  */
-export async function rotearComerciais({ simular = true } = {}) {
+export async function rotearComerciais({ simular = true, prazoTransferenciaFixo = null } = {}) {
   const lista = await rpc('chamado_listar', {});
   if (!Array.isArray(lista)) throw new Error('chamado_listar não devolveu lista');
 
@@ -200,28 +257,34 @@ export async function rotearComerciais({ simular = true } = {}) {
   const falhas = [];
   for (const m of alvos) {
     try {
-      const r = await rpc('chamado_atualizar', {
+      const { patch, prazoAplicado } = construirPatch(m, novoPrazo, prazoTransferenciaFixo);
+      let r = await rpc('chamado_atualizar', {
         p_id: m.chamado.id,
-        p_patch: (() => {
-          const patch = {
-            setor: m.setor,
-            comentario: `Encaminhado automaticamente do Financeiro para ${m.setor} (canal: ${m.canal}).`,
-          };
-          if (m.renovaPrazo) {
-            patch.prazo = novoPrazo;
-            // sem justificativa a RPC do Dryland devolve ok:true e IGNORA o prazo
-            patch.prazo_justificativa =
-              'Chamado vencido ao ser encaminhado do Financeiro para o Comercial — prazo renovado em 3 dias úteis.';
-          }
-          return patch;
-        })(),
+        p_patch: patch,
         p_por: AUTOR,
       });
+
+      // Regra nova do Dryland (set/2026): a partir da 3ª prorrogação a RPC
+      // recusa o patch INTEIRO — inclusive a troca de setor. Mover o chamado
+      // é o que importa, então se o prazo foi o motivo da recusa, reenviamos
+      // só o setor (sem prazo).
+      let prazoBloqueado = false;
+      if ((!r || !r.ok) && patch.prazo && /prorrog/i.test(JSON.stringify(r || ''))) {
+        const { prazo, prazo_justificativa, ...semPrazo } = patch;
+        r = await rpc('chamado_atualizar', {
+          p_id: m.chamado.id,
+          p_patch: semPrazo,
+          p_por: AUTOR,
+        });
+        prazoBloqueado = true;
+      }
+
       if (r && r.ok)
         aplicados.push({
           numero: m.chamado.numero,
           setor: m.setor,
-          prazo_renovado: m.renovaPrazo ? novoPrazo.slice(0, 10) : null,
+          prazo_renovado: prazoBloqueado ? null : prazoAplicado,
+          prazo_bloqueado: prazoBloqueado || undefined,
         });
       else falhas.push({ numero: m.chamado.numero, erro: (r && (r.mensagem || r.erro)) || 'recusado' });
     } catch (e) {
@@ -237,7 +300,7 @@ export async function rotearComerciais({ simular = true } = {}) {
     await criarNotificacaoSistema({
       tipo: 'DRYLAND_CHAMADO_ROTEADO',
       nivel: 'info',
-      titulo: `${aplicados.length} chamado(s) do Financeiro encaminhados ao Comercial`,
+      titulo: `${aplicados.length} chamado(s) do Financeiro encaminhados automaticamente`,
       mensagem: Object.entries(porSetor)
         .map(([s, n]) => `${n} para ${s}`)
         .join(' · '),
