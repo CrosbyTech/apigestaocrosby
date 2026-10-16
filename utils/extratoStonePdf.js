@@ -22,10 +22,22 @@ import { createRequire } from 'node:module';
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const soDigitos = (v) => String(v ?? '').replace(/\D/g, '');
 
-// colunas (x em pontos, página A4 de 598pt de largura)
+// colunas (x em pontos). Valores padrão do "Comprovante de Extrato"; o
+// "Extrato de conta corrente" usa outras posições, por isso os limites são
+// recalculados a partir do cabeçalho (DATA/TIPO/DESCRIÇÃO/VALOR/SALDO/
+// CONTRAPARTE) de cada página quando ele é encontrado.
 const COL = { data: 75, tipo: 120, descricao: 280, valor: 355, saldo: 425 };
-const colunaDe = (x) =>
-  x < COL.data ? 'data' : x < COL.tipo ? 'tipo' : x < COL.descricao ? 'descricao' : x < COL.valor ? 'valor' : x < COL.saldo ? 'saldo' : 'contraparte';
+const fazerColunaDe = (col) => (x) =>
+  x < col.data ? 'data' : x < col.tipo ? 'tipo' : x < col.descricao ? 'descricao' : x < col.valor ? 'valor' : x < col.saldo ? 'saldo' : 'contraparte';
+
+// limites a partir do cabeçalho: cada coluna começa 4pt antes do seu título
+function colunasDoCabecalho(items, cab) {
+  const linha = items.filter((it) => Math.abs(it.y - cab.y) <= 2.5);
+  const x = (re) => linha.find((it) => re.test(it.s.trim()))?.x;
+  const tipo = x(/^TIPO$/), desc = x(/^DESCRI[ÇC][ÃA]O$/), valor = x(/^VALOR$/), saldo = x(/^SALDO$/), contra = x(/^CONTRAPARTE$/);
+  if ([tipo, desc, valor, saldo, contra].some((v) => v == null)) return COL;
+  return { data: tipo - 4, tipo: desc - 4, descricao: valor - 4, valor: saldo - 4, saldo: contra - 4 };
+}
 
 const RE_DATA = /^(\d{2})\/(\d{2})\/(\d{2})$/;
 const RE_VALOR = /^(-)?\s*R\$\s*([\d.]+,\d{2})$/;
@@ -174,6 +186,7 @@ export function interpretarPaginas(paginas) {
     const items = pg.items;
     const cab = items.find((it) => it.s.trim() === 'DATA' && it.x < COL.data);
     if (!cab) continue; // página sem tabela
+    const colunaDe = fazerColunaDe(colunasDoCabecalho(items, cab));
     const yTopo = cab.y + 4;
     const rodape = items.find((it) => /Informa[çc][õo]es do Comprovante/i.test(it.s));
     const yFundo = rodape ? rodape.y - 4 : pg.altura;
