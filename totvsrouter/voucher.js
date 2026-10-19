@@ -12,6 +12,7 @@ import {
   TOTVS_BASE_URL,
 } from '../totvsrouter/totvsHelper.js';
 import supabase from '../config/supabase.js';
+import { comandoVoucherDoUrl, registrarComandoVoucher, postVoucherRegistrado } from '../services/erp/vouchers.js';
 
 const router = express.Router();
 
@@ -46,7 +47,20 @@ const VAREJO_VOUCHER_CONFIG = {
 };
 
 // POST autenticado na API TOTVS com retry automático em caso de token expirado (401)
+// ERP fase 1: criação/alteração de voucher fica registrada em voucher_commands
 const postTotvsAuthed = async (endpoint, payload) => {
+  if (!comandoVoucherDoUrl(endpoint)) return postTotvsAuthedBruto(endpoint, payload);
+  try {
+    const r = await postTotvsAuthedBruto(endpoint, payload);
+    registrarComandoVoucher(endpoint, payload, { sucesso: true, http_status: r.status, resposta: r.data });
+    return r;
+  } catch (e) {
+    registrarComandoVoucher(endpoint, payload, { sucesso: false, http_status: e.response?.status ?? null, resposta: e.response?.data ?? null, erro: e.message });
+    throw e;
+  }
+};
+
+const postTotvsAuthedBruto = async (endpoint, payload) => {
   const tokenData = await getToken();
   if (!tokenData?.access_token) {
     const err = new Error('Não foi possível obter token TOTVS');
@@ -627,7 +641,7 @@ router.post(
           printTemplateCode: voucher.printTemplateCode,
         };
 
-        const response = await axios.post(VOUCHER_UPDATE_ENDPOINT, payload, {
+        const response = await postVoucherRegistrado(VOUCHER_UPDATE_ENDPOINT, payload, {
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',
@@ -971,7 +985,7 @@ router.post(
           payload.printTemplateCode = voucher.printTemplateCode;
         if (voucher.branchs.length > 0) payload.branchs = voucher.branchs;
 
-        const response = await axios.post(VOUCHER_CREATE_ENDPOINT, payload, {
+        const response = await postVoucherRegistrado(VOUCHER_CREATE_ENDPOINT, payload, {
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',

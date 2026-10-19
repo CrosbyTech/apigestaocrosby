@@ -6,6 +6,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+import { requireAuth, requireRole } from '../middlewares/auth.js';
 import {
   httpsAgent,
   httpAgent,
@@ -15,8 +16,12 @@ import {
 
 const router = express.Router();
 
+// O token do TOTVS dá acesso total ao ERP: só admin/owner logado no HeadCoach
+// pode lê-lo (página API Claude). Antes era público.
 router.get(
   '/token',
+  requireAuth,
+  requireRole('owner', 'admin'),
   asyncHandler(async (req, res) => {
     // Obter token atual (ou gerar novo se necessário)
     const tokenData = await getToken();
@@ -44,6 +49,8 @@ router.get(
 
 router.post(
   '/auth',
+  requireAuth,
+  requireRole('owner', 'admin'),
   asyncHandler(async (req, res) => {
     const {
       grant_type,

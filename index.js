@@ -35,6 +35,9 @@ import fluxoCaixaExtRoutes from './routes/fluxoCaixaExt.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
+import erpRoutes from './routes/erp.routes.js';
+import { iniciarJobErpSync } from './jobs/erp-sync.job.js';
+import { iniciarJobIntegracaoOutbox } from './jobs/integracao-outbox.job.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
 import { iniciarUazapiMonitor } from './services/uazapiMonitor.js';
 import { initializeWhatsApp } from './config/whatsapp.js';
@@ -196,6 +199,7 @@ app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscri�
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
+app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 
 // Error handling middleware
@@ -257,6 +261,8 @@ app.listen(PORT, async () => {
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
+  iniciarJobErpSync();
+  iniciarJobIntegracaoOutbox();
 
   // Retoma campanhas WhatsApp travadas após restart (reseta processing → pending)
   (async () => {

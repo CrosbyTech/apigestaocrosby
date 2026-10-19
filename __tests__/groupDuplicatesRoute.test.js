@@ -32,8 +32,21 @@ jest.unstable_mockModule('../totvsrouter/totvsHelper.js', () => ({
   TOTVS_AUTH_ENDPOINT: 'https://totvs.test/token',
   getBranchCodes: async () => [1],
 }));
+// espelho do contas a pagar no HeadCoach (ERP fase 1) — sem banco no teste
+const comandosAP = [];
+const sincronizadosAP = [];
+jest.unstable_mockModule('../services/erp/contasPagar.js', () => ({
+  registrarComando: async (c) => {
+    comandosAP.push(c);
+  },
+  sincronizarDuplicata: async (d) => {
+    sincronizadosAP.push(d);
+    return 1;
+  },
+}));
 
 const { default: router } = await import('../totvsrouter/financeiro.js');
+const esperarEspelho = () => new Promise((r) => setTimeout(r, 30));
 const app = express();
 app.use(express.json());
 app.use('/api/totvs', router);
@@ -61,7 +74,31 @@ describe('POST /api/totvs/accounts-payable/duplicates/group', () => {
   beforeEach(() => {
     posts.length = 0;
     tokens.length = 0;
+    comandosAP.length = 0;
+    sincronizadosAP.length = 0;
     respostaTotvs = () => ({ status: 200, data: { ok: true } });
+  });
+
+  test('espelha no HeadCoach: registra o comando e relê a duplicata resultante e as de origem', async () => {
+    const r = await request(app).post(URL).send(bodyOk());
+    expect(r.status).toBe(200);
+    await esperarEspelho();
+    expect(comandosAP).toHaveLength(1);
+    expect(comandosAP[0]).toMatchObject({ command: 'group', sucesso: true, http_status: 200 });
+    expect(comandosAP[0].payload.duplicateCode).toBe(9001);
+    expect(sincronizadosAP.map((s) => s.duplicateCode)).toEqual([9001, 123, 124]);
+  });
+
+  test('falha no TOTVS também fica registrada como comando sem sucesso', async () => {
+    respostaTotvs = () => {
+      throw httpError(400, [{ message: 'Parcela inválida' }]);
+    };
+    const r = await request(app).post(URL).send(bodyOk());
+    expect(r.status).toBe(400);
+    await esperarEspelho();
+    expect(comandosAP).toHaveLength(1);
+    expect(comandosAP[0]).toMatchObject({ command: 'group', sucesso: false, http_status: 400 });
+    expect(sincronizadosAP).toHaveLength(0);
   });
 
   test('normaliza e envia o payload no formato GroupDuplicatesCommand', async () => {

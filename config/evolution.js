@@ -6,7 +6,8 @@ const evolutionPool = new Pool({
   port: parseInt(process.env.EVOLUTION_DB_PORT || '5432'),
   database: process.env.EVOLUTION_DB_NAME || 'evolutionadm',
   user: process.env.EVOLUTION_DB_USER || 'evolution_read',
-  password: process.env.EVOLUTION_DB_PASSWORD || 'HDDC6v9FSBXzZER3',
+  // senha só por env (EVOLUTION_DB_PASSWORD) — não voltar a deixar no código
+  password: process.env.EVOLUTION_DB_PASSWORD,
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,

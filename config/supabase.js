@@ -7,14 +7,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-const supabaseUrl =
-  process.env.SUPABASE_URL || 'https://dorztqiunewggydvkjnf.supabase.co';
-const supabaseServiceKey =
-  process.env.SUPABASE_SERVICE_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRvcnp0cWl1bmV3Z2d5ZHZram5mIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NzA3MTI4OCwiZXhwIjoyMDYyNjQ3Mjg4fQ.sk6z1v-MKAjiQK-IfIvPvxI-GdRyH_Biaj5a-8_Ksy8';
+// URL e service_role key SÓ por env (SUPABASE_URL / SUPABASE_SERVICE_KEY).
+// A chave que ficava hardcoded aqui foi removida do código: está no .env
+// (local) e no painel do Render (produção). Rotacionar no painel do Supabase.
+const supabaseUrl = process.env.SUPABASE_URL || 'https://dorztqiunewggydvkjnf.supabase.co';
+let supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
 
-if (!supabaseUrl || !supabaseServiceKey) {
-  console.error('Erro: Supabase URL ou Service Key não estão definidos');
+if (!supabaseServiceKey) {
+  console.error('❌ SUPABASE_SERVICE_KEY ausente no ambiente — o backend não consegue acessar o Supabase.');
+  // placeholder só para o módulo carregar (testes/CI); toda chamada vai falhar com 401
+  supabaseServiceKey = 'missing-service-key';
 }
 
 // Cliente admin para operações server-side (upsert, insert, etc.)

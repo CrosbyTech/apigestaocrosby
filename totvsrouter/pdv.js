@@ -18,11 +18,28 @@ import { XMLParser } from 'fast-xml-parser';
 import QRCode from 'qrcode';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
+import { comandoVendasDoUrl, espelharEscritaVendas } from '../services/erp/vendas.js';
 
 const router = express.Router();
 
 // Chamada TOTVS com retry automático em 401 (token expirado)
-async function callTotvs(method, url, { data, params, timeout } = {}) {
+// ERP fase 1 (vendas): transação, recebimento e bônus enviados ao TOTVS ficam
+// registrados e espelhados no HeadCoach, em background, sem mudar o retorno.
+async function callTotvs(method, url, opts = {}) {
+  if (String(method).toLowerCase() === 'post' && comandoVendasDoUrl(url)) {
+    try {
+      const r = await callTotvsBruto(method, url, opts);
+      espelharEscritaVendas(url, opts.data, { sucesso: true, http_status: r.status, resposta: r.data });
+      return r;
+    } catch (e) {
+      espelharEscritaVendas(url, opts.data, { sucesso: false, http_status: e.response?.status ?? null, resposta: e.response?.data ?? null, erro: e.message });
+      throw e;
+    }
+  }
+  return callTotvsBruto(method, url, opts);
+}
+
+async function callTotvsBruto(method, url, { data, params, timeout } = {}) {
   const doCall = async (token) =>
     axios({
       method,

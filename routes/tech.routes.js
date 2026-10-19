@@ -15,6 +15,7 @@ import {
   successResponse,
   errorResponse,
 } from '../utils/errorHandler.js';
+import { postVoucherRegistrado } from '../services/erp/vouchers.js';
 
 const router = express.Router();
 const VOUCHER_TOTVS_AGENT = new https.Agent({ rejectUnauthorized: false });
@@ -2136,7 +2137,7 @@ router.post(
       };
       let voucherNumber, voucherCode;
       try {
-        const r = await axios.post(
+        const r = await postVoucherRegistrado(
           `${BASE_API}/voucher/v2/create`,
           createPayload,
           { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
@@ -2153,7 +2154,7 @@ router.post(
           try {
             const nt = await getToken(true);
             token = nt?.access_token || token;
-            const r = await axios.post(
+            const r = await postVoucherRegistrado(
               `${BASE_API}/voucher/v2/create`,
               createPayload,
               { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },
@@ -2186,7 +2187,7 @@ router.post(
         customerCodeList: [code],
       };
       try {
-        await axios.post(
+        await postVoucherRegistrado(
           `${BASE_CUSTOMER}/voucher/v2/customer/create`,
           assocPayload,
           { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 },

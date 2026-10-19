@@ -13,6 +13,26 @@ import {
   TOTVS_AUTH_ENDPOINT,
   getBranchCodes,
 } from './totvsHelper.js';
+import {
+  registrarComando as registrarComandoAP,
+  sincronizarDuplicata as sincronizarDuplicataAP,
+} from '../services/erp/contasPagar.js';
+
+// ERP fase 1 (contas a pagar): toda duplicata criada/agrupada pelo HeadCoach
+// fica registrada em accounts_payable_commands e é gravada em
+// accounts_payable_duplicates com origem 'headcoach'. Roda em background e
+// nunca altera a resposta da rota nem derruba a criação no TOTVS.
+const espelharAP = (fn) => {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(fn)
+      .catch((e) => console.warn('[contas-pagar] espelho:', e.message));
+  });
+};
+const origemDaReq = (req) => ({
+  origem_tabela: req.body?._origemTabela || req.headers['x-origem-tabela'] || null,
+  origem_id: req.body?._origemId || req.headers['x-origem-id'] || null,
+});
 
 const router = express.Router();
 
@@ -2059,6 +2079,20 @@ router.post(
 
       console.log('✅ Duplicata criada com sucesso na TOTVS');
 
+      espelharAP(async () => {
+        await registrarComandoAP({
+          command: 'create',
+          payload,
+          sucesso: true,
+          http_status: response.status,
+          resposta: response.data ?? null,
+          ...origemDaReq(req),
+        });
+        // a busca do TOTVS às vezes demora a refletir a inclusão: tenta já e de novo em 1 min
+        const n = await sincronizarDuplicataAP({ ...payload, comando: payload });
+        if (!n) setTimeout(() => sincronizarDuplicataAP({ ...payload, comando: payload }), 60000);
+      });
+
       return successResponse(
         res,
         {
@@ -2074,6 +2108,17 @@ router.post(
         status: error.response?.status,
         response: error.response?.data,
       });
+      espelharAP(() =>
+        registrarComandoAP({
+          command: 'create',
+          payload: req.body || {},
+          sucesso: false,
+          http_status: error.response?.status ?? null,
+          resposta: error.response?.data ?? null,
+          erro: error.message,
+          ...origemDaReq(req),
+        }),
+      );
       console.error(
         '❌ Resposta TOTVS completa:',
         JSON.stringify(error.response?.data, null, 2),
@@ -2482,6 +2527,24 @@ router.post(
       }
 
       console.log('✅ Duplicatas agrupadas com sucesso na TOTVS');
+      espelharAP(async () => {
+        await registrarComandoAP({
+          command: 'group',
+          payload,
+          sucesso: true,
+          http_status: response.status,
+          resposta: response.data ?? null,
+          ...origemDaReq(req),
+        });
+        // duplicata resultante (nova) + parcelas de origem (viram status A)
+        const n = await sincronizarDuplicataAP({ ...payload, comando: payload });
+        if (!n) setTimeout(() => sincronizarDuplicataAP({ ...payload, comando: payload }), 60000);
+        const origens = [...new Set(groupInstallments.map((g) => g.duplicateCode))];
+        for (const dup of origens) {
+          const g = groupInstallments.find((x) => x.duplicateCode === dup);
+          await sincronizarDuplicataAP({ branchCnpj: g.branchCnpj, supplierCpfCnpj: g.supplierCpfCnpj, duplicateCode: dup });
+        }
+      });
       return successResponse(
         res,
         {
@@ -2498,6 +2561,17 @@ router.post(
         status: error.response?.status,
         response: JSON.stringify(error.response?.data ?? null),
       });
+      espelharAP(() =>
+        registrarComandoAP({
+          command: 'group',
+          payload,
+          sucesso: false,
+          http_status: error.response?.status ?? null,
+          resposta: error.response?.data ?? null,
+          erro: error.message,
+          ...origemDaReq(req),
+        }),
+      );
       return respondTotvsError(
         res,
         error,

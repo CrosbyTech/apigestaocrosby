@@ -14,6 +14,7 @@ import {
   getBranchCodes,
 } from './totvsHelper.js';
 import supabaseFiscal from '../config/supabaseFiscal.js';
+import { espelharEscritaAR } from '../services/erp/contasReceber.js';
 
 const router = express.Router();
 
@@ -1801,6 +1802,7 @@ router.post(
 
       const results = [];
       const errors = [];
+      const enviadosAR = []; // espelho no HeadCoach (ERP fase 1)
 
       // Agrupar itens por branchCode (empresa de liquidaÃ§Ã£o)
       // O invoices-payment exige um branchCode de liquidaÃ§Ã£o + settlementDate no nÃ­vel raiz
@@ -1918,6 +1920,7 @@ router.post(
             success: true,
             data: response.data,
           });
+          enviadosAR.push({ payload, sucesso: true, http_status: response.status, resposta: response.data });
         } catch (itemError) {
           console.error(
             `âŒ [${i + 1}/${items.length}] Erro na baixa - Fatura ${receivableCode} (Empresa ${settlementBranchCode}):`,
@@ -1961,6 +1964,7 @@ router.post(
                 success: true,
                 data: fallbackResponse.data,
               });
+              enviadosAR.push({ payload: fallbackPayload, sucesso: true, http_status: fallbackResponse.status, resposta: fallbackResponse.data });
               continue;
             } catch (fallbackError) {
               console.error(
@@ -2003,6 +2007,7 @@ router.post(
                 success: true,
                 data: retryResponse.data,
               });
+              enviadosAR.push({ payload, sucesso: true, http_status: retryResponse.status, resposta: retryResponse.data });
               continue;
             } catch (retryError) {
               // Falhou mesmo com retry
@@ -2063,7 +2068,15 @@ router.post(
             details: itemError.response?.data,
             payloadSent: payload,
           });
+          enviadosAR.push({ payload, sucesso: false, http_status: itemError.response?.status ?? null, resposta: itemError.response?.data ?? null, erro: itemError.message });
         }
+      }
+
+      // ERP fase 1: cada baixa enviada fica em accounts_receivable_commands e o
+      // título é relido no TOTVS e gravado em accounts_receivable_documents.
+      const usuarioAR = req.body?.usuario || req.body?.user_email || null;
+      for (const e of enviadosAR) {
+        espelharEscritaAR('/accounts-receivable/v2/invoices-payment', e.payload, { ...e, usuario: usuarioAR, origem_tabela: req.body?.origem || null });
       }
 
       const totalProcessed = results.length + errors.length;

@@ -29,6 +29,7 @@ import {
   getFilialBranchCodes,
 } from '../totvsrouter/totvsHelper.js';
 import { sanitizePayload } from '../totvsrouter/cadastroCliente.js';
+import { comandoDoPath, espelharEscritaAR } from './erp/contasReceber.js';
 
 // statusList do Contas a Receber TOTVS. Cancelar NÃO tira o título da busca:
 // o TOTVS marca status 3 e emite outro, então a mesma venda volta 2–3 vezes
@@ -65,7 +66,23 @@ export function limiteAutoAtivo() {
   );
 }
 
-export async function postTotvs(path, payload, { timeout = 60000 } = {}) {
+export async function postTotvs(path, payload, opts = {}) {
+  // ERP fase 1: escritas no contas a receber ficam registradas e espelhadas no
+  // HeadCoach (accounts_receivable_*), em background, sem mudar o retorno.
+  if (comandoDoPath(path)) {
+    try {
+      const r = await postTotvsBruto(path, payload, opts);
+      espelharEscritaAR(path, payload, { sucesso: true, http_status: r.status, resposta: r.data });
+      return r;
+    } catch (e) {
+      espelharEscritaAR(path, payload, { sucesso: false, http_status: e.response?.status ?? null, resposta: e.response?.data ?? null, erro: e.message });
+      throw e;
+    }
+  }
+  return postTotvsBruto(path, payload, opts);
+}
+
+async function postTotvsBruto(path, payload, { timeout = 60000 } = {}) {
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('token TOTVS indisponível');
   const doRequest = (t) =>

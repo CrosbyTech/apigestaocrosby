@@ -1,6 +1,14 @@
 import cron from 'node-cron';
 import axios from 'axios';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 import { logger } from './errorHandler.js';
+
+// Garante o .env carregado antes de ler as credenciais, independente da ordem
+// dos imports (scripts e jobs importam este módulo direto). Não sobrescreve
+// variáveis que já vierem do ambiente (Render).
+dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.env') });
 import { recordAuth } from '../services/totvsUsageMonitor.js';
 
 // URL da API TOTVS Moda
@@ -8,14 +16,23 @@ const TOTVS_AUTH_ENDPOINT =
   process.env.TOTVS_AUTH_ENDPOINT ||
   'https://www30.bhan.com.br:9443/api/totvsmoda/authorization/v2/token';
 
-// Credenciais padrão (podem ser sobrescritas via variáveis de ambiente)
-const TOTVS_CREDENTIALS = {
+// Credenciais SÓ por variável de ambiente (TOTVS_CLIENT_ID, TOTVS_CLIENT_SECRET,
+// TOTVS_USERNAME, TOTVS_PASSWORD). Os valores antigos que ficavam aqui no
+// código foram para o .env (local) e para o painel do Render (produção).
+// Lidas na hora de autenticar (não no carregamento do módulo).
+const credenciais = () => ({
   grant_type: 'password',
-  client_id: process.env.TOTVS_CLIENT_ID || 'crosbyapiv2',
-  client_secret: process.env.TOTVS_CLIENT_SECRET || '5955950459',
-  username: process.env.TOTVS_USERNAME || 'APINOVA',
-  password: process.env.TOTVS_PASSWORD || '123456',
-};
+  client_id: process.env.TOTVS_CLIENT_ID,
+  client_secret: process.env.TOTVS_CLIENT_SECRET,
+  username: process.env.TOTVS_USERNAME,
+  password: process.env.TOTVS_PASSWORD,
+});
+{
+  const faltando = ['TOTVS_CLIENT_ID', 'TOTVS_CLIENT_SECRET', 'TOTVS_USERNAME', 'TOTVS_PASSWORD'].filter((k) => !process.env[k]);
+  if (faltando.length) {
+    console.error(`❌ Credenciais TOTVS ausentes no ambiente: ${faltando.join(', ')} — toda chamada ao TOTVS vai falhar até configurar.`);
+  }
+}
 
 // Armazenamento do token em memória
 let currentToken = null;
@@ -84,6 +101,11 @@ async function _doGenerateToken() {
     logger.info('🔐 Gerando novo token TOTVS...');
 
     // Preparar payload conforme formato esperado pela API
+    const TOTVS_CREDENTIALS = credenciais();
+    if (!TOTVS_CREDENTIALS.client_id || !TOTVS_CREDENTIALS.username || !TOTVS_CREDENTIALS.password) {
+      // não tenta autenticar sem credencial: cada falha conta para o bloqueio do usuário no TOTVS
+      throw new Error('Credenciais TOTVS ausentes (TOTVS_CLIENT_ID/SECRET/USERNAME/PASSWORD)');
+    }
     const formData = new URLSearchParams();
     formData.append('Grant_type', TOTVS_CREDENTIALS.grant_type);
     formData.append('Client_id', TOTVS_CREDENTIALS.client_id);
