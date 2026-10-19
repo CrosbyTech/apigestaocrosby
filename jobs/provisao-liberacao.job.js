@@ -7,6 +7,10 @@
  *    VENCIMENTO cai entre hoje e hoje+3 dias (ou seja, ~3 dias antes de vencer).
  *  - Considera apenas as despesas monitoradas (salários, energia, água,
  *    telefone, internet, vale alimentação/transporte, férias, rescisão).
+ *  - Além disso, provisiona as duplicatas específicas escolhidas na tela
+ *    (Liberação de Pagamento → Provisão → "Selecionar duplicatas"), gravadas em
+ *    `provisao_duplicatas_selecionadas`: par (fornecedor, nº duplicata), sem
+ *    filtro de despesa, com vencimento dentro do mês corrente.
  *  - Insere os títulos novos em `pagamentos_liberacao` com status PROVISAO.
  *  - Nunca duplica: pula títulos que já existem na Liberação de Pagamento
  *    (mesma duplicata/empresa/fornecedor/parcela/vencimento, exceto CANCELADO).
@@ -38,26 +42,30 @@ const EXPENSE_CODES = [
   3036, // VALE TRANSPORTE
 ];
 
-// Duplicatas específicas de RENEGOCIAÇÃO (identificadas por fornecedor + número).
-// Diferente das despesas: entram independentemente do código de despesa e da
-// janela de 3 dias — são provisionadas enquanto estiverem em aberto.
-const RENEGOCIACOES = [
-  { cd_fornecedor: 67813, nr_duplicata: '598', nome: 'ELIAN INDUSTRIA TEXTIL LTDA' },
-  { cd_fornecedor: 67813, nr_duplicata: '599', nome: 'ELIAN INDUSTRIA TEXTIL LTDA' },
-  { cd_fornecedor: 32136, nr_duplicata: '6516', nome: 'RENAUXVIEW' },
-  { cd_fornecedor: 30061, nr_duplicata: '414154', nome: 'SUL AMERICA COMPANHIA DE SEGURO SAUDE' },
-  { cd_fornecedor: 5520, nr_duplicata: '2', nome: 'EXCIM IMPORTACAO E EXPORTACAO SA' },
-  { cd_fornecedor: 30037, nr_duplicata: '651', nome: 'PASSAMANARIA DO NORDESTE S A' },
-  { cd_fornecedor: 20950, nr_duplicata: '55', nome: 'ARTECA INDUSTRIAL TEXTIL' },
-  { cd_fornecedor: 12839, nr_duplicata: '69', nome: 'TEXILFIO' },
-  { cd_fornecedor: 20417, nr_duplicata: '176370690', nome: 'CAIXA ECONOMICA FEDERAL' },
-];
+// Duplicatas específicas selecionadas pela tela (tabela
+// provisao_duplicatas_selecionadas). Diferente das despesas: entram
+// independentemente do código de despesa e da janela de 3 dias — são
+// provisionadas enquanto estiverem em aberto (vencimento no mês corrente).
+export async function carregarDuplicatasSelecionadas() {
+  const { data, error } = await supabase
+    .from('provisao_duplicatas_selecionadas')
+    .select('id, cd_fornecedor, nm_fornecedor, nr_duplicata')
+    .order('id', { ascending: true });
+  if (error) {
+    throw new Error(`Falha ao ler duplicatas selecionadas: ${error.message}`);
+  }
+  return (data || []).map((r) => ({
+    cd_fornecedor: parseInt(r.cd_fornecedor, 10),
+    nr_duplicata: String(r.nr_duplicata),
+    nome: r.nm_fornecedor || null,
+  }));
+}
 
 // Janela de antecedência (dias). hoje .. hoje+DIAS_ANTECEDENCIA
 const DIAS_ANTECEDENCIA = 3;
 
-// As renegociações são pesquisadas no MÊS CORRENTE inteiro (1º ao último dia),
-// por vencimento — tanto para trás quanto para frente dentro do mês.
+// As duplicatas selecionadas são pesquisadas no MÊS CORRENTE inteiro (1º ao
+// último dia), por vencimento — tanto para trás quanto para frente dentro do mês.
 
 const PORT = process.env.PORT || 4100;
 const SELF_BASE_URL = `http://127.0.0.1:${PORT}`;
@@ -132,46 +140,68 @@ async function buscarContasPagar(branchCodes, dtInicio, dtFim) {
   return data?.data?.data || [];
 }
 
-// Busca as duplicatas específicas de renegociação (por fornecedor + número),
-// sem filtro de despesa e com janela ampla de vencimento.
-async function buscarRenegociacoes(branchCodes) {
-  if (RENEGOCIACOES.length === 0) return [];
-
-  const supplierCodeList = [
-    ...new Set(RENEGOCIACOES.map((r) => r.cd_fornecedor)),
-  ];
-  const duplicateCodeList = [
-    ...new Set(
-      RENEGOCIACOES.map((r) => parseInt(r.nr_duplicata, 10)).filter(
-        (n) => !Number.isNaN(n),
-      ),
-    ),
-  ];
-
-  const { inicio, fim } = limitesMesSaoPaulo();
+// Busca livre no Contas a Pagar (títulos Normais em aberto) por fornecedor
+// e/ou nº de duplicata, nas mesmas filiais do job. Usada pela tela
+// "Selecionar duplicatas" e pela própria provisão das duplicatas selecionadas.
+export async function buscarDuplicatasContasPagar({
+  dtInicio,
+  dtFim,
+  supplierCodeList = [],
+  duplicateCodeList = [],
+  branchCodes = null,
+}) {
+  const branches =
+    branchCodes || (await obterFiliais()).map((f) => parseInt(f.code, 10));
+  if (branches.length === 0) return [];
   const payload = {
-    dt_inicio: inicio,
-    dt_fim: fim,
-    branches: branchCodes,
+    dt_inicio: dtInicio,
+    dt_fim: dtFim,
+    branches,
     modo: 'vencimento',
     situacao: 'N',
     previsao: 'TODOS',
     filtroPagamento: 'ABERTO',
-    supplierCodeList,
-    duplicateCodeList,
   };
+  if (supplierCodeList.length > 0) payload.supplierCodeList = supplierCodeList;
+  if (duplicateCodeList.length > 0) payload.duplicateCodeList = duplicateCodeList;
 
   const { data } = await axios.post(
     `${SELF_BASE_URL}/api/totvs/accounts-payable/search`,
     payload,
     { headers: { 'Content-Type': 'application/json' }, timeout: 180000 },
   );
-  const itens = data?.data?.data || [];
+  return data?.data?.data || [];
+}
+
+// Busca as duplicatas selecionadas na tela (por fornecedor + número),
+// sem filtro de despesa e com vencimento no mês corrente inteiro.
+async function buscarDuplicatasSelecionadas(branchCodes, selecionadas) {
+  if (selecionadas.length === 0) return [];
+
+  const supplierCodeList = [
+    ...new Set(selecionadas.map((r) => r.cd_fornecedor)),
+  ];
+  const duplicateCodeList = [
+    ...new Set(
+      selecionadas
+        .map((r) => parseInt(r.nr_duplicata, 10))
+        .filter((n) => !Number.isNaN(n)),
+    ),
+  ];
+
+  const { inicio, fim } = limitesMesSaoPaulo();
+  const itens = await buscarDuplicatasContasPagar({
+    dtInicio: inicio,
+    dtFim: fim,
+    supplierCodeList,
+    duplicateCodeList,
+    branchCodes,
+  });
 
   // Filtra para os pares EXATOS (fornecedor, duplicata) — o TOTVS pode
   // devolver combinações cruzadas dos dois filtros.
   const alvo = new Set(
-    RENEGOCIACOES.map((r) => `${r.cd_fornecedor}|${String(r.nr_duplicata)}`),
+    selecionadas.map((r) => `${r.cd_fornecedor}|${String(r.nr_duplicata)}`),
   );
   return itens.filter((it) =>
     alvo.has(`${it.cd_fornecedor}|${String(it.nr_duplicata)}`),
@@ -272,7 +302,7 @@ function montarRegistro(item, nomeEmpresaMap, nowIso, origem = 'despesa') {
       ...item,
       incluido_por_ia: true,
       provisao_automatica: true,
-      origem_provisao: origem, // 'despesa' | 'renegociacao'
+      origem_provisao: origem, // 'despesa' | 'selecionada'
     },
   };
 }
@@ -315,14 +345,15 @@ export async function executarProvisaoLiberacao(opts = {}) {
     console.log(`🏢 [provisao-liberacao] ${branchCodes.length} filiais consideradas`);
 
     // 2. Buscar títulos: despesas monitoradas (janela 3 dias) +
-    //    renegociações específicas (por fornecedor/duplicata, janela ampla).
+    //    duplicatas selecionadas na tela (por fornecedor/duplicata, mês corrente).
+    const selecionadas = await carregarDuplicatasSelecionadas();
     const [itensDespesas, itensReneg] = await Promise.all([
       buscarContasPagar(branchCodes, dtInicio, dtFim),
-      buscarRenegociacoes(branchCodes),
+      buscarDuplicatasSelecionadas(branchCodes, selecionadas),
     ]);
     result.encontrados = itensDespesas.length + itensReneg.length;
     console.log(
-      `📄 [provisao-liberacao] ${itensDespesas.length} despesa(s) + ${itensReneg.length} renegociação(ões)`,
+      `📄 [provisao-liberacao] ${itensDespesas.length} despesa(s) + ${itensReneg.length} selecionada(s) (${selecionadas.length} cadastrada(s))`,
     );
 
     if (result.encontrados > 0) {
@@ -333,7 +364,7 @@ export async function executarProvisaoLiberacao(opts = {}) {
           montarRegistro(it, nomeEmpresaMap, nowIso, 'despesa'),
         ),
         ...itensReneg.map((it) =>
-          montarRegistro(it, nomeEmpresaMap, nowIso, 'renegociacao'),
+          montarRegistro(it, nomeEmpresaMap, nowIso, 'selecionada'),
         ),
       ];
       const vistos = new Set();

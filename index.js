@@ -102,6 +102,7 @@ import {
   iniciarJobProvisaoLiberacao,
   executarProvisaoLiberacao,
 } from './jobs/provisao-liberacao.job.js';
+import provisaoLiberacaoRoutes from './routes/provisaoLiberacao.routes.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -195,6 +196,7 @@ app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscri�
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
+app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 
 // Error handling middleware
 app.use((err, req, res, next) => {
