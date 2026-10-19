@@ -156,6 +156,7 @@ router.get(
         contas: lista(q.contas)?.map(Number),
         bancos: lista(q.bancos),
         tipo: q.tipo ? String(q.tipo).toUpperCase() : null,
+        tipos: lista(q.tipos)?.map((t) => t.toUpperCase()),
         formas: lista(q.formas),
         categoria: q.categoria ? String(q.categoria) : null,
         contraparte: q.contraparte ? String(q.contraparte) : null,

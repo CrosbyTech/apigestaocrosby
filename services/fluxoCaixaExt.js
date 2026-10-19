@@ -512,6 +512,7 @@ export async function painel(f) {
   const contraparteDoc = f.contraparte && /^\d{11,14}$/.test(soDigitos(f.contraparte)) && soDigitos(f.contraparte).length === String(f.contraparte).trim().length ? soDigitos(f.contraparte) : null;
   const lancamentos = todos.filter((l) => {
     if (f.tipo && l.tipo !== f.tipo) return false;
+    if (f.tipos?.length && !f.tipos.includes(l.tipo)) return false;
     if (formas && !formas.has(l.forma)) return false;
     if (f.categoria && l.categoria !== f.categoria) return false;
     if (contraparteDoc) {
