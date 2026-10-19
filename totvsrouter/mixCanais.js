@@ -58,6 +58,7 @@ const FORECAST_PARA_MIX = {
   MTM_DAVID: 'MULTIMARCAS',
   MTM_ARTHUR: 'MULTIMARCAS',
   MTM_YAGO: 'MULTIMARCAS',
+  MTM_JHEMYSON: 'MULTIMARCAS', // vendedor 40 vendendo p/ cliente não-franquia
   BAZAR: 'BAZAR',
   SHOWROOM: SHOWROOM_KEY, // rateado em normaliza()
   NOVIDADES: SHOWROOM_KEY,

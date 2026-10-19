@@ -853,6 +853,21 @@ const MTM_YAGO_CODE = 241;
 const MTM_YAGO_DESDE = '2026-10-06';
 const FAT_VEND_EXPEDICAO_CODE = -50;
 
+// JHEMYSON (vendedor 40) vende FRANQUIAS e, desde 10/2026, também
+// MULTIMARCAS. A régua é o CLIENTE: franquia tem nome fantasia
+// "F<nº> - CROSBY <nome>" (ou contém CROSBY); qualquer outro cliente é
+// multimarcas. O semanal publica FRANQUIAS só com as franquias e os dois
+// lados do 40 separados (VEND_40_FRQ / VEND_40_MTM / MTM_JHEMYSON); no
+// drill, '40_FRQ' e '40_MTM' são o vendedor 40 filtrado por cliente.
+const FRQ_JHEMYSON_CODE = 40;
+const ehClienteFranquia = (nome) => {
+  const n = String(nome || '')
+    .toUpperCase()
+    .trim();
+  if (!n) return false;
+  return /^F\s*\d{1,4}\s*-/.test(n) || /\bCROSBY\b/.test(n);
+};
+
 // RICARDO ELETRO: card próprio no Painel (pseudo-vendedor -512) e canal
 // automático no New Forecast. Diferente da expedição, a op 512 NÃO gera NF
 // fiscal (checado: zero NFs em 2026) — a venda existe só como movimento +
@@ -2091,7 +2106,8 @@ router.post(
 // S3=15-21, S4=22-28, S5=29+ — mesma régua do PlanejamentoMensalModal) via
 // chamada interna (aproveita o cache de 30min de cada semana) e devolve os
 // canais do New Forecast já mapeados:
-//   FRANQUIAS(40) · REVENDA(161/165, +241 até 09/2026) · MTM_YAGO(241, de
+//   FRANQUIAS(40, só clientes franquia) · MTM_JHEMYSON(40, demais clientes)
+//   REVENDA(161/165, +241 até 09/2026) · MTM_YAGO(241, de
 //   10/2026) · MTM_RAFAEL(21) · MTM_DAVID(26)
 //   MTM_ARTHUR(259) · VAREJO(painel oficial) · NOVIDADES(exp op 7255)
 //   SHOWROOM(demais ops de expedição)
@@ -2193,6 +2209,29 @@ router.post(
           qtd: row.qtd,
           valor: row.valor,
           vendas: cached?.detalhes?.[code] || [],
+        };
+      }
+      // JHEMYSON (40) dividido por cliente: '40_FRQ' (franquias) e
+      // '40_MTM' (multimarcas). Sem o detalhe em cache, tudo fica em FRQ.
+      const jh = vendedores[FRQ_JHEMYSON_CODE];
+      if (jh) {
+        const frq = jh.vendas.filter((v) => ehClienteFranquia(v.cliente_nome));
+        const mtm = jh.vendas.filter((v) => !ehClienteFranquia(v.cliente_nome));
+        const somaV = (arr) =>
+          Math.round(arr.reduce((a, v) => a + (v.valor || 0), 0) * 100) / 100;
+        vendedores['40_FRQ'] = {
+          seller_code: FRQ_JHEMYSON_CODE,
+          seller_name: jh.seller_name,
+          qtd: jh.vendas.length ? frq.length : jh.qtd,
+          valor: jh.vendas.length ? somaV(frq) : jh.valor,
+          vendas: frq,
+        };
+        vendedores['40_MTM'] = {
+          seller_code: FRQ_JHEMYSON_CODE,
+          seller_name: jh.seller_name ? `${jh.seller_name} (MTM)` : null,
+          qtd: mtm.length,
+          valor: somaV(mtm),
+          vendas: mtm,
         };
       }
       return {
@@ -2311,7 +2350,31 @@ router.post(
           valores[key] =
             Math.round(((valores[key] || 0) + (valor || 0)) * 100) / 100;
         };
-        put('FRANQUIAS', w.s, rowVal(40));
+        // JHEMYSON (40): o que vendeu para cliente que NÃO é franquia vai
+        // para MULTIMARCAS (MTM_JHEMYSON); FRANQUIAS fica só com franquias.
+        const total40 = rowVal(FRQ_JHEMYSON_CODE);
+        let jhMtm = 0;
+        {
+          let vendas40 = null;
+          for (const [k, v] of FAT_VEND_CACHE.entries()) {
+            if (k.startsWith(`${w.datemin}|${w.datemax}|`)) {
+              vendas40 = v?.detalhes?.[FRQ_JHEMYSON_CODE] || [];
+              break;
+            }
+          }
+          if (vendas40?.length) {
+            const soma = vendas40.reduce(
+              (a, v) => (ehClienteFranquia(v.cliente_nome) ? a : a + (v.valor || 0)),
+              0,
+            );
+            jhMtm = Math.min(Math.round(soma * 100) / 100, total40);
+          }
+        }
+        const jhFrq = Math.round((total40 - jhMtm) * 100) / 100;
+        put('FRANQUIAS', w.s, jhFrq);
+        put('VEND_40_FRQ', w.s, jhFrq);
+        put('VEND_40_MTM', w.s, jhMtm);
+        put('MTM_JHEMYSON', w.s, jhMtm);
         // YAGO (241) virou MULTIMARCAS em 06/10/2026: divide o bloco por dia
         // de venda. Sem o detalhe das vendas em cache, cai na data de início
         // do bloco (mesma régua de antes).
