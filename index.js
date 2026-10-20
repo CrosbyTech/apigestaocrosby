@@ -108,6 +108,7 @@ import {
 import provisaoLiberacaoRoutes from './routes/provisaoLiberacao.routes.js';
 import whatsappContasPagarRoutes from './routes/whatsappContasPagar.routes.js';
 import fiscalImpostosRoutes from './routes/fiscalImpostos.routes.js';
+import dreObservacoesRoutes from './routes/dreObservacoes.routes.js';
 import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
@@ -207,6 +208,7 @@ app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOT
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
+app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
 
 // Error handling middleware
 app.use((err, req, res, next) => {
