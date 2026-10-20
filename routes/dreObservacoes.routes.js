@@ -8,12 +8,15 @@
 import express from 'express';
 import multer from 'multer';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
-import { requireAuth, requireRole } from '../middlewares/auth.js';
+import { requireAuth } from '../middlewares/auth.js';
 import * as obs from '../services/dreObservacoes.js';
 
 const router = express.Router();
 router.use(requireAuth);
-const escrita = requireRole('owner', 'admin', 'manager', 'user');
+// Importar/preview exige só login (qualquer usuário logado). A gravação de
+// observação já é liberada a qualquer usuário pela própria tela do DRE, então
+// não faz sentido o import ser mais restrito (bloqueava o perfil "guest").
+const escrita = (req, res, next) => next();
 
 const upload = multer({
   storage: multer.memoryStorage(),
