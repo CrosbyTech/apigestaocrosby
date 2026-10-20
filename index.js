@@ -106,6 +106,9 @@ import {
   executarProvisaoLiberacao,
 } from './jobs/provisao-liberacao.job.js';
 import provisaoLiberacaoRoutes from './routes/provisaoLiberacao.routes.js';
+import whatsappContasPagarRoutes from './routes/whatsappContasPagar.routes.js';
+import fiscalImpostosRoutes from './routes/fiscalImpostos.routes.js';
+import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -201,6 +204,8 @@ app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — 
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
+app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
+app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -258,6 +263,7 @@ app.listen(PORT, async () => {
   iniciarJobFaturamentoVendedorMensal();
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
+  iniciarJojoBot().catch((e) => console.warn(`[jojo] falha ao iniciar: ${e.message}`)); // JOJO — assistente fiscal no grupo do Contas a Pagar
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
