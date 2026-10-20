@@ -16,12 +16,15 @@
 //   GET  /webhooks · POST /webhooks {action,id?,url,events?,enabled?}                   [admin]
 //   POST /webhook/receber?s=SECRET       receptor público de eventos da uazapi (buffer em memória)
 //   GET  /eventos?limit                  últimos eventos recebidos
+//   GET  /jojo/status · POST /jojo/simular     JOJO (assistente fiscal)           [simular: admin]
+//   GET  /bruce/status · POST /bruce/simular   BRUCE (assistente contas a receber)[simular: admin]
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth, requireRole } from '../middlewares/auth.js';
 import * as wa from '../services/whatsappContasPagar.js';
 import * as jojo from '../services/jojoBot.js';
+import * as bruce from '../services/bruceBot.js';
 
 const router = express.Router();
 
@@ -49,8 +52,9 @@ router.post(
       payload: ev,
     });
     if (eventos.length > EVENTOS_MAX) eventos.length = EVENTOS_MAX;
-    // JOJO: responde no grupo do Contas a Pagar (assíncrono, não segura o webhook)
+    // Agentes: cada um responde só no seu grupo (assíncrono, não segura o webhook)
     jojo.processarEvento(ev).catch((e) => console.error(`[jojo] webhook: ${e.message}`));
+    bruce.processarEvento(ev).catch((e) => console.error(`[bruce] webhook: ${e.message}`));
     return res.json({ success: true });
   },
 );
@@ -235,19 +239,18 @@ router.post(
   }),
 );
 
-// ─── JOJO (assistente fiscal do grupo) ─────────────────────────────────────
+// ─── JOJO (fiscal) e BRUCE (contas a receber) ──────────────────────────────
 router.get('/jojo/status', (req, res) => successResponse(res, jojo.statusJojo()));
+router.get('/bruce/status', (req, res) => successResponse(res, bruce.statusBruce()));
 
-// Simula uma mensagem do grupo (testes) — só admin
-router.post(
-  '/jojo/simular',
-  admin,
-  asyncHandler(async (req, res) => {
+// Simula uma mensagem do grupo (testes) — só admin. Responde DE VERDADE no grupo.
+function simular(agente, grupoDefault) {
+  return asyncHandler(async (req, res) => {
     const { text, senderName, sender, sender_pn, quoted, chatid, id } = req.body || {};
     if (!text) return errorResponse(res, 'text obrigatório', 400, 'VALIDATION');
-    const r = await jojo.processarMensagem({
+    const r = await agente.processarMensagem({
       id: id || `sim:${Date.now()}`,
-      chatid: chatid || process.env.JOJO_GRUPO_CHATID || '120363414933413909@g.us',
+      chatid: chatid || grupoDefault,
       fromMe: false,
       text,
       senderName: senderName || req.user.name,
@@ -257,8 +260,10 @@ router.post(
       messageTimestamp: Date.now(),
     });
     return successResponse(res, r);
-  }),
-);
+  });
+}
+router.post('/jojo/simular', admin, simular(jojo, process.env.JOJO_GRUPO_CHATID || '120363414933413909@g.us'));
+router.post('/bruce/simular', admin, simular(bruce, process.env.BRUCE_GRUPO_CHATID || '120363411253432671@g.us'));
 
 router.get('/eventos', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, EVENTOS_MAX);

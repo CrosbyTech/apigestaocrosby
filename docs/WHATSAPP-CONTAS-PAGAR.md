@@ -53,14 +53,25 @@ dá para filtrar no histórico (`/mensagens?trackSource=headcoach`) e aparece co
 - Header de auth é `token` (instância); `admintoken` só em `/instance/all` e criação/remoção de instâncias.
 - Já existe outro módulo uazapi no projeto (`config/uazapi.js`, `services/uazapiSync.js`, `uazapiMonitor.js`) que usa o admintoken para o CRM/cobrança em `UAZAPI_BASE_URL`; este módulo é independente e não compartilha env.
 
-## JOJO — assistente fiscal no grupo
+## Agentes de grupo: JOJO (fiscal) e BRUCE (contas a receber)
 
-`services/jojoBot.js`. Opera **só** no grupo `JOJO_GRUPO_CHATID` (default `120363414933413909@g.us`, "JOJO - FISCAL HEADCOACH") pela instância CONTAS A PAGAR. Iniciada em `index.js` (`iniciarJojoBot`).
+Núcleo compartilhado em `services/agenteWhatsapp.js` (`criarAgente`). Cada agente é um arquivo fino com nome, grupo, regex de chamada e prompt:
+
+| Agente | Arquivo | Grupo (chatid default) | Chamado por | Env |
+|---|---|---|---|---|
+| JOJO — assistente fiscal | `services/jojoBot.js` | `120363414933413909@g.us` ("JOJO - FISCAL HEADCOACH") | "jojo" | `JOJO_*` |
+| BRUCE — assistente do Contas a Receber (auxilia o João) | `services/bruceBot.js` | `120363411253432671@g.us` ("BRUCE - CAR HEADCOACH") | "bruce" | `BRUCE_*` |
+
+Os dois usam a mesma instância CONTAS A PAGAR, o mesmo autorizador e as mesmas regras abaixo (descritas para a JOJO; valem igual para o BRUCE trocando o prefixo das variáveis). Iniciados em `index.js` (`iniciarJojoBot`, `iniciarBruceBot`). O webhook `POST /webhook/receber` repassa cada evento aos dois; cada um só reage ao próprio grupo. Saudação do BRUCE enviada no grupo em 20/10/2026.
+
+### Regras (JOJO; BRUCE idêntico)
+
+Opera **só** no grupo `JOJO_GRUPO_CHATID` pela instância CONTAS A PAGAR.
 
 - **Entrada**: evento `messages` da uazapi no receptor `POST /api/whatsapp-cp/webhook/receber` (cadastre o webhook pela aba Webhook da página, evento `messages`). Sem URL pública, `JOJO_POLL_SEGUNDOS>0` consulta o grupo periodicamente.
 - **Quando responde**: mensagem contém "jojo" ou é resposta (quote) a uma mensagem dela. Ignora `fromMe`, outros chats e ids repetidos. Contexto = últimas `JOJO_CONTEXTO_MENSAGENS` do grupo.
 - **IA**: com `ANTHROPIC_API_KEY` usa Claude (`JOJO_MODEL`, default `claude-opus-5-5`, structured output JSON, pago por uso). Sem ela, usa o provedor do chat em `utils/aiProvider.js` (Groq grátis → OpenAI → xAI) com `response_format json_object`. A saída sempre vira `{resposta, pedido_alteracao, resumo_pedido}`.
 - **Autorização**: pedidos de alteração no HeadCoach (`pedido_alteracao=true`) ficam pendentes. Só o número `JOJO_NUMERO_AUTORIZADOR` (default 5584987187425) autoriza, respondendo "ok"/"autorizo" (ou "não"/"nega") à mensagem do pedido ou à resposta da JOJO. Em grupo o remetente pode vir como `@lid`; por isso o bot resolve o `lid` do autorizador via `/chat/check` na inicialização e também aceita `sender_pn`.
 - **Execução**: `executarAcao(pedido)` é o ponto de extensão — na v1 só registra e avisa que a execução automática ainda não está ligada. Nada no HeadCoach é alterado.
-- **Rotas**: `GET /api/whatsapp-cp/jojo/status` (provedor, stats, pedidos, histórico) e `POST /api/whatsapp-cp/jojo/simular {text, senderName?, sender_pn?, quoted?, chatid?}` (admin) que injeta uma mensagem como se viesse do grupo e **responde de verdade no grupo**.
-- Envios da JOJO vão com `track_id=jojo`.
+- **Rotas**: `GET /api/whatsapp-cp/jojo/status` e `GET /api/whatsapp-cp/bruce/status` (provedor, stats, pedidos, histórico); `POST /api/whatsapp-cp/jojo/simular` e `POST /api/whatsapp-cp/bruce/simular {text, senderName?, sender_pn?, quoted?, chatid?}` (admin) injetam uma mensagem como se viesse do grupo e **respondem de verdade no grupo**.
+- Envios vão com `track_id=jojo` / `track_id=bruce`. Para enviar um aviso avulso no grupo pelo código: `bruce.enviarNoGrupo(texto)`.

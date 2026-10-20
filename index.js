@@ -109,6 +109,7 @@ import provisaoLiberacaoRoutes from './routes/provisaoLiberacao.routes.js';
 import whatsappContasPagarRoutes from './routes/whatsappContasPagar.routes.js';
 import fiscalImpostosRoutes from './routes/fiscalImpostos.routes.js';
 import { iniciarJojoBot } from './services/jojoBot.js';
+import { iniciarBruceBot } from './services/bruceBot.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -264,6 +265,7 @@ app.listen(PORT, async () => {
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
   iniciarJojoBot().catch((e) => console.warn(`[jojo] falha ao iniciar: ${e.message}`)); // JOJO — assistente fiscal no grupo do Contas a Pagar
+  iniciarBruceBot().catch((e) => console.warn(`[bruce] falha ao iniciar: ${e.message}`)); // BRUCE — assistente do Contas a Receber no grupo BRUCE - CAR HEADCOACH
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
