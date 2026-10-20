@@ -19,34 +19,50 @@ import supabase from '../config/supabase.js';
 
 const TABELA = 'observacoes_despesas_totvs';
 
+// normaliza p/ comparação: sem acento, minúsculo, só alfanumérico
+// ("COD.DESP." → "coddesp", "NR.DUPL." → "nrdupl")
 const norm = (s) =>
   String(s ?? '')
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
-    .trim();
+    .replace(/[^a-z0-9]/g, '');
 
-// sinônimos de cabeçalho → campo canônico
+// sinônimos de cabeçalho (já normalizados) → campo canônico.
+// Cobre o formato exportado do Contas a Pagar (EMPRESA, COD.FORN., NR.DUPL.,
+// PARCELA, COD.DESP., OBSERVACAO) e variações.
 const MAPA_COLUNAS = [
-  ['cd_empresa', ['cd_empresa', 'empresa', 'cod empresa', 'codigo empresa', 'filial', 'cd_filial']],
-  ['cd_despesaitem', ['cd_despesaitem', 'despesaitem', 'item de despesa', 'item despesa', 'cod despesa', 'codigo despesa', 'despesa item', 'cd_despesa']],
-  ['cd_fornecedor', ['cd_fornecedor', 'cod fornecedor', 'codigo fornecedor', 'cd_pessoa', 'cod pessoa']],
-  ['fornecedor_nome', ['fornecedor', 'nome fornecedor', 'razao social', 'nm_fornecedor', 'nome']],
-  ['nr_duplicata', ['nr_duplicata', 'duplicata', 'documento', 'nr documento', 'numero documento', 'nota', 'nf', 'titulo']],
-  ['nr_parcela', ['nr_parcela', 'parcela', 'parc']],
-  ['observacao', ['observacao', 'observacoes', 'obs', 'comentario', 'comentarios', 'descricao obs', 'nota interna']],
+  ['cd_empresa', ['cdempresa', 'empresa', 'codempresa', 'codigoempresa', 'filial', 'cdfilial']],
+  ['cd_despesaitem', ['coddesp', 'cddespesaitem', 'despesaitem', 'coddespesa', 'codigodespesa', 'cddespesa', 'itemdespesa', 'itemdedespesa']],
+  ['cd_fornecedor', ['codforn', 'cdfornecedor', 'codfornecedor', 'codigofornecedor', 'cdpessoa', 'codpessoa']],
+  ['fornecedor_nome', ['nomefornecedor', 'fornecedor', 'razaosocial', 'nmfornecedor']],
+  ['nr_duplicata', ['nrdupl', 'nrduplicata', 'duplicata', 'documento', 'nrdocumento', 'numerodocumento', 'titulo', 'nota', 'nf']],
+  ['nr_parcela', ['nrparcela', 'parcela', 'parc']],
+  ['observacao', ['observacao', 'observacoes', 'obs', 'comentario', 'comentarios', 'notainterna']],
 ];
 
 function detectarColunas(headers) {
   const mapa = {};
-  const usados = new Set();
   headers.forEach((h, idx) => {
     const n = norm(h);
+    if (!n) return;
     for (const [campo, nomes] of MAPA_COLUNAS) {
       if (mapa[campo] != null) continue;
-      if (nomes.some((x) => n === x || n.includes(x))) {
+      // match exato primeiro; depois prefixo/contido (evita "nomefornecedor" cair em "fornecedor" antes da hora via ordem da lista)
+      if (nomes.includes(n) || nomes.some((x) => n === x)) {
         mapa[campo] = idx;
-        usados.add(idx);
+        break;
+      }
+    }
+  });
+  // segunda passada: contidos, para cabeçalhos com texto extra
+  headers.forEach((h, idx) => {
+    const n = norm(h);
+    if (!n) return;
+    for (const [campo, nomes] of MAPA_COLUNAS) {
+      if (mapa[campo] != null) continue;
+      if (nomes.some((x) => n.includes(x))) {
+        mapa[campo] = idx;
         break;
       }
     }
@@ -54,9 +70,15 @@ function detectarColunas(headers) {
   return mapa;
 }
 
+// código → inteiro ("005"→5, "6.023"→6023)
 const inteiro = (v) => {
   const s = String(v ?? '').replace(/\D/g, '');
   return s ? Number(s) : null;
+};
+// duplicata → só dígitos, como o HeadCoach guarda ("2.209.202.601"→"2209202601")
+const digitos = (v) => {
+  const s = String(v ?? '').replace(/\D/g, '');
+  return s || null;
 };
 const textoChave = (v) => {
   const s = String(v ?? '').trim();
@@ -80,7 +102,7 @@ export function parsePlanilha(buffer) {
       cd_despesaitem: inteiro(col(linha, 'cd_despesaitem')),
       cd_fornecedor: inteiro(col(linha, 'cd_fornecedor')),
       fornecedor_nome: textoChave(col(linha, 'fornecedor_nome')),
-      nr_duplicata: textoChave(col(linha, 'nr_duplicata')),
+      nr_duplicata: digitos(col(linha, 'nr_duplicata')),
       nr_parcela: inteiro(col(linha, 'nr_parcela')),
       observacao: textoChave(col(linha, 'observacao')),
     };
@@ -123,7 +145,8 @@ export function preview(buffer) {
 
 // Grava as observações das linhas prontas. Idempotente: não duplica uma
 // observação igual já existente para o mesmo lançamento/período.
-export async function importar({ buffer, dtInicio, dtFim, por = 'import-planilha', substituir = false }) {
+export async function importar({ buffer, dtInicio, dtFim, cdUsuario, por = 'import-planilha', substituir = false }) {
+  if (!cdUsuario) throw Object.assign(new Error('cd_usuario é obrigatório (a tabela exige um usuário dono da observação).'), { status: 400 });
   if (!dtInicio || !dtFim) throw Object.assign(new Error('Informe o período (dt_inicio e dt_fim) do DRE — ex.: 2026-09-01 e 2026-09-30.'), { status: 400 });
   const { linhas } = parsePlanilha(buffer);
   const prontas = linhas.filter((l) => l._pronta);
@@ -166,6 +189,7 @@ export async function importar({ buffer, dtInicio, dtFim, por = 'import-planilha
         ...chave,
         observacao: l.observacao,
         is_active: true,
+        cd_usuario: cdUsuario,
       });
       if (errIns) throw new Error(errIns.message);
       resultados.gravadas++;

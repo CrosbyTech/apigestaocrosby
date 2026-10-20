@@ -59,6 +59,7 @@ router.post(
         buffer: req.file.buffer,
         dtInicio: dt_inicio,
         dtFim: dt_fim,
+        cdUsuario: req.user.id,
         substituir: String(substituir) === 'true',
         por: req.user.email,
       });
