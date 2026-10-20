@@ -10,6 +10,7 @@ import multer from 'multer';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import * as obs from '../services/dreObservacoes.js';
+import { importarHistorico } from '../services/dreHistoricoHtml.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -67,6 +68,38 @@ router.post(
         por: req.user.email,
       });
       return successResponse(res, r, `Observações importadas: ${r.gravadas} gravadas, ${r.puladas} puladas, ${r.erros} erros`);
+    } catch (err) {
+      return tratar(res, err);
+    }
+  }),
+);
+
+// Importa o HISTÓRICO (jan–ago) do HTML "Despesas Gerais 2026".
+const uploadHtml = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = /\.(html?|txt)$/i.test(file.originalname || '') || /html|text/i.test(file.mimetype || '');
+    cb(ok ? null : new Error('Envie o arquivo .html da análise de despesas.'), ok);
+  },
+});
+router.post(
+  '/importar-historico-html',
+  (req, res, next) =>
+    uploadHtml.single('arquivo')(req, res, (err) => {
+      if (err) return errorResponse(res, err.message, 400, 'UPLOAD');
+      if (!req.file) return errorResponse(res, 'Nenhum arquivo enviado (campo "arquivo").', 400, 'VALIDATION');
+      next();
+    }),
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await importarHistorico({
+        html: req.file.buffer.toString('utf8'),
+        ano: Number(req.body?.ano) || 2026,
+        cdUsuario: req.user.id,
+        substituir: String(req.body?.substituir) === 'true',
+      });
+      return successResponse(res, r, `Histórico importado: ${r.gravadas} observações (jan–ago)`);
     } catch (err) {
       return tratar(res, err);
     }
