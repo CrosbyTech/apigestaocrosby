@@ -28,6 +28,7 @@ import {
   sincronizarRetorno,
   cancelarBoletos,
   contasInfo,
+  testarContas,
 } from '../services/pagarmeBoletos.js';
 
 const router = express.Router();
@@ -421,9 +422,13 @@ router.post(
 );
 
 // GET /remessa-boletos/contas — contas Pagar.me (qual tem chave, por qual sai a emissão)
+// ?testar=1 consulta a Pagar.me com cada chave e devolve o recebedor que responde
 router.get(
   '/remessa-boletos/contas',
-  asyncHandler(async (req, res) => successResponse(res, contasInfo(), 'Contas Pagar.me')),
+  asyncHandler(async (req, res) => {
+    const testar = req.query.testar === '1' || req.query.testar === 'true';
+    return successResponse(res, testar ? await testarContas() : contasInfo(), 'Contas Pagar.me');
+  }),
 );
 
 // POST /remessa-boletos/baixar — baixa (cancela) boletos na Pagar.me em massa.

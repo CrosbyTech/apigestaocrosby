@@ -61,6 +61,33 @@ export function contasInfo() {
     contas: Object.values(CONTAS).map((c) => ({ id: c.id, nome: c.nome, configurada: Boolean(c.sk) })),
   };
 }
+/** Testa cada conta configurada na Pagar.me (GET /recipients) e devolve quem responde. */
+export async function testarContas() {
+  const out = [];
+  for (const c of Object.values(CONTAS)) {
+    if (!c.sk) {
+      out.push({ id: c.id, nome: c.nome, configurada: false });
+      continue;
+    }
+    try {
+      const r = await pagarme('GET', '/recipients?size=3', null, c.id);
+      const recs = Array.isArray(r.data?.data) ? r.data.data : [];
+      out.push({
+        id: c.id,
+        nome: c.nome,
+        configurada: true,
+        ok: r.ok,
+        http: r.status,
+        chave: `${c.sk.slice(0, 7)}…`,
+        recebedores: recs.map((x) => ({ nome: x.name, documento: x.document, status: x.status })),
+        erro: r.ok ? null : r.data?.message || JSON.stringify(r.data).slice(0, 200),
+      });
+    } catch (e) {
+      out.push({ id: c.id, nome: c.nome, configurada: true, ok: false, erro: e.message });
+    }
+  }
+  return { emissao: contaEmissao(), contas: out };
+}
 const SK = CONTAS.crosby.sk;
 const BANCO_STONE = '197';
 // Multa (%) e juros (% a.m.) cobrados após o vencimento. 0 = não cobra.
