@@ -5,8 +5,9 @@
  *
  * ── REMESSA ──
  *  Só faturas em aberto nos portadores PORTADORES_REMESSA (título em carteira /
- *  baixado por solicitação da empresa) — as demais já têm boleto no banco do
- *  portador e um segundo boleto cobraria o cliente em dobro.
+ *  baixado por solicitação da empresa / entrada rejeitada pelo banco) — as
+ *  demais já têm boleto no banco do portador e um segundo boleto cobraria o
+ *  cliente em dobro.
  *  Para cada fatura: reserva a linha na tabela (índice único = idempotência),
  *  cria o pedido na Pagar.me e muda a carteira no TOTVS para Simples. O
  *  portador NÃO muda no TOTVS (a API não tem rota para isso): quem diz que a
@@ -21,7 +22,14 @@
 import supabase from '../config/supabase.js';
 import { postTotvs } from './bluecardLimite.js';
 
-export const PORTADORES_REMESSA = [1020, 1098];
+// Portadores cujas faturas entram na remessa (título sem boleto vivo no banco):
+//   1020 TITULO EM CARTEIRA · 1098 BAIXADO POR SOLICITACAO DA EMPRESA ·
+//   1021 entrada rejeitada pelo banco (pedido do João, Contas a Receber, 21/10/2026)
+// Override: PAGARME_PORTADORES_REMESSA="1020,1098,1021"
+export const PORTADORES_REMESSA = (process.env.PAGARME_PORTADORES_REMESSA || '1020,1098,1021')
+  .split(',')
+  .map((s) => parseInt(s.trim(), 10))
+  .filter((n) => Number.isInteger(n) && n > 0);
 const TABELA = 'pagarme_boletos';
 const TP_DOCUMENTO_FATURA = 1;
 const CARTEIRA_SIMPLES = 1; // ReceivableChargeType.Simple
