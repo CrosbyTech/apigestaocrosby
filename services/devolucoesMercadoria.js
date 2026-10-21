@@ -12,6 +12,8 @@
 import axios from 'axios';
 import supabase from '../config/supabase.js';
 import { listarBranches } from './pdvFiscal.js';
+import { getToken } from '../utils/totvsTokenManager.js';
+import { httpsAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 import { criarNotificacaoSistema } from './notificacoesSistema.js';
 
 export const BUCKET = 'devolucoes-mercadoria';
@@ -147,19 +149,61 @@ async function anexarFotosNoChamado(chamadoId, fotos) {
 }
 
 // ─── Cliente e vendedores ────────────────────────────────────────────────────
+// Fallback: busca a pessoa direto no TOTVS por CPF (individuals) ou CNPJ
+// (legal-entities) quando ela ainda não está no espelho pes_pessoa.
+async function buscarClienteNoTotvs(d) {
+  try {
+    const isPJ = d.length === 14;
+    const endpoint = isPJ ? 'legal-entities' : 'individuals';
+    const filter = isPJ ? { cnpjList: [d] } : { cpfList: [d] };
+    const token = (await getToken())?.access_token;
+    if (!token) return null;
+    const r = await axios.post(
+      `${TOTVS_BASE_URL}/person/v2/${endpoint}/search`,
+      { filter, expand: 'phones,emails', page: 1, pageSize: 5 },
+      { headers: { Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 },
+    );
+    const items = r.data?.items || [];
+    const it = items.find((x) => x.isCustomer) || items[0];
+    if (!it) return null;
+    const phone = (it.phones || []).find((p) => p.isDefault)?.number || it.phones?.[0]?.number || null;
+    const email = (it.emails || []).find((e) => e.isDefault)?.email || it.emails?.[0]?.email || null;
+    return {
+      code: it.code,
+      nm_pessoa: it.name,
+      fantasy_name: it.fantasyName || null,
+      cpf: isPJ ? it.cnpj : it.cpf,
+      tipo_pessoa: isPJ ? 'PJ' : 'PF',
+      cd_empresacad: it.branchInsertCode ?? null,
+      is_customer: !!it.isCustomer,
+      customer_status: it.customerStatus || null,
+      telefone: phone,
+      email,
+    };
+  } catch (e) {
+    console.warn(`⚠️ [Devoluções] fallback TOTVS por documento falhou: ${e.message}`);
+    return null;
+  }
+}
+
 export async function buscarClientePorDocumento(doc) {
   const d = digits(doc);
   if (d.length !== 11 && d.length !== 14) {
     throw new DevolucaoError('Informe um CPF (11 dígitos) ou CNPJ (14 dígitos)', 'DOC_INVALIDO');
   }
-  const { data, error } = await supabase
-    .from('pes_pessoa')
-    .select('code, nm_pessoa, fantasy_name, cpf, tipo_pessoa, cd_empresacad, is_customer, customer_status, telefone, email')
-    .eq('cpf', d)
-    .order('is_customer', { ascending: false })
-    .limit(5);
-  if (error) throw new DevolucaoError(`Erro ao consultar o cadastro: ${error.message}`, 'DB_ERROR', 500);
-  const cli = (data || []).find((c) => c.is_customer) || data?.[0];
+  // Principal: cadastro direto no TOTVS (person/v2) por CPF/CNPJ.
+  let cli = await buscarClienteNoTotvs(d);
+  // Fallback: espelho pes_pessoa (quando o TOTVS não respondeu ou não achou).
+  if (!cli) {
+    const { data, error } = await supabase
+      .from('pes_pessoa')
+      .select('code, nm_pessoa, fantasy_name, cpf, tipo_pessoa, cd_empresacad, is_customer, customer_status, telefone, email')
+      .eq('cpf', d)
+      .order('is_customer', { ascending: false })
+      .limit(5);
+    if (error) throw new DevolucaoError(`Erro ao consultar o cadastro: ${error.message}`, 'DB_ERROR', 500);
+    cli = (data || []).find((c) => c.is_customer) || data?.[0];
+  }
   if (!cli) {
     throw new DevolucaoError('CPF/CNPJ não encontrado no cadastro da Crosby. Fale com o seu vendedor.', 'CLIENTE_NAO_CADASTRADO', 404);
   }
