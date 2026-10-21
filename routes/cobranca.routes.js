@@ -419,4 +419,7 @@ router.get(
   }),
 );
 
+// Reuso pela tela Hoje do Contas a Receber (routes/contasReceberHoje.routes.js)
+export { obter, CANAIS, DT_INICIO_PADRAO };
+
 export default router;
