@@ -29,6 +29,9 @@ import {
   cancelarBoletos,
   contasInfo,
   testarContas,
+  clientesBloqueados,
+  bloquearCliente,
+  desbloquearCliente,
 } from '../services/pagarmeBoletos.js';
 
 const router = express.Router();
@@ -259,10 +262,11 @@ async function carregarFaturas(filtro, de) {
     ...new Set(abertos.map((t) => Number(t.customerCode)).filter(Boolean)),
   ];
   const nrFaturas = abertos.map((t) => t.receivableCode);
-  const [clientes, ativos, erros] = await Promise.all([
+  const [clientes, ativos, erros, bloqueados] = await Promise.all([
     buscarClientes(codigos),
     boletosAtivosPorTitulo(nrFaturas),
     ultimosErrosPorTitulo(nrFaturas),
+    clientesBloqueados(),
   ]);
 
   const items = abertos
@@ -300,7 +304,7 @@ async function carregarFaturas(filtro, de) {
         pendencias: ['cadastro não encontrado'],
       },
     }))
-    .filter((i) => !clienteExcluido(i.cliente));
+    .filter((i) => !clienteExcluido(i.cliente) && !bloqueados.has(Number(i.cd_cliente)));
   return { items, tabelaAusente: ativos.tabelaAusente };
 }
 
@@ -418,6 +422,39 @@ router.post(
       retentarErros: req.body?.retentarErros === true,
     });
     return successResponse(res, r, 'Retorno sincronizado');
+  }),
+);
+
+// ── Clientes bloqueados para boleto (trava configurável + lista fixa do código) ──
+// GET /remessa-boletos/bloqueados
+router.get(
+  '/remessa-boletos/bloqueados',
+  asyncHandler(async (req, res) => {
+    const mapa = await clientesBloqueados({ refresh: true });
+    return successResponse(
+      res,
+      { bloqueados: [...mapa.values()], fixos: [...CLIENTES_EXCLUIDOS], grupos: String(RX_GRUPO) },
+      'Clientes bloqueados para boleto',
+    );
+  }),
+);
+// POST /remessa-boletos/bloqueados { cd_cliente, nm_cliente?, nr_documento?, motivo?, usuario? }
+router.post(
+  '/remessa-boletos/bloqueados',
+  asyncHandler(async (req, res) => {
+    const { cd_cliente, nm_cliente, nr_documento, motivo, usuario } = req.body || {};
+    if (!cd_cliente) return errorResponse(res, 'cd_cliente obrigatório', 400, 'INVALID_PAYLOAD');
+    const r = await bloquearCliente({ cd_cliente, nm_cliente, nr_documento, motivo: String(motivo || '').slice(0, 200), usuario: String(usuario || '').slice(0, 120) });
+    console.log(`⛔ [remessa-boletos] cliente ${cd_cliente} bloqueado por ${usuario || '?'}: ${motivo || ''}`);
+    return successResponse(res, r, 'Cliente bloqueado');
+  }),
+);
+// DELETE /remessa-boletos/bloqueados/:cd_cliente
+router.delete(
+  '/remessa-boletos/bloqueados/:cd_cliente',
+  asyncHandler(async (req, res) => {
+    await desbloquearCliente(req.params.cd_cliente);
+    return successResponse(res, { ok: true }, 'Cliente desbloqueado');
   }),
 );
 

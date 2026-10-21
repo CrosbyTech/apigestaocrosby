@@ -111,6 +111,41 @@ export async function recebiveisPorCredito({ de, ate }) {
   return { itens, avisos };
 }
 
+// ── CLIENTES BLOQUEADOS ──
+// Tabela pagarme_clientes_bloqueados (migrations/pagarme_clientes_bloqueados.sql):
+// cliente travado não aparece no Envio de Remessa e a emissão é recusada.
+const TABELA_BLOQ = 'pagarme_clientes_bloqueados';
+let bloqCache = { ts: 0, mapa: null };
+export async function clientesBloqueados({ refresh = false } = {}) {
+  if (!refresh && bloqCache.mapa && Date.now() - bloqCache.ts < 60_000) return bloqCache.mapa;
+  const { data, error } = await supabase.from(TABELA_BLOQ).select('*').order('nm_cliente');
+  if (error) {
+    if (tabelaAusente(error)) return new Map();
+    throw new Error(`${TABELA_BLOQ}: ${error.message}`);
+  }
+  const mapa = new Map((data || []).map((r) => [Number(r.cd_cliente), r]));
+  bloqCache = { ts: Date.now(), mapa };
+  return mapa;
+}
+export async function bloquearCliente({ cd_cliente, nm_cliente, nr_documento, motivo, usuario }) {
+  const cd = Number(cd_cliente);
+  if (!Number.isInteger(cd) || cd <= 0) throw Object.assign(new Error('cd_cliente inválido'), { status: 400 });
+  const { data, error } = await supabase
+    .from(TABELA_BLOQ)
+    .upsert({ cd_cliente: cd, nm_cliente: nm_cliente || null, nr_documento: nr_documento || null, motivo: motivo || null, criado_por: usuario || null }, { onConflict: 'cd_cliente' })
+    .select('*')
+    .single();
+  if (error) throw new Error(`${TABELA_BLOQ}: ${error.message}`);
+  bloqCache = { ts: 0, mapa: null };
+  return data;
+}
+export async function desbloquearCliente(cd_cliente) {
+  const { error } = await supabase.from(TABELA_BLOQ).delete().eq('cd_cliente', Number(cd_cliente));
+  if (error) throw new Error(`${TABELA_BLOQ}: ${error.message}`);
+  bloqCache = { ts: 0, mapa: null };
+  return true;
+}
+
 /** Testa cada conta configurada na Pagar.me (GET /recipients) e devolve quem responde. */
 export async function testarContas() {
   const out = [];
@@ -188,6 +223,7 @@ export function descreverErro(msg) {
   if (/cadastro incompleto/i.test(m)) return t(m.replace(/^cadastro incompleto:/i, 'Cadastro incompleto no TOTVS:') + '. Corrija no olhinho e reenvie.');
   if (/não está mais em aberto/i.test(m)) return t('Fatura não está mais em aberto ou a vencer no TOTVS.');
   if (/portador .* não entra/i.test(m)) return t('Portador da fatura não entra na remessa.');
+  if (/cliente bloqueado/i.test(m)) return t('Cliente travado para boleto (lista de bloqueados do Envio de Remessa).');
   return t('Erro não identificado: ' + m.slice(0, 160));
 }
 
@@ -380,6 +416,10 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
   }
   if (cliente.pendencias?.length) {
     return { ok: false, chave, motivo: `cadastro incompleto: ${cliente.pendencias.join(', ')}` };
+  }
+  const bloqueado = (await clientesBloqueados()).get(Number(fatura.cd_cliente));
+  if (bloqueado) {
+    return { ok: false, chave, motivo: `cliente bloqueado para boleto${bloqueado.motivo ? ` (${bloqueado.motivo})` : ''}` };
   }
 
   const code = `HC-${chave}-${Date.now().toString(36)}`.slice(0, 52);
