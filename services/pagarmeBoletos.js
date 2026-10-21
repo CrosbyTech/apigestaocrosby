@@ -283,9 +283,20 @@ function detalharErroPagarme(order, tx) {
   return order?.message || JSON.stringify(order).slice(0, 300);
 }
 
+// Telefone do cadastro TOTVS → DDD + número que a Pagar.me aceita (máx. 15
+// chars no number). Cadastro vem com 55 na frente, 0 antes do DDD ou dois
+// números colados ("84999990000 84988880000") — fica só o primeiro.
+function telefoneBoleto(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if ((d.length === 12 || d.length === 13) && d.startsWith('55')) d = d.slice(2);
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  if (d.length > 11) d = d.slice(0, 11);
+  return d;
+}
+
 function montarPedido(fatura, cliente, code) {
   const e = cliente.endereco;
-  const fone = cliente.telefone.replace(/^55(?=\d{10,11}$)/, '');
+  const fone = telefoneBoleto(cliente.telefone);
   const titulo = `Fatura ${fatura.nr_fatura}/${fatura.nr_parcela}`;
   const boleto = {
     bank: BANCO_STONE,
