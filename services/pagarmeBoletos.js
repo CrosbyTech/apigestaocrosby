@@ -481,6 +481,171 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
   return r;
 }
 
+// ── BAIXA NA PAGAR.ME (cancelamento) ──
+// "Baixar o boleto na Pagar.me" = cancelar a cobrança lá (DELETE /charges/{id}),
+// para o cliente não conseguir mais pagar aquele boleto (ex.: pagou por outro
+// meio, renegociou, fatura cancelada). NÃO mexe no título do TOTVS: ele
+// continua em aberto, só sem boleto Pagar.me. Só boletos 'pending' entram.
+// A mesma função serve a conferência (confirmar=false: só lista o que seria
+// cancelado) e a execução (confirmar=true).
+
+const CANCEL_PARALELO = 5;
+
+function chaveFatura(b) {
+  return `${b.cd_empresa}-${b.nr_fatura}-${b.nr_parcela}`;
+}
+
+/** Carrega os boletos pendentes alvo da baixa, pelos critérios informados. */
+async function boletosPendentesAlvo({ ids = [], faturas = [], clientes = [] }) {
+  const alvo = new Map();
+  const juntar = (lote) => {
+    for (const b of lote || []) alvo.set(b.id, b);
+  };
+  const base = () =>
+    supabase
+      .from(TABELA)
+      .select('*')
+      .eq('status', 'pending')
+      .not('charge_id', 'is', null);
+
+  const idsNum = ids.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  for (let i = 0; i < idsNum.length; i += 500) {
+    const { data, error } = await base().in('id', idsNum.slice(i, i + 500));
+    if (error) throw new Error(`pagarme_boletos: ${error.message}`);
+    juntar(data);
+  }
+
+  const cliNum = clientes.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  for (let i = 0; i < cliNum.length; i += 500) {
+    const { data, error } = await base().in('cd_cliente', cliNum.slice(i, i + 500));
+    if (error) throw new Error(`pagarme_boletos: ${error.message}`);
+    juntar(data);
+  }
+
+  // faturas: [{ cd_empresa?, nr_fatura, nr_parcela? }] — sem empresa/parcela pega todas
+  const fatNum = faturas
+    .map((f) => (typeof f === 'object' ? f : { nr_fatura: f }))
+    .map((f) => ({
+      cd_empresa: f.cd_empresa ? Number(f.cd_empresa) : null,
+      nr_fatura: Number(f.nr_fatura),
+      nr_parcela: f.nr_parcela ? Number(f.nr_parcela) : null,
+    }))
+    .filter((f) => Number.isInteger(f.nr_fatura) && f.nr_fatura > 0);
+  const nrs = [...new Set(fatNum.map((f) => f.nr_fatura))];
+  for (let i = 0; i < nrs.length; i += 500) {
+    const { data, error } = await base().in('nr_fatura', nrs.slice(i, i + 500));
+    if (error) throw new Error(`pagarme_boletos: ${error.message}`);
+    juntar(
+      (data || []).filter((b) =>
+        fatNum.some(
+          (f) =>
+            f.nr_fatura === Number(b.nr_fatura) &&
+            (f.cd_empresa == null || f.cd_empresa === Number(b.cd_empresa)) &&
+            (f.nr_parcela == null || f.nr_parcela === Number(b.nr_parcela)),
+        ),
+      ),
+    );
+  }
+
+  const encontrados = [...alvo.values()].sort(
+    (a, b) => Number(a.cd_cliente) - Number(b.cd_cliente) || Number(a.nr_fatura) - Number(b.nr_fatura),
+  );
+  const clientesAchados = new Set(encontrados.map((b) => Number(b.cd_cliente)));
+  const faturasAchadas = new Set(encontrados.map((b) => Number(b.nr_fatura)));
+  const naoEncontrados = {
+    clientes: cliNum.filter((c) => !clientesAchados.has(c)),
+    faturas: nrs.filter((n) => !faturasAchadas.has(n)),
+    ids: idsNum.filter((i) => !alvo.has(i)),
+  };
+  return { encontrados, naoEncontrados };
+}
+
+/**
+ * Baixa (cancela) boletos na Pagar.me em massa.
+ * @param {object} p
+ * @param {number[]}  [p.ids]       ids da tabela pagarme_boletos
+ * @param {Array}     [p.faturas]   números de fatura ou {cd_empresa, nr_fatura, nr_parcela}
+ * @param {number[]}  [p.clientes]  códigos de cliente (todos os boletos pendentes deles)
+ * @param {boolean}   [p.confirmar] false = só conferência (nada é cancelado)
+ * @param {string}    [p.motivo]
+ * @param {string}    [p.usuario]
+ */
+export async function cancelarBoletos({ ids = [], faturas = [], clientes = [], confirmar = false, motivo = '', usuario = '' } = {}) {
+  if (!ids.length && !faturas.length && !clientes.length) {
+    throw Object.assign(new Error('Informe ids, faturas ou clientes'), { status: 400 });
+  }
+  const { encontrados, naoEncontrados } = await boletosPendentesAlvo({ ids, faturas, clientes });
+  const resumo = (lista) => ({
+    qtd: lista.length,
+    valor: Math.round(lista.reduce((a, b) => a + Number(b.vl_fatura || 0), 0) * 100) / 100,
+    clientes: new Set(lista.map((b) => Number(b.cd_cliente))).size,
+  });
+  const itens = encontrados.map((b) => ({
+    id: b.id,
+    cd_empresa: b.cd_empresa,
+    cd_cliente: b.cd_cliente,
+    nm_cliente: b.nm_cliente,
+    nr_fatura: b.nr_fatura,
+    nr_parcela: b.nr_parcela,
+    dt_vencimento: b.dt_vencimento,
+    vl_fatura: b.vl_fatura,
+    charge_id: b.charge_id,
+  }));
+  if (!confirmar) {
+    return { conferencia: true, ...resumo(encontrados), itens, naoEncontrados };
+  }
+
+  const agora = new Date().toISOString();
+  const cancelados = [];
+  const erros = [];
+  const fila = [...encontrados];
+  const worker = async () => {
+    for (;;) {
+      const b = fila.shift();
+      if (!b) return;
+      let resp;
+      try {
+        resp = await pagarme('DELETE', `/charges/${b.charge_id}`);
+      } catch (e) {
+        erros.push({ id: b.id, fatura: chaveFatura(b), erro: e.message });
+        continue;
+      }
+      const jaCancelada = resp.status === 412 || /cancel/i.test(JSON.stringify(resp.data?.message || resp.data?.errors || ''));
+      if (!resp.ok && !jaCancelada) {
+        const msg = resp.data?.message || JSON.stringify(resp.data?.errors || resp.data) || `HTTP ${resp.status}`;
+        erros.push({ id: b.id, fatura: chaveFatura(b), erro: msg });
+        continue;
+      }
+      const { error } = await supabase
+        .from(TABELA)
+        .update({
+          status: 'canceled',
+          cancelado_em: agora,
+          cancelado_por: usuario || null,
+          cancel_motivo: motivo || null,
+          updated_at: agora,
+        })
+        .eq('id', b.id);
+      if (error) {
+        // cancelou na Pagar.me mas não gravou: o sincronizar corrige depois (lê 'canceled' lá)
+        erros.push({ id: b.id, fatura: chaveFatura(b), erro: `cancelado na Pagar.me, falha ao gravar: ${error.message}` });
+        continue;
+      }
+      cancelados.push(b);
+      console.log(`🧾 [baixa-pagarme] cancelado ${chaveFatura(b)} charge ${b.charge_id} por ${usuario || '?'}`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CANCEL_PARALELO, fila.length) }, worker));
+
+  return {
+    conferencia: false,
+    ...resumo(cancelados),
+    cancelados: cancelados.map((b) => ({ id: b.id, fatura: chaveFatura(b), cd_cliente: b.cd_cliente, vl_fatura: b.vl_fatura })),
+    erros,
+    naoEncontrados,
+  };
+}
+
 /** Lista os boletos para a página Retorno Boleto. */
 export async function listarBoletos({
   branches,

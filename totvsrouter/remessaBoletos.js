@@ -26,6 +26,7 @@ import {
   emitirBoleto,
   listarBoletos,
   sincronizarRetorno,
+  cancelarBoletos,
 } from '../services/pagarmeBoletos.js';
 
 const router = express.Router();
@@ -414,6 +415,41 @@ router.post(
       retentarErros: req.body?.retentarErros === true,
     });
     return successResponse(res, r, 'Retorno sincronizado');
+  }),
+);
+
+// POST /remessa-boletos/baixar — baixa (cancela) boletos na Pagar.me em massa.
+// Body: { ids?: number[], faturas?: (number|{cd_empresa,nr_fatura,nr_parcela})[],
+//         clientes?: number[], confirmar?: boolean, motivo?: string, usuario?: string }
+// confirmar=false (default) só confere: devolve o que seria cancelado, nada muda.
+router.post(
+  '/remessa-boletos/baixar',
+  asyncHandler(async (req, res) => {
+    const { ids, faturas, clientes, confirmar, motivo, usuario } = req.body || {};
+    const lista = (v) => (Array.isArray(v) ? v : []);
+    if (!lista(ids).length && !lista(faturas).length && !lista(clientes).length) {
+      return errorResponse(
+        res,
+        'Informe ids, faturas ou clientes',
+        400,
+        'INVALID_PAYLOAD',
+      );
+    }
+    const r = await cancelarBoletos({
+      ids: lista(ids),
+      faturas: lista(faturas),
+      clientes: lista(clientes),
+      confirmar: confirmar === true,
+      motivo: String(motivo || '').slice(0, 200),
+      usuario: String(usuario || '').slice(0, 120),
+    });
+    return successResponse(
+      res,
+      r,
+      r.conferencia
+        ? `${r.qtd} boleto(s) pendente(s) encontrado(s)`
+        : `${r.qtd} boleto(s) baixado(s) na Pagar.me`,
+    );
   }),
 );
 
