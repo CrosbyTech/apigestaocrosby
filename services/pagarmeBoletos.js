@@ -61,6 +61,56 @@ export function contasInfo() {
     contas: Object.values(CONTAS).map((c) => ({ id: c.id, nome: c.nome, configurada: Boolean(c.sk) })),
   };
 }
+/**
+ * Recebíveis (payables) da Pagar.me por data de crédito em conta, nas contas
+ * configuradas. payment_date = dia em que o dinheiro cai na conta; status
+ * 'paid' = já creditado, 'prepaid' = agendado. Só type 'credit'.
+ * Devolve itens normalizados: { conta, dia, status, bruto, tarifa, liquido, metodo, charge_id }.
+ */
+export async function recebiveisPorCredito({ de, ate }) {
+  const itens = [];
+  const avisos = [];
+  for (const c of Object.values(CONTAS)) {
+    if (!c.sk) continue;
+    let cursor = null;
+    for (let pagina = 0; pagina < 30; pagina++) {
+      const q = `/payables?payment_date_since=${de}T00:00:00&payment_date_until=${ate}T23:59:59&size=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      let r;
+      try {
+        r = await pagarme('GET', q, null, c.id);
+      } catch (e) {
+        avisos.push(`${c.nome}: ${e.message}`);
+        break;
+      }
+      if (!r.ok) {
+        avisos.push(`${c.nome}: HTTP ${r.status} ${r.data?.message || ''}`.trim());
+        break;
+      }
+      const lote = Array.isArray(r.data?.data) ? r.data.data : [];
+      for (const x of lote) {
+        if (x.type !== 'credit') continue;
+        const bruto = Number(x.amount || 0) / 100;
+        const tarifa = (Number(x.fee || 0) + Number(x.anticipation_fee || 0)) / 100;
+        itens.push({
+          conta: c.id,
+          conta_nome: c.nome,
+          dia: String(x.payment_date || '').slice(0, 10),
+          status: x.status,
+          bruto,
+          tarifa,
+          liquido: Math.round((bruto - tarifa) * 100) / 100,
+          metodo: x.payment_method || 'outro',
+          charge_id: x.charge_id || null,
+          payable_id: x.id,
+        });
+      }
+      cursor = r.data?.paging?.forward_cursor || null;
+      if (!cursor || lote.length < 100) break;
+    }
+  }
+  return { itens, avisos };
+}
+
 /** Testa cada conta configurada na Pagar.me (GET /recipients) e devolve quem responde. */
 export async function testarContas() {
   const out = [];
@@ -145,7 +195,7 @@ export function tabelaAusente(error) {
   );
 }
 
-async function pagarme(method, path, body, contaId = CONTA_PADRAO) {
+export async function pagarme(method, path, body, contaId = CONTA_PADRAO) {
   const c = contaDe(contaId);
   if (!c.sk) throw new Error(`chave da Pagar.me da conta ${c.nome} não configurada no backend`);
   const r = await fetch(`https://api.pagar.me/core/v5${path}`, {
