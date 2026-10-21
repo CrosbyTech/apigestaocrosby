@@ -375,6 +375,13 @@ router.patch(
     if (b.observacao_interna !== undefined) patch.observacao_interna = b.observacao_interna || null;
     if (b.vendedor_code !== undefined) patch.vendedor_code = parseInt(b.vendedor_code, 10) || null;
     if (b.vendedor_nome !== undefined) patch.vendedor_nome = b.vendedor_nome || null;
+    if (b.local !== undefined) {
+      const LOCAIS = ['em_transito', 'matriz', 'local'];
+      if (!LOCAIS.includes(b.local)) return errorResponse(res, 'Local inválido', 400, 'INVALID_LOCAL');
+      patch.local = b.local;
+      patch.local_por = b.por || null;
+      patch.local_em = new Date().toISOString();
+    }
     if (b.status !== undefined) {
       if (!STATUS.includes(b.status)) return errorResponse(res, 'Status inválido', 400, 'INVALID_STATUS');
       patch.status = b.status;
