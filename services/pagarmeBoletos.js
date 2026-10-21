@@ -143,6 +143,10 @@ const BANCO_STONE = '197';
 // Multa (%) e juros (% a.m.) cobrados após o vencimento. 0 = não cobra.
 const MULTA_PCT = Number(process.env.PAGARME_BOLETO_MULTA_PCT ?? 2);
 const JUROS_PCT_MES = Number(process.env.PAGARME_BOLETO_JUROS_PCT_MES ?? 1);
+// Acréscimo fixo somado ao valor da fatura em todo boleto emitido (R$ 0,98 —
+// regra do João, 21/10/2026). Override: PAGARME_BOLETO_ACRESCIMO=0 desliga.
+export const ACRESCIMO_BOLETO = Math.round(Number(process.env.PAGARME_BOLETO_ACRESCIMO ?? 0.98) * 100) / 100;
+export const valorBoleto = (vlFatura) => Math.round((Number(vlFatura || 0) + ACRESCIMO_BOLETO) * 100) / 100;
 
 // Conta em que o repasse da Pagar.me cai — banco da baixa no TOTVS, por conta
 // Pagar.me: PAGARME_BAIXA_BANCO (Crosby, Sicredi) e PAGARME_BAIXA_BANCO_FABIO
@@ -296,8 +300,11 @@ function montarPedido(fatura, cliente, code) {
       .filter(Boolean)
       .join(' ')
       .slice(0, 256),
-    // fim do dia do vencimento, horário de Brasília
-    due_at: `${fatura.dt_vencimento}T23:59:59-03:00`,
+    // A Pagar.me guarda o vencimento pela DATA em UTC do instante enviado:
+    // "T23:59:59-03:00" vira 02:59Z do dia seguinte e o boleto saía um dia
+    // depois da fatura (visto em 21/10/2026). Meio-dia de Brasília = 15:00Z,
+    // mesmo dia nos dois fusos.
+    due_at: `${fatura.dt_vencimento}T12:00:00-03:00`,
     type: 'DM',
   };
   if (MULTA_PCT > 0) boleto.fine = { days: 1, type: 'percentage', amount: MULTA_PCT };
@@ -306,7 +313,7 @@ function montarPedido(fatura, cliente, code) {
   return {
     code,
     items: [
-      { code, amount: Math.round(fatura.vl_fatura * 100), description: titulo, quantity: 1 },
+      { code, amount: Math.round(valorBoleto(fatura.vl_fatura) * 100), description: titulo, quantity: 1 },
     ],
     customer: {
       name: cliente.nome.slice(0, 64),
@@ -381,6 +388,7 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
       dt_emissao: fatura.dt_emissao,
       dt_vencimento: fatura.dt_vencimento,
       vl_fatura: fatura.vl_fatura,
+      vl_acrescimo: ACRESCIMO_BOLETO,
       cd_portador_totvs: fatura.cd_portador,
       nm_portador_totvs: fatura.nm_portador,
       order_code: code,
