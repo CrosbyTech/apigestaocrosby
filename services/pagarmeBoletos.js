@@ -34,17 +34,48 @@ const TABELA = 'pagarme_boletos';
 const TP_DOCUMENTO_FATURA = 1;
 const CARTEIRA_SIMPLES = 1; // ReceivableChargeType.Simple
 
-const SK = process.env.PAGARME_SECRET_KEY || '';
+// ── CONTAS PAGAR.ME ──
+// 'crosby' = FERREIRA COMERCIO E CONFECCOES LTDA (conta original, PAGARME_SECRET_KEY)
+// 'fabio'  = FA MODA (conta do Fábio, PAGARME_SECRET_KEY_FABIO)
+// Cada boleto guarda em pagarme_boletos.conta onde foi emitido; retorno e
+// cancelamento usam a chave daquela conta. Emissão nova sai por
+// PAGARME_CONTA_EMISSAO (default: 'fabio' se a chave existir, senão 'crosby').
+export const CONTAS = {
+  crosby: { id: 'crosby', nome: 'Crosby (FERREIRA)', sk: process.env.PAGARME_SECRET_KEY || '', baixaBanco: process.env.PAGARME_BAIXA_BANCO || '748,2207,367338' },
+  fabio: { id: 'fabio', nome: 'FA MODA (Fábio)', sk: process.env.PAGARME_SECRET_KEY_FABIO || '', baixaBanco: process.env.PAGARME_BAIXA_BANCO_FABIO || process.env.PAGARME_BAIXA_BANCO || '748,2207,367338' },
+};
+export const CONTA_PADRAO = 'crosby';
+export function contaDe(id) {
+  return CONTAS[id] || CONTAS[CONTA_PADRAO];
+}
+export function contaEmissao() {
+  const pedida = String(process.env.PAGARME_CONTA_EMISSAO || '').trim();
+  if (pedida && CONTAS[pedida]?.sk) return pedida;
+  if (CONTAS.fabio.sk) return 'fabio';
+  return 'crosby';
+}
+/** Para o front: contas, qual tem chave e por qual sai a emissão. */
+export function contasInfo() {
+  return {
+    emissao: contaEmissao(),
+    contas: Object.values(CONTAS).map((c) => ({ id: c.id, nome: c.nome, configurada: Boolean(c.sk) })),
+  };
+}
+const SK = CONTAS.crosby.sk;
 const BANCO_STONE = '197';
 // Multa (%) e juros (% a.m.) cobrados após o vencimento. 0 = não cobra.
 const MULTA_PCT = Number(process.env.PAGARME_BOLETO_MULTA_PCT ?? 2);
 const JUROS_PCT_MES = Number(process.env.PAGARME_BOLETO_JUROS_PCT_MES ?? 1);
 
-// Conta em que o repasse da Pagar.me cai (Sicredi) — banco da baixa no TOTVS.
-// Override: PAGARME_BAIXA_BANCO="748,2207,367338"
-const [BX_BANCO, BX_AGENCIA, BX_CONTA] = (process.env.PAGARME_BAIXA_BANCO || '748,2207,367338')
-  .split(',')
-  .map((s) => s.trim());
+// Conta em que o repasse da Pagar.me cai — banco da baixa no TOTVS, por conta
+// Pagar.me: PAGARME_BAIXA_BANCO (Crosby, Sicredi) e PAGARME_BAIXA_BANCO_FABIO
+// (FA MODA; enquanto não informada usa a mesma da Crosby).
+function bancoBaixa(contaId) {
+  const [banco, agencia, conta] = String(contaDe(contaId).baixaBanco)
+    .split(',')
+    .map((x) => x.trim());
+  return { banco, agencia, conta };
+}
 const PAID_TYPE_CONTA_CORRENTE = 4;
 
 const soDigitos = (s) => String(s || '').replace(/\D/g, '');
@@ -87,13 +118,14 @@ export function tabelaAusente(error) {
   );
 }
 
-async function pagarme(method, path, body) {
-  if (!SK) throw new Error('PAGARME_SECRET_KEY não configurada no backend');
+async function pagarme(method, path, body, contaId = CONTA_PADRAO) {
+  const c = contaDe(contaId);
+  if (!c.sk) throw new Error(`chave da Pagar.me da conta ${c.nome} não configurada no backend`);
   const r = await fetch(`https://api.pagar.me/core/v5${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: 'Basic ' + Buffer.from(`${SK}:`).toString('base64'),
+      Authorization: 'Basic ' + Buffer.from(`${c.sk}:`).toString('base64'),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -114,7 +146,7 @@ export async function boletosAtivosPorTitulo(nrFaturas) {
   for (let i = 0; i < lista.length; i += 300) {
     const { data, error } = await supabase
       .from(TABELA)
-      .select('id, cd_empresa, nr_fatura, nr_parcela, status, boleto_url, linha_digitavel, baixa_status')
+      .select('id, cd_empresa, nr_fatura, nr_parcela, status, boleto_url, linha_digitavel, baixa_status, conta')
       .in('nr_fatura', lista.slice(i, i + 300))
       .not('status', 'in', '(failed,canceled)');
     if (error) {
@@ -255,12 +287,14 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
   }
 
   const code = `HC-${chave}-${Date.now().toString(36)}`.slice(0, 52);
+  const conta = contaEmissao();
 
   // 1) Reserva a linha. O índice único barra a fatura que já tem boleto vivo.
   const { data: reservado, error: eIns } = await supabase
     .from(TABELA)
     .insert({
       remessa_id: remessaId,
+      conta,
       cd_empresa: fatura.cd_empresa,
       cd_cliente: fatura.cd_cliente,
       nm_cliente: cliente.nome,
@@ -294,7 +328,7 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
   // 2) Pedido na Pagar.me
   let resp;
   try {
-    resp = await pagarme('POST', '/orders', montarPedido(fatura, cliente, code));
+    resp = await pagarme('POST', '/orders', montarPedido(fatura, cliente, code), conta);
   } catch (e) {
     await gravar({ status: 'failed', erro: `Pagar.me inacessível: ${e.message}` });
     return { ok: false, chave, motivo: `Pagar.me inacessível: ${e.message}` };
@@ -332,7 +366,7 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
   return {
     ok: true,
     chave,
-    boleto: { id, order_id: order.id, url: tx.url, linha_digitavel: tx.line },
+    boleto: { id, order_id: order.id, url: tx.url, linha_digitavel: tx.line, conta },
     carteiraErro,
   };
 }
@@ -347,6 +381,7 @@ async function baixarNoTotvs(b) {
   }
   const juros = Number((pago - fatura).toFixed(2));
   const data = new Date(b.dt_pagamento || Date.now()).toISOString();
+  const bx = bancoBaixa(b.conta);
   await postTotvs('/accounts-receivable/v2/invoices-payment', {
     branchCode: Number(b.cd_empresa),
     settlementDate: data,
@@ -366,9 +401,9 @@ async function baixarNoTotvs(b) {
         paidType: PAID_TYPE_CONTA_CORRENTE,
         movementDate: data,
         bank: {
-          bankNumber: Number(BX_BANCO),
-          agencyNumber: Number(BX_AGENCIA),
-          account: String(BX_CONTA),
+          bankNumber: Number(bx.banco),
+          agencyNumber: Number(bx.agencia),
+          account: String(bx.conta),
         },
       },
     ],
@@ -432,7 +467,7 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
     r.consultados++;
     let resp;
     try {
-      resp = await pagarme('GET', `/orders/${b.order_id}`);
+      resp = await pagarme('GET', `/orders/${b.order_id}`, null, b.conta);
     } catch {
       r.errosConsulta++;
       continue;
@@ -590,6 +625,8 @@ export async function cancelarBoletos({ ids = [], faturas = [], clientes = [], c
   });
   const itens = encontrados.map((b) => ({
     id: b.id,
+    conta: b.conta || CONTA_PADRAO,
+    conta_nome: contaDe(b.conta).nome,
     cd_empresa: b.cd_empresa,
     cd_cliente: b.cd_cliente,
     nm_cliente: b.nm_cliente,
@@ -613,7 +650,7 @@ export async function cancelarBoletos({ ids = [], faturas = [], clientes = [], c
       if (!b) return;
       let resp;
       try {
-        resp = await pagarme('DELETE', `/charges/${b.charge_id}`);
+        resp = await pagarme('DELETE', `/charges/${b.charge_id}`, null, b.conta);
       } catch (e) {
         erros.push({ id: b.id, fatura: chaveFatura(b), erro: e.message });
         continue;
@@ -698,6 +735,8 @@ export async function listarBoletos({
   const hoje = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10); // dia em Brasília
   const items = (data || []).map((b) => ({
     ...b,
+    conta: b.conta || CONTA_PADRAO,
+    conta_nome: contaDe(b.conta).nome,
     erro_descricao: b.status === 'failed' ? descreverErro(b.erro) : null,
     situacao:
       b.status === 'paid'

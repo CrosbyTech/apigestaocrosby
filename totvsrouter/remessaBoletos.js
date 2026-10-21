@@ -27,6 +27,7 @@ import {
   listarBoletos,
   sincronizarRetorno,
   cancelarBoletos,
+  contasInfo,
 } from '../services/pagarmeBoletos.js';
 
 const router = express.Router();
@@ -220,6 +221,7 @@ router.get(
         ),
         comPendencia: items.filter((i) => i.cliente.pendencias?.length).length,
         portadoresRemessa: PORTADORES_REMESSA,
+        contasPagarme: contasInfo(),
         tabelaAusente,
         periodo: { de, ate: dt_fim },
         timeMs: Date.now() - inicio,
@@ -403,7 +405,7 @@ router.get(
       dt_fim: req.query.dt_fim,
       modo: req.query.modo,
     });
-    return successResponse(res, dados, 'Boletos Pagar.me');
+    return successResponse(res, { ...dados, contasPagarme: contasInfo() }, 'Boletos Pagar.me');
   }),
 );
 
@@ -416,6 +418,12 @@ router.post(
     });
     return successResponse(res, r, 'Retorno sincronizado');
   }),
+);
+
+// GET /remessa-boletos/contas — contas Pagar.me (qual tem chave, por qual sai a emissão)
+router.get(
+  '/remessa-boletos/contas',
+  asyncHandler(async (req, res) => successResponse(res, contasInfo(), 'Contas Pagar.me')),
 );
 
 // POST /remessa-boletos/baixar — baixa (cancela) boletos na Pagar.me em massa.
