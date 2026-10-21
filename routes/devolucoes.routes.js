@@ -336,9 +336,23 @@ router.post(
       .from('devolucoes_transacoes')
       .update(patch)
       .eq('id', parseInt(req.params.id, 10))
-      .select('id, transacao_status')
+      .select('id, origem, devolucao_id, transacao_status')
       .single();
     if (error) return erroTrx(res, error);
+    // FISFP082 vinculado a uma solicitação: "lançada" (4) conclui a solicitação
+    // (sai de Solicitações); "reabrir" (1) volta para recebida/aguardando entrada.
+    if (data?.origem === 'fisfp082' && data?.devolucao_id) {
+      const novoStatus = status === 4 ? 'concluida' : status === 1 ? 'em_devolucao' : null;
+      if (novoStatus) {
+        await supabase
+          .from('devolucoes_mercadoria')
+          .update({
+            status: novoStatus,
+            ...(status === 4 ? { transacao_atendida_em: new Date().toISOString() } : {}),
+          })
+          .eq('id', data.devolucao_id);
+      }
+    }
     return successResponse(res, data, 'Situação atualizada');
   }),
 );
