@@ -328,7 +328,8 @@ function montarPedido(fatura, cliente, code) {
     ],
     customer: {
       name: cliente.nome.slice(0, 64),
-      email: cliente.email || undefined,
+      // e-mail inválido no cadastro derrubava a emissão (customer.email) — vai sem
+      email: /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(cliente.email || '').trim()) ? String(cliente.email).trim().toLowerCase() : undefined,
       document: cliente.documento,
       document_type: cliente.tipo === 'PJ' ? 'CNPJ' : 'CPF',
       type: cliente.tipo === 'PJ' ? 'company' : 'individual',
