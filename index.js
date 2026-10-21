@@ -109,7 +109,9 @@ import provisaoLiberacaoRoutes from './routes/provisaoLiberacao.routes.js';
 import whatsappContasPagarRoutes from './routes/whatsappContasPagar.routes.js';
 import fiscalImpostosRoutes from './routes/fiscalImpostos.routes.js';
 import dreObservacoesRoutes from './routes/dreObservacoes.routes.js';
+import dreAuditoriaRoutes from './routes/dreAuditoria.routes.js';
 import { iniciarJojoBot } from './services/jojoBot.js';
+import { iniciarJojoGrupoJob } from './jobs/jojo-grupo.job.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
@@ -209,6 +211,7 @@ app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão autom�
 app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
+app.use('/api/dre-auditoria', dreAuditoriaRoutes); // DRE — auditoria (Contratos PJ do Dryland × DRE Analítica), só leitura
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -267,6 +270,7 @@ app.listen(PORT, async () => {
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
   iniciarJojoBot().catch((e) => console.warn(`[jojo] falha ao iniciar: ${e.message}`)); // JOJO — assistente fiscal no grupo do Contas a Pagar
+  iniciarJojoGrupoJob(); // JOJO — job 5min que lê o grupo (sem IA): planilha de observações → cruzamento → SUBIR grava
   iniciarBruceBot().catch((e) => console.warn(`[bruce] falha ao iniciar: ${e.message}`)); // BRUCE — assistente do Contas a Receber no grupo BRUCE - CAR HEADCOACH
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
