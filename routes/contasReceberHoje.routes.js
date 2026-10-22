@@ -17,7 +17,7 @@ import { asyncHandler, successResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import supabase from '../config/supabase.js';
 import { postTotvs } from '../services/bluecardLimite.js';
-import { PORTADORES_REMESSA, boletosAtivosPorTitulo, recebiveisPorCredito, contasInfo } from '../services/pagarmeBoletos.js';
+import { PORTADORES_REMESSA, boletosAtivosPorTitulo, recebiveisPorCredito, contasInfo, conferirTitulosTotvs } from '../services/pagarmeBoletos.js';
 import { obter as obterInadimplentes, CANAIS, DT_INICIO_PADRAO } from './cobranca.routes.js';
 import { resumir } from '../utils/cobrancaInadimplentes.js';
 
@@ -182,7 +182,7 @@ async function pagarmeHoje(hoje) {
   for (let de = 0; ; de += 1000) {
     const { data, error } = await supabase
       .from('pagarme_boletos')
-      .select('id, cd_empresa, cd_cliente, nm_cliente, nr_fatura, nr_parcela, dt_vencimento, vl_fatura, vl_pago, dt_pagamento, status, baixa_status, charge_id')
+      .select('id, cd_empresa, cd_cliente, nm_cliente, nr_fatura, nr_parcela, dt_vencimento, vl_fatura, vl_pago, dt_pagamento, status, baixa_status, charge_id, totvs_conferido_em')
       .in('status', ['pending', 'paid'])
       .order('id', { ascending: true })
       .range(de, de + 999);
@@ -208,106 +208,33 @@ async function pagarmeHoje(hoje) {
   };
 }
 
-/** Boletos Pagar.me pendentes cujo título já está pago/baixado no TOTVS (cliente pagou por outro meio) — cancelar na Pagar.me. */
+/** Boletos Pagar.me pendentes cujo título já está pago/renegociado/cancelado no TOTVS — cancelar na Pagar.me. */
 async function boletosParaCancelar(pendentes) {
-  const porEmpresa = {};
-  for (const b of pendentes) (porEmpresa[b.cd_empresa] ||= []).push(b);
-  const itens = [];
-  for (const [emp, lista] of Object.entries(porEmpresa)) {
-    const porFatura = {};
-    for (const b of lista) (porFatura[Number(b.nr_fatura)] ||= []).push(b);
-    const codigos = Object.keys(porFatura).map(Number);
-    for (let i = 0; i < codigos.length; i += 100) {
-      const { itens: docs } = await buscarTitulos({ branchCodeList: [Number(emp)], receivableCodeList: codigos.slice(i, i + 100) }, { maxPaginas: 5 });
-      for (const t of docs) {
-        const bs = porFatura[Number(t.receivableCode)] || [];
-        const b = bs.find((x) => Number(x.nr_parcela) === Number(t.installmentCode ?? 1));
-        if (!b) continue;
-        if (!estaAberto(t)) {
-          itens.push({
-            id: b.id,
-            cd_empresa: b.cd_empresa,
-            cd_cliente: b.cd_cliente,
-            nome: b.nm_cliente,
-            nr_fatura: b.nr_fatura,
-            nr_parcela: b.nr_parcela,
-            dt_vencimento: b.dt_vencimento,
-            valor: Number(b.vl_fatura || 0),
-            motivo: ehRenegociacao(t)
-              ? 'renegociado'
-              : t.paymentDate || t.settlementDate
-                ? 'pago no TOTVS'
-                : { 2: 'devolvido no TOTVS', 3: 'cancelado no TOTVS', 4: 'quebrado no TOTVS' }[t.status] || `situação ${t.status} no TOTVS`,
-            baixa_em: ymd(t.paymentDate || t.settlementDate),
-          });
-        }
-      }
-    }
-  }
-  return itens.sort((a, b) => (a.baixa_em < b.baixa_em ? 1 : -1));
-}
-
-/** Recebíveis Pagar.me por data de crédito: o que caiu na conta hoje e o que cai nos próximos dias. */
-async function recebiveisPagarme(hoje) {
-  const de = somarDias(hoje, -1);
-  const ate = somarDias(hoje, 10);
-  const { itens, avisos } = await recebiveisPorCredito({ de, ate });
-  // cliente/fatura de cada recebível pelo charge_id (quando for boleto do HeadCoach)
-  const ids = [...new Set(itens.map((i) => i.charge_id).filter(Boolean))];
-  const porCharge = {};
-  for (let i = 0; i < ids.length; i += 300) {
-    const { data } = await supabase
-      .from('pagarme_boletos')
-      .select('charge_id, cd_empresa, cd_cliente, nm_cliente, nr_fatura, nr_parcela, vl_fatura, dt_pagamento, baixa_status')
-      .in('charge_id', ids.slice(i, i + 300));
-    for (const b of data || []) porCharge[b.charge_id] = b;
-  }
-  const enriquecer = (i) => {
-    const b = porCharge[i.charge_id];
-    return b
-      ? { ...i, cd_empresa: b.cd_empresa, cd_cliente: b.cd_cliente, nome: b.nm_cliente, nr_fatura: b.nr_fatura, nr_parcela: b.nr_parcela, vl_fatura: Number(b.vl_fatura || 0), pago_em: b.dt_pagamento, baixa: b.baixa_status }
-      : { ...i, nome: i.metodo === 'boleto' ? '(boleto fora do HeadCoach)' : i.metodo === 'credit_card' ? '(cartão)' : i.metodo === 'pix' ? '(Pix)' : '(outro)' };
-  };
-  const bloco = (lista, dia) => {
-    const porMetodo = {};
-    for (const i of lista) {
-      const m = (porMetodo[i.metodo] ||= { n: 0, bruto: 0, tarifa: 0, liquido: 0 });
-      m.n++;
-      m.bruto = r2(m.bruto + i.bruto);
-      m.tarifa = r2(m.tarifa + i.tarifa);
-      m.liquido = r2(m.liquido + i.liquido);
-    }
-    const porConta = {};
-    for (const i of lista) porConta[i.conta] = r2((porConta[i.conta] || 0) + i.liquido);
-    const boletos = lista.filter((i) => i.metodo === 'boleto');
-    return {
-      dia,
-      n: lista.length,
-      bruto: somar(lista, (i) => i.bruto),
-      tarifa: somar(lista, (i) => i.tarifa),
-      liquido: somar(lista, (i) => i.liquido),
-      boletos: { n: boletos.length, bruto: somar(boletos, (i) => i.bruto), liquido: somar(boletos, (i) => i.liquido) },
-      creditado: lista.every((i) => i.status === 'paid'),
-      porMetodo,
-      porConta,
-      itens: lista.map(enriquecer).sort((a, b) => b.liquido - a.liquido),
-    };
-  };
-  const dias = [...new Set(itens.map((i) => i.dia))].sort();
-  const amanhaDia = somarDias(hoje, 1);
-  const proximoDia = dias.find((d) => d > hoje) || amanhaDia;
-  return {
-    contas: contasInfo().contas,
-    periodo: { de, ate },
-    ontem: bloco(itens.filter((i) => i.dia === somarDias(hoje, -1)), somarDias(hoje, -1)),
-    hoje: bloco(itens.filter((i) => i.dia === hoje), hoje),
-    amanha: bloco(itens.filter((i) => i.dia === proximoDia), proximoDia),
-    proximos: dias.filter((d) => d > hoje).map((d) => {
-      const l = itens.filter((i) => i.dia === d);
-      return { dia: d, n: l.length, bruto: somar(l, (i) => i.bruto), liquido: somar(l, (i) => i.liquido), boletos: l.filter((i) => i.metodo === 'boleto').length };
-    }),
-    avisos,
-  };
+  // o retorno (job 30 min / botão) grava totvs_situacao; aqui só confere quem nunca foi conferido
+  const nunca = pendentes.filter((b) => !b.totvs_conferido_em);
+  if (nunca.length) await conferirTitulosTotvs(nunca);
+  const { data } = await supabase
+    .from('pagarme_boletos')
+    .select('id, conta, cd_empresa, cd_cliente, nm_cliente, nr_fatura, nr_parcela, dt_vencimento, vl_fatura, totvs_situacao, totvs_baixa_em')
+    .eq('status', 'pending')
+    .not('totvs_situacao', 'in', '(aberto,nao_encontrado)')
+    .not('totvs_situacao', 'is', null)
+    .limit(2000);
+  return (data || [])
+    .map((b) => ({
+      id: b.id,
+      conta: b.conta,
+      cd_empresa: b.cd_empresa,
+      cd_cliente: b.cd_cliente,
+      nome: b.nm_cliente,
+      nr_fatura: b.nr_fatura,
+      nr_parcela: b.nr_parcela,
+      dt_vencimento: b.dt_vencimento,
+      valor: Number(b.vl_fatura || 0),
+      motivo: `${b.totvs_situacao} no TOTVS`,
+      baixa_em: b.totvs_baixa_em,
+    }))
+    .sort((a, b) => String(b.baixa_em || '').localeCompare(String(a.baixa_em || '')));
 }
 
 async function pendenciasHeadCoach() {

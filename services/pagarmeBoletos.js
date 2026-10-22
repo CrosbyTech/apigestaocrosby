@@ -635,6 +635,24 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
     }
   }
 
+  // Título no TOTVS: pendente de boleto já pago/renegociado/cancelado lá vira
+  // demanda de cancelamento (gravado em totvs_situacao; a tela mostra).
+  try {
+    // PostgREST corta em 1000 linhas: pagina
+    const aindaPendentes = [];
+    for (let de = 0; ; de += 1000) {
+      const { data: lote } = await supabase.from(TABELA).select('id, cd_empresa, cd_cliente, nr_fatura, nr_parcela').eq('status', 'pending').not('charge_id', 'is', null).order('id').range(de, de + 999);
+      aindaPendentes.push(...(lote || []));
+      if (!lote || lote.length < 1000) break;
+    }
+    const c = await conferirTitulosTotvs(aindaPendentes);
+    r.totvsConferidos = c.conferidos;
+    r.totvsFechados = c.fechados.length;
+    r.totvsErros = c.erros;
+  } catch (e) {
+    console.warn(`⚠️ [retorno-boleto] conferência no TOTVS: ${e.message}`);
+  }
+
   // Reserva que nunca virou pedido (processo caiu no meio da emissão): libera a fatura.
   await supabase
     .from(TABELA)
@@ -826,6 +844,77 @@ export async function cancelarBoletos({ ids = [], faturas = [], clientes = [], c
     erros,
     naoEncontrados,
   };
+}
+
+// ── CONFERÊNCIA DO TÍTULO NO TOTVS ──
+// Boleto Pagar.me pendente cujo título já foi pago / renegociado / cancelado no
+// TOTVS tem que ser cancelado na Pagar.me (o cliente pode pagar em dobro).
+// Casamento pelo título inteiro: empresa + cliente + fatura + parcela — o
+// número da fatura se repete entre clientes (ex.: 123456), então só
+// receivableCode não basta.
+const TOTVS_STATUS = { 2: 'devolvido', 3: 'cancelado', 4: 'quebrado' };
+function situacaoTitulo(t) {
+  if (Number(t.dischargeType) === TP_BAIXA_RENEGOCIACAO) return 'renegociado';
+  if (t.paymentDate || t.settlementDate) return 'pago';
+  if (t.status !== 1) return TOTVS_STATUS[t.status] || `situacao_${t.status}`;
+  return 'aberto';
+}
+const TP_BAIXA_RENEGOCIACAO = 9;
+
+/**
+ * Confere no TOTVS os títulos dos boletos informados (pendentes) e grava
+ * totvs_situacao / totvs_baixa_em / totvs_conferido_em. Devolve o resumo e a
+ * lista dos que estão fechados no TOTVS.
+ */
+export async function conferirTitulosTotvs(boletos) {
+  const agora = new Date().toISOString();
+  const porEmpCli = {};
+  for (const b of boletos) (porEmpCli[`${b.cd_empresa}|${b.cd_cliente}`] ||= []).push(b);
+  const fechados = [];
+  let conferidos = 0;
+  let erros = 0;
+  const chaves = Object.keys(porEmpCli);
+  const PARALELO_TOTVS = 4;
+  for (let i = 0; i < chaves.length; i += PARALELO_TOTVS) {
+    await Promise.all(
+      chaves.slice(i, i + PARALELO_TOTVS).map(async (k) => {
+        const lista = porEmpCli[k];
+        const [emp, cli] = k.split('|').map(Number);
+        const faturas = [...new Set(lista.map((b) => Number(b.nr_fatura)))];
+        let docs = [];
+        try {
+          for (let j = 0; j < faturas.length; j += 100) {
+            const r = await postTotvs('/accounts-receivable/v2/documents/search', {
+              filter: { branchCodeList: [emp], customerCodeList: [cli], receivableCodeList: faturas.slice(j, j + 100) },
+              page: 1,
+              pageSize: 500,
+            });
+            docs = docs.concat(r.data?.items || []);
+          }
+        } catch (e) {
+          erros += lista.length;
+          return;
+        }
+        for (const b of lista) {
+          const t = docs.find(
+            (x) =>
+              Number(x.customerCode) === Number(b.cd_cliente) &&
+              Number(x.receivableCode) === Number(b.nr_fatura) &&
+              Number(x.installmentCode ?? 1) === Number(b.nr_parcela),
+          );
+          const situacao = t ? situacaoTitulo(t) : 'nao_encontrado';
+          const baixaEm = t ? (t.paymentDate || t.settlementDate || '').slice(0, 10) || null : null;
+          conferidos++;
+          await supabase
+            .from(TABELA)
+            .update({ totvs_situacao: situacao, totvs_baixa_em: baixaEm, totvs_conferido_em: agora })
+            .eq('id', b.id);
+          if (situacao !== 'aberto' && situacao !== 'nao_encontrado') fechados.push({ ...b, totvs_situacao: situacao, totvs_baixa_em: baixaEm });
+        }
+      }),
+    );
+  }
+  return { conferidos, erros, fechados };
 }
 
 /** Lista os boletos para a página Retorno Boleto. */
