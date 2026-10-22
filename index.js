@@ -113,7 +113,7 @@ import dreAuditoriaRoutes from './routes/dreAuditoria.routes.js';
 import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarJojoGrupoJob } from './jobs/jojo-grupo.job.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
-import contasReceberHojeRoutes from './routes/contasReceberHoje.routes.js';
+import contasReceberHojeRoutes, { iniciarJobHoje } from './routes/contasReceberHoje.routes.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -274,6 +274,7 @@ app.listen(PORT, async () => {
   iniciarJojoBot().catch((e) => console.warn(`[jojo] falha ao iniciar: ${e.message}`)); // JOJO — assistente fiscal no grupo do Contas a Pagar
   iniciarJojoGrupoJob(); // JOJO — job 5min que lê o grupo (sem IA): planilha de observações → cruzamento → SUBIR grava
   iniciarBruceBot().catch((e) => console.warn(`[bruce] falha ao iniciar: ${e.message}`)); // BRUCE — assistente do Contas a Receber no grupo BRUCE - CAR HEADCOACH
+  iniciarJobHoje(); // tela Hoje do Contas a Receber — snapshot diário + na subida
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();

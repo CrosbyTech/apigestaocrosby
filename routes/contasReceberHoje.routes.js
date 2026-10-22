@@ -237,6 +237,69 @@ async function boletosParaCancelar(pendentes) {
     .sort((a, b) => String(b.baixa_em || '').localeCompare(String(a.baixa_em || '')));
 }
 
+/** Recebíveis Pagar.me por data de crédito: o que caiu na conta hoje e o que cai nos próximos dias. */
+async function recebiveisPagarme(hoje) {
+  const de = somarDias(hoje, -1);
+  const ate = somarDias(hoje, 10);
+  const { itens, avisos } = await recebiveisPorCredito({ de, ate });
+  // cliente/fatura de cada recebível pelo charge_id (quando for boleto do HeadCoach)
+  const ids = [...new Set(itens.map((i) => i.charge_id).filter(Boolean))];
+  const porCharge = {};
+  for (let i = 0; i < ids.length; i += 300) {
+    const { data } = await supabase
+      .from('pagarme_boletos')
+      .select('charge_id, cd_empresa, cd_cliente, nm_cliente, nr_fatura, nr_parcela, vl_fatura, dt_pagamento, baixa_status')
+      .in('charge_id', ids.slice(i, i + 300));
+    for (const b of data || []) porCharge[b.charge_id] = b;
+  }
+  const enriquecer = (i) => {
+    const b = porCharge[i.charge_id];
+    return b
+      ? { ...i, cd_empresa: b.cd_empresa, cd_cliente: b.cd_cliente, nome: b.nm_cliente, nr_fatura: b.nr_fatura, nr_parcela: b.nr_parcela, vl_fatura: Number(b.vl_fatura || 0), pago_em: b.dt_pagamento, baixa: b.baixa_status }
+      : { ...i, nome: i.metodo === 'boleto' ? '(boleto fora do HeadCoach)' : i.metodo === 'credit_card' ? '(cartão)' : i.metodo === 'pix' ? '(Pix)' : '(outro)' };
+  };
+  const bloco = (lista, dia) => {
+    const porMetodo = {};
+    for (const i of lista) {
+      const m = (porMetodo[i.metodo] ||= { n: 0, bruto: 0, tarifa: 0, liquido: 0 });
+      m.n++;
+      m.bruto = r2(m.bruto + i.bruto);
+      m.tarifa = r2(m.tarifa + i.tarifa);
+      m.liquido = r2(m.liquido + i.liquido);
+    }
+    const porConta = {};
+    for (const i of lista) porConta[i.conta] = r2((porConta[i.conta] || 0) + i.liquido);
+    const boletos = lista.filter((i) => i.metodo === 'boleto');
+    return {
+      dia,
+      n: lista.length,
+      bruto: somar(lista, (i) => i.bruto),
+      tarifa: somar(lista, (i) => i.tarifa),
+      liquido: somar(lista, (i) => i.liquido),
+      boletos: { n: boletos.length, bruto: somar(boletos, (i) => i.bruto), liquido: somar(boletos, (i) => i.liquido) },
+      creditado: lista.every((i) => i.status === 'paid'),
+      porMetodo,
+      porConta,
+      itens: lista.map(enriquecer).sort((a, b) => b.liquido - a.liquido),
+    };
+  };
+  const dias = [...new Set(itens.map((i) => i.dia))].sort();
+  const amanhaDia = somarDias(hoje, 1);
+  const proximoDia = dias.find((d) => d > hoje) || amanhaDia;
+  return {
+    contas: contasInfo().contas,
+    periodo: { de, ate },
+    ontem: bloco(itens.filter((i) => i.dia === somarDias(hoje, -1)), somarDias(hoje, -1)),
+    hoje: bloco(itens.filter((i) => i.dia === hoje), hoje),
+    amanha: bloco(itens.filter((i) => i.dia === proximoDia), proximoDia),
+    proximos: dias.filter((d) => d > hoje).map((d) => {
+      const l = itens.filter((i) => i.dia === d);
+      return { dia: d, n: l.length, bruto: somar(l, (i) => i.bruto), liquido: somar(l, (i) => i.liquido), boletos: l.filter((i) => i.metodo === 'boleto').length };
+    }),
+    avisos,
+  };
+}
+
 async function pendenciasHeadCoach() {
   const [bx, ep] = await Promise.all([
     supabase.from('solicitacoes_baixa').select('id, cd_cliente, nm_cliente, nr_fat, nr_parcela, vl_fatura, created_at, origem').eq('status', 'pendente').order('created_at', { ascending: true }).limit(1000),
@@ -407,19 +470,90 @@ async function montar() {
   };
 }
 
-let cache = { ts: 0, data: null, pendente: null };
-export async function obterHoje(refresh) {
-  if (!refresh && cache.data && Date.now() - cache.ts < CACHE_MS && cache.data.dia === hojeLoja()) return { ...cache.data, cached: true };
-  if (cache.pendente) return { ...(await cache.pendente), cached: false };
-  cache.pendente = montar();
-  try {
-    const data = await cache.pendente;
-    cache = { ts: Date.now(), data, pendente: null };
-    return { ...data, cached: false };
-  } catch (e) {
-    cache.pendente = null;
-    throw e;
+// ─── snapshot persistido + geração em segundo plano ─────────────────────────
+// A carga completa leva de 30 s a 2 min (TOTVS + devedores + Pagar.me) e
+// estourava o tempo da requisição na primeira abertura do dia. Agora:
+//   - o resultado fica em contas_receber_hoje_snapshot (sobrevive ao restart);
+//   - GET /hoje devolve o último snapshot NA HORA (com `desatualizado` quando
+//     não é de hoje) e, se não houver nenhum, dispara a geração e devolve
+//     { gerando: true } para a tela esperar;
+//   - ?refresh=1 dispara uma geração nova em segundo plano e devolve o atual;
+//   - job: na subida do servidor e todo dia às HOJE_GERAR_HORA (06:10).
+const TABELA_SNAP = 'contas_receber_hoje_snapshot';
+let geracao = null; // promise da geração em andamento
+let ultimoSnap = null; // { dia, gerado_em, tempo_ms, payload }
+
+async function lerSnapshot() {
+  const { data, error } = await supabase.from(TABELA_SNAP).select('*').order('gerado_em', { ascending: false }).limit(1);
+  if (error) {
+    if (!/relation .* does not exist|PGRST205|schema cache/i.test(error.message)) console.warn(`[hoje] snapshot: ${error.message}`);
+    return null;
   }
+  return data?.[0] || null;
+}
+
+async function gerarSnapshot(origem = 'manual') {
+  if (geracao) return geracao;
+  geracao = (async () => {
+    const t0 = Date.now();
+    try {
+      const payload = await montar();
+      const linha = { dia: payload.dia, gerado_em: payload.geradoEm, tempo_ms: Date.now() - t0, payload };
+      const { error } = await supabase.from(TABELA_SNAP).insert(linha);
+      if (error) console.warn(`[hoje] não gravou snapshot: ${error.message}`);
+      ultimoSnap = linha;
+      // mantém só os últimos 30 snapshots
+      const { data: velhos } = await supabase.from(TABELA_SNAP).select('id').order('gerado_em', { ascending: false }).range(30, 200);
+      if (velhos?.length) await supabase.from(TABELA_SNAP).delete().in('id', velhos.map((v) => v.id));
+      console.log(`🌅 [hoje] snapshot gerado (${origem}) em ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+      return linha;
+    } finally {
+      geracao = null;
+    }
+  })();
+  return geracao;
+}
+
+/** Último snapshot (memória → banco). */
+async function snapshotAtual() {
+  if (ultimoSnap) return ultimoSnap;
+  ultimoSnap = await lerSnapshot();
+  return ultimoSnap;
+}
+
+export async function obterHoje(refresh) {
+  const hoje = hojeLoja();
+  let snap = await snapshotAtual();
+  if (refresh || !snap) {
+    gerarSnapshot(refresh ? 'atualizar' : 'primeira carga').catch((e) => console.error(`❌ [hoje] geração: ${e.message}`));
+  }
+  if (!snap) {
+    // sem nada ainda: a tela mostra "gerando" e consulta de novo em alguns segundos
+    return { gerando: true, dia: hoje, geradoEm: null, avisos: [], demandas: [] };
+  }
+  return {
+    ...snap.payload,
+    snapshotDia: snap.dia,
+    snapshotGeradoEm: snap.gerado_em,
+    tempoMs: snap.tempo_ms,
+    desatualizado: snap.dia !== hoje,
+    gerando: Boolean(geracao),
+    cached: true,
+  };
+}
+
+/** Chamado pelo index.js: gera na subida e todo dia no horário configurado. */
+export function iniciarJobHoje() {
+  const hora = String(process.env.HOJE_GERAR_HORA || '06:10');
+  const [hh, mm] = hora.split(':').map(Number);
+  setTimeout(() => gerarSnapshot('subida do servidor').catch((e) => console.error(`❌ [hoje] geração inicial: ${e.message}`)), 90_000);
+  setInterval(() => {
+    const agora = new Date().toLocaleTimeString('pt-BR', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+    if (agora === `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`) {
+      gerarSnapshot('job diário').catch((e) => console.error(`❌ [hoje] job diário: ${e.message}`));
+    }
+  }, 60_000);
+  console.log(`🌅 [hoje] snapshot do Contas a Receber: na subida (+90s) e todo dia às ${hora} (${TZ})`);
 }
 
 router.use(requireAuth);
