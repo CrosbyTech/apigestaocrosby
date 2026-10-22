@@ -1740,7 +1740,7 @@ router.post(
 router.post(
   '/invoices-settle',
   asyncHandler(async (req, res) => {
-    const { items, bank } = req.body;
+    const { items, bank, dadosCartao } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return errorResponse(
@@ -1772,6 +1772,25 @@ router.post(
 
     // Dados bancÃ¡rios: usar os enviados pelo frontend, senÃ£o fallback ConfianÃ§a
     const requestPaidType = req.body.paidType || 4; // Default: Conta corrente
+    // Cartao (paidType 1 ou 2): o TOTVS exige o bloco `card` em payments[] -
+    // nsu (so numeros, <=20), autorization (<=20), cardBrand, cardOperator e
+    // installmentQuantity (CardModel do swagger). Antes de 22/10/2026 esse
+    // bloco nao era enviado (bandeira/NSU/autorizacao ficavam so na tela).
+    // `dadosCartao` = padrao da requisicao; `item.card` = por titulo
+    // (ex.: NSU/autorizacao = data do pagamento daquele titulo).
+    const soDigitosCard = (v) => String(v ?? '').replace(/\D/g, '').slice(0, 20);
+    const montarCard = (item) => {
+      if (requestPaidType !== 1 && requestPaidType !== 2) return undefined;
+      const c = { ...(dadosCartao || {}), ...(item.card || {}) };
+      const nsu = soDigitosCard(c.nsu);
+      return {
+        nsu: nsu ? Number(nsu) : 0,
+        autorization: String(c.autorizacao ?? c.autorization ?? '').slice(0, 20),
+        cardBrand: String(c.bandeira ?? c.cardBrand ?? '').slice(0, 60),
+        cardOperator: String(c.operadora ?? c.cardOperator ?? '').slice(0, 60),
+        installmentQuantity: Number(c.parcelas ?? c.installmentQuantity ?? 1) || 1,
+      };
+    };
     const BANK_DATA =
       bank && bank.bankNumber
         ? {
@@ -1873,6 +1892,7 @@ router.post(
               value: paidValue,
               paidType: requestPaidType,
               movementDate: settlementDate,
+              ...(montarCard(item) ? { card: montarCard(item) } : {}),
               ...(requestPaidType === 4
                 ? {
                     bank: {
