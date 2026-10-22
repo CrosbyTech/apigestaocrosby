@@ -1772,6 +1772,11 @@ router.post(
 
     // Dados bancÃ¡rios: usar os enviados pelo frontend, senÃ£o fallback ConfianÃ§a
     const requestPaidType = req.body.paidType || 4; // Default: Conta corrente
+    // Cartão PAGARME (operadora PAGARME) está cadastrado só na empresa 1; o
+    // invoices-payment procura o cartão na empresa de liquidação. A baixa
+    // manual da equipe também liquida nessa empresa. Override por
+    // body.cardSettlementBranch ou env (default 1).
+    const CARD_SETTLE_BRANCH = Number(req.body.cardSettlementBranch || process.env.PAGARME_CARD_SETTLE_BRANCH || 1);
     // Cartao (paidType 1 ou 2): o TOTVS exige o bloco `card` em payments[] -
     // nsu (so numeros, <=20), autorization (<=20), cardBrand, cardOperator e
     // installmentQuantity (CardModel do swagger). Antes de 22/10/2026 esse
@@ -1871,7 +1876,8 @@ router.post(
 
         // Payload conforme InvoicesPaymentCommand do Swagger
         // Para adiantamento (paidType 3), tenta primeiro empresa 99, se falhar tenta empresa 1
-        const settlementBranchCode = requestPaidType === 3 ? 99 : branchCode;
+        const temCard = montarCard(item);
+        const settlementBranchCode = requestPaidType === 3 ? 99 : temCard ? CARD_SETTLE_BRANCH : branchCode;
 
         // movementDate fica DENTRO de payments[] (schema InvoicesPaymentCommand);
         // na raiz o TOTVS ignora e grava o movimento com a data do dia.
@@ -1892,7 +1898,7 @@ router.post(
               value: paidValue,
               paidType: requestPaidType,
               movementDate: settlementDate,
-              ...(montarCard(item) ? { card: montarCard(item) } : {}),
+              ...(temCard ? { card: temCard } : {}),
               ...(requestPaidType === 4
                 ? {
                     bank: {
