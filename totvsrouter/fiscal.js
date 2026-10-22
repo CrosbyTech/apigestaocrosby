@@ -1783,10 +1783,12 @@ router.post(
       if (requestPaidType !== 1 && requestPaidType !== 2) return undefined;
       const c = { ...(dadosCartao || {}), ...(item.card || {}) };
       const nsu = soDigitosCard(c.nsu);
+      const cardBrand = String(c.bandeira ?? c.cardBrand ?? '').slice(0, 60);
       return {
         nsu: nsu ? Number(nsu) : 0,
         autorization: String(c.autorizacao ?? c.autorization ?? '').slice(0, 20),
-        cardBrand: String(c.bandeira ?? c.cardBrand ?? '').slice(0, 60),
+        // bandeira vazia = cadastro sem bandeira (ex.: PAGARME DEBITO, seq 63) — omite p/ casar com null
+        ...(cardBrand ? { cardBrand } : {}),
         cardOperator: String(c.operadora ?? c.cardOperator ?? '').slice(0, 60),
         installmentQuantity: Number(c.parcelas ?? c.installmentQuantity ?? 1) || 1,
       };
