@@ -39,6 +39,7 @@ import {
   statusSefaz,
   ICMS_ALIQ_UF,
 } from '../services/pdvFiscal.js';
+import { espelharVendaNoTotvs, EspelhoError } from '../services/pdvEspelhoTotvs.js';
 
 const router = express.Router();
 
@@ -184,10 +185,12 @@ router.put(
     const num = (v) => (v === '' || v == null ? undefined : Number(v));
     if (b.ambiente != null) patch.ambiente = Number(b.ambiente) === 1 ? 1 : 2;
     if (b.ativo != null) patch.ativo = !!b.ativo;
-    for (const k of ['serie_nfce', 'serie_nfe', 'prox_num_nfce', 'prox_num_nfe', 'operacao_nfce', 'operacao_nfe', 'operacao_troca']) {
+    for (const k of ['serie_nfce', 'serie_nfe', 'prox_num_nfce', 'prox_num_nfe', 'operacao_nfce', 'operacao_nfe', 'operacao_troca', 'operacao_doc_interno', 'terminal_totvs', 'cliente_balcao_totvs']) {
       const v = num(b[k]);
       if (v != null && Number.isInteger(v) && v >= 0) patch[k] = v;
     }
+    if (b.cliente_balcao_totvs === '' || b.cliente_balcao_totvs === null) patch.cliente_balcao_totvs = null;
+    if (b.espelhar_totvs != null) patch.espelhar_totvs = !!b.espelhar_totvs;
     if (b.aliq_icms !== undefined) patch.aliq_icms = b.aliq_icms === '' || b.aliq_icms == null ? null : Number(b.aliq_icms);
     if (b.info_complementar !== undefined) patch.info_complementar = b.info_complementar || null;
     if (b.empresa_nome !== undefined) patch.empresa_nome = b.empresa_nome || null;
@@ -637,6 +640,29 @@ router.get(
       etiquetas: new Set(items.map((i) => i.epc)).size,
     };
     return successResponse(res, { items, resumo }, `${items.length} movimento(s)`);
+  }),
+);
+
+// Espelha a venda HEADCOACH no TOTVS como documento interno + recebimento
+// (ATENDIDA). Pode ser chamada de novo após erro (ex.: caixa fechado).
+router.post(
+  '/vendas/:id/espelhar-totvs',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+      const r = await espelharVendaNoTotvs(id, { forcar: !!req.body?.forcar });
+      const venda = await carregarVenda(id);
+      return successResponse(res, { espelho: r, venda }, r.ignorado ? r.motivo : r.jaEstava ? 'Venda já estava recebida no TOTVS' : `Documento interno recebido no TOTVS (transação ${r.transactionCode})`);
+    } catch (err) {
+      if (err instanceof EspelhoError) {
+        let venda = null;
+        try { venda = await carregarVenda(id); } catch { /* segue sem a venda */ }
+        return errorResponse(res, err.message, err.status || 400, err.code, { venda, totvs: err.details ?? null });
+      }
+      const mig = erroMigracao(res, err);
+      if (mig) return mig;
+      throw err;
+    }
   }),
 );
 
