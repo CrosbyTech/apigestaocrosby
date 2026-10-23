@@ -231,6 +231,211 @@ async function fonteTotvs({ de, ate }) {
   }
 }
 
+// nomes de fornecedores TOTVS (pessoa jurídica) por código, em lotes
+const cacheNomes = new Map();
+async function nomesFornecedores(codes, token) {
+  const faltam = [...new Set(codes.filter((c) => c != null && !cacheNomes.has(c)))];
+  for (let i = 0; i < faltam.length; i += 50) {
+    const lote = faltam.slice(i, i + 50);
+    try {
+      const r = await axios.post(
+        `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
+        { filter: { personCodeList: lote }, page: 1, pageSize: 100 },
+        { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 },
+      );
+      for (const p of r.data?.items || []) cacheNomes.set(p.code, p.name || p.fantasyName || null);
+    } catch {
+      /* nome fica vazio */
+    }
+    for (const c of lote) if (!cacheNomes.has(c)) cacheNomes.set(c, null);
+  }
+  return cacheNomes;
+}
+
+/**
+ * Busca MANUAL no Contas a Pagar (TOTVS) + Liberação + Solicitações, pelos
+ * filtros do usuário: nº da duplicata, fornecedor (nome ou CNPJ), vencimento
+ * (de/até) e faixa de valor. Traz pagas e em aberto; marca `pago`.
+ */
+export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorMin, valorMax, lancamentoId } = {}) {
+  const avisos = [];
+  const f = { duplicata: soDigitos(duplicata) || null, fornecedor: limparTxt(fornecedor), de: de || null, ate: ate || null, valorMin: valorMin != null && valorMin !== '' ? Number(valorMin) : null, valorMax: valorMax != null && valorMax !== '' ? Number(valorMax) : null };
+  if (!f.duplicata && !f.fornecedor && !f.de && !f.ate && f.valorMin == null && f.valorMax == null) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, vencimento ou valor).');
+  const docFornecedor = soDigitos(f.fornecedor).length === 14 || soDigitos(f.fornecedor).length === 11 ? soDigitos(f.fornecedor) : null;
+  const nomeRe = f.fornecedor && !docFornecedor ? f.fornecedor : null;
+
+  const usados = await usadosTotais();
+  const lanc = lancamentoId ? await lancamentoEnriquecido(lancamentoId) : null;
+  const out = [];
+
+  // ── TOTVS: fornecedores por CNPJ ou por nome (via histórico da Liberação / Solicitações)
+  const tokenData = await getToken();
+  const token = tokenData?.access_token;
+  if (!token) avisos.push('TOTVS indisponível (sem token).');
+  let supplierCodes = null;
+  if (token && docFornecedor) {
+    try {
+      const r = await axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { filter: { cnpjList: [docFornecedor] }, page: 1, pageSize: 20 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 });
+      supplierCodes = (r.data?.items || []).map((p) => p.code);
+      for (const p of r.data?.items || []) cacheNomes.set(p.code, p.name);
+    } catch (e) {
+      avisos.push(`fornecedor por CNPJ: ${e.message}`);
+    }
+  } else if (nomeRe) {
+    const { data: libs } = await supabase.from(T.lib).select('cd_fornecedor,nm_fornecedor').ilike('nm_fornecedor', `%${nomeRe}%`).not('cd_fornecedor', 'is', null).limit(200);
+    const codes = new Set((libs || []).map((x) => Number(x.cd_fornecedor)).filter((n) => Number.isFinite(n)));
+    const { data: sols } = await supabase.from(T.sol).select('supplier_cpf_cnpj').ilike('supplier_name', `%${nomeRe}%`).not('supplier_cpf_cnpj', 'is', null).limit(100);
+    const cnpjs = [...new Set((sols || []).map((x) => soDigitos(x.supplier_cpf_cnpj)).filter((d) => d.length === 14 || d.length === 11))];
+    if (token && cnpjs.length) {
+      try {
+        const r = await axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { filter: { cnpjList: cnpjs.slice(0, 50) }, page: 1, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 });
+        for (const p of r.data?.items || []) {
+          codes.add(p.code);
+          cacheNomes.set(p.code, p.name);
+        }
+      } catch {
+        /* segue só com os códigos da Liberação */
+      }
+    }
+    supplierCodes = [...codes];
+    if (!supplierCodes.length && !f.duplicata) avisos.push(`Nenhum fornecedor com "${nomeRe}" no histórico de pagamentos; no TOTVS a busca foi só pelos outros filtros.`);
+  }
+
+  if (token && (f.duplicata || supplierCodes?.length || f.de || f.ate || f.valorMin != null || f.valorMax != null)) {
+    try {
+      const branchCodeList = await getBranchCodes(token);
+      const filter = { branchCodeList };
+      if (f.duplicata) filter.duplicateCodeList = [Number(f.duplicata)];
+      if (supplierCodes?.length) filter.supplierCodeList = supplierCodes.slice(0, 200);
+      if (f.de) filter.startExpiredDate = `${f.de}T00:00:00`;
+      if (f.ate) filter.endExpiredDate = `${f.ate}T23:59:59`;
+      if (!f.duplicata && !supplierCodes?.length && !f.de && !f.ate) {
+        // só valor: limita ao entorno do lançamento (±60 dias) para não varrer o TOTVS inteiro
+        const base = lanc?.data || new Date().toISOString().slice(0, 10);
+        filter.startExpiredDate = `${addDias(base, -60)}T00:00:00`;
+        filter.endExpiredDate = `${addDias(base, 60)}T23:59:59`;
+      }
+      if (f.valorMin != null) filter.startDuplicateValue = f.valorMin;
+      if (f.valorMax != null) filter.endDuplicateValue = f.valorMax;
+      const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 60000 });
+      const first = await pedir(1);
+      let itens = [...(first.data?.items || [])];
+      const totalPages = Math.min(Number(first.data?.totalPages) || 1, 10);
+      for (let p = 2; p <= totalPages; p++) itens.push(...((await pedir(p)).data?.items || []));
+      if ((Number(first.data?.totalPages) || 1) > 10) avisos.push('Busca no TOTVS limitada aos primeiros 1.000 títulos; refine os filtros.');
+      await nomesFornecedores(itens.map((it) => it.supplierCode), token);
+      for (const it of itens) {
+        const id = `${it.branchCode}|${it.duplicateCode}|${it.installmentCode}|${it.supplierCode}`;
+        const valorDup = round2(it.duplicateValue);
+        const pago = (it.paidValue || 0) > 0 || !!it.settlementDate;
+        out.push({
+          origem: 'TOTVS_CP',
+          id,
+          valor: round2(pago ? it.paidValue || it.duplicateValue : it.duplicateValue),
+          valorDuplicata: valorDup,
+          data: it.settlementDate ? String(it.settlementDate).slice(0, 10) : null,
+          vencimento: it.dueDate ? String(it.dueDate).slice(0, 10) : null,
+          emissao: it.issueDate ? String(it.issueDate).slice(0, 10) : null,
+          nome: cacheNomes.get(it.supplierCode) || null,
+          doc: soDigitos(it.supplierCpfCnpj) || null,
+          empresa: `Empresa ${it.branchCode}`,
+          duplicata: `${it.duplicateCode}|${it.installmentCode}`,
+          detalhe: [`dup ${it.duplicateCode}/${it.installmentCode}`, it.expense?.[0]?.expenseName, pago ? 'liquidada' : 'em aberto'].filter(Boolean).join(' · '),
+          pago,
+          supplierCode: it.supplierCode,
+        });
+      }
+    } catch (e) {
+      avisos.push(`Contas a Pagar TOTVS: ${e.message}`);
+    }
+  }
+
+  // ── Liberação de Pagamento (qualquer status) e Solicitações, com os mesmos filtros
+  try {
+    let q = supabase.from(T.lib).select('id,cd_empresa,nm_empresa,nm_fornecedor,cd_fornecedor,vl_duplicata,vl_real,dt_emissao,dt_vencimento,dt_pagamento,pago_em,status,forma_pagamento,chave_pix,banco_pagamento,nr_duplicata,nr_parcela,ds_despesaitem,dados_completos').neq('status', 'CANCELADO').limit(300);
+    if (f.duplicata) q = q.eq('nr_duplicata', f.duplicata);
+    if (nomeRe) q = q.ilike('nm_fornecedor', `%${nomeRe}%`);
+    if (f.de) q = q.gte('dt_vencimento', f.de);
+    if (f.ate) q = q.lte('dt_vencimento', f.ate);
+    if (f.valorMin != null) q = q.gte('vl_duplicata', f.valorMin);
+    if (f.valorMax != null) q = q.lte('vl_duplicata', f.valorMax);
+    const { data } = await q;
+    for (const p of data || []) {
+      const doc = soDigitos(p.dados_completos?.nr_cpfcnpj_fornecedor) || null;
+      if (docFornecedor && doc && doc !== docFornecedor) continue;
+      out.push({
+        origem: 'LIBERACAO',
+        id: p.id,
+        valor: round2(p.vl_real ?? p.vl_duplicata),
+        valorDuplicata: round2(p.vl_duplicata),
+        data: p.dt_pagamento || null,
+        vencimento: p.dt_vencimento || null,
+        emissao: p.dt_emissao || null,
+        nome: p.nm_fornecedor || null,
+        doc,
+        empresa: p.nm_empresa || null,
+        duplicata: p.nr_duplicata ? `${p.nr_duplicata}|${p.nr_parcela ?? ''}` : null,
+        detalhe: [p.ds_despesaitem, p.forma_pagamento, p.banco_pagamento ? `banco ${p.banco_pagamento}` : null, p.status].filter(Boolean).join(' · '),
+        pago: p.status === 'PAGO',
+      });
+    }
+  } catch (e) {
+    avisos.push(`Liberação de Pagamento: ${e.message}`);
+  }
+  try {
+    let q = supabase.from(T.sol).select('id,nm_empresa,supplier_name,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,descricao,tipo_solicitacao,duplicate_code').is('pagamento_liberacao_id', null).not('status', 'in', '("rejeitado","cancelado")').limit(200);
+    if (f.duplicata) q = q.eq('duplicate_code', f.duplicata);
+    if (nomeRe) q = q.ilike('supplier_name', `%${nomeRe}%`);
+    if (docFornecedor) q = q.eq('supplier_cpf_cnpj', docFornecedor);
+    if (f.de) q = q.gte('dt_vencimento', f.de);
+    if (f.ate) q = q.lte('dt_vencimento', f.ate);
+    if (f.valorMin != null) q = q.gte('valor_total', f.valorMin);
+    if (f.valorMax != null) q = q.lte('valor_total', f.valorMax);
+    const { data } = await q;
+    for (const s of data || []) {
+      out.push({
+        origem: 'SOLICITACAO',
+        id: s.id,
+        valor: round2(s.valor_total),
+        valorDuplicata: round2(s.valor_total),
+        data: null,
+        vencimento: s.dt_vencimento || null,
+        emissao: s.dt_emissao || null,
+        nome: s.supplier_name || null,
+        doc: soDigitos(s.supplier_cpf_cnpj) || null,
+        empresa: s.nm_empresa || null,
+        duplicata: s.duplicate_code ? `${s.duplicate_code}|` : null,
+        detalhe: [s.tipo_solicitacao, s.descricao ? String(s.descricao).slice(0, 60) : null, s.status].filter(Boolean).join(' · '),
+        pago: false,
+      });
+    }
+  } catch (e) {
+    avisos.push(`Solicitações Crosby: ${e.message}`);
+  }
+
+  // duplicatas da Liberação já cobrem as do TOTVS com o mesmo número
+  const dupsLib = new Set(out.filter((c) => c.origem === 'LIBERACAO' && c.duplicata).map((c) => c.duplicata));
+  const lista = out
+    .filter((c) => !(c.origem === 'TOTVS_CP' && dupsLib.has(c.duplicata)))
+    .map((c) => {
+      const usado = usados.get(`${c.origem}:${c.id}`) || 0;
+      return { ...c, usado, restante: round2((c.valorDuplicata ?? c.valor) - usado) };
+    })
+    .filter((c) => c.restante > VALOR_TOL);
+  // mais perto do valor/data da saída primeiro
+  const alvo = lanc ? Math.abs(lanc.valor) : null;
+  lista.sort((a, b) => {
+    if (alvo != null) {
+      const da = Math.abs((a.restante ?? a.valor) - alvo);
+      const db = Math.abs((b.restante ?? b.valor) - alvo);
+      if (da !== db) return da - db;
+    }
+    return String(b.vencimento || '').localeCompare(String(a.vencimento || ''));
+  });
+  return { candidatos: lista.slice(0, 200), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
+}
+const limparTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
 // ─── pontuação ────────────────────────────────────────────────
 function pontuar(l, c, usado = 0) {
   const valorL = Math.abs(round2(l.valor));
@@ -343,12 +548,17 @@ export async function carregarFontes({ de, ate }) {
 async function usadosNaJanela({ de, ate }) {
   const rows = await listarConciliacoes({ de: addDias(de, -40), ate: addDias(ate, 40) });
   const m = new Map();
+  const soma = (k, v) => m.set(k, round2((m.get(k) || 0) + Math.abs(Number(v))));
   for (const r of rows) {
-    if (r.referencia?.id == null) continue;
-    const k = `${r.origem}:${r.referencia.id}`;
-    m.set(k, round2((m.get(k) || 0) + Math.abs(Number(r.valor))));
+    if (Array.isArray(r.referencia?.itens)) {
+      for (const it of r.referencia.itens) if (it?.id != null) soma(`${it.origem}:${it.id}`, it.valorUsado ?? it.valor ?? 0);
+    } else if (r.referencia?.id != null) soma(`${r.origem}:${r.referencia.id}`, r.valor);
   }
   return m;
+}
+// uso acumulado de TODAS as conciliações (busca manual pode trazer duplicatas antigas)
+async function usadosTotais() {
+  return usadosNaJanela({ de: '2000-01-01', ate: '2099-12-31' });
 }
 const marcarUso = (usados, origem, id, valor) => usados.set(`${origem}:${id}`, round2((usados.get(`${origem}:${id}`) || 0) + Math.abs(valor)));
 
@@ -365,10 +575,54 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'MANUAL'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'MANUAL', 'MULTIPLO'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   const l = await lancamentoComChave(lancamentoId);
   if (!l.chave) throw new Error('Não foi possível calcular a chave do lançamento.');
+  // várias duplicatas somando a saída (ex.: 2.000 + 2.000 = 4.000)
+  if (Array.isArray(referencia?.itens)) {
+    const itens = referencia.itens.filter((it) => it && it.id != null && it.origem);
+    if (!itens.length) throw new Error('Selecione pelo menos uma duplicata.');
+    const usados = await usadosTotais();
+    const { data: atual } = await supabase.from(T.conc).select('referencia,origem,valor').eq('chave', l.chave).maybeSingle();
+    // se está regravando a mesma linha, libera o que ela já usava
+    if (atual) {
+      if (Array.isArray(atual.referencia?.itens)) for (const it of atual.referencia.itens) usados.set(`${it.origem}:${it.id}`, round2((usados.get(`${it.origem}:${it.id}`) || 0) - Math.abs(it.valorUsado ?? it.valor ?? 0)));
+      else if (atual.referencia?.id != null) usados.set(`${atual.origem}:${atual.referencia.id}`, round2((usados.get(`${atual.origem}:${atual.referencia.id}`) || 0) - Math.abs(Number(atual.valor))));
+    }
+    let restante = Math.abs(Number(l.valor));
+    const alocados = [];
+    for (const it of itens) {
+      const valorDup = Number(it.valorDuplicata ?? it.valor);
+      const jaUsado = usados.get(`${it.origem}:${it.id}`) || 0;
+      const disponivel = round2(valorDup - jaUsado);
+      if (disponivel <= VALOR_TOL) throw new Error(`A duplicata ${it.duplicata || it.id} (R$ ${valorDup.toFixed(2)}) já foi totalmente usada em outras saídas.`);
+      const usar = round2(Math.min(disponivel, restante));
+      restante = round2(restante - usar);
+      alocados.push({ origem: it.origem, id: it.id, nome: it.nome, doc: it.doc, duplicata: it.duplicata, vencimento: it.vencimento, data: it.data, empresa: it.empresa, detalhe: it.detalhe, valorDuplicata: valorDup, valorUsado: usar, parcial: usar < disponivel - VALOR_TOL || jaUsado > VALOR_TOL });
+      if (restante <= VALOR_TOL) break;
+    }
+    if (restante > VALOR_TOL) throw new Error(`As duplicatas selecionadas (R$ ${round2(Math.abs(Number(l.valor)) - restante).toFixed(2)} disponíveis) não cobrem a saída de R$ ${Math.abs(Number(l.valor)).toFixed(2)}.`);
+    const multi = alocados.length > 1;
+    const row = {
+      conta_id: l.conta_id,
+      lancamento_id: l.id,
+      chave: l.chave,
+      data: l.data,
+      valor: l.valor,
+      origem: multi ? 'MULTIPLO' : alocados[0].origem,
+      referencia: multi
+        ? { multiplo: true, itens: alocados, valorTotal: round2(alocados.reduce((s, a) => s + a.valorUsado, 0)), valorDuplicata: round2(alocados.reduce((s, a) => s + a.valorDuplicata, 0)), nome: alocados[0].nome, motivos: ['escolha manual'] }
+        : { ...referenciaDe({ ...alocados[0], valor: alocados[0].valorDuplicata, restanteDepois: round2(alocados[0].valorDuplicata - (usados.get(`${alocados[0].origem}:${alocados[0].id}`) || 0) - alocados[0].valorUsado), motivos: ['escolha manual'] }), itens: alocados },
+      justificativa: justificativa || (multi ? `${alocados.length} duplicatas: ${alocados.map((a) => `${a.nome || ''} ${a.duplicata || a.id} (${a.valorUsado.toFixed(2)})`).join(' + ')}` : [alocados[0].parcial ? 'PARCIAL' : null, alocados[0].nome, alocados[0].detalhe].filter(Boolean).join(' · ')),
+      automatico: false,
+      pontuacao,
+      usuario: usuario || null,
+    };
+    const { data, error } = await supabase.from(T.conc).upsert(row, { onConflict: 'chave' }).select().single();
+    lancar(error);
+    return data;
+  }
   // a mesma duplicata não pode cobrir mais saídas do que o seu valor
   if (origem !== 'MANUAL' && referencia?.id != null && referencia?.valorDuplicata != null) {
     const usados = await usadosNaJanela({ de: l.data, ate: l.data });
@@ -419,6 +673,18 @@ export async function detalheConciliacao(id) {
   const ref = c.referencia || {};
   let origem = null;
   let solicitacao = null;
+  if (Array.isArray(ref.itens) && ref.itens.length > 1) {
+    // várias duplicatas somando a saída: o detalhe é a lista
+    return {
+      conciliacao: { ...c, valor: Number(c.valor) },
+      lancamento: l ? { ...l, valor: Number(l.valor) } : null,
+      origem: null,
+      solicitacao: null,
+      itens: ref.itens,
+      usos: [],
+      parcial: { totalUsado: ref.valorTotal, valorDuplicata: ref.valorDuplicata, restante: ref.valorDuplicata != null && ref.valorTotal != null ? round2(ref.valorDuplicata - ref.valorTotal) : null },
+    };
+  }
   if (c.origem === 'LIBERACAO' && ref.id) {
     const { data: p } = await supabase.from(T.lib).select('*').eq('id', ref.id).maybeSingle();
     if (p) {
@@ -615,4 +881,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };

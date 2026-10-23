@@ -228,6 +228,19 @@ router.post(
   }),
 );
 
+// busca manual: nº da duplicata, fornecedor (nome/CNPJ), vencimento de/até, valor min/max
+router.get(
+  '/conciliacao/buscar-cp',
+  asyncHandler(async (req, res) => {
+    const q = req.query;
+    try {
+      return successResponse(res, await conciliacao.buscarContasPagar({ duplicata: q.duplicata, fornecedor: q.fornecedor, de: q.de, ate: q.ate, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.post(
   '/conciliacao/automatica',
   asyncHandler(async (req, res) => {
