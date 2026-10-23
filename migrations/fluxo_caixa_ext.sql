@@ -110,3 +110,6 @@ END $$;
 COMMENT ON TABLE fluxo_caixa_contas IS 'Fluxo de Caixa Ext — contas bancárias do grupo (extratos importados em PDF).';
 COMMENT ON TABLE fluxo_caixa_lancamentos IS 'Fluxo de Caixa Ext — lançamentos dos extratos (Stone, Sicredi, Caixa, Mêntore), classificados por forma de pagamento.';
 COMMENT ON TABLE fluxo_caixa_transferencias IS 'Fluxo de Caixa Ext — transferências entre contas do grupo casadas automaticamente (mesmo valor, data ±1 dia, contraparte = titular).';
+
+-- 23/10/2026: código da conta no TOTVS (CTA), editado na página Conciliação
+ALTER TABLE fluxo_caixa_contas ADD COLUMN IF NOT EXISTS cta_totvs TEXT;

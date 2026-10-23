@@ -142,6 +142,8 @@ export async function atualizarConta(id, patch) {
     permitido.titular_cnpj = d || null;
   }
   if (patch.ativo !== undefined) permitido.ativo = !!patch.ativo;
+  // código da conta no TOTVS (CTA), usado pela página Conciliação
+  if (patch.cta_totvs !== undefined) permitido.cta_totvs = patch.cta_totvs ? String(patch.cta_totvs).trim().slice(0, 20) : null;
   permitido.atualizado_em = new Date().toISOString();
   const { data, error } = await supabase.from(T.contas).update(permitido).eq('id', id).select().single();
   lancar(error);
