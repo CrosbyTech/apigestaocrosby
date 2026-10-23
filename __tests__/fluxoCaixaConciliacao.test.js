@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -154,5 +154,26 @@ describe('Pix da maquininha Stone × contas a receber TOTVS', () => {
 
   test('título com valor diferente não serve', () => {
     expect(candidatosPara(pix({ valor: 288 }), { totvs: [tit()] })).toHaveLength(0);
+  });
+});
+
+describe('Pix do QR Code TOTVS (Fiserv) × título PIX', () => {
+  const pix = (over = {}) => ({ id: 30, conta_id: 34, data: '2026-09-03', valor: 201.83, categoria: 'pix', banco: 'STONE', descricao: 'RECEBIMENTO PIX', memo: 'Crosby Canguaretama - Transferência | Pix', contraparte_nome: 'CROSBY CANGUARETAMA', contraparte_banco: 'FISERV DO BRASIL INSTITUIÇÃO DE PAGAMENTO LTDA', taxaFixa: 0.79, ...over });
+  const tit = (over = {}) => ({ origem: 'TOTVS_CR', id: '65|250136|1', valor: 202.62, data: '2026-09-03', nome: 'WAGNER SOARES', doc: '12399284402', empresa: 'Empresa 65', detalhe: 'PIX · portador PIX · título 250136/1 · liquidado 2026-09-03', duplicata: '250136|1', ...over });
+
+  test('reconhece o Pix pelo banco da contraparte', () => {
+    expect(ehEntradaPixTotvs(pix())).toBe(true);
+    expect(ehEntradaPixTotvs(pix({ contraparte_banco: 'STONE INSTITUIÇÃO DE PAGAMENTO S.A.' }))).toBe(false);
+  });
+
+  test('título vale o extrato + 0,79 e concilia automaticamente; sem a taxa não casa', () => {
+    const c = candidatosPara(pix(), { totvs: [tit()] });
+    expect(c).toHaveLength(1);
+    expect(c[0].motivos[0]).toBe('valor igual (líquido da taxa R$ 0,79)');
+    expect(c[0].taxaFixa).toBe(0.79);
+    expect(decidir(c).automatico).toBe(true);
+    // sem a taxa o título só apareceria como "parcial", e Pix não admite parcial
+    expect(candidatosPara(pix({ taxaFixa: 0, semParcial: true }), { totvs: [tit()] })).toHaveLength(0);
+    expect(candidatosPara(pix(), { totvs: [tit({ valor: 201.83 })] })).toHaveLength(0);
   });
 });
