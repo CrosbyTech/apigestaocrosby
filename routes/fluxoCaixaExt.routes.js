@@ -13,6 +13,7 @@
 //   POST   /transferencias/recasar?de&ate  → refaz o casamento automático
 //   PATCH  /lancamentos/:id                 → fornecedor / observação / forma / tipo
 //   GET    /formas                          → formas de pagamento padronizadas
+//   GET    /conciliacao/buscar-cr?titulo|cliente|de|ate|emissaoDe|emissaoAte|valorMin|valorMax → busca manual no contas a receber (entradas Pix)
 //   GET    /conciliacao/candidatos?lancamentoId → candidatos (Liberação, Solicitações, TOTVS CP)
 //   POST   /conciliacao/automatica {contaId?, de, ate} → concilia saídas pendentes com decisão segura
 //   POST   /conciliacao {lancamentoId, origem, referencia, justificativa} → grava/justifica
@@ -230,6 +231,18 @@ router.post(
 
 // busca manual: nº da duplicata, fornecedor (nome/CNPJ), vencimento de/até, valor min/max
 router.get(
+  '/conciliacao/buscar-cr',
+  asyncHandler(async (req, res) => {
+    const q = req.query;
+    try {
+      return successResponse(res, await conciliacao.buscarContasReceber({ titulo: q.titulo, cliente: q.cliente, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.get(
   '/conciliacao/buscar-cp',
   asyncHandler(async (req, res) => {
     const q = req.query;
@@ -247,7 +260,7 @@ router.post(
     const { contaId, de, ate } = req.body || {};
     if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
     try {
-      const r = await conciliacao.conciliarAutomatico({ contaId: contaId ? Number(contaId) : null, de: String(de), ate: String(ate), usuario: usuarioDe(req), simular: !!req.body?.simular });
+      const r = await conciliacao.conciliarAutomatico({ contaId: contaId ? Number(contaId) : null, de: String(de), ate: String(ate), usuario: usuarioDe(req), simular: !!req.body?.simular, apenas: req.body?.apenas || null });
       return successResponse(res, r, `${r.conciliadas.length} de ${r.pendentes} saída(s) conciliada(s) automaticamente`);
     } catch (e) {
       return tratar(res, e);
