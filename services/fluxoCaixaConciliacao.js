@@ -232,11 +232,22 @@ async function fonteTotvs({ de, ate }) {
 }
 
 // ─── pontuação ────────────────────────────────────────────────
-function pontuar(l, c) {
+function pontuar(l, c, usado = 0) {
   const valorL = Math.abs(round2(l.valor));
-  if (c.valor == null || Math.abs(c.valor - valorL) > VALOR_TOL) return null;
-  const motivos = ['valor igual'];
+  if (c.valor == null) return null;
+  const restante = round2(c.valor - usado);
+  const motivos = [];
   let score = c.origem === 'SOLICITACAO' ? 25 : 40;
+  let parcial = false;
+  if (Math.abs(c.valor - valorL) <= VALOR_TOL) {
+    if (usado > VALOR_TOL) return null; // já foi usada inteira por outra saída
+    motivos.push('valor igual');
+  } else if (c.valor > valorL + VALOR_TOL && restante >= valorL - VALOR_TOL) {
+    // duplicata maior que a saída: pagamento parcial (o restante fica para outra saída)
+    parcial = true;
+    score -= 15;
+    motivos.push(`pagamento parcial (duplicata ${c.valor.toFixed(2)}, restante ${round2(restante - valorL).toFixed(2)})`);
+  } else return null;
   if (c.data) {
     const d = Math.abs(diffDias(c.data, l.data));
     if (c.semDataPagamento) {
@@ -284,19 +295,19 @@ function pontuar(l, c) {
       motivos.push('banco de pagamento confere');
     }
   }
-  return { ...c, score, motivos };
+  return { ...c, score, motivos, parcial, valorDuplicata: c.valor, restanteAntes: restante, restanteDepois: round2(restante - valorL) };
 }
 
 /**
  * Candidatos de conciliação para UM lançamento de saída.
  * `fontes` é o cache já carregado para a janela (ver carregarFontes).
  */
-export function candidatosPara(l, fontes, usados = new Set()) {
+export function candidatosPara(l, fontes, usados = new Map()) {
   const lista = [];
   for (const f of [fontes.liberacao, fontes.totvs, fontes.solicitacoes]) {
     for (const c of f || []) {
-      if (usados.has(`${c.origem}:${c.id}`)) continue;
-      const p = pontuar(l, c);
+      const usado = usados.get(`${c.origem}:${c.id}`) || 0;
+      const p = pontuar(l, c, usado);
       if (p) lista.push(p);
     }
   }
@@ -327,11 +338,19 @@ export async function carregarFontes({ de, ate }) {
   return { liberacao, solicitacoes, totvs, avisos, janela };
 }
 
-// candidatos já usados por outras conciliações (não reaproveitar o mesmo pagamento)
+// quanto de cada pagamento já foi usado por outras conciliações: uma duplicata
+// só serve para UMA saída, salvo pagamento parcial (saídas somadas ≤ duplicata)
 async function usadosNaJanela({ de, ate }) {
-  const rows = await listarConciliacoes({ de: addDias(de, -10), ate: addDias(ate, 10) });
-  return new Set(rows.filter((r) => r.referencia?.id != null).map((r) => `${r.origem}:${r.referencia.id}`));
+  const rows = await listarConciliacoes({ de: addDias(de, -40), ate: addDias(ate, 40) });
+  const m = new Map();
+  for (const r of rows) {
+    if (r.referencia?.id == null) continue;
+    const k = `${r.origem}:${r.referencia.id}`;
+    m.set(k, round2((m.get(k) || 0) + Math.abs(Number(r.valor))));
+  }
+  return m;
 }
+const marcarUso = (usados, origem, id, valor) => usados.set(`${origem}:${id}`, round2((usados.get(`${origem}:${id}`) || 0) + Math.abs(valor)));
 
 // ─── gravação ─────────────────────────────────────────────────
 async function lancamentoComChave(lancamentoId) {
@@ -350,6 +369,15 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   const l = await lancamentoComChave(lancamentoId);
   if (!l.chave) throw new Error('Não foi possível calcular a chave do lançamento.');
+  // a mesma duplicata não pode cobrir mais saídas do que o seu valor
+  if (origem !== 'MANUAL' && referencia?.id != null && referencia?.valorDuplicata != null) {
+    const usados = await usadosNaJanela({ de: l.data, ate: l.data });
+    const { data: atual } = await supabase.from(T.conc).select('valor').eq('chave', l.chave).maybeSingle();
+    const jaUsado = round2((usados.get(`${origem}:${referencia.id}`) || 0) - (atual ? Math.abs(Number(atual.valor)) : 0));
+    if (jaUsado + Math.abs(Number(l.valor)) > Number(referencia.valorDuplicata) + VALOR_TOL) {
+      throw new Error(`Esta duplicata (R$ ${Number(referencia.valorDuplicata).toFixed(2)}) já foi usada em outras saídas (R$ ${jaUsado.toFixed(2)}); o restante não cobre esta saída.`);
+    }
+  }
   const row = {
     conta_id: l.conta_id,
     lancamento_id: l.id,
@@ -366,6 +394,124 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
   const { data, error } = await supabase.from(T.conc).upsert(row, { onConflict: 'chave' }).select().single();
   lancar(error);
   return data;
+}
+
+export async function atualizarAnexos(id, anexos) {
+  if (!Array.isArray(anexos)) throw new Error('anexos deve ser uma lista.');
+  const limpos = anexos
+    .filter((a) => a && a.url)
+    .map((a) => ({ tipo: ['comprovante', 'nota_fiscal'].includes(a.tipo) ? a.tipo : 'outro', url: String(a.url), nome: a.nome ? String(a.nome).slice(0, 200) : null, em: a.em || new Date().toISOString(), usuario: a.usuario || null }));
+  const { data, error } = await supabase.from(T.conc).update({ anexos: limpos }).eq('id', id).select().single();
+  lancar(error);
+  return data;
+}
+
+/**
+ * Detalhe de uma conciliação: o lançamento, o registro de origem completo
+ * (duplicata/solicitação/liberação), outras saídas que usam a mesma origem
+ * (pagamento parcial) e os anexos.
+ */
+export async function detalheConciliacao(id) {
+  const { data: c, error } = await supabase.from(T.conc).select('*').eq('id', id).maybeSingle();
+  lancar(error);
+  if (!c) throw new Error('Conciliação não encontrada.');
+  const { data: l } = await supabase.from(T.lanc).select('*').eq('id', c.lancamento_id).maybeSingle();
+  const ref = c.referencia || {};
+  let origem = null;
+  let solicitacao = null;
+  if (c.origem === 'LIBERACAO' && ref.id) {
+    const { data: p } = await supabase.from(T.lib).select('*').eq('id', ref.id).maybeSingle();
+    if (p) {
+      const dc = p.dados_completos || {};
+      origem = {
+        tipo: 'Liberação de Pagamento',
+        empresa: p.nm_empresa,
+        fornecedor: p.nm_fornecedor,
+        fornecedorCodigo: p.cd_fornecedor,
+        doc: soDigitos(dc.nr_cpfcnpj_fornecedor) || null,
+        duplicata: p.nr_duplicata,
+        parcela: p.nr_parcela,
+        emissao: p.dt_emissao || dc.dt_emissao || null,
+        vencimento: p.dt_vencimento,
+        dataPagamento: p.dt_pagamento,
+        pagoEm: p.pago_em,
+        pagoPor: p.pago_por,
+        valor: p.vl_duplicata,
+        valorPago: p.vl_real ?? p.vl_duplicata,
+        forma: p.forma_pagamento,
+        chavePix: p.chave_pix,
+        codigoBarras: p.codigo_barras,
+        banco: p.banco_pagamento,
+        despesa: p.ds_despesaitem,
+        centroCusto: p.cd_ccusto,
+        observacao: p.observacao,
+        status: p.status,
+        origemRegistro: dc.origem || null,
+      };
+      if (dc.solicitacao_id) {
+        const { data: s } = await supabase.from(T.sol).select('id,descricao,comprovante_url,nota_fiscal_url,comprovante_gestor_url,comprovante_fabio_url,tem_nota_fiscal,solicitante,setor,status').eq('id', dc.solicitacao_id).maybeSingle();
+        solicitacao = s || null;
+      }
+    }
+  } else if (c.origem === 'SOLICITACAO' && ref.id) {
+    const { data: s } = await supabase.from(T.sol).select('*').eq('id', ref.id).maybeSingle();
+    if (s) {
+      origem = {
+        tipo: 'Solicitação Crosby',
+        empresa: s.nm_empresa,
+        fornecedor: s.supplier_name,
+        doc: soDigitos(s.supplier_cpf_cnpj) || null,
+        duplicata: s.duplicate_code,
+        emissao: s.dt_emissao,
+        vencimento: s.dt_vencimento,
+        dataPagamento: s.pago_em ? String(s.pago_em).slice(0, 10) : null,
+        valor: s.valor_total,
+        valorPago: s.valor_total,
+        forma: s.forma_pagamento,
+        chavePix: s.chave_pix,
+        codigoBarras: s.codigo_barras,
+        despesa: s.despesa_code,
+        centroCusto: s.cost_center_code,
+        observacao: s.descricao,
+        status: s.status,
+        solicitante: s.solicitante,
+        setor: s.setor,
+      };
+      solicitacao = { id: s.id, comprovante_url: s.comprovante_url, nota_fiscal_url: s.nota_fiscal_url, comprovante_gestor_url: s.comprovante_gestor_url, comprovante_fabio_url: s.comprovante_fabio_url, tem_nota_fiscal: s.tem_nota_fiscal };
+    }
+  } else if (c.origem === 'TOTVS_CP') {
+    const [branch, dup, parc, forn] = String(ref.id || '').split('|');
+    origem = {
+      tipo: 'Contas a Pagar (TOTVS)',
+      empresa: ref.empresa || (branch ? `Empresa ${branch}` : null),
+      fornecedor: ref.nome,
+      fornecedorCodigo: forn,
+      doc: ref.doc,
+      duplicata: dup,
+      parcela: parc,
+      vencimento: ref.vencimento,
+      dataPagamento: ref.data,
+      valor: ref.valorDuplicata ?? ref.valor,
+      valorPago: ref.valor,
+      despesa: ref.detalhe,
+    };
+  }
+  // outras saídas conciliadas com a mesma origem (pagamento parcial)
+  let usos = [];
+  if (ref.id != null && c.origem !== 'MANUAL') {
+    const { data: outras } = await supabase.from(T.conc).select('id,lancamento_id,conta_id,data,valor,justificativa,usuario,criado_em,referencia').eq('origem', c.origem).neq('id', c.id);
+    usos = (outras || []).filter((o) => String(o.referencia?.id) === String(ref.id)).map((o) => ({ id: o.id, lancamentoId: o.lancamento_id, contaId: o.conta_id, data: o.data, valor: Number(o.valor), justificativa: o.justificativa, usuario: o.usuario }));
+  }
+  const totalUsado = round2(Math.abs(Number(c.valor)) + usos.reduce((s, u) => s + Math.abs(u.valor), 0));
+  const valorDuplicata = ref.valorDuplicata != null ? Number(ref.valorDuplicata) : origem?.valorPago != null ? Number(origem.valorPago) : null;
+  return {
+    conciliacao: { ...c, valor: Number(c.valor) },
+    lancamento: l ? { ...l, valor: Number(l.valor) } : null,
+    origem,
+    solicitacao,
+    usos,
+    parcial: { totalUsado, valorDuplicata, restante: valorDuplicata != null ? round2(valorDuplicata - totalUsado) : null },
+  };
 }
 
 export async function excluirConciliacao(id) {
@@ -391,6 +537,8 @@ export async function buscarCandidatos(lancamentoId) {
   const candidatos = candidatosPara(l, fontes, usados);
   return { lancamento: l, candidatos, avisos: fontes.avisos, decisao: decidir(candidatos) };
 }
+
+export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos });
 
 // regra de aceite automático: melhor ≥ 70 e com folga ≥ 15 pontos para o 2º.
 // Candidatos "gêmeos" (mesma origem, nome, data e valor — ex.: 3 pagamentos
@@ -443,13 +591,13 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario }) {
       await salvarConciliacao({
         lancamentoId: l.id,
         origem: esc.origem,
-        referencia: { id: esc.id, nome: esc.nome, doc: esc.doc, valor: esc.valor, data: esc.data, empresa: esc.empresa, detalhe: esc.detalhe, motivos: esc.motivos },
-        justificativa: [esc.nome, esc.detalhe].filter(Boolean).join(' · '),
+        referencia: referenciaDe(esc),
+        justificativa: [esc.parcial ? 'PARCIAL' : null, esc.nome, esc.detalhe].filter(Boolean).join(' · '),
         usuario,
         automatico: true,
         pontuacao: esc.score,
       });
-      usados.add(`${esc.origem}:${esc.id}`);
+      marcarUso(usados, esc.origem, esc.id, l.valor);
       resultado.conciliadas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, origem: esc.origem, nome: esc.nome, score: esc.score });
     } else if (candidatos.length) {
       resultado.ambiguas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, contraparte: l.contraparte_nome, motivo: d.motivo, candidatos: candidatos.slice(0, 5) });
@@ -467,4 +615,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };

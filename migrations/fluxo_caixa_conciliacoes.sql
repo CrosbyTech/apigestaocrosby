@@ -27,3 +27,6 @@ CREATE TABLE IF NOT EXISTS fluxo_caixa_conciliacoes (
 );
 CREATE INDEX IF NOT EXISTS idx_fc_conc_conta_data ON fluxo_caixa_conciliacoes (conta_id, data);
 CREATE INDEX IF NOT EXISTS idx_fc_conc_lanc ON fluxo_caixa_conciliacoes (lancamento_id);
+
+-- 23/10/2026: anexos da conciliação (comprovante / nota fiscal) — bucket solicitacoes-crosby
+ALTER TABLE fluxo_caixa_conciliacoes ADD COLUMN IF NOT EXISTS anexos JSONB NOT NULL DEFAULT '[]'::jsonb;

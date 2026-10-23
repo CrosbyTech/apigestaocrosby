@@ -256,6 +256,28 @@ router.post(
   }),
 );
 
+router.get(
+  '/conciliacao/:id/detalhe',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await conciliacao.detalheConciliacao(Number(req.params.id)));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.patch(
+  '/conciliacao/:id/anexos',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await conciliacao.atualizarAnexos(Number(req.params.id), req.body?.anexos), 'Anexos atualizados');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.delete(
   '/conciliacao/:id',
   asyncHandler(async (req, res) => {
