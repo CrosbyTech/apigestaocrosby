@@ -525,7 +525,7 @@ const ddmmaaaa = (iso) => {
 async function dataCreditoBoleto(b) {
   if (!b.charge_id) return null;
   const r = await pagarme('GET', `/payables?charge_id=${encodeURIComponent(b.charge_id)}&size=20`, null, b.conta || CONTA_PADRAO);
-  const pagos = (r?.data || []).filter((x) => x.status === 'paid' && x.payment_date);
+  const lista = r?.ok && Array.isArray(r?.data?.data) ? r.data.data : []; const pagos = lista.filter((x) => x.status === 'paid' && x.payment_date);
   if (!pagos.length) return null;
   return pagos.map((x) => String(x.payment_date).slice(0, 10)).sort().slice(-1)[0];
 }
@@ -577,7 +577,28 @@ export async function abrirSolicitacaoBoleto(b) {
     ref_externa: ref,
   });
   if (!error) return 'inserida';
-  if (error.code === '23505') return 'ja_existia';
+  if (error.code === '23505') {
+    // Já existe (ex.: aberta antes de o crédito cair, com data nula ou do
+    // pagamento): alinha a data da baixa ao recebimento, se ainda pendente.
+    const { data: ex } = await supabase
+      .from('solicitacoes_baixa')
+      .select('id, dt_pagamento, observacao')
+      .eq('ref_externa', ref)
+      .eq('status', 'pendente')
+      .maybeSingle();
+    if (ex && String(ex.dt_pagamento || '').slice(0, 10) !== dtCredito) {
+      await supabase
+        .from('solicitacoes_baixa')
+        .update({
+          dt_pagamento: dtCredito,
+          observacao: `${ex.observacao || ''} [${new Date().toISOString().slice(0, 16)}: data da baixa = RECEBIMENTO (crédito Pagar.me) ${dtCredito}]`.trim(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', ex.id);
+      return 'data_atualizada';
+    }
+    return 'ja_existia';
+  }
   throw new Error(`solicitacoes_baixa: ${error.message}`);
 }
 
