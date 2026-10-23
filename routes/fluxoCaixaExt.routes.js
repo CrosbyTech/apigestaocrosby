@@ -13,6 +13,10 @@
 //   POST   /transferencias/recasar?de&ate  → refaz o casamento automático
 //   PATCH  /lancamentos/:id                 → fornecedor / observação / forma / tipo
 //   GET    /formas                          → formas de pagamento padronizadas
+//   GET    /conciliacao/candidatos?lancamentoId → candidatos (Liberação, Solicitações, TOTVS CP)
+//   POST   /conciliacao/automatica {contaId?, de, ate} → concilia saídas pendentes com decisão segura
+//   POST   /conciliacao {lancamentoId, origem, referencia, justificativa} → grava/justifica
+//   DELETE /conciliacao/:id                  → desfaz
 // Sem as tabelas → 503 MIGRATION_PENDING (migrations/fluxo_caixa_ext.sql).
 // ============================================================
 import express from 'express';
@@ -20,6 +24,7 @@ import multer from 'multer';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { FORMAS } from '../utils/extratosBancariosPdf.js';
 import fluxo, { MigrationPendingError } from '../services/fluxoCaixaExt.js';
+import conciliacao from '../services/fluxoCaixaConciliacao.js';
 
 const router = express.Router();
 
@@ -161,6 +166,7 @@ router.get(
         categoria: q.categoria ? String(q.categoria) : null,
         contraparte: q.contraparte ? String(q.contraparte) : null,
         busca: q.busca ? String(q.busca) : null,
+        pendencia: q.pendencia ? String(q.pendencia) : null,
       });
       return successResponse(res, data);
     } catch (e) {
@@ -188,6 +194,59 @@ router.patch(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await fluxo.atualizarLancamento(Number(req.params.id), req.body || {}), 'Lançamento atualizado');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// ─── conciliação das pendências ───────────────────────────────
+router.get(
+  '/conciliacao/candidatos',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.query.lancamentoId);
+    if (!id) return errorResponse(res, 'Informe lancamentoId.', 400);
+    try {
+      return successResponse(res, await conciliacao.buscarCandidatos(id));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.post(
+  '/conciliacao/automatica',
+  asyncHandler(async (req, res) => {
+    const { contaId, de, ate } = req.body || {};
+    if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
+    try {
+      const r = await conciliacao.conciliarAutomatico({ contaId: contaId ? Number(contaId) : null, de: String(de), ate: String(ate), usuario: usuarioDe(req) });
+      return successResponse(res, r, `${r.conciliadas.length} de ${r.pendentes} saída(s) conciliada(s) automaticamente`);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.post(
+  '/conciliacao',
+  asyncHandler(async (req, res) => {
+    const { lancamentoId, origem, referencia, justificativa, pontuacao } = req.body || {};
+    if (!lancamentoId || !origem) return errorResponse(res, 'Informe lancamentoId e origem.', 400);
+    try {
+      const r = await conciliacao.salvarConciliacao({ lancamentoId: Number(lancamentoId), origem: String(origem).toUpperCase(), referencia, justificativa, usuario: usuarioDe(req), automatico: false, pontuacao: pontuacao ?? null });
+      return successResponse(res, r, 'Pendência conciliada');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.delete(
+  '/conciliacao/:id',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await conciliacao.excluirConciliacao(Number(req.params.id)), 'Conciliação desfeita');
     } catch (e) {
       return tratar(res, e);
     }

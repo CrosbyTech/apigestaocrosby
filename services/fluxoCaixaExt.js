@@ -18,6 +18,7 @@
 import crypto from 'node:crypto';
 import supabase from '../config/supabase.js';
 import { lerExtratoBancario, BANCOS, FORMAS } from '../utils/extratosBancariosPdf.js';
+import { anexarConciliacoes } from './fluxoCaixaConciliacao.js';
 
 const T = {
   contas: 'fluxo_caixa_contas',
@@ -506,6 +507,9 @@ export async function painel(f) {
     };
   });
 
+  // conciliação: justificativas gravadas + transferências casadas (derivadas)
+  await anexarConciliacoes(todos, { de: f.de, ate: f.ate });
+
   // filtros em memória (volume mensal é pequeno)
   const formas = f.formas?.length ? new Set(f.formas) : null;
   const buscaTxt = semAcento(f.busca || '').toUpperCase().trim();
@@ -517,6 +521,8 @@ export async function painel(f) {
     if (f.tipos?.length && !f.tipos.includes(l.tipo)) return false;
     if (formas && !formas.has(l.forma)) return false;
     if (f.categoria && l.categoria !== f.categoria) return false;
+    if (f.pendencia === 'pendentes' && !l.pendente) return false;
+    if (f.pendencia === 'conciliadas' && l.pendente) return false;
     if (contraparteDoc) {
       if (l.contraparte_doc !== contraparteDoc) return false;
     } else if (contraparteN && chaveNome(l) !== contraparteN && normNome(l.nomeExibicao || '') !== contraparteN) return false;
@@ -531,7 +537,7 @@ export async function painel(f) {
   });
 
   // ── agregados ──
-  const resumo = { entradas: 0, saidas: 0, transfEntradas: 0, transfSaidas: 0, qtdEntradas: 0, qtdSaidas: 0, qtdTransf: 0, qtd: lancamentos.length };
+  const resumo = { entradas: 0, saidas: 0, transfEntradas: 0, transfSaidas: 0, qtdEntradas: 0, qtdSaidas: 0, qtdTransf: 0, qtd: lancamentos.length, pendencias: lancamentos.filter((l) => l.pendente).length, conciliadas: lancamentos.filter((l) => !l.pendente).length };
   const porFormaM = new Map();
   const porContaM = new Map();
   const porDiaM = new Map();
@@ -555,8 +561,13 @@ export async function painel(f) {
       resumo.qtdSaidas += 1;
     }
 
-    somar(porContaM, l.conta_id, () => ({ contaId: l.conta_id, conta: l.conta_apelido, banco: l.banco, titular: l.conta_titular, cnpj: l.conta_cnpj, entradas: 0, saidas: 0, transfEntradas: 0, transfSaidas: 0, qtd: 0, saldoInicial: null, saldoFinal: null, ultimaData: null }), (a) => {
+    somar(porContaM, l.conta_id, () => ({ contaId: l.conta_id, conta: l.conta_apelido, banco: l.banco, titular: l.conta_titular, cnpj: l.conta_cnpj, entradas: 0, saidas: 0, transfEntradas: 0, transfSaidas: 0, qtd: 0, saldoInicial: null, saldoFinal: null, ultimaData: null, pendencias: 0, pendEntradas: 0, pendSaidas: 0, conciliadas: 0 }), (a) => {
       a.qtd += 1;
+      if (l.pendente) {
+        a.pendencias += 1;
+        if (ent) a.pendEntradas += 1;
+        else a.pendSaidas += 1;
+      } else a.conciliadas += 1;
       if (transf) ent ? (a.transfEntradas += v) : (a.transfSaidas += v);
       else ent ? (a.entradas += v) : (a.saidas += v);
       if (l.saldo_apos != null) {
