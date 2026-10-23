@@ -1,10 +1,12 @@
-// Parsers adicionais de extrato (BNB, Santander, Unicred, Daycoval, Pagar.me)
+// Parsers adicionais de extrato (BNB, Santander, Unicred, Daycoval, PagBank, Pagar.me)
 import * as XLSX from 'xlsx';
 import {
   interpretarBnb,
   interpretarSantander,
   interpretarUnicred,
   interpretarDaycoval,
+  interpretarPagbank,
+  classificarPagbank,
   interpretarPagarme,
   classificarGenerico,
   ehXlsx,
@@ -252,5 +254,65 @@ describe('classificarGenerico', () => {
     expect(classificarGenerico('PIX RECEBIDO FULANO', 10).descricao).toBe('RECEBIMENTO PIX');
     expect(classificarGenerico('TED ENVIADA', -10).descricao).toBe('TRANSFERÊNCIA ENVIADA');
     expect(classificarGenerico('PAGAMENTO BOLETO', -10).forma).toBe('BOLETO');
+  });
+});
+
+describe('PagBank', () => {
+  // posições reais do "Extrato da conta" (01-09-2026_30-09-2026.pdf)
+  const cabecalho = (y) => [it(35, y, 'Data'), it(114, y, 'Descrição'), it(536, y, 'Valor', 22)];
+  const linha = (y, data, desc, valor, xValor = 527) => [it(35, y, data), it(114, y, desc), it(xValor, y, valor, 558 - xValor)];
+  const pag1 = pagina([
+    it(400, 56, '290 - PagSeguro Internet S/A'),
+    it(192, 63, 'FERREIRA COMERCIO E CONFECCOES'),
+    it(400, 68, 'Agência 0001'),
+    it(192, 75, 'CNPJ: 17.177.680/0001-16'),
+    it(400, 80, 'Conta 86828919-0'),
+    it(19, 138, 'Extrato da conta'),
+    it(20, 179, 'Periodo: 01/09/2026 a 30/09/2026'),
+    ...cabecalho(219),
+    ...linha(241, '03/09/2026', 'Pix recebido - Crosby', 'R$ 50,00'),
+    ...linha(262, '03/09/2026', 'Saldo do dia', 'R$ 50,00'),
+    ...linha(284, '10/09/2026', 'Pix enviado - Jucileide Da Costa', '-R$ 35,00', 524),
+    ...linha(305, '10/09/2026', 'Saldo do dia', 'R$ 15,00'),
+    // descrição quebrada acima e abaixo da data
+    it(114, 603, 'Cobrança Seguro Cartão Protegido - Para: PAGSEGURO INTERNET INSTITUICAO DE'),
+    it(35, 608, '23/09/2026'),
+    it(528, 608, '-R$ 9,90', 30),
+    it(114, 612, 'PAGAMENTO'),
+    it(35, 630, '23/09/2026'), it(114, 630, 'Cartão de Débito - ATACADAO AS 842'), it(276, 630, 'NATAL'), it(320, 630, 'BR'), it(524, 630, '-R$ 12,98', 34),
+    ...linha(652, '23/09/2026', 'Saldo do dia', 'R$ 2,12', 530),
+  ]);
+  const pag2 = pagina([
+    ...cabecalho(39),
+    ...linha(61, '25/09/2026', 'Pix recebido - Crosby', 'R$ 1.000,00', 515),
+    ...linha(82, '25/09/2026', 'Saldo do dia', 'R$ 1.002,12', 515),
+  ], 2);
+
+  test('titular, período, saldo inicial calculado e "Saldo do dia" como saldoApos', () => {
+    const r = interpretarPagbank([pag1, pag2]);
+    expect(r.titular).toEqual({ nome: 'FERREIRA COMERCIO E CONFECCOES', cnpj: '17177680000116', agencia: '0001', conta: '86828919', contaDv: '0' });
+    expect(r.periodo).toEqual({ inicio: '2026-09-01', fim: '2026-09-30' });
+    expect(r.saldoInicial).toBe(0); // 50,00 do 1º "Saldo do dia" − 50,00 recebidos
+    expect(r.saldoFinalInformado).toBe(1002.12);
+    expect(r.lancamentos.map((l) => l.descricao)).not.toContain('SALDO DO DIA');
+    expect(r.lancamentos).toHaveLength(5);
+    expect(r.lancamentos.map((l) => l.saldoApos)).toEqual([50, 15, null, 2.12, 1002.12]);
+    expect(r.lancamentos[2].memo).toBe('Cobrança Seguro Cartão Protegido - Para: PAGSEGURO INTERNET INSTITUICAO DE PAGAMENTO');
+    expect(r.lancamentos[2]).toMatchObject({ valor: -9.9, forma: 'TARIFA/ENCARGO', descricao: 'SEGURO CARTÃO PROTEGIDO' });
+    expect(r.lancamentos[3]).toMatchObject({ valor: -12.98, forma: 'COMPRA CARTÃO', contraparteNome: 'ATACADAO AS 842 NATAL' });
+    // cabeçalho repetido da página 2 não entra na descrição
+    expect(r.lancamentos[4].memo).toBe('Pix recebido - Crosby');
+    expect(r.avisos).toEqual([]);
+  });
+
+  test('classificação das descrições do PagBank', () => {
+    expect(classificarPagbank('Pix recebido - Crosby Cr Vestuario Ltda', 600)).toMatchObject({ forma: 'PIX', descricao: 'RECEBIMENTO PIX', contraparteNome: 'CROSBY CR VESTUARIO LTDA' });
+    expect(classificarPagbank('QR Code Pix enviado - Ifood.com Agencia', -218.13)).toMatchObject({ forma: 'PIX', descricao: 'PAGAMENTO PIX', contraparteNome: 'IFOOD.COM AGENCIA' });
+    expect(classificarPagbank('IOF Cartão de Débito - IOF', -73.6)).toMatchObject({ forma: 'TARIFA/ENCARGO', categoria: 'tarifa' });
+    expect(classificarPagbank('Cartão PagBank - Pagamento de Fatura', -752.18)).toMatchObject({ forma: 'FATURA CARTÃO', categoria: 'cartao_fatura' });
+    expect(classificarPagbank('Cartão Valor Reservado - Valor reservado', -2024)).toMatchObject({ forma: 'OUTROS' });
+    expect(classificarPagbank('Cartão de Débito - FACEBK *PC9AK6SCC4 650-5434800 US', -2102.76)).toMatchObject({ forma: 'COMPRA CARTÃO', categoria: 'cartao_compra', contraparteNome: 'FACEBK *PC9AK6SCC4' });
+    expect(classificarPagbank('Cartão de Débito - PAO & CIA - LAGOA NOVA NATAL BR', -52.8)).toMatchObject({ contraparteNome: 'PAO & CIA - LAGOA NOVA NATAL' });
+    expect(classificarPagbank('Cartão de Débito - ANTHROPIC* CLAUDE SUB +14152360599 US', -583.87)).toMatchObject({ contraparteNome: 'ANTHROPIC* CLAUDE SUB' });
   });
 });

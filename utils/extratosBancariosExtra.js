@@ -19,6 +19,13 @@
 //               saldos com dígitos FRAGMENTADOS ("- R $ 71 , 24"); o extrato
 //               detalhado com movimentos não veio em amostra — é lido pela
 //               tabela genérica (Data … Valor … Saldo) quando existir.
+//   PAGBANK   — "Extrato da conta" do PagBank/PagSeguro (290 - PagSeguro Internet
+//               S/A): titular e CNPJ à esquerda, "Agência 0001" / "Conta 86828919-0"
+//               à direita; "Periodo: X a Y"; tabela Data | Descrição | Valor, SEM
+//               coluna de saldo — cada dia fecha com uma linha "Saldo do dia", que
+//               vira o saldoApos do último movimento do dia (e o saldo inicial é o
+//               1º "Saldo do dia" menos os movimentos daquele dia). Descrição pode
+//               quebrar acima e abaixo da data.
 //   PAGARME   — planilha .xlsx exportada do painel Pagar.me (saldo/operações):
 //               Data da operação | Tipo | Id | Descrição | Id da transação |
 //               Parcela | Método | Entrada bruta | Saída bruta | Taxas |
@@ -84,6 +91,8 @@ const F = {
   EMPRESTIMO: 'EMPRÉSTIMO/LIMITE',
   DINHEIRO: 'DINHEIRO',
   TRANSFERENCIA: 'TRANSFERÊNCIA',
+  FATURA_CARTAO: 'FATURA CARTÃO',
+  COMPRA_CARTAO: 'COMPRA CARTÃO',
   OUTROS: 'OUTROS',
 };
 
@@ -120,7 +129,9 @@ function lerTabela(paginas, cab, { stop, inicioPg1 }) {
   let parou = false;
   for (const pg of paginas) {
     if (parou) break;
-    const yMin = pg.numero === 1 ? inicioPg1 : 0;
+    // páginas seguintes repetem o cabeçalho: começa abaixo dele
+    const cabPg = pg.numero === 1 ? null : pg.items.filter((it) => Math.abs(it.x - cab.xData) < 6 && /^Data$/i.test(limpar(it.s))).sort((a, b) => a.y - b.y)[0];
+    const yMin = pg.numero === 1 ? inicioPg1 : cabPg ? cabPg.y + 3 : 0;
     // fim da tabela: o PRIMEIRO marcador abaixo do cabeçalho (itens do pdfjs não vêm ordenados)
     const stopIt = stop
       ? pg.items.filter((it) => it.y > yMin && stop.test(limpar(it.s))).sort((a, b) => a.y - b.y)[0] || null
@@ -304,6 +315,88 @@ export function interpretarUnicred(paginas) {
   };
 }
 
+// ─── PAGBANK / PAGSEGURO ───────────────────────────────────────
+export function classificarPagbank(desc, valor) {
+  const d = limpar(desc);
+  const up = semAcento(d).toUpperCase();
+  const deb = valor < 0;
+  const base = { contraparteNome: null, contraparteDoc: null, documento: null };
+  let m;
+  if ((m = up.match(/^PIX RECEBIDO\s*-\s*(.*)$/))) return { ...base, forma: F.PIX, categoria: 'pix', descricao: 'RECEBIMENTO PIX', contraparteNome: m[1] || null };
+  if ((m = up.match(/^(?:QR CODE )?PIX ENVIADO\s*-\s*(.*)$/))) return { ...base, forma: F.PIX, categoria: 'pix', descricao: 'PAGAMENTO PIX', contraparteNome: m[1] || null };
+  if ((m = up.match(/^(?:DEVOLUCAO (?:DE )?PIX|PIX DEVOLVIDO|ESTORNO PIX)\s*-?\s*(.*)$/)))
+    return { ...base, forma: F.PIX, categoria: 'pix', descricao: deb ? 'DEVOLUÇÃO PIX ENVIADA' : 'DEVOLUÇÃO PIX RECEBIDA', contraparteNome: m[1] || null };
+  if (/^IOF\b/.test(up)) return { ...base, forma: F.TARIFA, categoria: 'tarifa', descricao: 'IOF CARTÃO DE DÉBITO' };
+  if (/^COBRANCA SEGURO/.test(up)) return { ...base, forma: F.TARIFA, categoria: 'tarifa', descricao: 'SEGURO CARTÃO PROTEGIDO', contraparteNome: 'PAGSEGURO' };
+  if (/^(?:TARIFA|TAXA|ENCARGO|MULTA|JUROS)/.test(up)) return { ...base, forma: F.TARIFA, categoria: 'tarifa', descricao: up };
+  if (/^CARTAO PAGBANK\s*-\s*PAGAMENTO DE FATURA/.test(up)) return { ...base, forma: F.FATURA_CARTAO, categoria: 'cartao_fatura', descricao: 'PAGAMENTO FATURA CARTÃO PAGBANK' };
+  if (/^CARTAO VALOR RESERVADO/.test(up)) return { ...base, forma: F.OUTROS, categoria: 'outros', descricao: deb ? 'VALOR RESERVADO PARA O CARTÃO' : 'LIBERAÇÃO DE VALOR RESERVADO' };
+  if ((m = up.match(/^CARTAO DE (DEBITO|CREDITO)\s*-\s*(.*)$/))) {
+    // "FACEBK *X 650-5434800 US" → tira telefone e país (a cidade fica: "ATACADAO AS 842 NATAL")
+    const estab = m[2].replace(/\s+[+\d()-]{6,}(?=\s+[A-Z]{2}$)/, '').replace(/\s+[A-Z]{2}$/, '').trim();
+    return { ...base, forma: F.COMPRA_CARTAO, categoria: 'cartao_compra', descricao: `COMPRA CARTÃO ${m[1] === 'DEBITO' ? 'DÉBITO' : 'CRÉDITO'}`, contraparteNome: estab || m[2] || null };
+  }
+  if ((m = up.match(/^(?:TED|TRANSFERENCIA|TRANSF\.?)(?: (?:RECEBIDA?|ENVIADA?))?\s*-?\s*(.*)$/)))
+    return { ...base, forma: F.TED, categoria: 'transferencia', descricao: deb ? 'TRANSFERÊNCIA ENVIADA' : 'TRANSFERÊNCIA RECEBIDA', contraparteNome: m[1] || null };
+  if ((m = up.match(/^(?:PAGAMENTO DE )?BOLETO\s*-?\s*(.*)$/))) return { ...base, forma: F.BOLETO, categoria: 'boleto', descricao: deb ? 'PAGAMENTO BOLETO' : 'RECEBIMENTO BOLETO', contraparteNome: m[1] || null };
+  if (/RENDIMENTO|APLICACAO|RESGATE|CDB/.test(up)) return { ...base, forma: F.APLICACAO, categoria: 'aplicacao', descricao: up };
+  if (/VENDA|MAQUININHA|ANTECIPACAO/.test(up)) return { ...base, forma: /ANTECIP/.test(up) ? F.ANTECIPACAO : F.CARTAO_CREDITO, categoria: /ANTECIP/.test(up) ? 'antecipacao' : 'cartao', descricao: up };
+  return classificarGenerico(d, valor);
+}
+
+export function interpretarPagbank(paginas) {
+  const avisos = [];
+  const l1 = agruparLinhas(paginas[0].items);
+  const texto = l1.map((l) => textoDe(l.items)).join('\n');
+  const cnpj = soDigitos(texto.match(/CNPJ:\s*([\d./-]+)/i)?.[1]);
+  const agencia = texto.match(/Ag[êe]ncia\s+(\d+)/i)?.[1] || null;
+  const conta = texto.match(/Conta\s+(\d+)\s*-\s*(\d)/i);
+  const per = texto.match(/Per[íi]odo:\s*(\d{2}\/\d{2}\/\d{4})\s*a\s*(\d{2}\/\d{2}\/\d{4})/i);
+  // titular: linha logo acima do "CNPJ:" (só os itens da coluna da esquerda)
+  const esq = l1.map((l) => textoDe(l.items.filter((it) => it.x < 350)));
+  const iCnpj = esq.findIndex((t) => /^CNPJ:/i.test(t));
+  const nome = iCnpj > 0 ? [...esq.slice(0, iCnpj)].reverse().find((t) => t && !/^\d{3}\s*-\s*PAG/i.test(t)) || null : null;
+  const titular = { nome, cnpj: cnpj || null, agencia, conta: conta?.[1] || null, contaDv: conta?.[2] || null };
+  const periodo = { inicio: dataIso4(per?.[1]), fim: dataIso4(per?.[2]) };
+
+  const cab = acharCabecalho(paginas);
+  if (!cab) {
+    if (/n[ãa]o (h[áa]|houve|existem) (movimenta|lan[çc]amento)/i.test(texto)) {
+      avisos.push('PagBank informa que não houve movimentação no período.');
+      return { titular, periodo, saldoInicial: null, saldoFinalInformado: null, lancamentos: [], avisos };
+    }
+    throw new Error('PagBank: cabeçalho da tabela (Data/Descrição/Valor) não encontrado.');
+  }
+  const r = lerTabela(paginas, cab, { stop: null, inicioPg1: cab.y + 3 });
+  avisos.push(...r.avisos);
+
+  // "Saldo do dia" fecha o dia: vira saldoApos do último movimento daquele dia
+  const lanc = [];
+  let saldoInicial = null;
+  let ultimoSaldoDia = null;
+  let somaDia = 0;
+  let diaAtual = null;
+  for (const l of r.lanc) {
+    if (l.data !== diaAtual) {
+      diaAtual = l.data;
+      somaDia = 0;
+    }
+    if (/^SALDO DO DIA$/i.test(semAcento(l.descricao))) {
+      const saldo = l.valor;
+      if (saldoInicial == null) saldoInicial = round2(saldo - somaDia);
+      const ult = [...lanc].reverse().find((x) => x.data === l.data);
+      if (ult) ult.saldoApos = saldo;
+      else avisos.push(`${l.data}: "Saldo do dia" sem movimentos no dia.`);
+      ultimoSaldoDia = saldo;
+      continue;
+    }
+    somaDia = round2(somaDia + l.valor);
+    lanc.push({ ...l, saldoApos: null });
+  }
+  const lancamentos = lanc.map((l) => ({ ...l, memo: l.descricao, ...classificarPagbank(l.descricao, l.valor), documento: l.documento }));
+  return { titular, periodo, saldoInicial, saldoFinalInformado: ultimoSaldoDia, lancamentos, avisos };
+}
+
 // ─── DAYCOVAL ──────────────────────────────────────────────────
 export function interpretarDaycoval(paginas) {
   const p1 = paginas[0].items;
@@ -477,4 +570,4 @@ export function interpretarPagarme(buffer, { nomeArquivo } = {}) {
 
 export const ehXlsx = (buffer) => Buffer.isBuffer(buffer) && buffer.length > 4 && buffer[0] === 0x50 && buffer[1] === 0x4b;
 
-export default { interpretarBnb, interpretarSantander, interpretarUnicred, interpretarDaycoval, interpretarPagarme, classificarGenerico, ehXlsx };
+export default { interpretarBnb, interpretarSantander, interpretarUnicred, interpretarDaycoval, interpretarPagbank, classificarPagbank, interpretarPagarme, classificarGenerico, ehXlsx };

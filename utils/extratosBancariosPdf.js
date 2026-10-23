@@ -33,6 +33,7 @@ import {
   interpretarSantander,
   interpretarUnicred,
   interpretarDaycoval,
+  interpretarPagbank,
   interpretarPagarme,
   ehXlsx,
 } from './extratosBancariosExtra.js';
@@ -53,6 +54,7 @@ export const BANCOS = {
   SANTANDER: { codigo: '033', nome: 'Santander' },
   UNICRED: { codigo: '136', nome: 'Unicred' },
   DAYCOVAL: { codigo: '707', nome: 'Daycoval' },
+  PAGBANK: { codigo: '290', nome: 'PagBank' },
   PAGARME: { codigo: 'PAGARME', nome: 'Pagar.me' },
 };
 
@@ -136,6 +138,7 @@ export function detectarBanco(paginas) {
   if (/SANTANDER EMPRESAS|SANTANDER EMPRESARIAL/.test(texto)) return 'SANTANDER';
   if (/COOP: \d+ - AG: \d+ - CONTA:/.test(texto) || /UNICRED/.test(texto)) return 'UNICRED';
   if (/DAYCOVAL|DAYCONNECT/.test(texto)) return 'DAYCOVAL';
+  if (/PAGSEGURO INTERNET|PAGBANK/.test(texto) && /EXTRATO DA CONTA/.test(texto)) return 'PAGBANK';
   return null;
 }
 
@@ -604,7 +607,7 @@ export async function lerExtratoBancario(buffer, opts = {}) {
       const legivel = paginas.some((p) => p.items.some((it) => /[A-Za-z]{4,}/.test(it.s)));
       throw new Error(
         legivel
-          ? 'Banco não reconhecido no PDF (esperado: Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval ou planilha Pagar.me).'
+          ? 'Banco não reconhecido no PDF (esperado: Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval, PagBank ou planilha Pagar.me).'
           : 'PDF sem texto legível (fonte sem mapa de caracteres — comum no Bradesco). Exporte o extrato em OFX/CSV/TXT ou use outro formato de PDF.',
       );
     }
@@ -617,6 +620,7 @@ export async function lerExtratoBancario(buffer, opts = {}) {
       SANTANDER: interpretarSantander,
       UNICRED: interpretarUnicred,
       DAYCOVAL: interpretarDaycoval,
+      PAGBANK: interpretarPagbank,
     };
     r = parsers[banco](paginas);
   }
