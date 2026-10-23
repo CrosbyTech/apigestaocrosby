@@ -12,7 +12,12 @@
 //   • ENTRADA Stone (antecipação / liquidação de vendas por bandeira): casada
 //     com os DEPÓSITOS do arquivo diário da API de Conciliação Stone da loja
 //     (mesmo CNPJ da conta): valor igual e mesma data, mostrando bruto,
-//     líquido e taxa cobrada; outras entradas (boleto, Pix de cliente) só manual.
+//     líquido e taxa cobrada;
+//   • ENTRADA Pix da maquininha Stone ("<cliente> - Pix | Maquininha"): não
+//     vem no arquivo da Stone; é casada com o TÍTULO do contas a RECEBER do
+//     TOTVS das empresas do CNPJ da conta (fatura, nota promissória, Pix,
+//     adiantamento), pelas mesmas regras das saídas (valor, data, nome);
+//   • outras entradas (boleto, Pix de cliente direto) só manual.
 //
 // A conciliação gravada (fluxo_caixa_conciliacoes) aponta para o lançamento
 // por uma CHAVE estável — conta|data|valor|hash(histórico)|n — porque a
@@ -25,6 +30,7 @@ import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL, httpsAgent, getBranchCodes } from '../totvsrouter/totvsHelper.js';
 import { STONE_LOJAS, stonecodesDaLoja } from '../config/stoneConciliacao.js';
 import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
+import { mapearFiliaisTotvsPorCnpj } from './totvsCartoesStone.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
 
@@ -455,6 +461,94 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
 }
 const limparTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
+// ─── entradas Pix da maquininha: títulos do contas a receber TOTVS ──
+// Tipos de documento do contas a receber que o PDV usa para o Pix da
+// maquininha (1 = Fatura, 20/26 = PIX; 14 e 11 observados nos títulos do Pix
+// Stone — nota promissória / adiantamento). Cartão (4/5) fica fora.
+export const TIPOS_CR_PIX = { 1: 'Fatura', 11: 'Adiantamento', 14: 'Nota promissória', 20: 'PIX', 26: 'PIX' };
+export const ehEntradaPixMaquininha = (l) => Number(l.valor) > 0 && String(l.banco || '').toUpperCase() === 'STONE' && String(l.categoria || '') === 'pix' && /MAQUININHA/i.test(`${l.descricao || ''} ${l.memo || ''}`);
+
+const cacheClientes = new Map(); // personCode → nome
+async function nomesClientes(itens, token) {
+  const pf = [...new Set(itens.filter((it) => soDigitos(it.customerCpfCnpj).length !== 14).map((it) => it.customerCode).filter((c) => c != null && !cacheClientes.has(c)))];
+  const pj = [...new Set(itens.filter((it) => soDigitos(it.customerCpfCnpj).length === 14).map((it) => it.customerCode).filter((c) => c != null && !cacheClientes.has(c)))];
+  const h = { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 };
+  for (const [path, lista] of [['/person/v2/individuals/search', pf], ['/person/v2/legal-entities/search', pj]]) {
+    for (let i = 0; i < lista.length; i += 50) {
+      const lote = lista.slice(i, i + 50);
+      try {
+        const r = await axios.post(`${TOTVS_BASE_URL}${path}`, { filter: { personCodeList: lote }, page: 1, pageSize: 100 }, h);
+        for (const x of r.data?.items || []) cacheClientes.set(x.code, x.name || x.fantasyName || null);
+      } catch {
+        /* nome fica vazio */
+      }
+      for (const c of lote) if (!cacheClientes.has(c)) cacheClientes.set(c, null);
+    }
+  }
+}
+
+const cacheCR = new Map();
+async function fonteTotvsCR(branchCodes, { de, ate }) {
+  const key = `${branchCodes.join(',')}|${de}|${ate}`;
+  const hit = cacheCR.get(key);
+  if (hit && hit.itens && Date.now() - hit.em < 30 * 60 * 1000) return hit.itens;
+  if (hit?.promessa) return hit.promessa;
+  const promessa = (async () => {
+    const tokenData = await getToken();
+    if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível.');
+    const token = tokenData.access_token;
+    const filter = { branchCodeList: branchCodes.map(Number), startIssueDate: `${de}T00:00:00`, endIssueDate: `${ate}T23:59:59`, documentTypeList: Object.keys(TIPOS_CR_PIX).map(Number) };
+    const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`, { filter, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 60000 });
+    const first = await pedir(1);
+    let itens = [...(first.data?.items || [])];
+    const totalPages = Number(first.data?.totalPages) || 1;
+    for (let start = 2; start <= totalPages; start += 10) {
+      const lote = [];
+      for (let p = start; p <= Math.min(start + 9, totalPages); p++) lote.push(pedir(p));
+      for (const r of await Promise.all(lote)) itens.push(...(r.data?.items || []));
+    }
+    const vistos = new Set();
+    itens = itens.filter((it) => {
+      const k = `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`;
+      if (vistos.has(k) || ![1, 2].includes(Number(it.status))) return false; // 3 = cancelado, 4 = quebrada
+      vistos.add(k);
+      return true;
+    });
+    await nomesClientes(itens, token);
+    return itens.map((it) => {
+      const liquidado = !!it.settlementDate;
+      const tipo = TIPOS_CR_PIX[it.documentType] || `tipo ${it.documentType}`;
+      return {
+        origem: 'TOTVS_CR',
+        id: `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`,
+        valor: round2(liquidado && it.paidValue ? it.paidValue : it.installmentValue),
+        data: it.issueDate ? String(it.issueDate).slice(0, 10) : null,
+        nome: cacheClientes.get(it.customerCode) || null,
+        doc: soDigitos(it.customerCpfCnpj) || null,
+        empresa: `Empresa ${it.branchCode}`,
+        detalhe: [tipo, it.bearerName ? `portador ${it.bearerName}` : null, `título ${it.receivableCode}/${it.installmentCode}`, liquidado ? `liquidado ${String(it.settlementDate).slice(0, 10)}` : 'em aberto'].filter(Boolean).join(' · '),
+        duplicata: `${it.receivableCode}|${it.installmentCode}`,
+        vencimento: it.expiredDate ? String(it.expiredDate).slice(0, 10) : null,
+        cr: { tipoDocumento: it.documentType, tipo, portador: it.bearerName, portadorCodigo: it.bearerCode, clienteCodigo: it.customerCode, liquidacao: liquidado ? String(it.settlementDate).slice(0, 10) : null, valorTitulo: round2(it.installmentValue), valorPago: round2(it.paidValue || 0), status: it.status },
+      };
+    });
+  })();
+  cacheCR.set(key, { promessa, em: Date.now() });
+  try {
+    const itens = await promessa;
+    cacheCR.set(key, { itens, em: Date.now() });
+    return itens;
+  } catch (e) {
+    cacheCR.delete(key);
+    throw e;
+  }
+}
+
+async function filiaisDaConta(cnpj) {
+  const mapa = await mapearFiliaisTotvsPorCnpj();
+  return (mapa.get(soDigitos(cnpj)) || []).map((f) => f.code);
+}
+
 // ─── entradas Stone: depósitos do arquivo de conciliação ─────
 const fmtBr = (v) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const lojaStoneDoCnpj = (cnpj) => STONE_LOJAS.find((l) => l.cnpj === soDigitos(cnpj) && l.apiKey && l.stonecode) || null;
@@ -699,7 +793,7 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'STONE', 'MANUAL', 'MULTIPLO'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'MANUAL', 'MULTIPLO'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   const l = await lancamentoComChave(lancamentoId);
   if (!l.chave) throw new Error('Não foi possível calcular a chave do lançamento.');
@@ -886,7 +980,29 @@ export async function detalheConciliacao(id) {
       despesa: ref.detalhe,
     };
   }
-  else if (c.origem === 'STONE') {
+  else if (c.origem === 'TOTVS_CR') {
+    const [branch, tit, parc] = String(ref.id || '').split('|');
+    const cr = ref.cr || {};
+    origem = {
+      tipo: 'Contas a Receber (TOTVS)',
+      cliente: true,
+      empresa: ref.empresa || (branch ? `Empresa ${branch}` : null),
+      fornecedor: ref.nome,
+      fornecedorCodigo: cr.clienteCodigo,
+      doc: ref.doc,
+      duplicata: tit,
+      parcela: parc,
+      emissao: ref.data,
+      vencimento: ref.vencimento,
+      dataPagamento: cr.liquidacao || null,
+      valor: cr.valorTitulo ?? ref.valor,
+      valorPago: ref.valor,
+      forma: cr.tipo || null,
+      banco: cr.portador || null,
+      despesa: ref.detalhe,
+      status: cr.status,
+    };
+  } else if (c.origem === 'STONE') {
     const st = ref.stone || {};
     origem = {
       tipo: st.tipo === 'ANTECIPACAO' ? 'Antecipação Stone' : 'Depósito Stone (liquidação de vendas)',
@@ -949,7 +1065,16 @@ async function lancamentoEnriquecido(lancamentoId) {
 export async function buscarCandidatos(lancamentoId) {
   const l = await lancamentoEnriquecido(lancamentoId);
   if (l.valor >= 0) {
-    if (!ehEntradaStone(l)) return { lancamento: l, candidatos: [], avisos: ['Só entradas da Stone (antecipação e liquidação de vendas) têm busca automática por enquanto; para as demais use a justificativa manual.'] };
+    if (ehEntradaPixMaquininha(l)) {
+      const filiais = await filiaisDaConta(l.conta_cnpj);
+      if (!filiais.length) return { lancamento: l, candidatos: [], avisos: [`Nenhuma empresa do TOTVS com o CNPJ ${l.conta_cnpj || '?'} desta conta.`] };
+      const janela = janelaMensal({ de: l.data, ate: l.data });
+      const cr = await fonteTotvsCR(filiais, janela);
+      const usados = await usadosNaJanela({ de: l.data, ate: l.data });
+      const candidatos = candidatosPara(l, { totvs: cr }, usados);
+      return { lancamento: l, candidatos, avisos: [], decisao: decidir(candidatos), filiais };
+    }
+    if (!ehEntradaStone(l)) return { lancamento: l, candidatos: [], avisos: ['Só entradas da Stone (antecipação, liquidação de vendas e Pix da maquininha) têm busca automática por enquanto; para as demais use a justificativa manual.'] };
     const loja = lojaStoneDoCnpj(l.conta_cnpj);
     if (!loja) return { lancamento: l, candidatos: [], avisos: [`Conta Stone sem chave da API de Conciliação cadastrada (CNPJ ${l.conta_cnpj || '?'}). Cadastre em config/stoneConciliacao.js.`] };
     const f = await fonteStone(loja, janelaMensal({ de: l.data, ate: l.data }));
@@ -963,7 +1088,7 @@ export async function buscarCandidatos(lancamentoId) {
   return { lancamento: l, candidatos, avisos: fontes.avisos, decisao: decidir(candidatos) };
 }
 
-export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.stone ? { stone: c.stone } : {}) });
+export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.stone ? { stone: c.stone } : {}), ...(c.cr ? { cr: c.cr } : {}) });
 
 // regra de aceite automático: melhor ≥ 70 e com folga ≥ 15 pontos para o 2º.
 // Candidatos "gêmeos" (mesma origem, nome, data e valor — ex.: 3 pagamentos
@@ -995,7 +1120,7 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
     return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome, conta_cnpj: c?.titular_cnpj };
   };
   // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
-  const alvo = (lancs || []).map(enriquecer).filter((l) => l.valor < 0 || ehEntradaStone(l));
+  const alvo = (lancs || []).map(enriquecer).filter((l) => l.valor < 0 || ehEntradaStone(l) || ehEntradaPixMaquininha(l));
   const porConta = new Map();
   for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
@@ -1011,11 +1136,21 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   const usados = await usadosNaJanela({ de, ate });
   const resultado = { pendentes: pendentes.length, conciliadas: [], ambiguas: [], semCandidato: 0, avisos: [...fontes.avisos] };
   const stonePorCnpj = new Map();
+  const crPorCnpj = new Map();
 
   for (const l of pendentes) {
     let candidatos;
     if (l.valor < 0) {
       candidatos = candidatosPara(l, fontes, usados);
+    } else if (ehEntradaPixMaquininha(l)) {
+      const cnpj = soDigitos(l.conta_cnpj);
+      if (!crPorCnpj.has(cnpj)) {
+        const filiais = await filiaisDaConta(cnpj).catch(() => []);
+        const itens = filiais.length ? await fonteTotvsCR(filiais, janelaMensal({ de, ate })).catch((e) => (resultado.avisos.push(`Contas a Receber TOTVS: ${e.message}`), [])) : [];
+        if (!filiais.length) resultado.avisos.push(`${l.conta_apelido}: nenhuma empresa do TOTVS com o CNPJ da conta; Pix da maquininha fica pendente.`);
+        crPorCnpj.set(cnpj, itens);
+      }
+      candidatos = candidatosPara(l, { totvs: crPorCnpj.get(cnpj) }, usados);
     } else {
       const loja = lojaStoneDoCnpj(l.conta_cnpj);
       if (!loja) {
@@ -1060,4 +1195,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, decidir };

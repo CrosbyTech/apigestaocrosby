@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -129,5 +129,30 @@ describe('entradas Stone (depósitos do arquivo de conciliação)', () => {
     expect(ehEntradaStone(entrada({ categoria: 'boleto' }))).toBe(false);
     expect(ehEntradaStone(entrada({ banco: 'SICREDI' }))).toBe(false);
     expect(ehEntradaStone(entrada({ valor: -10 }))).toBe(false);
+  });
+});
+
+describe('Pix da maquininha Stone × contas a receber TOTVS', () => {
+  const pix = (over = {}) => ({ id: 20, conta_id: 34, data: '2026-09-03', valor: 149, categoria: 'pix', banco: 'STONE', descricao: 'PIX MAQUININHA', memo: 'Geraldo Alves Do Nascimento Neto - Pix | Maquininha', contraparte_nome: 'GERALDO ALVES DO NASCIMENTO NETO', ...over });
+  const tit = (over = {}) => ({ origem: 'TOTVS_CR', id: '65|249700|1', valor: 149, data: '2026-09-03', nome: 'GERALDO IRMAO', doc: '05964582400', empresa: 'Empresa 65', detalhe: 'Nota promissória · portador TITULO EM CARTEIRA · título 249700/1 · liquidado 2026-09-03', duplicata: '249700|1', ...over });
+
+  test('reconhece só o Pix da maquininha em conta Stone', () => {
+    expect(ehEntradaPixMaquininha(pix())).toBe(true);
+    expect(ehEntradaPixMaquininha(pix({ memo: 'CROSBY - Transferência | Pix', descricao: 'RECEBIMENTO PIX' }))).toBe(false);
+    expect(ehEntradaPixMaquininha(pix({ banco: 'SICREDI' }))).toBe(false);
+  });
+
+  test('título do mesmo dia e valor, com nome parecido, concilia automaticamente; dois títulos iguais são gêmeos', () => {
+    const c = candidatosPara(pix(), { totvs: [tit(), tit({ id: '65|249701|1' })] });
+    expect(c).toHaveLength(2);
+    expect(c[0].motivos).toEqual(expect.arrayContaining(['valor igual', 'mesma data', 'nome parecido']));
+    expect(decidir(c)).toMatchObject({ automatico: true, escolhido: expect.objectContaining({ id: '65|249700|1' }) });
+    // o 1º já usado → sobra o 2º para a outra linha de 149
+    const c2 = candidatosPara(pix(), { totvs: [tit(), tit({ id: '65|249701|1' })] }, new Map([['TOTVS_CR:65|249700|1', 149]]));
+    expect(c2.map((x) => x.id)).toEqual(['65|249701|1']);
+  });
+
+  test('título com valor diferente não serve', () => {
+    expect(candidatosPara(pix({ valor: 288 }), { totvs: [tit()] })).toHaveLength(0);
   });
 });
