@@ -6,6 +6,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
+import { removerAbatidas } from '../utils/contasPagarAbatidas.js';
 import {
   httpsAgent,
   httpAgent,
@@ -1432,7 +1433,16 @@ router.post(
 
       // PASSO 3: Filtros locais
 
-      let filteredItems = allItems;
+      // Regra fixa: duplicatas abatidas (agrupadas e baixadas por desconto,
+      // com data de liquidação e valor pago zero) nunca aparecem no HeadCoach.
+      const semAbatidas = removerAbatidas(allItems);
+      let filteredItems = semAbatidas.itens;
+      const abatidasRemovidas = semAbatidas.removidas;
+      if (abatidasRemovidas > 0) {
+        console.log(
+          `🧹 Contas a Pagar - ${abatidasRemovidas} duplicata(s) abatida(s) removida(s) (liquidadas com valor pago zero)`,
+        );
+      }
 
       // Situação já filtrada via API (filter.status com enum string)
 
@@ -1818,6 +1828,7 @@ router.post(
           totals,
           count: mappedItems.length,
           totalCount,
+          abatidasRemovidas,
           pagesSearched: totalPages,
           timeMs: totalTime,
           filtros: {

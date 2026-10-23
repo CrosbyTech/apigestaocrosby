@@ -26,6 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import supabase from '../config/supabase.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import { FILTRO_ABATIDAS_POSTGREST } from '../utils/contasPagarAbatidas.js';
 import { requireAuth, requireRole } from '../middlewares/auth.js';
 import { executarSync, executarVarios, listarEntidades, emAndamento } from '../services/erp/sync/runner.js';
 import { ORDEM } from '../services/erp/sync/entidades.js';
@@ -236,6 +237,8 @@ router.get(
     }
     if (req.query.produto_code) query = query.eq('produto_code', req.query.produto_code);
     if (req.query.empresa) query = query.eq(def.colEmpresa || 'empresa', req.query.empresa);
+    // Contas a pagar: títulos abatidos (liquidados com valor pago zero) nunca aparecem em tela.
+    if (req.params.entidade === 'contas_pagar') query = query.or(FILTRO_ABATIDAS_POSTGREST);
     const { data, count, error } = await query;
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
     return successResponse(res, { itens: data, total: count, limite, offset });
