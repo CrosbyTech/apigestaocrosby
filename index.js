@@ -114,6 +114,8 @@ import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarJojoGrupoJob } from './jobs/jojo-grupo.job.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
 import contasReceberHojeRoutes, { iniciarJobHoje } from './routes/contasReceberHoje.routes.js';
+import drylandBaixasRoutes from './routes/drylandBaixas.routes.js';
+import { iniciarJobDrylandBaixas } from './services/drylandBaixas.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -211,6 +213,7 @@ app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOT
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
 app.use('/api/contas-receber', contasReceberHojeRoutes); // Contas a Receber — tela Hoje (entrou / vai entrar / precisa de você)
+app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa do link do Dryland → aba Solicitações de Baixa (ponte, precisa de DRYLAND_COB_*)
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
 app.use('/api/dre-auditoria', dreAuditoriaRoutes); // DRE — auditoria (Contratos PJ do Dryland × DRE Analítica), só leitura
@@ -275,6 +278,7 @@ app.listen(PORT, async () => {
   iniciarJojoGrupoJob(); // JOJO — job 5min que lê o grupo (sem IA): planilha de observações → cruzamento → SUBIR grava
   iniciarBruceBot().catch((e) => console.warn(`[bruce] falha ao iniciar: ${e.message}`)); // BRUCE — assistente do Contas a Receber no grupo BRUCE - CAR HEADCOACH
   iniciarJobHoje(); // tela Hoje do Contas a Receber — snapshot diário + na subida
+  iniciarJobDrylandBaixas(); // ponte Dryland → Solicitações de Baixa (só liga com DRYLAND_COB_USUARIO/SENHA)
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
