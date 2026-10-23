@@ -21,6 +21,7 @@
  */
 import supabase from '../config/supabase.js';
 import { postTotvs } from './bluecardLimite.js';
+import { abrirSolicitacaoBoleto } from './baixaAutomaticaPagarme.js';
 
 // Portadores cujas faturas entram na remessa (título sem boleto vivo no banco):
 //   1020 TITULO EM CARTEIRA · 1098 BAIXADO POR SOLICITACAO DA EMPRESA ·
@@ -510,6 +511,7 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
 
 // ── RETORNO ────────────────────────────────────────────────────────────────
 
+// eslint-disable-next-line no-unused-vars -- histórico: baixa em conta corrente (desativada em 23/10/2026)
 async function baixarNoTotvs(b) {
   const pago = Number(b.vl_pago);
   const fatura = Number(b.vl_fatura);
@@ -560,13 +562,18 @@ async function baixarBoletoPago(b) {
   if (!claim?.length) return 'ocupado';
 
   try {
-    await baixarNoTotvs(b);
+    // 23/10/2026 (João): o que entra pela Pagar.me NÃO baixa em conta corrente.
+    // O boleto pago vira uma Solicitação de Baixa (origem pagarme_boleto) na aba
+    // do HeadCoach, baixada como cartão débito PAGARME no dia do pagamento —
+    // pelo João na tela ou pela baixa automática (PAGARME_BAIXA_AUTO=on).
+    // A baixa bancária antiga (baixarNoTotvs) fica no arquivo só como histórico.
+    const r = await abrirSolicitacaoBoleto(b);
     await supabase
       .from(TABELA)
-      .update({ baixa_status: 'processada', baixa_erro: null, baixa_em: new Date().toISOString() })
+      .update({ baixa_status: 'solicitada', baixa_erro: null, updated_at: new Date().toISOString() })
       .eq('id', b.id);
-    console.log(`✅ [retorno-boleto] baixa TOTVS ${b.cd_empresa}-${b.nr_fatura}/${b.nr_parcela}`);
-    return 'processada';
+    console.log(`📝 [retorno-boleto] solicitação de baixa ${r} ${b.cd_empresa}-${b.nr_fatura}/${b.nr_parcela} (cartão PAGARME)`);
+    return 'solicitada';
   } catch (e) {
     const msg = erroTotvs(e);
     await supabase.from(TABELA).update({ baixa_status: 'erro', baixa_erro: msg }).eq('id', b.id);
