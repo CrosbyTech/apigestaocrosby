@@ -257,12 +257,15 @@ async function nomesFornecedores(codes, token) {
  * filtros do usuário: nº da duplicata, fornecedor (nome ou CNPJ), vencimento
  * (de/até) e faixa de valor. Traz pagas e em aberto; marca `pago`.
  */
-export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorMin, valorMax, lancamentoId } = {}) {
+export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissaoDe, emissaoAte, valorMin, valorMax, lancamentoId } = {}) {
   const avisos = [];
-  const f = { duplicata: soDigitos(duplicata) || null, fornecedor: limparTxt(fornecedor), de: de || null, ate: ate || null, valorMin: valorMin != null && valorMin !== '' ? Number(valorMin) : null, valorMax: valorMax != null && valorMax !== '' ? Number(valorMax) : null };
-  if (!f.duplicata && !f.fornecedor && !f.de && !f.ate && f.valorMin == null && f.valorMax == null) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, vencimento ou valor).');
-  const docFornecedor = soDigitos(f.fornecedor).length === 14 || soDigitos(f.fornecedor).length === 11 ? soDigitos(f.fornecedor) : null;
-  const nomeRe = f.fornecedor && !docFornecedor ? f.fornecedor : null;
+  const f = { duplicata: soDigitos(duplicata) || null, fornecedor: limparTxt(fornecedor), de: de || null, ate: ate || null, emissaoDe: emissaoDe || null, emissaoAte: emissaoAte || null, valorMin: valorMin != null && valorMin !== '' ? Number(valorMin) : null, valorMax: valorMax != null && valorMax !== '' ? Number(valorMax) : null };
+  if (!f.duplicata && !f.fornecedor && !f.de && !f.ate && !f.emissaoDe && !f.emissaoAte && f.valorMin == null && f.valorMax == null) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, emissão, vencimento ou valor).');
+  const digitosForn = soDigitos(f.fornecedor);
+  const docFornecedor = digitosForn.length === 14 || digitosForn.length === 11 ? digitosForn : null;
+  // só dígitos, mais curto que um CPF → é o código do fornecedor no TOTVS
+  const codigoFornecedor = f.fornecedor && /^\d+$/.test(f.fornecedor.trim()) && digitosForn.length < 11 ? Number(digitosForn) : null;
+  const nomeRe = f.fornecedor && !docFornecedor && codigoFornecedor == null ? f.fornecedor : null;
 
   const usados = await usadosTotais();
   const lanc = lancamentoId ? await lancamentoEnriquecido(lancamentoId) : null;
@@ -273,7 +276,10 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorM
   const token = tokenData?.access_token;
   if (!token) avisos.push('TOTVS indisponível (sem token).');
   let supplierCodes = null;
-  if (token && docFornecedor) {
+  if (codigoFornecedor != null) {
+    supplierCodes = [codigoFornecedor];
+    if (token) await nomesFornecedores([codigoFornecedor], token).catch(() => {});
+  } else if (token && docFornecedor) {
     try {
       const r = await axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { filter: { cnpjList: [docFornecedor] }, page: 1, pageSize: 20 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 });
       supplierCodes = (r.data?.items || []).map((p) => p.code);
@@ -301,7 +307,7 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorM
     if (!supplierCodes.length && !f.duplicata) avisos.push(`Nenhum fornecedor com "${nomeRe}" no histórico de pagamentos; no TOTVS a busca foi só pelos outros filtros.`);
   }
 
-  if (token && (f.duplicata || supplierCodes?.length || f.de || f.ate || f.valorMin != null || f.valorMax != null)) {
+  if (token && (f.duplicata || supplierCodes?.length || f.de || f.ate || f.emissaoDe || f.emissaoAte || f.valorMin != null || f.valorMax != null)) {
     try {
       const branchCodeList = await getBranchCodes(token);
       const filter = { branchCodeList };
@@ -309,7 +315,9 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorM
       if (supplierCodes?.length) filter.supplierCodeList = supplierCodes.slice(0, 200);
       if (f.de) filter.startExpiredDate = `${f.de}T00:00:00`;
       if (f.ate) filter.endExpiredDate = `${f.ate}T23:59:59`;
-      if (!f.duplicata && !supplierCodes?.length && !f.de && !f.ate) {
+      if (f.emissaoDe) filter.startIssueDate = `${f.emissaoDe}T00:00:00`;
+      if (f.emissaoAte) filter.endIssueDate = `${f.emissaoAte}T23:59:59`;
+      if (!f.duplicata && !supplierCodes?.length && !f.de && !f.ate && !f.emissaoDe && !f.emissaoAte) {
         // só valor: limita ao entorno do lançamento (±60 dias) para não varrer o TOTVS inteiro
         const base = lanc?.data || new Date().toISOString().slice(0, 10);
         filter.startExpiredDate = `${addDias(base, -60)}T00:00:00`;
@@ -355,8 +363,11 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorM
     let q = supabase.from(T.lib).select('id,cd_empresa,nm_empresa,nm_fornecedor,cd_fornecedor,vl_duplicata,vl_real,dt_emissao,dt_vencimento,dt_pagamento,pago_em,status,forma_pagamento,chave_pix,banco_pagamento,nr_duplicata,nr_parcela,ds_despesaitem,dados_completos').neq('status', 'CANCELADO').limit(300);
     if (f.duplicata) q = q.eq('nr_duplicata', f.duplicata);
     if (nomeRe) q = q.ilike('nm_fornecedor', `%${nomeRe}%`);
+    if (codigoFornecedor != null) q = q.eq('cd_fornecedor', codigoFornecedor);
     if (f.de) q = q.gte('dt_vencimento', f.de);
     if (f.ate) q = q.lte('dt_vencimento', f.ate);
+    if (f.emissaoDe) q = q.gte('dt_emissao', f.emissaoDe);
+    if (f.emissaoAte) q = q.lte('dt_emissao', f.emissaoAte);
     if (f.valorMin != null) q = q.gte('vl_duplicata', f.valorMin);
     if (f.valorMax != null) q = q.lte('vl_duplicata', f.valorMax);
     const { data } = await q;
@@ -383,12 +394,15 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, valorM
     avisos.push(`Liberação de Pagamento: ${e.message}`);
   }
   try {
-    let q = supabase.from(T.sol).select('id,nm_empresa,supplier_name,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,descricao,tipo_solicitacao,duplicate_code').is('pagamento_liberacao_id', null).not('status', 'in', '("rejeitado","cancelado")').limit(200);
+    let q = supabase.from(T.sol).select('id,nm_empresa,supplier_name,supplier_code,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,descricao,tipo_solicitacao,duplicate_code').is('pagamento_liberacao_id', null).not('status', 'in', '("rejeitado","cancelado")').limit(200);
     if (f.duplicata) q = q.eq('duplicate_code', f.duplicata);
     if (nomeRe) q = q.ilike('supplier_name', `%${nomeRe}%`);
     if (docFornecedor) q = q.eq('supplier_cpf_cnpj', docFornecedor);
+    if (codigoFornecedor != null) q = q.eq('supplier_code', codigoFornecedor);
     if (f.de) q = q.gte('dt_vencimento', f.de);
     if (f.ate) q = q.lte('dt_vencimento', f.ate);
+    if (f.emissaoDe) q = q.gte('dt_emissao', f.emissaoDe);
+    if (f.emissaoAte) q = q.lte('dt_emissao', f.emissaoAte);
     if (f.valorMin != null) q = q.gte('valor_total', f.valorMin);
     if (f.valorMax != null) q = q.lte('valor_total', f.valorMax);
     const { data } = await q;
