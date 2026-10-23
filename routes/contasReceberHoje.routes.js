@@ -309,7 +309,32 @@ async function pendenciasHeadCoach() {
   if (ep.error) throw new Error(`esteira_protesto: ${ep.error.message}`);
   const baixas = bx.data || [];
   const protesto = ep.data || [];
+  // João (23/10/2026): separar o que precisa baixar por origem — Pix (BlueCard)
+  // e boleto Pagar.me recebido — e mostrar também os boletos pagos que ainda
+  // não creditaram (não dá pra baixar antes do recebimento).
+  const pix = baixas.filter((x) => x.origem === 'bluecard_pagarme');
+  const boletoRecebido = baixas.filter((x) => x.origem === 'pagarme_boleto');
+  let boletosAguardandoCredito = { n: 0, valor: 0 };
+  try {
+    const { data: ag } = await supabase
+      .from('pagarme_boletos')
+      .select('vl_fatura')
+      .eq('status', 'paid')
+      .in('baixa_status', ['pendente', 'aguardando_credito'])
+      .limit(1000);
+    boletosAguardandoCredito = { n: (ag || []).length, valor: somar(ag || [], (x) => Number(x.vl_fatura || 0)) };
+  } catch {
+    /* sem a tabela, ignora */
+  }
+  const resumo = (lista) => ({
+    n: lista.length,
+    valor: somar(lista, (x) => Number(x.vl_fatura || 0)),
+    itens: lista.slice(0, 30).map((x) => ({ cd_cliente: x.cd_cliente, nome: x.nm_cliente, nr_fatura: x.nr_fat, nr_parcela: x.nr_parcela, valor: Number(x.vl_fatura || 0), em: x.created_at, origem: x.origem })),
+  });
   return {
+    pixParaBaixar: resumo(pix),
+    boletoRecebidoParaBaixar: resumo(boletoRecebido),
+    boletosAguardandoCredito,
     baixasPendentes: {
       n: baixas.length,
       valor: somar(baixas, (x) => Number(x.vl_fatura || 0)),
@@ -400,6 +425,34 @@ async function montar() {
       urgente: false,
       rota: '/solicitacao-baixa',
       itens: pend.baixasPendentes.itens,
+    });
+  }
+  if (pend?.pixParaBaixar?.n) {
+    demandas.push({
+      chave: 'pix_baixar',
+      titulo: 'Pix recebidos (BlueCard) a baixar',
+      descricao: `${pend.pixParaBaixar.n} pagamento(s) via Pix, R$ ${pend.pixParaBaixar.valor.toFixed(2)} — baixar como cartão débito PAGARME na data do pagamento.`,
+      oQueFazer: 'Solicitações de Baixa → caixa "Pix a baixar" → marcar → Processar → Cartão de Débito → Confirmar (cada uma sai na sua data).',
+      qtd: pend.pixParaBaixar.n,
+      valor: pend.pixParaBaixar.valor,
+      urgente: false,
+      rota: '/solicitacao-baixa',
+      itens: pend.pixParaBaixar.itens,
+    });
+  }
+  if (pend?.boletoRecebidoParaBaixar?.n || pend?.boletosAguardandoCredito?.n) {
+    const br = pend.boletoRecebidoParaBaixar || { n: 0, valor: 0, itens: [] };
+    const ag = pend.boletosAguardandoCredito || { n: 0, valor: 0 };
+    demandas.push({
+      chave: 'boleto_recebido_baixar',
+      titulo: 'Boletos Pagar.me recebidos a baixar',
+      descricao: `${br.n} recebido(s), R$ ${Number(br.valor || 0).toFixed(2)} — baixar como cartão débito PAGARME na data do recebimento.${ag.n ? ` Mais ${ag.n} pago(s) (R$ ${Number(ag.valor || 0).toFixed(2)}) ainda sem crédito na Pagar.me — entram quando cair.` : ''}`,
+      oQueFazer: 'Solicitações de Baixa → caixa "Boleto recebido a baixar" → marcar → Processar → Cartão de Débito → Confirmar.',
+      qtd: br.n,
+      valor: Number(br.valor || 0),
+      urgente: false,
+      rota: '/solicitacao-baixa',
+      itens: br.itens || [],
     });
   }
   if (pm.pagarme?.aguardandoBaixa?.n) {

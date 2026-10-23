@@ -21,7 +21,6 @@
  */
 import supabase from '../config/supabase.js';
 import { postTotvs } from './bluecardLimite.js';
-import { abrirSolicitacaoBoleto } from './baixaAutomaticaPagarme.js';
 
 // Portadores cujas faturas entram na remessa (título sem boleto vivo no banco):
 //   1020 TITULO EM CARTEIRA · 1098 BAIXADO POR SOLICITACAO DA EMPRESA ·
@@ -511,6 +510,77 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
 
 // ── RETORNO ────────────────────────────────────────────────────────────────
 
+// ── BOLETO PAGO → SOLICITAÇÃO DE BAIXA ─────────────────────────────────────
+// Regra do João (23/10/2026): boleto Pagar.me pago NÃO baixa em conta corrente
+// nem no dia do pagamento. Vira uma Solicitação de Baixa na aba do HeadCoach,
+// com a data do RECEBIMENTO (crédito do recebível na Pagar.me), pra ser baixada
+// pelo João como cartão débito PAGARME. Enquanto não creditou, fica aguardando.
+
+const ddmmaaaa = (iso) => {
+  const [a, m, d] = String(iso || '').slice(0, 10).split('-');
+  return d ? `${d}${m}${a}` : '';
+};
+
+/** Data em que o dinheiro do boleto caiu (payable 'paid' da cobrança). null = ainda não creditou. */
+async function dataCreditoBoleto(b) {
+  if (!b.charge_id) return null;
+  const r = await pagarme('GET', `/payables?charge_id=${encodeURIComponent(b.charge_id)}&size=20`, null, b.conta || CONTA_PADRAO);
+  const pagos = (r?.data || []).filter((x) => x.status === 'paid' && x.payment_date);
+  if (!pagos.length) return null;
+  return pagos.map((x) => String(x.payment_date).slice(0, 10)).sort().slice(-1)[0];
+}
+
+/**
+ * Abre a Solicitação de Baixa de um boleto pago (idempotente por ref_externa
+ * `pagarme:boleto:<id>`). Retorna 'inserida' | 'ja_existia' | 'aguardando_credito'.
+ */
+export async function abrirSolicitacaoBoleto(b) {
+  const dtCredito = await dataCreditoBoleto(b);
+  if (!dtCredito) return 'aguardando_credito';
+  const pago = Number(b.vl_pago) || 0;
+  const fatura = Number(b.vl_fatura) || 0;
+  const acrescimo = Math.round((pago - fatura) * 100) / 100;
+  const dtPag = String(b.dt_pagamento || '').slice(0, 10);
+  const ref = `pagarme:boleto:${b.id}`;
+  const obs = [
+    `Boleto Pagar.me pago em ${dtPag || '?'}, RECEBIDO (crédito) em ${dtCredito}${b.conta ? ` · conta ${b.conta}` : ''}. Pedido ${b.order_id || '?'} · cobrança ${b.charge_id || '?'}${b.nosso_numero ? ` · nosso nº ${b.nosso_numero}` : ''}.`,
+    `Título ${fatura.toFixed(2)}, pago ${pago.toFixed(2)}${acrescimo > 0 ? ` (acréscimo do boleto ${acrescimo.toFixed(2)} fica na Pagar.me, não entra na baixa)` : ''}.`,
+    pago + 0.005 < fatura ? '⚠️ PAGO A MENOR — conferir antes de baixar.' : null,
+    `Baixar como Cartão de Débito PAGARME (portador 9901) na data do recebimento; NSU/autorização ${ddmmaaaa(dtCredito)}.`,
+    `[${ref}]`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const { error } = await supabase.from('solicitacoes_baixa').insert({
+    cd_empresa: Number(b.cd_empresa),
+    cd_cliente: Number(b.cd_cliente),
+    nm_cliente: b.nm_cliente || '',
+    nr_fat: Number(b.nr_fatura),
+    nr_parcela: Number(b.nr_parcela) || 1,
+    vl_fatura: fatura,
+    vl_juros: 0,
+    dt_vencimento: String(b.dt_vencimento || '').slice(0, 10) || null,
+    dt_emissao: String(b.dt_emissao || '').slice(0, 10) || null,
+    cd_portador: b.cd_portador_totvs ?? null,
+    nm_portador: b.nm_portador_totvs || null,
+    comprovante_url: '',
+    comprovante_path: '',
+    status: 'pendente',
+    user_id: null,
+    user_nome: 'Pagar.me · boleto recebido',
+    user_email: 'pagarme@crosby.app',
+    observacao: obs,
+    dt_pagamento: dtCredito,
+    forma_pagamento: 'cartao_debito',
+    dados_cartao: null,
+    origem: 'pagarme_boleto',
+    ref_externa: ref,
+  });
+  if (!error) return 'inserida';
+  if (error.code === '23505') return 'ja_existia';
+  throw new Error(`solicitacoes_baixa: ${error.message}`);
+}
+
 // eslint-disable-next-line no-unused-vars -- histórico: baixa em conta corrente (desativada em 23/10/2026)
 async function baixarNoTotvs(b) {
   const pago = Number(b.vl_pago);
@@ -556,7 +626,7 @@ async function baixarBoletoPago(b) {
     .from(TABELA)
     .update({ baixa_status: 'processando', updated_at: new Date().toISOString() })
     .eq('id', b.id)
-    .eq('baixa_status', 'pendente')
+    .in('baixa_status', ['pendente', 'aguardando_credito'])
     .select('id');
   if (error) throw new Error(`pagarme_boletos: ${error.message}`);
   if (!claim?.length) return 'ocupado';
@@ -568,11 +638,18 @@ async function baixarBoletoPago(b) {
     // pelo João na tela ou pela baixa automática (PAGARME_BAIXA_AUTO=on).
     // A baixa bancária antiga (baixarNoTotvs) fica no arquivo só como histórico.
     const r = await abrirSolicitacaoBoleto(b);
+    if (r === 'aguardando_credito') {
+      await supabase
+        .from(TABELA)
+        .update({ baixa_status: 'aguardando_credito', baixa_erro: null, updated_at: new Date().toISOString() })
+        .eq('id', b.id);
+      return 'aguardando_credito';
+    }
     await supabase
       .from(TABELA)
       .update({ baixa_status: 'solicitada', baixa_erro: null, updated_at: new Date().toISOString() })
       .eq('id', b.id);
-    console.log(`📝 [retorno-boleto] solicitação de baixa ${r} ${b.cd_empresa}-${b.nr_fatura}/${b.nr_parcela} (cartão PAGARME)`);
+    console.log(`📝 [retorno-boleto] solicitação de baixa ${r} ${b.cd_empresa}-${b.nr_fatura}/${b.nr_parcela} (cartão PAGARME, data do crédito)`);
     return 'solicitada';
   } catch (e) {
     const msg = erroTotvs(e);
@@ -671,16 +748,45 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
   if (retentarErros) {
     await supabase.from(TABELA).update({ baixa_status: 'pendente' }).eq('status', 'paid').eq('baixa_status', 'erro');
   }
+  // Baixas desfeitas no TOTVS (ex.: as 23 feitas em conta corrente que o João
+  // está desfazendo): boleto pago e 'processada' aqui, mas título ABERTO no
+  // TOTVS → volta a 'pendente' pra virar Solicitação de Baixa.
+  try {
+    const { data: feitos } = await supabase
+      .from(TABELA)
+      .select('id, cd_empresa, cd_cliente, nr_fatura, nr_parcela, baixa_status')
+      .eq('status', 'paid')
+      .eq('baixa_status', 'processada')
+      .order('id', { ascending: false })
+      .limit(300);
+    if (feitos?.length) {
+      await conferirTitulosTotvs(feitos);
+      const { data: reabertos } = await supabase
+        .from(TABELA)
+        .update({ baixa_status: 'pendente', baixa_erro: null, updated_at: new Date().toISOString() })
+        .in('id', feitos.map((x) => x.id))
+        .eq('totvs_situacao', 'aberto')
+        .select('id, cd_empresa, nr_fatura, nr_parcela');
+      r.reabertos = reabertos?.length || 0;
+      if (r.reabertos) console.log(`↩️ [retorno-boleto] ${r.reabertos} baixa(s) desfeita(s) no TOTVS voltaram pra solicitação: ${reabertos.map((x) => `${x.cd_empresa}-${x.nr_fatura}/${x.nr_parcela}`).join(', ')}`);
+    }
+  } catch (e) {
+    console.warn(`⚠️ [retorno-boleto] conferência das baixas feitas: ${e.message}`);
+  }
+
   const { data: aBaixar, error: e2 } = await supabase
     .from(TABELA)
     .select('*')
     .eq('status', 'paid')
-    .eq('baixa_status', 'pendente')
+    .in('baixa_status', ['pendente', 'aguardando_credito'])
     .limit(500);
   if (e2) throw new Error(`pagarme_boletos: ${e2.message}`);
+  r.solicitadas = 0;
+  r.aguardandoCredito = 0;
   for (const b of aBaixar || []) {
     const res = await baixarBoletoPago(b);
-    if (res === 'processada') r.baixados++;
+    if (res === 'solicitada') r.solicitadas++;
+    else if (res === 'aguardando_credito') r.aguardandoCredito++;
     else if (res === 'erro') r.errosBaixa++;
   }
   return r;

@@ -38,57 +38,7 @@ const ddmmaaaa = (iso) => {
 };
 const agoraBR = () => new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }).slice(0, 16);
 
-// ── boleto pago → solicitação ───────────────────────────────────────────────
-/**
- * Abre a Solicitação de Baixa de um boleto Pagar.me pago (linha de pagarme_boletos).
- * Idempotente: ref_externa `pagarme:boleto:<id>` é única. Retorna 'inserida' | 'ja_existia'.
- */
-export async function abrirSolicitacaoBoleto(b) {
-  const pago = r2(b.vl_pago);
-  const fatura = r2(b.vl_fatura);
-  const acrescimo = r2(pago - fatura);
-  const dtPag = dataISO(b.dt_pagamento) || new Date().toISOString().slice(0, 10);
-  const ref = `pagarme:boleto:${b.id}`;
-  const obs = [
-    `Boleto Pagar.me pago em ${dtPag}${b.conta ? ` (conta ${b.conta})` : ''}. Pedido ${b.order_id || '?'} · cobrança ${b.charge_id || '?'}${b.nosso_numero ? ` · nosso nº ${b.nosso_numero}` : ''}.`,
-    `Valor do título ${fatura.toFixed(2)}, pago ${pago.toFixed(2)}${acrescimo ? ` (acréscimo do boleto ${acrescimo.toFixed(2)} fica na Pagar.me, não entra na baixa)` : ''}.`,
-    pago + 0.005 < fatura ? `⚠️ PAGO A MENOR — conferir antes de baixar.` : null,
-    `Baixar como Cartão de Débito PAGARME (portador ${PORTADOR_PAGARME_DEBITO}), NSU/autorização ${ddmmaaaa(dtPag)}.`,
-    `[${ref}]`,
-  ]
-    .filter(Boolean)
-    .join(' ');
-
-  const row = {
-    cd_empresa: Number(b.cd_empresa),
-    cd_cliente: Number(b.cd_cliente),
-    nm_cliente: b.nm_cliente || '',
-    nr_fat: Number(b.nr_fatura),
-    nr_parcela: Number(b.nr_parcela) || 1,
-    vl_fatura: fatura,
-    vl_juros: 0,
-    dt_vencimento: dataISO(b.dt_vencimento),
-    dt_emissao: dataISO(b.dt_emissao),
-    cd_portador: b.cd_portador_totvs ?? null,
-    nm_portador: b.nm_portador_totvs || null,
-    comprovante_url: '',
-    comprovante_path: '',
-    status: 'pendente',
-    user_id: null,
-    user_nome: 'Pagar.me · boleto pago',
-    user_email: 'pagarme@crosby.app',
-    observacao: obs,
-    dt_pagamento: dtPag,
-    forma_pagamento: 'cartao_debito',
-    dados_cartao: null,
-    origem: 'pagarme_boleto',
-    ref_externa: ref,
-  };
-  const { error } = await supabase.from('solicitacoes_baixa').insert(row);
-  if (!error) return 'inserida';
-  if (error.code === '23505') return 'ja_existia';
-  throw new Error(`solicitacoes_baixa: ${error.message}`);
-}
+// (abrirSolicitacaoBoleto vive em services/pagarmeBoletos.js — usa a data do CRÉDITO.)
 
 // ── prévia / execução ───────────────────────────────────────────────────────
 async function pendentes({ limite = 200 } = {}) {
