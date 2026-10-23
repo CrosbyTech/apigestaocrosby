@@ -377,10 +377,13 @@ export async function casarTransferencias({ de, ate }) {
   for (const s of rows) {
     if (Number(s.valor) >= 0 || Math.abs(Number(s.valor)) < 1 || usados.has(s.id)) continue;
     const origem = porId.get(s.conta_id);
+    // a entrada pode cair até 3 dias depois da saída (PIX agendado/fim de
+    // semana: sexta na Stone → segunda na Sicredi); acima de 1 dia exige
+    // mais evidência (CNPJ/nome), ver pontuação abaixo
     const cands = (entradasPorValor.get(cents(s.valor)) || []).filter((e) => {
       if (usados.has(e.id) || e.conta_id === s.conta_id) return false;
       const d = diffDias(e.data, s.data);
-      return d >= 0 && d <= 1;
+      return d >= 0 && d <= 3;
     });
     if (!cands.length) continue;
     let melhor = null;
@@ -399,7 +402,9 @@ export async function casarTransferencias({ de, ate }) {
       if (nomesBatem(e.contraparte_nome, origem?.titular_nome)) sc += 2;
       if (s.contraparte_banco && destino && bancoBate(s.contraparte_banco, destino.banco)) sc += 1;
       if (e.contraparte_banco && origem && bancoBate(e.contraparte_banco, origem.banco)) sc += 1;
-      if (e.data === s.data) sc += 1;
+      const dd = diffDias(e.data, s.data);
+      if (dd === 0) sc += 1;
+      else if (dd >= 2) sc -= 1;
       if (!melhor || sc > melhor.sc) melhor = { e, sc };
     }
     if (!melhor || melhor.sc < 2) continue;
