@@ -214,6 +214,20 @@ router.get(
   }),
 );
 
+// aquece o cache das fontes (TOTVS é pesado) — a tela chama ao abrir o período
+router.post(
+  '/conciliacao/preparar',
+  asyncHandler(async (req, res) => {
+    const { de, ate } = req.body || {};
+    if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
+    try {
+      return successResponse(res, await conciliacao.prepararFontes({ de: String(de), ate: String(ate) }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.post(
   '/conciliacao/automatica',
   asyncHandler(async (req, res) => {

@@ -171,8 +171,10 @@ const cacheTotvs = new Map();
 async function fonteTotvs({ de, ate }) {
   const key = `${de}|${ate}`;
   const hit = cacheTotvs.get(key);
-  if (hit && Date.now() - hit.em < 10 * 60 * 1000) return hit.itens;
+  if (hit && Date.now() - hit.em < 30 * 60 * 1000) return hit.itens;
+  if (hit?.promessa) return hit.promessa; // já está carregando: reaproveita
 
+  const promessa = (async () => {
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível.');
   const token = tokenData.access_token;
@@ -189,9 +191,9 @@ async function fonteTotvs({ de, ate }) {
   const first = await pedir(1);
   let itens = [...(first.data?.items || [])];
   const totalPages = Number(first.data?.totalPages) || 1;
-  for (let start = 2; start <= totalPages; start += 10) {
+  for (let start = 2; start <= totalPages; start += 15) {
     const lote = [];
-    for (let p = start; p <= Math.min(start + 9, totalPages); p++) lote.push(pedir(p));
+    for (let p = start; p <= Math.min(start + 14, totalPages); p++) lote.push(pedir(p));
     for (const r of await Promise.all(lote)) itens.push(...(r.data?.items || []));
   }
 
@@ -216,8 +218,17 @@ async function fonteTotvs({ de, ate }) {
       vencimento: it.dueDate ? String(it.dueDate).slice(0, 10) : null,
       supplierCode: it.supplierCode,
     }));
-  cacheTotvs.set(key, { em: Date.now(), itens });
   return itens;
+  })();
+  cacheTotvs.set(key, { em: Date.now(), promessa });
+  try {
+    const itens = await promessa;
+    cacheTotvs.set(key, { em: Date.now(), itens });
+    return itens;
+  } catch (e) {
+    cacheTotvs.delete(key);
+    throw e;
+  }
 }
 
 // ─── pontuação ────────────────────────────────────────────────
@@ -296,8 +307,17 @@ export function candidatosPara(l, fontes, usados = new Set()) {
   return semRepetidos.slice(0, 8);
 }
 
+// janela de busca: o(s) mês(es) inteiro(s) que cobrem o período, com 5 dias
+// de folga — assim o cache do TOTVS (pesado) é reaproveitado entre as linhas
+const janelaMensal = ({ de, ate }) => {
+  const ini = `${de.slice(0, 7)}-01`;
+  const [y, m] = ate.slice(0, 7).split('-').map(Number);
+  const fim = `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+  return { de: addDias(ini, -5), ate: addDias(fim, 5) };
+};
+
 export async function carregarFontes({ de, ate }) {
-  const janela = { de: addDias(de, -5), ate: addDias(ate, 5) };
+  const janela = janelaMensal({ de, ate });
   const avisos = [];
   const [liberacao, solicitacoes, totvs] = await Promise.all([
     fonteLiberacao(janela).catch((e) => (avisos.push(`Liberação de Pagamento: ${e.message}`), [])),
@@ -440,4 +460,11 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario }) {
   return resultado;
 }
 
-export default { atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };
+/** Aquece as fontes do período (chamado pela tela ao escolher o mês). */
+export async function prepararFontes({ de, ate }) {
+  const t0 = Date.now();
+  const f = await carregarFontes({ de, ate });
+  return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, avisos: f.avisos, ms: Date.now() - t0 };
+}
+
+export default { prepararFontes, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };
