@@ -1784,16 +1784,72 @@ router.post(
     // `dadosCartao` = padrao da requisicao; `item.card` = por titulo
     // (ex.: NSU/autorizacao = data do pagamento daquele titulo).
     const soDigitosCard = (v) => String(v ?? '').replace(/\D/g, '').slice(0, 20);
-    const montarCard = (item) => {
+    // Cadastro de cartões do TOTVS (payment-cards = componente FCXFL002), cache 5 min.
+    // Provado em 23/10/2026 (sonda com fatura inexistente): a API só localiza o
+    // cartão quando Operadora E Bandeira estão preenchidas no cadastro; o texto
+    // enviado precisa ser igual ao cadastrado (case-insensitive) e parcelas iguais.
+    const cartoesCache = (globalThis.__hcCartoesCache ||= { em: 0, lista: null });
+    const cartoesDoTotvs = async () => {
+      if (cartoesCache.lista && Date.now() - cartoesCache.em < 5 * 60 * 1000) return cartoesCache.lista;
+      const tk = await getToken();
+      const auth = typeof tk === 'string' ? tk : tk?.access_token;
+      const lista = [];
+      for (let page = 1; page <= 20; page++) {
+        const r = await axios.get(`${TOTVS_BASE_URL}/accounts-receivable/v2/payment-cards`, {
+          params: { Page: page, PageSize: 100, IsInactive: false },
+          headers: { Authorization: `Bearer ${auth}` },
+          httpsAgent,
+          timeout: 30000,
+        });
+        const it = r.data?.items || [];
+        lista.push(...it);
+        if (!r.data?.hasNext || it.length === 0) break;
+      }
+      cartoesCache.lista = lista;
+      cartoesCache.em = Date.now();
+      return lista;
+    };
+    const cartaoDoPortador = async (portador, parcelas) => {
+      const lista = await cartoesDoTotvs();
+      const doPortador = lista.filter((c) => Number(c.bearerNumber) === Number(portador));
+      if (!doPortador.length) return null;
+      return doPortador.find((c) => Number(c.installmentNumber) === Number(parcelas)) || doPortador[0];
+    };
+    const montarCard = async (item) => {
       if (requestPaidType !== 1 && requestPaidType !== 2) return undefined;
       const c = { ...(dadosCartao || {}), ...(item.card || {}) };
       const nsu = soDigitosCard(c.nsu);
+      let bandeira = String(c.bandeira ?? c.cardBrand ?? '');
+      let operadora = String(c.operadora ?? c.cardOperator ?? '');
+      let parcelas = Number(c.parcelas ?? c.installmentQuantity ?? 1) || 1;
+      if (c.portador) {
+        let reg = null;
+        try {
+          reg = await cartaoDoPortador(c.portador, parcelas);
+        } catch (e) {
+          return { erro: `Não consegui ler o cadastro de cartões do TOTVS (portador ${c.portador}): ${e.message}` };
+        }
+        if (!reg) {
+          return { erro: `Nenhum cartão ativo com portador ${c.portador} no cadastro de cartões do TOTVS (FCXFL002).` };
+        }
+        if (!reg.brandName || !reg.operatorName) {
+          return {
+            erro:
+              `Cartão "${reg.description}" (portador ${reg.bearerNumber}, tipo ${reg.documentType}, seq. ${reg.sequenceNumber}) está ` +
+              `${!reg.brandName ? 'SEM BANDEIRA' : 'SEM OPERADORA'} no cadastro de cartões do TOTVS (FCXFL002). ` +
+              `A API só localiza cartão com Operadora e Bandeira preenchidas — preencha lá e tente de novo.`,
+          };
+        }
+        bandeira = reg.brandName;
+        operadora = reg.operatorName;
+        parcelas = Number(reg.installmentNumber) || parcelas;
+      }
       return {
         nsu: nsu ? Number(nsu) : 0,
         autorization: String(c.autorizacao ?? c.autorization ?? '').slice(0, 20),
-        cardBrand: String(c.bandeira ?? c.cardBrand ?? '').slice(0, 60),
-        cardOperator: String(c.operadora ?? c.cardOperator ?? '').slice(0, 60),
-        installmentQuantity: Number(c.parcelas ?? c.installmentQuantity ?? 1) || 1,
+        cardBrand: bandeira.slice(0, 60),
+        cardOperator: operadora.slice(0, 60),
+        installmentQuantity: parcelas,
       };
     };
     const BANK_DATA =
@@ -1876,7 +1932,21 @@ router.post(
 
         // Payload conforme InvoicesPaymentCommand do Swagger
         // Para adiantamento (paidType 3), tenta primeiro empresa 99, se falhar tenta empresa 1
-        const temCard = montarCard(item);
+        const temCard = await montarCard(item);
+        if (temCard && temCard.erro) {
+          console.warn(`⚠️ [${i + 1}/${items.length}] Fatura ${receivableCode}: ${temCard.erro}`);
+          errors.push({
+            index: i,
+            receivableCode,
+            installmentCode,
+            branchCode,
+            success: false,
+            error: temCard.erro,
+            message: temCard.erro,
+            errorMessages: [temCard.erro],
+          });
+          continue;
+        }
         const settlementBranchCode = requestPaidType === 3 ? 99 : temCard ? CARD_SETTLE_BRANCH : branchCode;
 
         // movementDate fica DENTRO de payments[] (schema InvoicesPaymentCommand);
