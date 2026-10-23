@@ -462,10 +462,15 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
 const limparTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
 // ─── entradas Pix da maquininha: títulos do contas a receber TOTVS ──
-// Tipos de documento do contas a receber que o PDV usa para o Pix da
-// maquininha (1 = Fatura, 20/26 = PIX; 14 e 11 observados nos títulos do Pix
-// Stone — nota promissória / adiantamento). Cartão (4/5) fica fora.
-export const TIPOS_CR_PIX = { 1: 'Fatura', 11: 'Adiantamento', 14: 'Nota promissória', 20: 'PIX', 26: 'PIX' };
+// Tipos de documento do contas a receber (cadastro "Tipo de documento" do
+// TOTVS, conferido com o usuário em 23/10/2026): 1 Fatura · 2 Cheque · 3 Dinheiro
+// · 4/5 Cartão crédito/débito · 6 Nota de débito · 7 TEF · 10 Adiantamento
+// (saída cx.) · 11 Desconto financeiro · 14 Nota promissória · 16 TED/DOC ·
+// 20 CREDEV · 21 Cartão próprio · 26 PIX · 27 PicPay · 29 Mercado Pago ·
+// 30 Marketplace · 50 Outro documento. O Pix da maquininha é procurado em
+// fatura, nota promissória, Pix e adiantamento (os 4 que o caixa usa).
+export const TIPOS_CR = { 1: 'Fatura', 2: 'Cheque', 3: 'Dinheiro', 4: 'Cartão de crédito', 5: 'Cartão de débito', 6: 'Nota de débito', 7: 'TEF', 8: 'Cheque TEF', 9: 'Troco', 10: 'Adiantamento', 11: 'Desconto financeiro', 12: 'DOFINI', 13: 'Vale', 14: 'Nota promissória', 15: 'Cheque garantido', 16: 'TED/DOC', 17: 'Pré-autorização TEF', 18: 'Cheque presente', 19: 'TEF/TECBAN', 20: 'CREDEV', 21: 'Cartão próprio', 22: 'TEF/Hipercard', 23: 'Bônus desconto', 25: 'Voucher', 26: 'PIX', 27: 'PicPay', 28: 'Ame', 29: 'Mercado Pago', 30: 'Marketplace', 50: 'Outro documento' };
+export const TIPOS_CR_PIX = { 1: TIPOS_CR[1], 10: TIPOS_CR[10], 14: TIPOS_CR[14], 26: TIPOS_CR[26] };
 export const ehEntradaPixMaquininha = (l) => Number(l.valor) > 0 && String(l.banco || '').toUpperCase() === 'STONE' && String(l.categoria || '') === 'pix' && /MAQUININHA/i.test(`${l.descricao || ''} ${l.memo || ''}`);
 
 const cacheClientes = new Map(); // personCode → nome
@@ -517,7 +522,7 @@ async function fonteTotvsCR(branchCodes, { de, ate }) {
     await nomesClientes(itens, token);
     return itens.map((it) => {
       const liquidado = !!it.settlementDate;
-      const tipo = TIPOS_CR_PIX[it.documentType] || `tipo ${it.documentType}`;
+      const tipo = TIPOS_CR[it.documentType] || `tipo ${it.documentType}`;
       return {
         origem: 'TOTVS_CR',
         id: `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`,
