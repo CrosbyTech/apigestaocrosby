@@ -28,6 +28,14 @@
 // ============================================================
 import { extrairPaginasPdf, interpretarPaginas as interpretarStone } from './extratoStonePdf.js';
 import { classificarLancamento as classificarStone } from './ofxParaCnab240.js';
+import {
+  interpretarBnb,
+  interpretarSantander,
+  interpretarUnicred,
+  interpretarDaycoval,
+  interpretarPagarme,
+  ehXlsx,
+} from './extratosBancariosExtra.js';
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const soDigitos = (v) => String(v ?? '').replace(/\D/g, '');
@@ -41,6 +49,11 @@ export const BANCOS = {
   SICREDI: { codigo: '748', nome: 'Sicredi' },
   CAIXA: { codigo: '104', nome: 'Caixa Econômica Federal' },
   MENTORE: { codigo: 'MENTORE', nome: 'Mêntore' },
+  BNB: { codigo: '004', nome: 'Banco do Nordeste' },
+  SANTANDER: { codigo: '033', nome: 'Santander' },
+  UNICRED: { codigo: '136', nome: 'Unicred' },
+  DAYCOVAL: { codigo: '707', nome: 'Daycoval' },
+  PAGARME: { codigo: 'PAGARME', nome: 'Pagar.me' },
 };
 
 // formas de pagamento (gerencial) — valores livres, mas padronizados aqui
@@ -119,6 +132,10 @@ export function detectarBanco(paginas) {
   if (/ASSOCIADO:/.test(texto) && /COOPERATIVA:/.test(texto)) return 'SICREDI';
   if (/SICREDI FONE|SICREDI/.test(texto) && /COOPERATIVA/.test(texto)) return 'SICREDI';
   if (/SALDO ANTERIOR AO PERIODO SOLICITADO|SAC CAIXA|ALO CAIXA/.test(texto)) return 'CAIXA';
+  if (/DETALHAMENTO DO EXTRATO/.test(texto) && /EXTRATO DE CONTA CORRENTE - NO PERIODO/.test(texto)) return 'BNB';
+  if (/SANTANDER EMPRESAS|SANTANDER EMPRESARIAL/.test(texto)) return 'SANTANDER';
+  if (/COOP: \d+ - AG: \d+ - CONTA:/.test(texto) || /UNICRED/.test(texto)) return 'UNICRED';
+  if (/DAYCOVAL|DAYCONNECT/.test(texto)) return 'DAYCOVAL';
   return null;
 }
 
@@ -272,6 +289,16 @@ function interpretarSicredi(paginas) {
   const per = textoDe(p1).match(/Per[íi]odo de (\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/i);
 
   const docCab = achar(p1, /^Documento$/i);
+  if (!docCab && /N[ãa]o h[áa] lan[çc]amentos no per[íi]odo/i.test(textoDe(p1))) {
+    return {
+      titular: { nome: titularNome, cnpj: null, agencia: cooperativa || null, conta: contaTxt ? contaTxt.slice(0, -1) : null, contaDv: contaTxt ? contaTxt.slice(-1) : null },
+      periodo: { inicio: dataIso4(per?.[1]), fim: dataIso4(per?.[2]) },
+      saldoInicial: null,
+      saldoFinalInformado: null,
+      lancamentos: [],
+      avisos: ['Sicredi informa que não há lançamentos no período.'],
+    };
+  }
   if (!docCab) throw new Error('Sicredi: cabeçalho da tabela (Data/Descrição/Documento/Valor/Saldo) não encontrado.');
   const cab = p1.filter((it) => Math.abs(it.y - docCab.y) <= 2.5);
   const cDesc = achar(cab, /^Descri[çc][ãa]o$/i);
@@ -355,9 +382,12 @@ function interpretarCaixa(paginas) {
   const idxCnpj = linhas1.findIndex((l) => /^CNPJ:/i.test(textoDe(l.items)));
   const nome = idxCnpj > 0 ? textoDe(linhas1[idxCnpj - 1].items) : null;
   const cnpj = soDigitos(texto1.match(/CNPJ:\s*([\d./-]+)/i)?.[1]);
-  const agCc = texto1.match(/Ag[êe]ncia:\s*(\d+)\s*Conta:\s*([\d-]+)/i);
+  const agCc = texto1.match(/Ag[êe]ncia:\s*(\d+)\s*(?:Produto:\s*\d+\s*)?Conta:\s*([\d-]+)/i);
   const contaDig = soDigitos(agCc?.[2]);
-  const per = texto1.match(/Extrato no per[íi]odo de (\d{2}\/\d{2}\/\d{4}) [àa] (\d{2}\/\d{2}\/\d{4})/i);
+  const per =
+    texto1.match(/Extrato no per[íi]odo de (\d{2}\/\d{2}\/\d{4}) [àa] (\d{2}\/\d{2}\/\d{4})/i) ||
+    texto1.match(/Lan[çc]amentos de (\d{2}\/\d{2}\/\d{4}) [àa] (\d{2}\/\d{2}\/\d{4})/i);
+  const semLancamentos = /N[ÃA]O CONSTA LAN[ÇC]AMENTO/i.test(semAcento(texto1).toUpperCase().replace(/[ÇC]/g, 'C'));
 
   // saldo anterior: valor na linha do rótulo (pode vir fragmentado "R", "$ 146,99", "C")
   let saldoAnterior = null;
@@ -412,7 +442,8 @@ function interpretarCaixa(paginas) {
       });
     });
   }
-  if (!cab) throw new Error('Caixa: cabeçalho da tabela (Documento/Histórico/Valor/Saldo) não encontrado.');
+  if (!cab && !semLancamentos) throw new Error('Caixa: cabeçalho da tabela (Documento/Histórico/Valor/Saldo) não encontrado.');
+  if (semLancamentos) avisos.push('Caixa informa que não consta lançamento no período.');
 
   const lancamentos = lanc.map((l) => {
     const c = classificarCaixa(l.descricaoLinhas, l.valor);
@@ -558,13 +589,37 @@ function conferirSaldo(lancamentos, saldoInicial) {
  * @param {{nomeArquivo?: string, banco?: string}} opts banco força o parser
  */
 export async function lerExtratoBancario(buffer, opts = {}) {
-  const paginas = await extrairPaginasPdf(buffer);
-  if (!paginas.length) throw new Error('PDF vazio ou ilegível.');
-  const banco = (opts.banco || detectarBanco(paginas) || '').toUpperCase();
-  if (!BANCOS[banco]) throw new Error('Banco não reconhecido no PDF (esperado: Stone, Sicredi, Caixa ou Mêntore).');
-
-  const parsers = { STONE: interpretarStoneNormalizado, SICREDI: interpretarSicredi, CAIXA: interpretarCaixa, MENTORE: interpretarMentore };
-  const r = parsers[banco](paginas);
+  let banco;
+  let r;
+  let paginas = [];
+  if (ehXlsx(buffer)) {
+    // planilha: hoje só o export do painel Pagar.me
+    banco = 'PAGARME';
+    r = interpretarPagarme(buffer, { nomeArquivo: opts.nomeArquivo });
+  } else {
+    paginas = await extrairPaginasPdf(buffer);
+    if (!paginas.length) throw new Error('PDF vazio ou ilegível.');
+    banco = (opts.banco || detectarBanco(paginas) || '').toUpperCase();
+    if (!BANCOS[banco]) {
+      const legivel = paginas.some((p) => p.items.some((it) => /[A-Za-z]{4,}/.test(it.s)));
+      throw new Error(
+        legivel
+          ? 'Banco não reconhecido no PDF (esperado: Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval ou planilha Pagar.me).'
+          : 'PDF sem texto legível (fonte sem mapa de caracteres — comum no Bradesco). Exporte o extrato em OFX/CSV/TXT ou use outro formato de PDF.',
+      );
+    }
+    const parsers = {
+      STONE: interpretarStoneNormalizado,
+      SICREDI: interpretarSicredi,
+      CAIXA: interpretarCaixa,
+      MENTORE: interpretarMentore,
+      BNB: interpretarBnb,
+      SANTANDER: interpretarSantander,
+      UNICRED: interpretarUnicred,
+      DAYCOVAL: interpretarDaycoval,
+    };
+    r = parsers[banco](paginas);
+  }
 
   // ordena cronologicamente preservando a ordem do extrato dentro do dia
   const lancamentos = r.lancamentos.map((l, i) => ({ ...l, ordem: i }));
@@ -596,7 +651,7 @@ export async function lerExtratoBancario(buffer, opts = {}) {
 
   const creditos = round2(normalizados.filter((l) => l.valor > 0).reduce((s, l) => s + l.valor, 0));
   const debitos = round2(normalizados.filter((l) => l.valor < 0).reduce((s, l) => s - l.valor, 0));
-  const conferencia = banco === 'MENTORE'
+  const conferencia = banco === 'MENTORE' || banco === 'PAGARME' || banco === 'DAYCOVAL'
     ? (() => {
         const calc = r.saldoInicial != null ? round2(r.saldoInicial + creditos - debitos) : null;
         const ok = calc != null && r.saldoFinalInformado != null && Math.abs(calc - r.saldoFinalInformado) < 0.009;
