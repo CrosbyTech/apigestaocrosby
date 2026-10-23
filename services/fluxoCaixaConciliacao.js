@@ -9,7 +9,10 @@
 //     (Liberação de Pagamento), solicitacoes_crosby (Solicitações Crosby) e
 //     no contas a pagar do TOTVS (duplicatas liquidadas). Só roda quando o
 //     usuário clica em Conciliar; o resultado é gravado e não é refeito;
-//   • ENTRADA: antecipação de recebíveis / boleto — por enquanto só manual.
+//   • ENTRADA Stone (antecipação / liquidação de vendas por bandeira): casada
+//     com os DEPÓSITOS do arquivo diário da API de Conciliação Stone da loja
+//     (mesmo CNPJ da conta): valor igual e mesma data, mostrando bruto,
+//     líquido e taxa cobrada; outras entradas (boleto, Pix de cliente) só manual.
 //
 // A conciliação gravada (fluxo_caixa_conciliacoes) aponta para o lançamento
 // por uma CHAVE estável — conta|data|valor|hash(histórico)|n — porque a
@@ -20,6 +23,8 @@ import axios from 'axios';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL, httpsAgent, getBranchCodes } from '../totvsrouter/totvsHelper.js';
+import { STONE_LOJAS, stonecodesDaLoja } from '../config/stoneConciliacao.js';
+import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
 
@@ -450,6 +455,111 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
 }
 const limparTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
+// ─── entradas Stone: depósitos do arquivo de conciliação ─────
+const fmtBr = (v) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export const lojaStoneDoCnpj = (cnpj) => STONE_LOJAS.find((l) => l.cnpj === soDigitos(cnpj) && l.apiKey && l.stonecode) || null;
+export const ehEntradaStone = (l) => Number(l.valor) > 0 && String(l.banco || '').toUpperCase() === 'STONE' && ['antecipacao', 'cartao'].includes(String(l.categoria || ''));
+
+/** Um candidato por depósito (Payment) da Stone, com as parcelas liquidadas somadas. */
+export function depositosStoneDoDia(dia, loja, code) {
+  const out = [];
+  for (const p of dia.pagamentos || []) {
+    const liqs = (dia.liquidacoes || []).filter((x) => x.paymentId === p.id);
+    const bruto = round2(liqs.reduce((a, x) => a + x.bruto, 0));
+    const liquido = round2(liqs.reduce((a, x) => a + x.liquido, 0));
+    const taxa = round2(bruto - liquido);
+    const taxaPct = bruto ? round2((taxa / bruto) * 100) : null;
+    const nAnt = liqs.filter((x) => x.antecipada).length;
+    const tipo = liqs.length && nAnt === liqs.length ? 'ANTECIPACAO' : nAnt ? 'MISTO' : 'LIQUIDACAO';
+    const rotulo = tipo === 'ANTECIPACAO' ? 'Antecipação' : tipo === 'MISTO' ? 'Liquidação + antecipação' : `Liquidação ${p.carteira || ''}`.trim();
+    out.push({
+      origem: 'STONE',
+      id: `${code}|${dia.data}|${p.id}`,
+      valor: round2(p.valorTotal),
+      data: dia.data,
+      nome: 'STONE',
+      doc: null,
+      empresa: loja.nome,
+      detalhe: `${rotulo} · ${liqs.length} parcela(s) · bruto ${fmtBr(bruto)} · taxa ${fmtBr(taxa)}${taxaPct != null ? ` (${fmtBr(taxaPct)}%)` : ''}`,
+      stone: { stonecode: code, paymentId: p.id, carteira: p.carteira, carteiraId: p.carteiraId, tipo, bruto, liquido, taxa, taxaPct, parcelas: liqs.length, antecipadas: nAnt, valorEventos: p.valorEventos, saldoNegativoAnterior: p.saldoNegativoAnterior, contaDeposito: p.conta, dataOriginal: liqs.map((x) => x.dataOriginal).filter(Boolean).sort()[0] || null },
+    });
+  }
+  return out;
+}
+
+// depósitos Stone da loja na janela (cache 30 min por loja+janela; o serviço
+// Stone ainda guarda cada dia em memória/Supabase, respeitando o limite 7/h)
+const cacheStone = new Map();
+async function fonteStone(loja, { de, ate }) {
+  const key = `${loja.cnpj}|${de}|${ate}`;
+  const hit = cacheStone.get(key);
+  if (hit && hit.itens && Date.now() - hit.em < 30 * 60 * 1000) return hit;
+  if (hit?.promessa) return hit.promessa;
+  const promessa = (async () => {
+    const itens = [];
+    const erros = [];
+    for (const code of stonecodesDaLoja(loja)) {
+      const r = await obterPeriodoStone({ ...loja, stonecode: code }, de, ate, { concorrencia: 4 });
+      erros.push(...r.erros.map((e) => ({ ...e, code })));
+      for (const dia of r.dias) itens.push(...depositosStoneDoDia(dia, loja, code));
+    }
+    const avisos = erros.length ? [`Stone ${loja.nome}: ${erros.length} dia(s) sem arquivo (${erros[0].data}: ${erros[0].erro})`] : [];
+    return { itens, avisos, em: Date.now() };
+  })();
+  cacheStone.set(key, { promessa, em: Date.now() });
+  try {
+    const r = await promessa;
+    cacheStone.set(key, r);
+    return r;
+  } catch (e) {
+    cacheStone.delete(key);
+    throw e;
+  }
+}
+
+function pontuarEntradaStone(l, c, usado = 0) {
+  const valorL = round2(Number(l.valor));
+  if (Math.abs(c.valor - valorL) > VALOR_TOL) return null;
+  if (usado > VALOR_TOL) return null; // depósito já conciliado com outra linha
+  const motivos = ['valor igual'];
+  let score = 60;
+  const d = Math.abs(diffDias(c.data, l.data));
+  if (d === 0) {
+    score += 40;
+    motivos.push('mesma data');
+  } else if (d === 1) {
+    score += 25;
+    motivos.push('1 dia de diferença');
+  } else if (d === 2) {
+    score += 10;
+    motivos.push('2 dias de diferença');
+  } else return null;
+  const cat = String(l.categoria || '');
+  if (cat === 'antecipacao' && c.stone?.tipo === 'ANTECIPACAO') {
+    score += 10;
+    motivos.push('antecipação confere');
+  } else if (cat === 'cartao' && c.stone?.tipo === 'LIQUIDACAO') {
+    const band = semAcento(l.bandeira || '').toUpperCase().split(' ')[0];
+    if (band && semAcento(c.stone.carteira || '').toUpperCase().includes(band)) {
+      score += 10;
+      motivos.push('bandeira confere');
+    }
+  } else if ((cat === 'antecipacao') !== (c.stone?.tipo === 'ANTECIPACAO')) {
+    score -= 10;
+  }
+  return { ...c, score, motivos, parcial: false, valorDuplicata: c.valor, restanteAntes: c.valor, restanteDepois: 0 };
+}
+
+export function candidatosEntradaStone(l, itens, usados = new Map()) {
+  const lista = [];
+  for (const c of itens || []) {
+    const p = pontuarEntradaStone(l, c, usados.get(`${c.origem}:${c.id}`) || 0);
+    if (p) lista.push(p);
+  }
+  lista.sort((a, b) => b.score - a.score);
+  return lista.slice(0, 8);
+}
+
 // ─── pontuação ────────────────────────────────────────────────
 function pontuar(l, c, usado = 0) {
   const valorL = Math.abs(round2(l.valor));
@@ -589,7 +699,7 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'MANUAL', 'MULTIPLO'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'STONE', 'MANUAL', 'MULTIPLO'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   const l = await lancamentoComChave(lancamentoId);
   if (!l.chave) throw new Error('Não foi possível calcular a chave do lançamento.');
@@ -776,6 +886,33 @@ export async function detalheConciliacao(id) {
       despesa: ref.detalhe,
     };
   }
+  else if (c.origem === 'STONE') {
+    const st = ref.stone || {};
+    origem = {
+      tipo: st.tipo === 'ANTECIPACAO' ? 'Antecipação Stone' : 'Depósito Stone (liquidação de vendas)',
+      empresa: ref.empresa,
+      fornecedor: 'STONE',
+      dataPagamento: ref.data,
+      valor: ref.valor,
+      valorPago: ref.valor,
+      despesa: ref.detalhe,
+      stone: { ...st, parcelas: [] },
+    };
+    // parcelas liquidadas nesse depósito (NSU, captura, bruto, líquido, taxa)
+    try {
+      const loja = STONE_LOJAS.find((x) => x.stonecode === st.stonecode || (x.stonecodesExtras || []).includes(st.stonecode)) || lojaStoneDoCnpj(ref.cnpj);
+      if (loja && ref.data) {
+        const dia = await obterDiaStone({ ...loja, stonecode: st.stonecode || loja.stonecode }, ref.data);
+        origem.stone.parcelas = (dia.liquidacoes || [])
+          .filter((x) => x.paymentId === st.paymentId)
+          .map((x) => ({ nsu: x.nsu, dataCaptura: x.dataCaptura, formaEntrada: x.formaEntrada, parcela: x.numero, bruto: x.bruto, liquido: x.liquido, taxa: x.taxa, mdr: x.mdr, antecipada: x.antecipada, dataOriginal: x.dataOriginal, dataPagamento: x.dataPagamento }))
+          .sort((a, b) => String(a.dataCaptura).localeCompare(String(b.dataCaptura)));
+        origem.stone.eventos = (dia.eventosFinanceiros || []).filter((e) => e.paymentId === st.paymentId);
+      }
+    } catch (e) {
+      origem.stone.erroParcelas = e.message;
+    }
+  }
   // outras saídas conciliadas com a mesma origem (pagamento parcial)
   let usos = [];
   if (ref.id != null && c.origem !== 'MANUAL') {
@@ -805,20 +942,28 @@ async function lancamentoEnriquecido(lancamentoId) {
   const { data: l, error } = await supabase.from(T.lanc).select('*').eq('id', lancamentoId).maybeSingle();
   lancar(error);
   if (!l) throw new Error('Lançamento não encontrado.');
-  const { data: c } = await supabase.from('fluxo_caixa_contas').select('banco,apelido,titular_nome').eq('id', l.conta_id).maybeSingle();
-  return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome };
+  const { data: c } = await supabase.from('fluxo_caixa_contas').select('banco,apelido,titular_nome,titular_cnpj').eq('id', l.conta_id).maybeSingle();
+  return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome, conta_cnpj: c?.titular_cnpj };
 }
 
 export async function buscarCandidatos(lancamentoId) {
   const l = await lancamentoEnriquecido(lancamentoId);
-  if (l.valor >= 0) return { lancamento: l, candidatos: [], avisos: ['Entradas ainda não têm busca automática (antecipação/boleto): use a justificativa manual.'] };
+  if (l.valor >= 0) {
+    if (!ehEntradaStone(l)) return { lancamento: l, candidatos: [], avisos: ['Só entradas da Stone (antecipação e liquidação de vendas) têm busca automática por enquanto; para as demais use a justificativa manual.'] };
+    const loja = lojaStoneDoCnpj(l.conta_cnpj);
+    if (!loja) return { lancamento: l, candidatos: [], avisos: [`Conta Stone sem chave da API de Conciliação cadastrada (CNPJ ${l.conta_cnpj || '?'}). Cadastre em config/stoneConciliacao.js.`] };
+    const f = await fonteStone(loja, janelaMensal({ de: l.data, ate: l.data }));
+    const usados = await usadosNaJanela({ de: l.data, ate: l.data });
+    const candidatos = candidatosEntradaStone(l, f.itens, usados);
+    return { lancamento: l, candidatos, avisos: f.avisos, decisao: decidir(candidatos) };
+  }
   const fontes = await carregarFontes({ de: l.data, ate: l.data });
   const usados = await usadosNaJanela({ de: l.data, ate: l.data });
   const candidatos = candidatosPara(l, fontes, usados);
   return { lancamento: l, candidatos, avisos: fontes.avisos, decisao: decidir(candidatos) };
 }
 
-export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos });
+export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.stone ? { stone: c.stone } : {}) });
 
 // regra de aceite automático: melhor ≥ 70 e com folga ≥ 15 pontos para o 2º.
 // Candidatos "gêmeos" (mesma origem, nome, data e valor — ex.: 3 pagamentos
@@ -838,37 +983,57 @@ export function decidir(candidatos) {
  * no período. Só grava quando a decisão é segura; o resto volta como
  * "ambíguas" (com candidatos) ou "sem candidato".
  */
-export async function conciliarAutomatico({ contaId, de, ate, usuario }) {
-  let q = supabase.from(T.lanc).select('*').gte('data', de).lte('data', ate).lt('valor', 0).is('transferencia_id', null).order('data').order('seq');
+export async function conciliarAutomatico({ contaId, de, ate, usuario, simular = false }) {
+  let q = supabase.from(T.lanc).select('*').gte('data', de).lte('data', ate).is('transferencia_id', null).order('data').order('seq');
   if (contaId) q = q.eq('conta_id', contaId);
   const { data: lancs, error } = await q;
   lancar(error);
+  const { data: contas } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome,titular_cnpj');
+  const contaDe = new Map((contas || []).map((c) => [c.id, c]));
+  const enriquecer = (l) => {
+    const c = contaDe.get(l.conta_id);
+    return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome, conta_cnpj: c?.titular_cnpj };
+  };
+  // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
+  const alvo = (lancs || []).map(enriquecer).filter((l) => l.valor < 0 || ehEntradaStone(l));
   const porConta = new Map();
-  for (const l of lancs || []) {
-    l.valor = Number(l.valor);
+  for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
     porConta.get(l.conta_id).push(l);
   }
   for (const lista of porConta.values()) atribuirChaves(lista);
   const gravadas = await listarConciliacoes({ de, ate, contaIds: [...porConta.keys()] });
   const jaTem = new Set(gravadas.map((g) => g.chave));
-  const pendentes = (lancs || []).filter((l) => !jaTem.has(l.chave));
+  const pendentes = alvo.filter((l) => !jaTem.has(l.chave));
 
-  const { data: contas } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome');
-  const contaDe = new Map((contas || []).map((c) => [c.id, c]));
-
-  const fontes = await carregarFontes({ de, ate });
+  const temSaida = pendentes.some((l) => l.valor < 0);
+  const fontes = temSaida ? await carregarFontes({ de, ate }) : { avisos: [] };
   const usados = await usadosNaJanela({ de, ate });
-  const resultado = { pendentes: pendentes.length, conciliadas: [], ambiguas: [], semCandidato: 0, avisos: fontes.avisos };
+  const resultado = { pendentes: pendentes.length, conciliadas: [], ambiguas: [], semCandidato: 0, avisos: [...fontes.avisos] };
+  const stonePorCnpj = new Map();
 
   for (const l of pendentes) {
-    const c = contaDe.get(l.conta_id);
-    const enr = { ...l, banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome };
-    const candidatos = candidatosPara(enr, fontes, usados);
+    let candidatos;
+    if (l.valor < 0) {
+      candidatos = candidatosPara(l, fontes, usados);
+    } else {
+      const loja = lojaStoneDoCnpj(l.conta_cnpj);
+      if (!loja) {
+        if (!resultado.avisos.some((a) => a.includes(l.conta_apelido || ''))) resultado.avisos.push(`${l.conta_apelido}: conta Stone sem chave da API de Conciliação; entradas ficam pendentes.`);
+        resultado.semCandidato += 1;
+        continue;
+      }
+      if (!stonePorCnpj.has(loja.cnpj)) {
+        const f = await fonteStone(loja, janelaMensal({ de, ate })).catch((e) => ({ itens: [], avisos: [`Stone ${loja.nome}: ${e.message}`] }));
+        stonePorCnpj.set(loja.cnpj, f);
+        resultado.avisos.push(...f.avisos);
+      }
+      candidatos = candidatosEntradaStone(l, stonePorCnpj.get(loja.cnpj).itens, usados);
+    }
     const d = decidir(candidatos);
     if (d.automatico) {
       const esc = d.escolhido;
-      await salvarConciliacao({
+      if (!simular) await salvarConciliacao({
         lancamentoId: l.id,
         origem: esc.origem,
         referencia: referenciaDe(esc),
@@ -895,4 +1060,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, decidir };
