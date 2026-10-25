@@ -114,6 +114,7 @@ import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarJojoGrupoJob } from './jobs/jojo-grupo.job.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
 import contasReceberHojeRoutes, { iniciarJobHoje } from './routes/contasReceberHoje.routes.js';
+import receitaFinanceiraRoutes from './routes/receitaFinanceira.routes.js';
 import drylandBaixasRoutes from './routes/drylandBaixas.routes.js';
 import { iniciarJobDrylandBaixas } from './services/drylandBaixas.js';
 import baixaAutomaticaPagarmeRoutes from './routes/baixaAutomaticaPagarme.routes.js';
@@ -214,6 +215,7 @@ app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoa
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
+app.use('/api/contas-receber', receitaFinanceiraRoutes); // Contas a Receber — Receita Financeira (faturas pagas × valor pago: juros, multa, taxas)
 app.use('/api/contas-receber', contasReceberHojeRoutes); // Contas a Receber — tela Hoje (entrou / vai entrar / precisa de você)
 app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa do link do Dryland → aba Solicitações de Baixa (ponte, precisa de DRYLAND_COB_*)
 app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automática Pagar.me (cartão débito PAGARME) — status/prévia/executar; liga com PAGARME_BAIXA_AUTO=on
