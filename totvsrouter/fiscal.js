@@ -2217,6 +2217,48 @@ router.post(
         `ðŸ“Š Baixa finalizada: ${results.length}/${totalProcessed} com sucesso, ${errors.length} erros`,
       );
 
+      // Histórico de lotes (João, 26/10/2026): 1 linha por clique em Processar,
+      // com os itens e o motivo de cada falha. Não pode derrubar a resposta.
+      try {
+        const porChave = new Map(items.map((it) => [`${it.branchCode}-${it.receivableCode}-${it.installmentCode || 1}`, it]));
+        const itemLote = (r, ok) => {
+          const it = porChave.get(`${r.branchCode}-${r.receivableCode}-${r.installmentCode || 1}`) || {};
+          return {
+            titulo: `${r.branchCode}-${r.receivableCode}/${r.installmentCode || 1}`,
+            cd_empresa: r.branchCode,
+            cd_cliente: it.customerCode ?? null,
+            nm_cliente: it.nomeCliente ?? it.nm_cliente ?? null,
+            nr_fat: r.receivableCode,
+            nr_parcela: r.installmentCode || 1,
+            valor: Number(it.paidValue) || 0,
+            juros: Number(it.interestValue) || 0,
+            data: String(it.settlementDate || '').slice(0, 10) || null,
+            ok,
+            motivo: ok ? null : (r.errorMessages?.length ? r.errorMessages.join('; ') : r.error || r.message || 'erro'),
+            seq: r.settlementSequence ?? r.sequence ?? null,
+            solicitacao_id: it.solicitacaoId ?? it.solicitacao_id ?? null,
+          };
+        };
+        const itensLote = [...results.map((r) => itemLote(r, true)), ...errors.map((r) => itemLote(r, false))];
+        const somar = (l) => Math.round(l.reduce((a, x) => a + (x.valor || 0) + (x.juros || 0), 0) * 100) / 100;
+        const { default: supabaseLotes } = await import('../config/supabase.js');
+        const { error: eLote } = await supabaseLotes.from('baixa_lotes').insert({
+          usuario: req.body.usuario || null,
+          origem: req.body.origem || 'solicitacoes-baixa',
+          forma: req.body.formaLabel || null,
+          paid_type: requestPaidType,
+          qtd: results.length + errors.length,
+          sucesso: results.length,
+          falhas: errors.length,
+          valor_ok: somar(itensLote.filter((x) => x.ok)),
+          valor_falha: somar(itensLote.filter((x) => !x.ok)),
+          itens: itensLote,
+        });
+        if (eLote) console.warn('baixa_lotes:', eLote.message);
+      } catch (e) {
+        console.warn('baixa_lotes (historico):', e.message);
+      }
+
       return res
         .status(errors.length > 0 && results.length === 0 ? 400 : 200)
         .json({

@@ -65,10 +65,9 @@ function lerPedido({ conta, order: o, charge: c }) {
   const item = (o.items || [])[0] || {};
   const ref = md.ref || item.description || o.code || '';
   let cd = Number(String(md.cd_cliente || '').replace(/\D/g, '')) || null;
-  if (!cd && md.origem === 'tadeu_gerador') {
-    const m = /(\d{2,7})\s*$/.exec(String(ref).trim());
-    if (m) cd = Number(m[1]);
-  }
+  // Gerador: a referência é "Nome - número" e o número NÃO é cliente nem fatura
+  // (visto 26/10/2026: "Betania - 115281" → 115281 é a própria Crosby CR). Só o nome vale.
+  const nomeRef = md.origem === 'tadeu_gerador' ? String(ref).split(' - ')[0].trim() : '';
   const titulos = String(md.titulos || '')
     .split(/[,;\s]+/)
     .map((t) => /^(\d+)-(\d+)-(\d+)$/.exec(t.trim()))
@@ -82,7 +81,8 @@ function lerPedido({ conta, order: o, charge: c }) {
     ref,
     cd_cliente: cd,
     cpf: soDigitos(o.customer?.document),
-    nome: o.customer?.name || null,
+    nome: nomeRef || o.customer?.name || null,
+    pagador: o.customer?.name || null,
     valor: r2((c.paid_amount ?? c.amount ?? o.amount ?? 0) / 100),
     pago_em: c.paid_at || o.updated_at || o.created_at,
     dia: dataBR(c.paid_at || o.updated_at || o.created_at),
@@ -185,7 +185,7 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
     const refBase = `pagarme:pix:${p.order_id}`;
     if (existentes.has(refBase)) { resumo.ja_existiam++; continue; }
     try {
-      const titulos = await titulosDoCliente({ cd: p.cd_cliente, cpf: p.cpf });
+      const titulos = p.origem === 'tadeu_gerador' ? [] : await titulosDoCliente({ cd: p.cd_cliente, cpf: p.cpf });
       const abertos = titulos.filter((t) => t.aberto);
       const cliente = titulos[0] ? { code: titulos[0].customerCode, name: titulos[0].customerName } : null;
       let achado = null;
@@ -200,14 +200,8 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
           achado = { titulos: alvo, criterio: 'título(s) do link do cliente', juros };
         }
       } else if (p.origem === 'tadeu_gerador') {
-        // Gerador: sugere os vencidos mais antigos até o valor (conferir)
-        achado = p.valor > 0 ? casar(abertos, cents(p.valor)) : null;
-        if (!achado && abertos.length) {
-          const ord = abertos.slice().sort((a, b) => String(a.vencimento).localeCompare(String(b.vencimento)));
-          const sel = []; let acc = 0;
-          for (const t of ord) { if (acc + t.valorCents <= cents(p.valor)) { sel.push(t); acc += t.valorCents; } }
-          if (sel.length) achado = { titulos: sel, criterio: `Gerador — vencidos mais antigos até o valor (sugestão, sobra R$ ${r2((cents(p.valor) - acc) / 100).toFixed(2)})`, juros: 0 };
-        }
+        // Gerador: só o nome do cliente é confiável → linha "a conferir" (João identifica cliente/títulos)
+        achado = null;
       } else if (p.origem === 'tadeu_loja') {
         // link da loja: só títulos abertos que somam exatamente o valor (senão é compra — não entra)
         const c0 = p.valor > 0 ? casar(abertos, cents(p.valor)) : null;
@@ -217,11 +211,13 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
       const quem = `Pix ${p.origem.replace('tadeu_', '')} · ${p.conta === 'fabio' ? 'FA MODA' : 'Crosby'}${p.loja ? ` · loja ${p.loja}` : ''}${p.vendedor ? ` · ${p.vendedor}` : ''}`;
       const cabec = [
         `Pix recebido na Pagar.me (${quem}) em ${p.dia} — R$ ${p.valor.toFixed(2)}. Pedido ${p.order_id} · cobrança ${p.charge_id}${p.ref ? ` · ref "${String(p.ref).slice(0, 80)}"` : ''}.`,
-        `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ''}${p.cpf ? ` CPF/CNPJ ${p.cpf}` : ''}.`,
+        p.origem === 'tadeu_gerador'
+          ? `Cliente (nome na referência do Gerador): ${p.nome || '?'} — quem pagou o QR: ${p.pagador || '?'}${p.cpf ? ` (${p.cpf})` : ''}. Identificar o cliente e os títulos manualmente.`
+          : `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ''}${p.cpf ? ` CPF/CNPJ ${p.cpf}` : ''}.`,
       ];
       const filialFallback = titulos.slice().sort((x, y) => String(y.emissao).localeCompare(String(x.emissao)))[0]?.branchCode ?? 0;
       const base = {
-        nm_cliente: cliente?.name || p.nome || '',
+        nm_cliente: p.origem === 'tadeu_gerador' ? `${p.nome || '?'} (Pix do Gerador — identificar cliente)` : cliente?.name || p.nome || '',
         comprovante_url: '',
         comprovante_path: '',
         status: 'pendente',
@@ -252,7 +248,7 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
         : [{
             ...base,
             cd_empresa: filialFallback,
-            cd_cliente: cliente?.code ?? p.cd_cliente ?? null,
+            cd_cliente: cliente?.code ?? p.cd_cliente ?? 0, // NOT NULL: 0 = não identificado
             nr_fat: 0,
             nr_parcela: 1,
             vl_fatura: p.valor,
