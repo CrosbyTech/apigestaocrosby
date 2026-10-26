@@ -94,9 +94,10 @@ async function titulosRelevantes(codigos, dtIniVenc, dtFimVenc, dtIniPago, hoje)
   for (let i = 0; i < codigos.length; i += LOTE_CLIENTES) lotes.push(codigos.slice(i, i + LOTE_CLIENTES));
   const itens = [];
   const avisos = [];
+  // Na rota interna, 'Em Aberto' = a vencer; 'Todos' traz abertos E pagos na janela
+  // de vencimento — é o que precisamos (o pago desde fev conta nos meses anteriores).
   const consultas = (lote) => [
-    { rot: 'abertos', params: { dt_inicio: dtIniVenc, dt_fim: dtFimVenc, modo: 'vencimento', situacao: '1', status: 'Em Aberto', tp_documento: String(DOC_FATURA), cd_cliente: lote.join(',') } },
-    { rot: 'pagos', params: { dt_inicio: dtIniPago, dt_fim: hoje, modo: 'pagamento', situacao: '1', status: 'Pago', tp_documento: String(DOC_FATURA), cd_cliente: lote.join(',') } },
+    { rot: 'todos', params: { dt_inicio: dtIniVenc, dt_fim: dtFimVenc, modo: 'vencimento', situacao: '1', status: 'Todos', tp_documento: String(DOC_FATURA), cd_cliente: lote.join(',') } },
   ];
   for (let i = 0; i < lotes.length; i += LOTES_SIMULTANEOS) {
     const grupo = lotes.slice(i, i + LOTES_SIMULTANEOS);
@@ -110,7 +111,7 @@ async function titulosRelevantes(codigos, dtIniVenc, dtFimVenc, dtIniPago, hoje)
   }
   // união por título (um mesmo título pode vir nas duas consultas)
   const vistos = new Map();
-  for (const t of itens) vistos.set(`${t.branchCode}-${t.customerCode}-${t.receivableCode}-${t.installmentCode ?? 1}`, t);
+  for (const t of itens) vistos.set(`${t.cd_empresa}-${t.cd_cliente}-${t.nr_fatura ?? t.nr_fat}-${t.nr_parcela ?? 1}`, t);
   return { itens: [...vistos.values()], avisos };
 }
 
@@ -124,17 +125,19 @@ export async function calcular() {
   const { itens, avisos: av2 } = await titulosRelevantes(codigos, DT_INICIO_PADRAO, corteMax, `${MES_INICIAL}-01`, hoje);
   avisos.push(...av2);
 
+  // Campos da rota interna: cd_cliente, cd_empresa, nr_fatura, nr_parcela, vl_fatura,
+  // dt_vencimento, dt_liq (data da baixa; vazio = em aberto).
   const titulos = itens
-    .filter((t) => canalDe.has(Number(t.customerCode)))
+    .filter((t) => canalDe.has(Number(t.cd_cliente)))
     .map((t) => ({
-      cliente: Number(t.customerCode),
-      canal: canalDe.get(Number(t.customerCode)),
-      empresa: t.branchCode,
-      fatura: t.receivableCode,
-      parcela: t.installmentCode ?? 1,
-      valor: Number(t.installmentValue) || 0,
-      venc: String(t.expiredDate || '').slice(0, 10),
-      pago: t.paymentDate ? String(t.paymentDate).slice(0, 10) : null,
+      cliente: Number(t.cd_cliente),
+      canal: canalDe.get(Number(t.cd_cliente)),
+      empresa: t.cd_empresa,
+      fatura: t.nr_fatura ?? t.nr_fat,
+      parcela: t.nr_parcela ?? 1,
+      valor: Number(t.vl_fatura) || 0,
+      venc: String(t.dt_vencimento || '').slice(0, 10),
+      pago: t.dt_liq ? String(t.dt_liq).slice(0, 10) : null,
     }));
 
   const serie = meses.map((ym) => {
