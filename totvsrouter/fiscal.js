@@ -1957,6 +1957,11 @@ router.post(
 
         // movementDate fica DENTRO de payments[] (schema InvoicesPaymentCommand);
         // na raiz o TOTVS ignora e grava o movimento com a data do dia.
+        // Baixa com juros (João, 26/10/2026): o valor baixado tem que ser o
+        // recebido. `interestValue` entra no título e o pagamento vai com
+        // título + juros (TOTVS exige payments.value = invoices.paidValue + juros).
+        const interestValue = Math.round((Number(item.interestValue) || 0) * 100) / 100;
+        const valorPagamento = Math.round((paidValue + (interestValue > 0 ? interestValue : 0)) * 100) / 100;
         const buildPayload = (sBranchCode) => ({
           branchCode: sBranchCode,
           settlementDate,
@@ -1967,11 +1972,12 @@ router.post(
               receivableCode,
               installmentCode,
               paidValue,
+              ...(interestValue > 0 ? { interestValue } : {}),
             },
           ],
           payments: [
             {
-              value: paidValue,
+              value: valorPagamento,
               paidType: requestPaidType,
               movementDate: settlementDate,
               ...(temCard ? { card: temCard } : {}),
