@@ -178,9 +178,12 @@ const BANCO_STONE = '197';
 // Multa (%) e juros (% a.m.) cobrados após o vencimento. 0 = não cobra.
 const MULTA_PCT = Number(process.env.PAGARME_BOLETO_MULTA_PCT ?? 2);
 const JUROS_PCT_MES = Number(process.env.PAGARME_BOLETO_JUROS_PCT_MES ?? 1);
-// Acréscimo fixo somado ao valor da fatura em todo boleto emitido (R$ 0,98 —
-// regra do João, 21/10/2026). Override: PAGARME_BOLETO_ACRESCIMO=0 desliga.
-export const ACRESCIMO_BOLETO = Math.round(Number(process.env.PAGARME_BOLETO_ACRESCIMO ?? 0.98) * 100) / 100;
+// Acréscimo fixo somado ao valor da fatura em todo boleto emitido = tarifa
+// bancária de emissão repassada ao cliente. R$ 0,98 (João, 21/10/2026) →
+// R$ 2,99 (João, 26/10/2026: boletos da FA MODA reemitidos com a tarifa da
+// Pagar.me). Override: PAGARME_BOLETO_ACRESCIMO (0 desliga).
+export const ACRESCIMO_BOLETO = Math.round(Number(process.env.PAGARME_BOLETO_ACRESCIMO ?? 2.99) * 100) / 100;
+const brl = (v) => Number(v || 0).toFixed(2).replace('.', ',');
 export const valorBoleto = (vlFatura) => Math.round((Number(vlFatura || 0) + ACRESCIMO_BOLETO) * 100) / 100;
 
 // Conta em que o repasse da Pagar.me cai — banco da baixa no TOTVS, por conta
@@ -336,8 +339,13 @@ function montarPedido(fatura, cliente, code) {
   const titulo = `Fatura ${fatura.nr_fatura}/${fatura.nr_parcela}`;
   const boleto = {
     bank: BANCO_STONE,
+    // Texto impresso no boleto (Pagar.me: até 256 caracteres, sem acentos por
+    // segurança). A tarifa de emissão vai declarada, a pedido do João (26/10/2026).
     instructions: [
       `${titulo} - Crosby.`,
+      ACRESCIMO_BOLETO > 0
+        ? `Valor inclui R$ ${brl(ACRESCIMO_BOLETO)} referente a tarifa bancaria de emissao do boleto.`
+        : '',
       MULTA_PCT || JUROS_PCT_MES
         ? `Apos o vencimento:${MULTA_PCT ? ` multa de ${MULTA_PCT}%` : ''}${
             MULTA_PCT && JUROS_PCT_MES ? ' e' : ''
