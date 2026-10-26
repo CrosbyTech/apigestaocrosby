@@ -1971,7 +1971,7 @@ router.post(
               customerCode,
               receivableCode,
               installmentCode,
-              paidValue,
+              paidValue: valorPagamento, // TOTVS: Vl. Pago = total recebido (titulo + juros); interestValue discrimina os juros (sonda 26/10/2026)
               ...(interestValue > 0 ? { interestValue } : {}),
             },
           ],

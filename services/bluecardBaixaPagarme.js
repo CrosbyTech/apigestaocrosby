@@ -163,7 +163,8 @@ export async function abrirSolicitacoesBaixaPix(body) {
   const somaParcelas = parcelas.reduce((s, p) => s + Number(p.valor_cents || 0), 0) || 1;
   const encargos = Number(pg.encargos_cents || 0);
   const pagoEm = pg.pago_em ? new Date(pg.pago_em) : new Date();
-  const dtPagamento = isNaN(pagoEm) ? new Date().toISOString().slice(0, 10) : pagoEm.toISOString().slice(0, 10);
+  // Data do Pix em Brasília (26/10/2026): pago_em vem em UTC — 07/10 23:32 BRT é 08/10 02:32Z e a data saía errada.
+    const dtPagamento = new Date(pg.pago_em || Date.now()).toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
 
   const usados = new Set();
   const resultado = { inseridas: 0, ja_existiam: 0, sem_titulo: 0, detalhes: [] };
@@ -220,7 +221,12 @@ export async function abrirSolicitacoesBaixaPix(body) {
       nr_fat: t?.receivableCode ?? ref?.receivableCode ?? 0,
       nr_parcela: t?.installmentCode ?? ref?.installmentCode ?? p.numero ?? 1,
       vl_fatura: t ? centsParaReais(t.valorCents) : centsParaReais(p.valor_cents),
-      vl_juros: centsParaReais(jurosCents),
+      // Juros/encargos = tudo que o cliente pagou além do título (26/10/2026, João):
+      // parcela do app + encargos rateados − valor do título no TOTVS. Antes só
+      // os encargos entravam e diferenças de centavos (ex.: 248,64 × 248,62) sumiam.
+      vl_juros: t
+        ? Math.max(0, centsParaReais(Number(p.valor_cents || 0) + jurosCents - t.valorCents))
+        : centsParaReais(jurosCents),
       dt_vencimento: t?.vencimento || String(p.vencimento || '').slice(0, 10) || null,
       dt_emissao: t?.emissao || null,
       cd_portador: t?.cd_portador ?? null,
