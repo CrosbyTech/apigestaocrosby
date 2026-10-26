@@ -1,0 +1,33 @@
+{
+  "headcoachUrl": "https://apigestaocrosby-bw2v.onrender.com",
+  "token": "COLE_AQUI_O_STONE_BOT_TOKEN_DO_RENDER",
+  "horarioDiario": "07:30",
+  "diasSemana": [0, 1, 2, 3, 4, 5, 6],
+  "diasRetroativos": 3,
+  "headless": false,
+  "janelaOculta": true,
+  "intervaloFilaSeg": 15,
+  "stone": {
+    "url": "https://conta.stone.com.br",
+    "apiRegex": "/api/v1/accounts|openbank\\.stone\\.com\\.br",
+    "limitePagina": 100
+  },
+  "pdf": {
+    "ativo": true,
+    "timeoutDownloadSeg": 90,
+    "trocarConta": [
+      { "acao": "ir", "url": "https://conta.stone.com.br" },
+      { "acao": "clicar", "texto": ["Trocar conta", "Trocar de conta", "Alterar conta", "Minhas contas", "Contas"] },
+      { "acao": "clicar", "texto": ["{titular}", "{conta}"] }
+    ],
+    "passos": [
+      { "acao": "clicar", "texto": ["Extrato"], "opcional": true },
+      { "acao": "clicar", "texto": ["Exportar", "Exportar extrato", "Baixar extrato", "Download"] },
+      { "acao": "preencher", "rotulo": ["Data inicial", "Início", "De"], "valor": "{deBr}", "opcional": true },
+      { "acao": "preencher", "rotulo": ["Data final", "Fim", "Até"], "valor": "{ateBr}", "opcional": true },
+      { "acao": "clicar", "texto": ["PDF"] },
+      { "acao": "clicar", "texto": ["Exportar", "Baixar", "Confirmar", "Gerar"], "opcional": true },
+      { "acao": "esperarDownload" }
+    ]
+  }
+}

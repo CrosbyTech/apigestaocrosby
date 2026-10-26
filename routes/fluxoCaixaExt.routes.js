@@ -7,6 +7,7 @@
 //   PATCH  /contas/:id                      → apelido / titular / CNPJ / ativo
 //   GET    /importacoes                     → histórico de PDFs importados
 //   DELETE /importacoes/:id                 → remove a importação e seus lançamentos
+//   GET    /importacoes/:id/arquivo         → link temporário do PDF guardado (bot Stone)
 //   POST   /ler        (multipart: arquivo) → só lê o PDF (conferência), não grava
 //   POST   /importar   (multipart: arquivos[]) → grava e recasa transferências
 //   GET    /painel?de&ate[&contas&bancos&tipo&formas&categoria&contraparte&busca]
@@ -105,6 +106,17 @@ router.delete(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await fluxo.excluirImportacao(Number(req.params.id)), 'Importação removida');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.get(
+  '/importacoes/:id/arquivo',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await fluxo.urlArquivoImportacao(Number(req.params.id)));
     } catch (e) {
       return tratar(res, e);
     }

@@ -234,7 +234,7 @@ function classificarMentore(desc, valor) {
 }
 
 // Stone: reaproveita classificarLancamento (grupo/bandeira) e traduz para forma
-function classificarStoneNormalizado(l) {
+export function classificarStoneNormalizado(l) {
   const c = classificarStone(l);
   const mapa = {
     cartao: c.tipoCartao === 'Débito' ? FORMAS.CARTAO_DEBITO : FORMAS.CARTAO_CREDITO,
@@ -624,7 +624,19 @@ export async function lerExtratoBancario(buffer, opts = {}) {
     };
     r = parsers[banco](paginas);
   }
+  return montarExtrato(banco, r, { nomeArquivo: opts.nomeArquivo, paginas: paginas.length });
+}
 
+/**
+ * Normaliza o resultado "cru" de um interpretador (titular, periodo,
+ * saldoInicial, saldoFinalInformado, lancamentos, avisos) no formato final do
+ * extrato: ordena, classifica natureza/tipo, confere o saldo corrente e
+ * calcula totais. Usado pelo PDF/XLSX e também pelo extrato Stone vindo da
+ * API do portal (bot Stone, utils/extratoStoneApi.js).
+ */
+export function montarExtrato(banco, r, opts = {}) {
+  if (!BANCOS[banco]) throw new Error(`Banco desconhecido: ${banco}`);
+  const paginas = opts.paginas || 0;
   // ordena cronologicamente preservando a ordem do extrato dentro do dia
   const lancamentos = r.lancamentos.map((l, i) => ({ ...l, ordem: i }));
   lancamentos.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : a.ordem - b.ordem));
@@ -684,10 +696,10 @@ export async function lerExtratoBancario(buffer, opts = {}) {
     saldo: { inicial: r.saldoInicial ?? null, final: saldoFinal, creditos, debitos },
     conferencia,
     avisos,
-    paginas: paginas.length,
+    paginas,
     qtd: normalizados.length,
     lancamentos: normalizados,
   };
 }
 
-export default { lerExtratoBancario, detectarBanco, parseNumBr, BANCOS, FORMAS };
+export default { lerExtratoBancario, montarExtrato, detectarBanco, parseNumBr, BANCOS, FORMAS };

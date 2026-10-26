@@ -207,10 +207,23 @@ export async function lerExtrato(buffer, opts = {}) {
   return { ...resumoExtrato(extrato), apelido: apelidoPadrao(extrato), lancamentos: extrato.lancamentos };
 }
 
-export async function importarExtrato(buffer, { nomeArquivo, usuario, banco } = {}) {
+export async function importarExtrato(buffer, { nomeArquivo, usuario, banco, arquivoPath, origem } = {}) {
   const extrato = await lerExtratoBancario(buffer, { nomeArquivo, banco });
-  const conta = await garantirConta(extrato);
   const hash = crypto.createHash('sha1').update(buffer).digest('hex');
+  return persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem: origem || 'upload' });
+}
+
+/**
+ * Importa um extrato já interpretado (ex.: JSON da API do portal Stone montado
+ * por utils/extratoStoneApi.js). Mesma regra de reimportação do PDF.
+ */
+export async function importarExtratoObjeto(extrato, { nomeArquivo, usuario, arquivoPath, origem } = {}) {
+  const hash = crypto.createHash('sha1').update(JSON.stringify(extrato.lancamentos || [])).digest('hex');
+  return persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem: origem || 'api' });
+}
+
+async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem } = {}) {
+  const conta = await garantirConta(extrato);
   const inicio = extrato.periodo.inicio || extrato.periodo.primeiroLancamento;
   const fim = extrato.periodo.fim || extrato.periodo.ultimoLancamento;
 
@@ -237,6 +250,8 @@ export async function importarExtrato(buffer, { nomeArquivo, usuario, banco } = 
       inconsistencias: extrato.conferencia?.inconsistencias || 0,
       avisos: extrato.avisos?.length ? extrato.avisos : null,
       usuario: usuario || null,
+      ...(arquivoPath ? { arquivo_path: arquivoPath } : {}),
+      ...(origem ? { origem } : {}),
     })
     .select()
     .single();
@@ -276,13 +291,15 @@ export async function importarExtrato(buffer, { nomeArquivo, usuario, banco } = 
  * Importa vários PDFs e recasa as transferências do período coberto.
  * @param arquivos [{ buffer, nome }]
  */
-export async function importarVarios(arquivos, { usuario } = {}) {
+export async function importarVarios(arquivos, { usuario, origem } = {}) {
   const resultados = [];
   let de = null;
   let ate = null;
   for (const a of arquivos) {
     try {
-      const r = await importarExtrato(a.buffer, { nomeArquivo: a.nome, usuario });
+      const r = a.extrato
+        ? await importarExtratoObjeto(a.extrato, { nomeArquivo: a.nome, usuario, arquivoPath: a.arquivoPath, origem: a.origem || origem })
+        : await importarExtrato(a.buffer, { nomeArquivo: a.nome, usuario, arquivoPath: a.arquivoPath, origem: a.origem || origem });
       const p = r.extrato.periodo;
       if (p.inicio && (!de || p.inicio < de)) de = p.inicio;
       if (p.fim && (!ate || p.fim > ate)) ate = p.fim;
@@ -290,6 +307,7 @@ export async function importarVarios(arquivos, { usuario } = {}) {
         arquivo: a.nome,
         ok: true,
         banco: r.extrato.banco,
+        importacaoId: r.importacao.id,
         contaId: r.conta.id,
         conta: r.conta.apelido,
         titular: r.conta.titular_nome,
@@ -316,10 +334,36 @@ export async function listarImportacoes() {
   return imps.map((i) => ({ ...i, conta: porId.get(i.conta_id) || null }));
 }
 
+export const BUCKET_EXTRATOS = 'extratos-bancarios';
+
+/** Guarda o arquivo original (PDF) no Storage e devolve o path gravado. */
+export async function guardarArquivoExtrato(buffer, { nome, pasta = 'upload' } = {}) {
+  const seguro = String(nome || 'extrato.pdf').replace(/[^\w.\-]+/g, '_');
+  const path = `${pasta}/${new Date().toISOString().slice(0, 7)}/${Date.now()}_${seguro}`;
+  const { error } = await supabase.storage.from(BUCKET_EXTRATOS).upload(path, buffer, {
+    contentType: /\.xlsx$/i.test(seguro) ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/pdf',
+    upsert: false,
+  });
+  if (error) throw new Error(`Storage (${BUCKET_EXTRATOS}): ${error.message}`);
+  return path;
+}
+
+/** Link temporário (5 min) para baixar o arquivo da importação. */
+export async function urlArquivoImportacao(id) {
+  const { data: imp, error } = await supabase.from(T.imp).select('id,arquivo_nome,arquivo_path').eq('id', id).maybeSingle();
+  lancar(error);
+  if (!imp) throw new Error('Importação não encontrada.');
+  if (!imp.arquivo_path) throw new Error('Esta importação não tem o arquivo guardado (importada antes do bot ou via API).');
+  const { data, error: e2 } = await supabase.storage.from(BUCKET_EXTRATOS).createSignedUrl(imp.arquivo_path, 60 * 5, { download: imp.arquivo_nome || undefined });
+  if (e2) throw new Error(`Storage: ${e2.message}`);
+  return { url: data.signedUrl, nome: imp.arquivo_nome };
+}
+
 export async function excluirImportacao(id) {
   const { data: imp, error } = await supabase.from(T.imp).select('*').eq('id', id).maybeSingle();
   lancar(error);
   if (!imp) throw new Error('Importação não encontrada.');
+  if (imp.arquivo_path) await supabase.storage.from(BUCKET_EXTRATOS).remove([imp.arquivo_path]).catch(() => {});
   const d1 = await supabase.from(T.lanc).delete().eq('importacao_id', id);
   lancar(d1.error);
   const d2 = await supabase.from(T.imp).delete().eq('id', id);
@@ -695,9 +739,12 @@ export default {
   atualizarConta,
   lerExtrato,
   importarExtrato,
+  importarExtratoObjeto,
   importarVarios,
   listarImportacoes,
   excluirImportacao,
+  guardarArquivoExtrato,
+  urlArquivoImportacao,
   casarTransferencias,
   atualizarLancamento,
   painel,

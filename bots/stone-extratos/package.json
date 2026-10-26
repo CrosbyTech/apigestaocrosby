@@ -1,0 +1,20 @@
+{
+  "name": "crosby-bot-stone-extratos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agente local: baixa os extratos das contas Stone (puppeteer) e importa no HeadCoach",
+  "type": "module",
+  "main": "bot.mjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node bot.mjs",
+    "login": "node bot.mjs --login",
+    "agora": "node bot.mjs --agora",
+    "mapear": "node bot.mjs --mapear"
+  },
+  "dependencies": {
+    "puppeteer": "^24.40.0"
+  }
+}

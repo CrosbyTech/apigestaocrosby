@@ -1,0 +1,10 @@
+# token do bot — nunca versionar
+config.json
+# sessão do Chrome logada na Stone
+perfil-chrome/
+# PDFs baixados, capturas de erro e mapa do portal
+downloads/
+capturas/
+mapa/
+node_modules/
+*.log
