@@ -26,7 +26,7 @@ const MES_INICIAL = process.env.INADIMPLENCIA_MES_INICIAL || '2026-02';
 const DIAS = Number(process.env.INADIMPLENCIA_DIAS || 60);
 const GERAR_HORA = process.env.INADIMPLENCIA_GERAR_HORA || '06:40';
 const LOTE_CLIENTES = 500;
-const LOTES_SIMULTANEOS = 4;
+const LOTES_SIMULTANEOS = 3;
 const DOC_FATURA = 1;
 const CLIENTES_TESTE = new Set([3591]);
 const TABELA = 'inadimplencia_mensal_snapshot';
@@ -82,36 +82,36 @@ async function clientesPorCanal() {
   return { canalDe, avisos };
 }
 
-/** Faturas (status normal) dos clientes com vencimento entre dtIni e dtFim — abertas ou pagas. */
-async function titulosVencidosAte(codigos, dtIni, dtFim) {
+/**
+ * Títulos que podem contar em algum mês: (a) ABERTOS com vencimento ≤ hoje−DIAS e
+ * (b) PAGOS desde o 1º dia do mês inicial (um título pago em maio ainda conta em
+ * março). Pela rota interna /accounts-receivable/filter, que busca TODAS as
+ * páginas do TOTVS e filtra o status localmente (sem teto de linhas) — a mesma
+ * que a tela de cobrança usa. Lotes de 500 clientes, 3 por vez.
+ */
+async function titulosRelevantes(codigos, dtIniVenc, dtFimVenc, dtIniPago, hoje) {
   const lotes = [];
   for (let i = 0; i < codigos.length; i += LOTE_CLIENTES) lotes.push(codigos.slice(i, i + LOTE_CLIENTES));
   const itens = [];
   const avisos = [];
+  const consultas = (lote) => [
+    { rot: 'abertos', params: { dt_inicio: dtIniVenc, dt_fim: dtFimVenc, modo: 'vencimento', situacao: '1', status: 'Em Aberto', tp_documento: String(DOC_FATURA), cd_cliente: lote.join(',') } },
+    { rot: 'pagos', params: { dt_inicio: dtIniPago, dt_fim: hoje, modo: 'pagamento', situacao: '1', status: 'Pago', tp_documento: String(DOC_FATURA), cd_cliente: lote.join(',') } },
+  ];
   for (let i = 0; i < lotes.length; i += LOTES_SIMULTANEOS) {
     const grupo = lotes.slice(i, i + LOTES_SIMULTANEOS);
-    const rs = await Promise.allSettled(
-      grupo.map(async (lote) => {
-        const out = [];
-        for (let page = 1; page <= 50; page++) {
-          const r = await postTotvs('/accounts-receivable/v2/documents/search', {
-            filter: { customerCodeList: lote, documentTypeList: [DOC_FATURA], statusList: [1], startExpiredDate: `${dtIni}T00:00:00`, endExpiredDate: `${dtFim}T23:59:59` },
-            page,
-            pageSize: 200,
-          });
-          const it = r.data?.items || [];
-          out.push(...it);
-          if (page >= (r.data?.totalPages || 1) || it.length === 0) break;
-        }
-        return out;
-      }),
-    );
-    rs.forEach((r, idx) => {
-      if (r.status === 'fulfilled') itens.push(...r.value);
-      else avisos.push(`lote ${i + idx + 1}/${lotes.length}: ${r.reason?.message}`);
+    const tarefas = grupo.flatMap((lote, k) => consultas(lote).map((c) => ({ ...c, idx: i + k + 1 })));
+    const rs = await Promise.allSettled(tarefas.map((t) => getInterno('/api/totvs/accounts-receivable/filter', t.params)));
+    rs.forEach((r, j) => {
+      const t = tarefas[j];
+      if (r.status === 'fulfilled') itens.push(...(r.value.data?.items || []));
+      else avisos.push(`lote ${t.idx}/${lotes.length} (${t.rot}): ${r.reason?.message}`);
     });
   }
-  return { itens, avisos };
+  // união por título (um mesmo título pode vir nas duas consultas)
+  const vistos = new Map();
+  for (const t of itens) vistos.set(`${t.branchCode}-${t.customerCode}-${t.receivableCode}-${t.installmentCode ?? 1}`, t);
+  return { itens: [...vistos.values()], avisos };
 }
 
 /** Monta a série mensal. */
@@ -121,7 +121,7 @@ export async function calcular() {
   const { canalDe, avisos } = await clientesPorCanal();
   const codigos = [...canalDe.keys()];
   const corteMax = addDias(hoje, -DIAS); // vencimento mais novo que pode contar (mês atual)
-  const { itens, avisos: av2 } = await titulosVencidosAte(codigos, DT_INICIO_PADRAO, corteMax);
+  const { itens, avisos: av2 } = await titulosRelevantes(codigos, DT_INICIO_PADRAO, corteMax, `${MES_INICIAL}-01`, hoje);
   avisos.push(...av2);
 
   const titulos = itens
