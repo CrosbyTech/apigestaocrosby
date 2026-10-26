@@ -1912,23 +1912,29 @@ router.post(
             : item.paidValue;
 
         // Data de liquidaÃ§Ã£o: usar a data do arquivo (dt_pagamento) se fornecida, senÃ£o hoje
-        let settlementDate;
-        if (item.settlementDate) {
-          // Aceitar formatos ISO (2026-02-15) ou BR (15/02/2026)
-          const raw = item.settlementDate;
-          if (raw.includes('/')) {
-            // Formato BR: dd/mm/yyyy
-            const [dd, mm, yyyy] = raw.split('/');
-            settlementDate = new Date(
-              `${yyyy}-${mm}-${dd}T12:00:00`,
-            ).toISOString();
+        // Data de liquidação em HORA LOCAL, meio-dia, SEM 'Z' (26/10/2026):
+        // o doc de cartão da baixa por cartão nascia com vencimento = dia do
+        // processamento (data do sistema) e não da data do pagamento, e por
+        // isso não aparecia na conciliação de cartões do TOTVS. O swagger diz
+        // que `movementDate` "substituirá a data do sistema" — mandávamos em
+        // UTC ('...T00:00:00.000Z') e o TOTVS ignorava. Meio-dia local é
+        // inequívoco em qualquer fuso.
+        const dataLocalMeioDia = (raw) => {
+          const str = String(raw || '').trim();
+          let y, m, d;
+          if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+            [d, m, y] = str.split('/');
+          } else if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+            [y, m, d] = str.slice(0, 10).split('-');
           } else {
-            // Formato ISO ou similar
-            settlementDate = new Date(raw).toISOString();
+            const hoje = new Date();
+            y = hoje.getFullYear();
+            m = String(hoje.getMonth() + 1).padStart(2, '0');
+            d = String(hoje.getDate()).padStart(2, '0');
           }
-        } else {
-          settlementDate = new Date().toISOString();
-        }
+          return `${y}-${m}-${d}T12:00:00`;
+        };
+        const settlementDate = dataLocalMeioDia(item.settlementDate);
 
         // Payload conforme InvoicesPaymentCommand do Swagger
         // Para adiantamento (paidType 3), tenta primeiro empresa 99, se falhar tenta empresa 1
