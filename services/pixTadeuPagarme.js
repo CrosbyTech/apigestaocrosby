@@ -52,21 +52,28 @@ async function pedidosPagosPix({ conta, dias }) {
   return lista;
 }
 
-/** Extrai o que o Dryland guarda no pedido: referência e código do cliente. */
+/**
+ * Lê o que o Dryland grava no pedido (visto em produção, 26/10/2026):
+ *   tadeu_pix     → metadata { origem, titulos: "99-12000-4[, ...]", cd_cliente: "116622" }  (link do cliente)
+ *   tadeu_gerador → metadata { origem, ref: "Betania - 115281", cd_cliente: "" , usuario }   (Gerador de QR)
+ *   tadeu_loja    → metadata { origem, loja: "99", vendedor }                                 (link da loja)
+ * Qualquer outro pedido (loja virtual/revenda por payment link, BlueCard, boleto) é ignorado.
+ */
+export const ORIGENS_TADEU = ['tadeu_pix', 'tadeu_gerador', 'tadeu_loja'];
 function lerPedido({ conta, order: o, charge: c }) {
   const md = o.metadata || {};
   const item = (o.items || [])[0] || {};
-  const textos = [o.code, item.code, item.description, md.ref, md.referencia, md.descricao].filter(Boolean).map(String);
-  const ref = md.ref || md.referencia || item.description || o.code || '';
-  let cd = Number(md.cd_cliente || md.cd || md.cliente || md.codigo_cliente || 0) || null;
-  if (!cd) {
-    // "pelo código no fim da referência" (Dryland)
-    for (const t of textos) {
-      const m = /(\d{3,7})\s*$/.exec(t.trim());
-      if (m) { cd = Number(m[1]); break; }
-    }
+  const ref = md.ref || item.description || o.code || '';
+  let cd = Number(String(md.cd_cliente || '').replace(/\D/g, '')) || null;
+  if (!cd && md.origem === 'tadeu_gerador') {
+    const m = /(\d{2,7})\s*$/.exec(String(ref).trim());
+    if (m) cd = Number(m[1]);
   }
-  const origem = md.origem || (/gerador/i.test(ref) ? 'gerador' : /loja|lv/i.test(ref) ? 'loja' : 'link');
+  const titulos = String(md.titulos || '')
+    .split(/[,;\s]+/)
+    .map((t) => /^(\d+)-(\d+)-(\d+)$/.exec(t.trim()))
+    .filter(Boolean)
+    .map((m) => ({ branchCode: Number(m[1]), receivableCode: Number(m[2]), installmentCode: Number(m[3]) }));
   return {
     conta,
     order_id: o.id,
@@ -79,7 +86,10 @@ function lerPedido({ conta, order: o, charge: c }) {
     valor: r2((c.paid_amount ?? c.amount ?? o.amount ?? 0) / 100),
     pago_em: c.paid_at || o.updated_at || o.created_at,
     dia: dataBR(c.paid_at || o.updated_at || o.created_at),
-    origem,
+    origem: md.origem || 'outro',
+    titulos,
+    loja: md.loja || null,
+    vendedor: md.vendedor || null,
     metadata: md,
   };
 }
@@ -160,7 +170,7 @@ export async function listar({ dias = DIAS_PADRAO, bruto = false } = {}) {
   }
   const bc = await orderIdsBlueCard(dias + 5);
   const lidos = todos
-    .filter(({ order }) => (order.metadata?.origem || '') !== 'headcoach_remessa')
+    .filter(({ order }) => ORIGENS_TADEU.includes(order.metadata?.origem || ''))
     .filter(({ order }) => !bc.has(order.id))
     .map(lerPedido);
   return { contas, dias, total: lidos.length, avisos, itens: bruto ? todos.slice(0, 5).map(({ conta, order, charge }) => ({ conta, order: { id: order.id, code: order.code, amount: order.amount, metadata: order.metadata, items: order.items, customer: { name: order.customer?.name, document: order.customer?.document, code: order.customer?.code } }, charge: { id: charge.id, status: charge.status, paid_at: charge.paid_at, paid_amount: charge.paid_amount, amount: charge.amount } })) : lidos };
@@ -178,8 +188,33 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
       const titulos = await titulosDoCliente({ cd: p.cd_cliente, cpf: p.cpf });
       const abertos = titulos.filter((t) => t.aberto);
       const cliente = titulos[0] ? { code: titulos[0].customerCode, name: titulos[0].customerName } : null;
-      const achado = p.valor > 0 ? casar(abertos, cents(p.valor)) : null;
-      const quem = `Pix ${p.origem} · ${p.conta === 'fabio' ? 'FA MODA' : 'Crosby'}`;
+      let achado = null;
+      if (p.origem === 'tadeu_pix' && p.titulos.length) {
+        // link do cliente: os títulos são exatamente os do Pix (metadata.titulos)
+        const alvo = p.titulos
+          .map((x) => abertos.find((t) => t.receivableCode === x.receivableCode && t.installmentCode === x.installmentCode))
+          .filter(Boolean);
+        if (alvo.length) {
+          const soma = alvo.reduce((a, t) => a + t.valorCents, 0);
+          const juros = cents(p.valor) > soma ? r2((cents(p.valor) - soma) / 100) : 0;
+          achado = { titulos: alvo, criterio: 'título(s) do link do cliente', juros };
+        }
+      } else if (p.origem === 'tadeu_gerador') {
+        // Gerador: sugere os vencidos mais antigos até o valor (conferir)
+        achado = p.valor > 0 ? casar(abertos, cents(p.valor)) : null;
+        if (!achado && abertos.length) {
+          const ord = abertos.slice().sort((a, b) => String(a.vencimento).localeCompare(String(b.vencimento)));
+          const sel = []; let acc = 0;
+          for (const t of ord) { if (acc + t.valorCents <= cents(p.valor)) { sel.push(t); acc += t.valorCents; } }
+          if (sel.length) achado = { titulos: sel, criterio: `Gerador — vencidos mais antigos até o valor (sugestão, sobra R$ ${r2((cents(p.valor) - acc) / 100).toFixed(2)})`, juros: 0 };
+        }
+      } else if (p.origem === 'tadeu_loja') {
+        // link da loja: só títulos abertos que somam exatamente o valor (senão é compra — não entra)
+        const c0 = p.valor > 0 ? casar(abertos, cents(p.valor)) : null;
+        achado = c0 && c0.juros === 0 ? c0 : null;
+        if (!achado) { resumo.compras_loja = (resumo.compras_loja || 0) + 1; continue; }
+      }
+      const quem = `Pix ${p.origem.replace('tadeu_', '')} · ${p.conta === 'fabio' ? 'FA MODA' : 'Crosby'}${p.loja ? ` · loja ${p.loja}` : ''}${p.vendedor ? ` · ${p.vendedor}` : ''}`;
       const cabec = [
         `Pix recebido na Pagar.me (${quem}) em ${p.dia} — R$ ${p.valor.toFixed(2)}. Pedido ${p.order_id} · cobrança ${p.charge_id}${p.ref ? ` · ref "${String(p.ref).slice(0, 80)}"` : ''}.`,
         `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ''}${p.cpf ? ` CPF/CNPJ ${p.cpf}` : ''}.`,
@@ -191,7 +226,7 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
         comprovante_path: '',
         status: 'pendente',
         user_id: null,
-        user_nome: `Pix do Tadeu · ${p.origem}`,
+        user_nome: `Pix do Tadeu · ${p.origem.replace('tadeu_', '')}`,
         user_email: 'pagarme@crosby.app',
         dt_pagamento: p.dia,
         forma_pagamento: 'cartao_debito',
@@ -206,7 +241,7 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
             nr_fat: t.receivableCode,
             nr_parcela: t.installmentCode,
             vl_fatura: r2(t.valorCents / 100),
-            vl_juros: achado.titulos.length === 1 ? achado.juros : 0,
+            vl_juros: i === achado.titulos.length - 1 ? achado.juros : 0,
             dt_vencimento: t.vencimento,
             dt_emissao: t.emissao,
             cd_portador: t.cd_portador,
