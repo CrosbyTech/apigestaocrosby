@@ -86,10 +86,8 @@ async function listarTudo(contaId, path, { max = 60 } = {}) {
   const itens = new Map();
   const meta = { paginas: 0, cursores: 0, repetidas: 0, chavesPaging: null };
   let cursor = null;
-  for (let pagina = 1; pagina <= max; pagina++) {
-    meta.paginas += 1;
-    const sep = path.includes('?') ? '&' : '?';
-    const q = `${path}${sep}size=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : `&page=${pagina}`}`;
+  const sep = path.includes('?') ? '&' : '?';
+  const buscar = async (q) => {
     const r = await pagarme('GET', q, null, contaId);
     if (!r.ok) {
       const e = new Error(`${path.split('?')[0]} ${r.status} ${r.data?.message || JSON.stringify(r.data).slice(0, 160)}`);
@@ -106,15 +104,28 @@ async function listarTudo(contaId, path, { max = 60 } = {}) {
         novos += 1;
       }
     }
-    if (!novos && lote.length) meta.repetidas += 1;
-    if (!lote.length || !novos) break;
-    const next = r.data?.paging?.forward_cursor || r.data?.paging?.next_cursor || null;
-    if (next) {
-      meta.cursores += 1;
-      cursor = next;
-      continue;
+    return { lote, novos, next: r.data?.paging?.forward_cursor || r.data?.paging?.next_cursor || null };
+  };
+  for (let pagina = 1; pagina <= max; pagina++) {
+    meta.paginas += 1;
+    let res;
+    if (pagina === 1) res = await buscar(`${path}${sep}size=100`);
+    else {
+      // a API aceita cursor (forward_cursor) ou página; testa as variantes até uma trazer itens novos
+      const variantes = [];
+      if (cursor) variantes.push(`${path}${sep}size=100&cursor=${encodeURIComponent(cursor)}`, `${path}${sep}size=100&cursor=${cursor}`);
+      variantes.push(`${path}${sep}size=100&page=${pagina}`);
+      for (const q of variantes) {
+        res = await buscar(q);
+        if (res.novos) break;
+        meta.repetidas += 1;
+      }
     }
-    if (lote.length < 100 || cursor) break;
+    if (!res.lote.length || !res.novos) break;
+    if (res.next) {
+      meta.cursores += 1;
+      cursor = res.next;
+    } else if (res.lote.length < 100) break;
   }
   const lista = [...itens.values()];
   lista.meta = meta;
@@ -176,7 +187,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
   let origemSaida = null;
   const tentativas = [
     { rota: `/transfers?created_since=${de}T00:00:00&created_until=${ate}T23:59:59&recipient_id=${rec.id}`, nome: 'transfers' },
-    { rota: `/transfers?recipient_id=${rec.id}`, nome: 'transfers (sem filtro de data)' },
+    { rota: `/settlements?recipient_id=${rec.id}&created_since=${de}T00:00:00&created_until=${ate}T23:59:59`, nome: 'settlements' },
     { rota: `/recipients/${rec.id}/withdrawals?created_since=${de}T00:00:00&created_until=${ate}T23:59:59`, nome: 'withdrawals' },
   ];
   const errosSaida = [];
