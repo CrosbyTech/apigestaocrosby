@@ -1789,25 +1789,43 @@ router.post(
     // cartão quando Operadora E Bandeira estão preenchidas no cadastro; o texto
     // enviado precisa ser igual ao cadastrado (case-insensitive) e parcelas iguais.
     const cartoesCache = (globalThis.__hcCartoesCache ||= { em: 0, lista: null });
+    // Leitura do cadastro de cartões TOLERANTE (26/10/2026): o TOTVS deu 502 no
+    // meio de um lote de 40 baixas e derrubou itens. Agora: 3 tentativas com
+    // espera, senão usa o último cadastro conhecido (mesmo vencido); só sem
+    // nada em cache é que o item falha.
     const cartoesDoTotvs = async () => {
       if (cartoesCache.lista && Date.now() - cartoesCache.em < 5 * 60 * 1000) return cartoesCache.lista;
-      const tk = await getToken();
-      const auth = typeof tk === 'string' ? tk : tk?.access_token;
-      const lista = [];
-      for (let page = 1; page <= 20; page++) {
-        const r = await axios.get(`${TOTVS_BASE_URL}/accounts-receivable/v2/payment-cards`, {
-          params: { Page: page, PageSize: 100, IsInactive: false },
-          headers: { Authorization: `Bearer ${auth}` },
-          httpsAgent,
-          timeout: 30000,
-        });
-        const it = r.data?.items || [];
-        lista.push(...it);
-        if (!r.data?.hasNext || it.length === 0) break;
+      let ultimoErro = null;
+      for (let tentativa = 1; tentativa <= 3; tentativa++) {
+        try {
+          const tk = await getToken();
+          const auth = typeof tk === 'string' ? tk : tk?.access_token;
+          const lista = [];
+          for (let page = 1; page <= 20; page++) {
+            const r = await axios.get(`${TOTVS_BASE_URL}/accounts-receivable/v2/payment-cards`, {
+              params: { Page: page, PageSize: 100, IsInactive: false },
+              headers: { Authorization: `Bearer ${auth}` },
+              httpsAgent,
+              timeout: 30000,
+            });
+            const it = r.data?.items || [];
+            lista.push(...it);
+            if (!r.data?.hasNext || it.length === 0) break;
+          }
+          cartoesCache.lista = lista;
+          cartoesCache.em = Date.now();
+          return lista;
+        } catch (e) {
+          ultimoErro = e;
+          console.warn(`⚠️ payment-cards tentativa ${tentativa}/3 falhou: ${e.response?.status || e.message}`);
+          await new Promise((r) => setTimeout(r, 1500 * tentativa));
+        }
       }
-      cartoesCache.lista = lista;
-      cartoesCache.em = Date.now();
-      return lista;
+      if (cartoesCache.lista) {
+        console.warn('⚠️ payment-cards indisponível — usando o último cadastro conhecido');
+        return cartoesCache.lista;
+      }
+      throw ultimoErro;
     };
     const cartaoDoPortador = async (portador, parcelas) => {
       const lista = await cartoesDoTotvs();
@@ -1827,7 +1845,14 @@ router.post(
         try {
           reg = await cartaoDoPortador(c.portador, parcelas);
         } catch (e) {
-          return { erro: `Não consegui ler o cadastro de cartões do TOTVS (portador ${c.portador}): ${e.message}` };
+          // Sem cadastro e sem cache: usa a combinação validada em 23/10/2026 para o
+          // portador 9901 (operadora PAGARME, bandeira OUTROS) em vez de perder o item.
+          if (Number(c.portador) === 9901) {
+            console.warn(`⚠️ cadastro de cartões indisponível (${e.message}) — usando PAGARME/OUTROS conhecido p/ portador 9901`);
+            reg = { description: 'PAGARME DEBITO', bearerNumber: 9901, documentType: 5, sequenceNumber: 63, operatorName: 'PAGARME', brandName: 'OUTROS', installmentNumber: 1 };
+          } else {
+            return { erro: `Não consegui ler o cadastro de cartões do TOTVS (portador ${c.portador}): ${e.message}` };
+          }
         }
         if (!reg) {
           return { erro: `Nenhum cartão ativo com portador ${c.portador} no cadastro de cartões do TOTVS (FCXFL002).` };
