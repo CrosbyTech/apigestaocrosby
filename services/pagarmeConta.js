@@ -187,7 +187,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
   let origemSaida = null;
   const tentativas = [
     { rota: `/transfers?created_since=${de}T00:00:00&created_until=${ate}T23:59:59&recipient_id=${rec.id}`, nome: 'transfers' },
-    { rota: `/settlements?recipient_id=${rec.id}&created_since=${de}T00:00:00&created_until=${ate}T23:59:59`, nome: 'settlements' },
+    { rota: `/settlements?recipient_id=${rec.id}&payment_date_start=${de}&payment_date_end=${ate}`, nome: 'settlements' },
     { rota: `/recipients/${rec.id}/withdrawals?created_since=${de}T00:00:00&created_until=${ate}T23:59:59`, nome: 'withdrawals' },
   ];
   const errosSaida = [];
@@ -207,7 +207,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
   for (const s of saidas) {
     const status = String(s.status || '').toLowerCase();
     if (/fail|cancel/.test(status)) continue;
-    const quando = s.funding_date || s.created_at || s.date_created || s.updated_at;
+    const quando = s.funding_date || s.payment_date || s.settlement_date || s.created_at || s.date_created || s.updated_at;
     if (!dentro(quando, de, ate)) continue;
     saquesNoPeriodo += 1;
     operacoes.push({
@@ -216,7 +216,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
       created_at: quando,
       amount: -Math.abs(Number(s.amount || 0)),
       fee: -Math.abs(Number(s.fee || 0)),
-      movement_object: { object: 'transfer', id: s.id, type: 'transfer', status, bank_account: s.bank_account || null, description: `Saque ${status}` },
+      movement_object: { object: 'transfer', id: s.id, type: 'transfer', status, bank_account: s.bank_account || null, description: `${origemSaida === 'settlements' ? 'Liquidação' : 'Saque'} ${status}`, bruto: s },
     });
   }
   fontes.push(`${origemSaida} ${saquesNoPeriodo}/${saidas.length} (${resumoMeta(saidas)})`);
