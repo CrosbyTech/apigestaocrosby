@@ -202,7 +202,10 @@ export async function extratoPagarme(contaId, { de, ate }) {
     }
   }
   if (!origemSaida) throw new Error(`saques indisponíveis — ${errosSaida.join(' | ')}`);
-  if (errosSaida.length) fontes.push(`saídas: ${errosSaida.join(' | ')}`);
+  // a Pagar.me bloqueia a LEITURA de /transfers por IP (26/10/2026); o bot não transfere nada,
+  // só deixaria de mostrar a transferência diária como saída — aviso curto, sem erro
+  if (errosSaida.some((e) => /IP de origem/i.test(e))) fontes.push('saídas: leitura de transferências bloqueada pela Pagar.me (IP) — só entradas');
+  else if (errosSaida.length) fontes.push(`saídas: ${errosSaida.join(' | ')}`);
   let saquesNoPeriodo = 0;
   for (const s of saidas) {
     const status = String(s.status || '').toLowerCase();
