@@ -217,6 +217,7 @@ export async function gravarSaldos(execucaoId, saldos, { data } = {}) {
     .filter((s) => s && s.conta && s.saldo != null && !Number.isNaN(Number(s.saldo)))
     .map((s) => ({
       execucao_id: execucaoId || null,
+      banco: 'STONE',
       data: dia,
       stone_account_id: s.accountId || null,
       agencia: s.agencia || null,
@@ -250,11 +251,19 @@ export async function ultimosSaldos() {
   const { data: ult, error } = await supabase.from(T.saldos).select('data').order('data', { ascending: false }).limit(1);
   lancar(error);
   const dia = ult?.[0]?.data;
-  if (!dia) return { data: null, contas: [], total: 0 };
-  const { data, error: e2 } = await supabase.from(T.saldos).select('*').eq('data', dia).order('titular_nome');
+  if (!dia) return { data: null, contas: [], total: 0, porBanco: {} };
+  const { data, error: e2 } = await supabase.from(T.saldos).select('*').eq('data', dia).order('banco').order('titular_nome');
   lancar(e2);
-  const total = round2((data || []).reduce((a, l) => a + Number(l.saldo), 0));
-  return { data: dia, contas: data || [], total };
+  const contas = (data || []).map((l) => ({ ...l, banco: l.banco || 'STONE' }));
+  const porBanco = {};
+  for (const l of contas) {
+    const b = porBanco[l.banco] || (porBanco[l.banco] = { banco: l.banco, contas: 0, total: 0, aReceber: 0 });
+    b.contas += 1;
+    b.total = round2(b.total + Number(l.saldo));
+    b.aReceber = round2(b.aReceber + Number(l.saldo_a_receber || 0));
+  }
+  const total = round2(contas.reduce((a, l) => a + Number(l.saldo), 0));
+  return { data: dia, contas, total, porBanco };
 }
 
 export async function status() {
@@ -267,7 +276,12 @@ export async function status() {
   lancar(error);
   const lim = Date.now() - AGENTE_ONLINE_SEG * 1000;
   const lista = (agentes || []).map((a) => ({ ...a, online: new Date(a.ultimo_ping).getTime() >= lim }));
-  const { data: sb } = await supabase.from(T.saldoBancario).select('*').eq('banco', BANCO_SALDO_STONE).maybeSingle();
+  const { data: sbs } = await supabase.from(T.saldoBancario).select('*').in('banco', [BANCO_SALDO_STONE, 'PAGARME', 'PAGARME A RECEBER']);
+  const sb = (sbs || []).find((x) => x.banco === BANCO_SALDO_STONE);
+  const linha = (b) => {
+    const x = (sbs || []).find((y) => y.banco === b);
+    return x ? { valor: Number(x.valor), atualizadoEm: x.updated_at, por: x.updated_by } : null;
+  };
   return {
     agentes: lista,
     online: lista.some((a) => a.online),
@@ -275,6 +289,8 @@ export async function status() {
     execucoes: execs,
     saldos,
     saldoLiberacao: sb ? { valor: Number(sb.valor), atualizadoEm: sb.updated_at, por: sb.updated_by } : null,
+    saldoPagarme: linha('PAGARME'),
+    saldoPagarmeReceber: linha('PAGARME A RECEBER'),
   };
 }
 

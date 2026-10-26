@@ -219,8 +219,25 @@ async function executar(exec, { visivel = false } = {}) {
       log('Nenhum saldo capturado — Liberação de Pagamento NÃO foi atualizada.', 'erro');
       resumo.falhas += 1;
     }
+    // Pagar.me (adquirente/subconta da Stone): o servidor consulta a API dela e grava saldo + extrato
+    if (cfg.pagarme?.ativo !== false) {
+      try {
+        log('Pagar.me: consultando saldo e extrato pelo servidor…');
+        const r = await hc.pagarme(execId, { de, ate });
+        resumo.pagarme = { contas: r?.contas ?? 0, importados: r?.importados ?? 0, falhas: r?.falhas ?? 0, disponivel: r?.disponivel ?? null, aReceber: r?.aReceber ?? null };
+        if (r?.falhas) {
+          resumo.falhas += r.falhas;
+          log(`Pagar.me: ${r.falhas} falha(s) — veja as linhas acima.`, 'aviso');
+        }
+      } catch (e) {
+        resumo.falhas += 1;
+        resumo.pagarme = { erro: e.message };
+        log(`Pagar.me FALHOU — ${e.message}`, 'erro');
+      }
+    }
+
     if (resumo.falhas) status = 'erro';
-    log(`Fim: ${resumo.importados}/${resumo.contas} extrato(s) importado(s) (${resumo.pdfs} PDF, ${resumo.viaApi} via API), ${resumo.falhas} falha(s).`, resumo.falhas ? 'aviso' : 'ok');
+    log(`Fim: ${resumo.importados}/${resumo.contas} extrato(s) Stone importado(s) (${resumo.pdfs} PDF, ${resumo.viaApi} via API)${resumo.pagarme && !resumo.pagarme.erro ? ` · Pagar.me ${resumo.pagarme.importados}/${resumo.pagarme.contas}` : ''}, ${resumo.falhas} falha(s).`, resumo.falhas ? 'aviso' : 'ok');
   } catch (e) {
     status = 'erro';
     erroGeral = e.message;

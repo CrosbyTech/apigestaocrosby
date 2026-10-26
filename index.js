@@ -32,6 +32,7 @@ import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import extratoStoneRoutes from './routes/extratoStone.routes.js';
 import stoneBotRoutes from './routes/stoneBot.routes.js';
+import { iniciarJobPagarmeSaldo } from './jobs/pagarme-saldo.job.js';
 import fluxoCaixaExtRoutes from './routes/fluxoCaixaExt.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
@@ -276,6 +277,7 @@ app.listen(PORT, async () => {
   iniciarJobPesPessoaSync();
   iniciarJobConversaoTemplate();
   iniciarJobProvisaoLiberacao();
+  iniciarJobPagarmeSaldo();
   iniciarJobBoletoCobranca();
   iniciarBluecardPagamentosSync();
   iniciarBluecardLimiteWatchdog();

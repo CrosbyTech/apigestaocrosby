@@ -17,6 +17,8 @@
 //   POST   /agente/execucoes/:id/pdf            multipart arquivo + meta (JSON)
 //   POST   /agente/execucoes/:id/extrato-json   { conta, entradas, saldo, periodo }
 //   POST   /agente/execucoes/:id/saldos         { saldos: [...] , data? }
+//   POST   /agente/execucoes/:id/pagarme        { de?, ate? } → saldo + extrato Pagar.me (servidor)
+//   Tela: GET /pagarme/saldos · POST /pagarme/executar {de?, ate?}
 //   POST   /agente/execucoes/:id/finalizar      { status, resumo, erro }
 // ============================================================
 import crypto from 'node:crypto';
@@ -25,6 +27,7 @@ import multer from 'multer';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import bot from '../services/stoneBot.js';
+import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
@@ -129,6 +132,32 @@ tela.get(
   }),
 );
 
+// Pagar.me (roda no servidor, não depende do PC do bot)
+tela.get(
+  '/pagarme/saldos',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await saldosPagarme());
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+tela.post(
+  '/pagarme/executar',
+  asyncHandler(async (req, res) => {
+    try {
+      const de = dataIso(req.body?.de);
+      const ate = dataIso(req.body?.ate);
+      const r = await executarPagarme({ de: de && ate ? de : undefined, ate: de && ate ? ate : undefined });
+      return successResponse(res, r, r.falhas ? `Pagar.me: ${r.falhas} falha(s) — veja o log do servidor` : 'Pagar.me atualizada');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // ═══ agente ═══════════════════════════════════════════════════
 const agente = express.Router();
 agente.use(requireBotToken);
@@ -223,6 +252,20 @@ agente.post(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await bot.gravarSaldos(Number(req.params.id), req.body?.saldos || [], { data: dataIso(req.body?.data) }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// o bot chama no fim da execução: saldo + extrato Pagar.me com log na mesma execução
+agente.post(
+  '/execucoes/:id/pagarme',
+  asyncHandler(async (req, res) => {
+    try {
+      const { de, ate } = req.body || {};
+      const r = await executarPagarme({ execucaoId: Number(req.params.id), de: dataIso(de) || undefined, ate: dataIso(ate) || undefined });
+      return successResponse(res, r);
     } catch (e) {
       return tratar(res, e);
     }

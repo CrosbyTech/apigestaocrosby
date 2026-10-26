@@ -75,6 +75,11 @@ export class HeadCoach {
     return this.req('POST', `/execucoes/${execId}/saldos`, { json: { saldos, data }, timeoutMs: 60000 });
   }
 
+  /** Saldo + extrato da Pagar.me: roda no servidor (as chaves ficam lá), com log nesta execução. */
+  pagarme(execId, { de, ate } = {}) {
+    return this.req('POST', `/execucoes/${execId}/pagarme`, { json: { de, ate }, timeoutMs: 300000 });
+  }
+
   finalizar(execId, { status, resumo, erro }) {
     return this.req('POST', `/execucoes/${execId}/finalizar`, { json: { status, resumo, erro }, timeoutMs: 30000 });
   }
