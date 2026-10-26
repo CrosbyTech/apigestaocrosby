@@ -12,6 +12,10 @@
     "apiRegex": "/api/v1/accounts|openbank\\.stone\\.com\\.br",
     "limitePagina": 100
   },
+  "pagarme": {
+    "ativo": true,
+    "_comentario": "no fim da execução o servidor consulta a API da Pagar.me (saldo disponível/a receber + extrato) — não precisa de chave neste PC"
+  },
   "pdf": {
     "ativo": true,
     "modo": "api",

@@ -86,11 +86,23 @@ FA MODA, as duas só no Render; a do `.env` local está vencida). Tudo em
 | `GET /recipients?size=10` | recebedor da conta (id `re_…`, nome, CNPJ) |
 | `GET /recipients/:id/balance` | `available_amount` (disponível), `waiting_funds_amount` (a receber), `transferred_amount` — centavos |
 | `GET /payables?payment_date_since&payment_date_until&size=100&cursor` | recebíveis creditados (`status = paid`): entradas, estornos, chargebacks, com `fee`/`anticipation_fee` |
-| `GET /transfers?…` → fallback `GET /recipients/:id/withdrawals` | saques para a conta bancária (saídas) |
+| `GET /transfers?…` → fallbacks `GET /settlements?payment_date_start/end`, `GET /recipients/:id/withdrawals` | saques/transferências para a conta bancária (saídas) |
 
 A `/balance/operations` (extrato antigo) está em descontinuação, por isso o
 extrato é montado por payables + transfers (`utils/extratoPagarmeApi.js`, mesmas
 formas/categorias da planilha `.xlsx`, conta `PAGARME CROSBY` / `PAGARME FABIO`).
+Paginação dos payables: `paging.forward_cursor`; o cursor codificado às vezes
+repete a página, então `listarTudo` tenta cursor codificado → cursor cru →
+`page=N` até vir item novo (FA MODA: 277 recebíveis em 3 páginas, 26/10/2026).
+
+**Pendência (26/10/2026):** `GET /transfers` responde `401 IP de origem não
+autorizado` — a conta Pagar.me tem lista de IPs permitidos e o IP de saída do
+Render não está nela. `settlements` e `withdrawals` voltam vazios, então as
+SAÍDAS (a transferência diária para a Stone) ainda não entram no extrato
+Pagar.me; só as entradas. Para liberar: Dashboard Pagar.me → configurações da
+conta → IPs autorizados → incluir os "Outbound IP addresses" do serviço
+apigestaocrosby no Render (Settings do serviço). O log da execução mostra o
+erro enquanto isso.
 O saque entra como saída TED com contraparte = a própria empresa (CNPJ do
 recebedor) para o casamento automático com a entrada na conta Stone.
 
