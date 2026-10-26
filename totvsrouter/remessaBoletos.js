@@ -28,6 +28,7 @@ import {
   sincronizarRetorno,
   cancelarBoletos,
   contasInfo,
+  ACRESCIMO_BOLETO,
   testarContas,
   clientesBloqueados,
   bloquearCliente,
