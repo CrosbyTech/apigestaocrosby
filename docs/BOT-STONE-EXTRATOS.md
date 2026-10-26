@@ -73,6 +73,52 @@ traz agência `0001` e conta `21774800` + DV `3`; a API traz `branch_code "1"` e
 para cair na MESMA conta. Reimportar preserva `fornecedor`/`observacao`
 editados à mão (chave data|valor|memo).
 
+## Antecipação (valor disponível para antecipar, por conta)
+
+Vem de dois serviços que o portal usa na tela Antecipação, com o mesmo token:
+`customer-api.stone.com.br/v0/portal/users/<email>` (lista de maquininhas,
+`affiliationCodes`) → `customer-api…/v0/merchants/summary?affiliationCodes=`
+(cada maquininha com `affiliationKey` e `document` = CNPJ) →
+`prepayment-v2.stone.com.br/customer/<cnpj>/financial-position?customerExternalKey=<affiliationKey>`
+(`netReceivablesAmount` / `grossReceivablesAmount` em centavos). O bot soma por
+CNPJ e grava `stone_bot_saldos.saldo_antecipavel` (+ `antecipavel_detalhe` por
+maquininha). O e-mail do usuário é capturado da própria chamada que a home faz.
+Em 26/10/2026: 0002-05 = R$ 1.276,74, 0011-98 = R$ 1.980,30, 0014-30 = R$ 802,07,
+0012-79 = R$ 390,40.
+
+## Comprovantes de saída → Conciliação → Solicitação Crosby
+
+Para cada saída do período (Pix, pagamento de boleto/conta, TED, Conta Stone;
+ignora tarifa, cartão pré-pago, mensalidade, estorno, bloqueio, investimento) o
+bot chama a mesma rota do botão "Baixar comprovante":
+`GET /api/v1/fma/accounts/:id/statement/:entryId` (detalhe) e
+`POST …/statement/:entryId/receipt {resource_id, resource_type}` → PDF.
+
+| Tipo do lançamento | resource_type | resource_id | validado |
+| --- | --- | --- | --- |
+| `outbound_pix_payment` | `outbound_pix_payment` | `pix_id` do detalhe | sim (26/10) |
+| `payment` (boleto/conta) | `payment` | `operation_id` | sim (26/10) |
+| `internal` / `external` (saída) | `internal_transfer` / `external_transfer` + transfer_id/operation_id/id | — | sem exemplo em out/2026 |
+
+PEGADINHA: `internal_transfer` + id do lançamento devolve PDF para QUALQUER
+tipo, mas é um comprovante genérico ("Entre Contas Stone", destino "Não
+informado"). O backend lê o texto do PDF e rejeita esse caso.
+
+Backend (`services/comprovantesStone.js`): `POST /agente/execucoes/:id/comprovante`
+(multipart + meta) guarda o PDF em `extratos-bancarios/comprovantes/…` e a linha
+em `fluxo_caixa_comprovantes`, ligada ao lançamento pela chave estável
+(conta|data|valor|hash(memo)|n, igual às conciliações; memo da API = memo do PDF
+"title - subtitle"). `painel` e `detalheConciliacao` devolvem `comprovante`;
+`GET /api/fluxo-caixa-ext/comprovantes/:id/arquivo` dá o link temporário.
+
+Ao gravar uma conciliação (`gravarConciliacaoRow`) cuja origem envolve
+Solicitação Crosby (SOLICITACAO, itens de MULTIPLO, ou LIBERACAO nascida de
+solicitação / apontada por `pagamento_liberacao_id`): copia o PDF para o bucket
+público `solicitacoes-crosby/comprovantes/<solId>/…`, grava
+`solicitacoes_crosby.comprovante_url` (se vazio), `pago_em` + `pago_por_nome`
+(se não paga), põe o título da Liberação em PAGO (se existir e não estiver) e
+registra o anexo na conciliação. Desfazer a conciliação NÃO desfaz isso.
+
 ## Pagar.me (adquirente / subconta da Stone)
 
 Boletos e vendas online caem na Pagar.me e o financeiro transfere todo dia para
