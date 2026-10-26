@@ -28,6 +28,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { requireAuth } from '../middlewares/auth.js';
 import bot from '../services/stoneBot.js';
 import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
+import { salvarComprovante } from '../services/comprovantesStone.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
@@ -227,6 +228,28 @@ agente.post(
         meta = {};
       }
       const r = await bot.importarPdf(Number(req.params.id), { buffer: req.file.buffer, nome: req.file.originalname, meta });
+      return successResponse(res, r);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// comprovante de uma saída (PDF do portal) → bucket + fluxo_caixa_comprovantes
+agente.post(
+  '/execucoes/:id/comprovante',
+  (req, res, next) =>
+    upload.single('arquivo')(req, res, (err) => (err ? errorResponse(res, err.message, 400, 'UPLOAD') : next())),
+  asyncHandler(async (req, res) => {
+    try {
+      if (!req.file) return errorResponse(res, 'Envie o PDF no campo "arquivo".', 400);
+      let meta = {};
+      try {
+        meta = req.body?.meta ? JSON.parse(req.body.meta) : {};
+      } catch {
+        meta = {};
+      }
+      const r = await salvarComprovante({ ...meta, buffer: req.file.buffer, nome: req.file.originalname, execucaoId: Number(req.params.id) });
       return successResponse(res, r);
     } catch (e) {
       return tratar(res, e);

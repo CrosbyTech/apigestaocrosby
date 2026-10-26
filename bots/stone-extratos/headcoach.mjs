@@ -67,6 +67,14 @@ export class HeadCoach {
     return this.req('POST', `/execucoes/${execId}/pdf`, { form, timeoutMs: 180000 });
   }
 
+  /** Comprovante (PDF) de uma saída → bucket + fluxo_caixa_comprovantes. */
+  async enviarComprovante(execId, buffer, nome, meta = {}) {
+    const form = new FormData();
+    form.append('arquivo', new Blob([buffer], { type: 'application/pdf' }), nome);
+    form.append('meta', JSON.stringify(meta));
+    return this.req('POST', `/execucoes/${execId}/comprovante`, { form, timeoutMs: 120000 });
+  }
+
   enviarExtratoJson(execId, { conta, entradas, saldo, periodo }) {
     return this.req('POST', `/execucoes/${execId}/extrato-json`, { json: { conta, entradas, saldo, periodo }, timeoutMs: 180000 });
   }

@@ -124,7 +124,21 @@ async function executar(exec, { visivel = false } = {}) {
     if (!contas.length) throw new Error('A API do portal não devolveu nenhuma conta.');
     log(`${contas.length} conta(s) Stone acessíveis: ${contas.map((c) => `${c.owner_name || '?'} (${c.account_code})`).join(' · ')}`);
 
+    // valor disponível para antecipação por CNPJ (serviço prepayment, via maquininhas)
+    let antecipavel = new Map();
+    if (cfg.antecipacao?.ativo !== false) {
+      try {
+        antecipavel = await stone.antecipavelPorCnpj();
+        const tot = [...antecipavel.values()].reduce((a, g) => a + g.liquido, 0);
+        log(`Antecipação: ${antecipavel.size} CNPJ(s) consultados · R$ ${tot.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} disponíveis para antecipar`);
+      } catch (e) {
+        log(`Antecipação: não consegui consultar (${e.message})`, 'aviso');
+        resumo.avisos.push(`antecipação: ${e.message}`);
+      }
+    }
+
     const saldos = [];
+    resumo.comprovantes = { enviados: 0, semComprovante: 0, falhas: 0 };
     let pdfLigado = cfg.pdf?.ativo !== false;
     for (const [i, c] of contas.entries()) {
       const rot = `[${i + 1}/${contas.length}] ${c.owner_name || ''} ${c.branch_code || ''}/${c.account_code}`;
@@ -133,8 +147,9 @@ async function executar(exec, { visivel = false } = {}) {
       try {
         saldo = await stone.saldo(c.id);
         const disp = saldo.balance / 100;
-        saldos.push({ accountId: c.id, agencia: c.branch_code, conta: c.account_code, titular: c.owner_name, cnpj: soDigitos(c.owner_document), saldo: disp, bloqueado: saldo.blocked_balance == null ? null : saldo.blocked_balance / 100, agendado: saldo.scheduled_balance == null ? null : saldo.scheduled_balance / 100 });
-        log(`${rot}: saldo R$ ${disp.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`);
+        const ant = antecipavel.get(soDigitos(c.owner_document));
+        saldos.push({ accountId: c.id, agencia: c.branch_code, conta: c.account_code, titular: c.owner_name, cnpj: soDigitos(c.owner_document), saldo: disp, bloqueado: saldo.blocked_balance == null ? null : saldo.blocked_balance / 100, agendado: saldo.scheduled_balance == null ? null : saldo.scheduled_balance / 100, antecipavel: ant ? ant.liquido : null, antecipavelDetalhe: ant ? ant.detalhe : null });
+        log(`${rot}: saldo R$ ${disp.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}${ant?.liquido ? ` · antecipável R$ ${ant.liquido.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : ''}`);
       } catch (e) {
         if (e.semPermissao) {
           // o usuário logado não enxerga essa conta no portal: não é falha do bot
@@ -209,6 +224,45 @@ async function executar(exec, { visivel = false } = {}) {
           await stone.capturar(`extrato-${c.account_code}`);
         }
       }
+    }
+
+    // comprovantes das saídas (Pix, boleto/conta, TED, Conta Stone) → Conciliação
+    if (cfg.comprovantes?.ativo !== false) {
+      const TIPOS_SAIDA = /pix|payment|internal|external|ted|transfer/i;
+      const IGNORAR = /^fee$|prepaid|rent|card_payment|acquirer|blocked|investment|refund/i;
+      for (const c of contas) {
+        if (!saldos.some((s) => s.accountId === c.id)) continue; // sem permissão / falhou
+        const rot = `${c.owner_name || ''} ${c.account_code}`;
+        let entradas = [];
+        try {
+          entradas = await stone.extrato(c.id, { de, ate });
+        } catch (e) {
+          log(`${rot}: comprovantes — não listei as saídas (${e.message})`, 'aviso');
+          continue;
+        }
+        const saidas = entradas.filter((e) => e.operation === 'debit' && TIPOS_SAIDA.test(e.type || '') && !IGNORAR.test(e.type || ''));
+        if (!saidas.length) continue;
+        let ok = 0;
+        for (const e of saidas) {
+          const valor = -Math.abs(Number(e.operation_amount ?? e.amount) / 100);
+          const dataLocal = new Date(e.created_at).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+          const memo = [e.title, e.subtitle].filter(Boolean).join(' - ');
+          try {
+            const { buffer, resourceType } = await stone.comprovante(c.id, e);
+            const nome = `Comprovante_${soDigitos(c.account_code)}_${dataLocal}_${Math.abs(valor).toFixed(2)}.pdf`;
+            const r = await hc.enviarComprovante(execId, buffer, nome, { contaStone: { agencia: c.branch_code, conta: c.account_code, cnpj: soDigitos(c.owner_document) }, data: dataLocal, valor, memo, stoneEntryId: e.id, stoneTipo: e.type, resourceType });
+            ok += 1;
+            resumo.comprovantes.enviados += 1;
+            if (r && r.casou === false) resumo.comprovantes.semLancamento = (resumo.comprovantes.semLancamento || 0) + 1;
+          } catch (err) {
+            if (/sem comprovante|genérico/i.test(err.message)) resumo.comprovantes.semComprovante += 1;
+            else resumo.comprovantes.falhas += 1;
+            log(`${rot}: comprovante de ${dataLocal} R$ ${Math.abs(valor).toFixed(2)} (${memo.slice(0, 40)}) — ${err.message}`, 'aviso');
+          }
+        }
+        log(`${rot}: ${ok}/${saidas.length} comprovante(s) de saída enviados`);
+      }
+      log(`Comprovantes: ${resumo.comprovantes.enviados} enviado(s), ${resumo.comprovantes.semComprovante} sem comprovante no portal, ${resumo.comprovantes.falhas} falha(s).`, resumo.comprovantes.falhas ? 'aviso' : 'ok');
     }
 
     if (saldos.length) {

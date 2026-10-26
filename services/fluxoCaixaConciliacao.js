@@ -37,6 +37,7 @@ import { TOTVS_BASE_URL, httpsAgent, getBranchCodes } from '../totvsrouter/totvs
 import { STONE_LOJAS, stonecodesDaLoja } from '../config/stoneConciliacao.js';
 import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
 import { mapearFiliaisTotvsPorCnpj } from './totvsCartoesStone.js';
+import { vincularComprovanteASolicitacao, solicitacoesDaConciliacao, comprovantePorChave, urlComprovante } from './comprovantesStone.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
 
@@ -61,7 +62,7 @@ const lancar = (error) => {
 };
 
 // ─── chave estável do lançamento ──────────────────────────────
-const hashMemo = (l) => crypto.createHash('sha1').update(semAcento(l.memo || l.descricao || '').toUpperCase().replace(/\s+/g, ' ').trim()).digest('hex').slice(0, 10);
+export const hashMemo = (l) => crypto.createHash('sha1').update(semAcento(l.memo || l.descricao || '').toUpperCase().replace(/\s+/g, ' ').trim()).digest('hex').slice(0, 10);
 
 /**
  * Atribui `chave` a cada lançamento (mesma conta). Lançamentos idênticos no
@@ -113,7 +114,7 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
   for (const l of lancamentos) {
     const g = porChave.get(l.chave);
     if (g) {
-      l.conciliacao = { id: g.id, origem: g.origem, referencia: g.referencia, justificativa: g.justificativa, automatico: g.automatico, pontuacao: g.pontuacao, usuario: g.usuario, em: g.criado_em };
+      l.conciliacao = { id: g.id, origem: g.origem, referencia: g.referencia, justificativa: g.justificativa, automatico: g.automatico, pontuacao: g.pontuacao, usuario: g.usuario, em: g.criado_em, anexos: g.anexos || [] };
     } else if (l.transferencia_id && l.transferencia) {
       l.conciliacao = {
         id: null,
@@ -1001,9 +1002,7 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
       pontuacao,
       usuario: usuario || null,
     };
-    const { data, error } = await supabase.from(T.conc).upsert(row, { onConflict: 'chave' }).select().single();
-    lancar(error);
-    return data;
+    return gravarConciliacaoRow(row);
   }
   // a mesma duplicata não pode cobrir mais saídas do que o seu valor
   if (origem !== 'MANUAL' && referencia?.id != null && referencia?.valorDuplicata != null) {
@@ -1027,8 +1026,39 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
     pontuacao,
     usuario: usuario || null,
   };
+  return gravarConciliacaoRow(row);
+}
+
+/**
+ * Grava a conciliação e, quando a origem envolve Solicitação Crosby, leva o
+ * comprovante da saída (baixado pelo bot Stone) para a solicitação: anexo na
+ * conciliação + comprovante_url + marcada como paga (+ Liberação PAGO).
+ */
+async function gravarConciliacaoRow(row) {
   const { data, error } = await supabase.from(T.conc).upsert(row, { onConflict: 'chave' }).select().single();
   lancar(error);
+  try {
+    const ids = await solicitacoesDaConciliacao(data);
+    if (ids.length) {
+      const anexos = [...(data.anexos || [])];
+      let mudou = false;
+      for (const solicitacaoId of ids) {
+        const r = await vincularComprovanteASolicitacao({ chave: data.chave, solicitacaoId, dataPagamento: data.data, usuario: data.usuario });
+        if (r?.url && !anexos.some((a) => a.url === r.url)) {
+          anexos.push({ tipo: 'comprovante', url: r.url, nome: 'Comprovante Stone (bot)', em: new Date().toISOString(), usuario: 'bot-stone' });
+          mudou = true;
+        }
+        if (r) data.solicitacaoVinculada = { id: solicitacaoId, comprovante: r.url, jaEstavaPaga: r.jaEstavaPaga };
+      }
+      if (mudou) {
+        const { data: d2 } = await supabase.from(T.conc).update({ anexos }).eq('id', data.id).select().single();
+        if (d2) data.anexos = d2.anexos;
+      }
+    }
+  } catch (e) {
+    console.error('[conciliacao] comprovante → solicitação falhou:', e.message);
+    data.avisoComprovante = e.message;
+  }
   return data;
 }
 
@@ -1055,6 +1085,14 @@ export async function detalheConciliacao(id) {
   const ref = c.referencia || {};
   let origem = null;
   let solicitacao = null;
+  // comprovante da saída baixado do portal Stone pelo bot (link temporário)
+  let comprovante = null;
+  try {
+    const comp = await comprovantePorChave(c.chave);
+    if (comp) comprovante = { ...(await urlComprovante(comp.id)), solicitacaoId: comp.solicitacao_id, em: comp.criado_em, tipo: comp.stone_tipo };
+  } catch (e) {
+    comprovante = null;
+  }
   if (Array.isArray(ref.itens) && ref.itens.length > 1) {
     // várias duplicatas somando a saída: o detalhe é a lista
     return {
@@ -1062,6 +1100,7 @@ export async function detalheConciliacao(id) {
       lancamento: l ? { ...l, valor: Number(l.valor) } : null,
       origem: null,
       solicitacao: null,
+      comprovante,
       itens: ref.itens,
       usos: [],
       parcial: { totalUsado: ref.valorTotal, valorDuplicata: ref.valorDuplicata, restante: ref.valorDuplicata != null && ref.valorTotal != null ? round2(ref.valorDuplicata - ref.valorTotal) : null },
@@ -1209,6 +1248,7 @@ export async function detalheConciliacao(id) {
     lancamento: l ? { ...l, valor: Number(l.valor) } : null,
     origem,
     solicitacao,
+    comprovante,
     usos,
     parcial: { totalUsado, valorDuplicata, restante: valorDuplicata != null ? round2(valorDuplicata - totalUsado) : null },
   };

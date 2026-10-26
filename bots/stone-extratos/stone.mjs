@@ -79,10 +79,13 @@ export class Stone {
   #observarRequisicao(req) {
     try {
       const u = req.url();
-      if (!this.apiRegex.test(u)) return;
+      if (!this.apiRegex.test(u) && !/customer-api\.stone\.com\.br/.test(u)) return;
       // conta que o portal está mostrando agora (as chamadas levam o id dela na URL)
       const mConta = u.match(/\/accounts\/([0-9a-f]{8}-[0-9a-f-]{27})\//i);
       if (mConta) this.contaAtual = mConta[1];
+      // e-mail do usuário do portal (serve para listar as maquininhas → antecipação)
+      const mEmail = u.match(/customer-api\.stone\.com\.br\/v0\/portal\/users\/([^/?]+)/i);
+      if (mEmail) this.emailPortal = decodeURIComponent(mEmail[1]);
       const h = req.headers();
       const auth = h.authorization || h.Authorization;
       if (!auth) return;
@@ -92,7 +95,8 @@ export class Stone {
         return;
       }
       const headers = { authorization: auth };
-      for (const [k, v] of Object.entries(h)) if (/^x-/i.test(k) && !/idempotency/i.test(k)) headers[k] = v;
+      // o portal manda platform-id / device-generated-id em toda chamada (alguns serviços exigem)
+      for (const [k, v] of Object.entries(h)) if ((/^x-/i.test(k) && !/idempotency/i.test(k)) || /^(platform-id|device-generated-id)$/i.test(k)) headers[k] = v;
       if (h.accept) headers.accept = h.accept;
       const base = new URL(u);
       const idx = base.pathname.indexOf('/api/v1/');
@@ -270,6 +274,104 @@ export class Stone {
       }
     }
     throw ultimoErro || new Error('extrato indisponível');
+  }
+
+  /** GET genérico em outros serviços do portal (customer-api, prepayment) com o mesmo token. */
+  async getServico(url) {
+    await this.garantirApi();
+    const r = await fetch(url, { headers: { ...this.api.headers, accept: 'application/json', 'user-agent': this.ua || 'Mozilla/5.0', origin: this.url, referer: `${this.url}/` } });
+    const texto = await r.text();
+    if (r.status >= 400) throw new Error(`${new URL(url).host} ${r.status}: ${texto.slice(0, 160)}`);
+    try {
+      return JSON.parse(texto);
+    } catch {
+      throw new Error(`${new URL(url).host}: resposta não é JSON`);
+    }
+  }
+
+  /**
+   * Valor disponível para antecipação por CNPJ: as maquininhas (affiliationCode)
+   * do usuário vêm do customer-api; para cada uma, o serviço prepayment devolve
+   * a posição financeira (netReceivablesAmount em centavos). Soma por CNPJ.
+   * @returns Map<cnpj14, { liquido, bruto, detalhe:[{stonecode, chave, liquido, bruto}] }>
+   */
+  async antecipavelPorCnpj() {
+    if (!this.emailPortal) {
+      // a home chama portal/users/<email>; se ainda não passou por lá, força
+      await this.page.goto(`${this.url}/home`, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+      await dormir(2000);
+    }
+    if (!this.emailPortal) throw new Error('não descobri o e-mail do usuário do portal (customer-api)');
+    const u = await this.getServico(`https://customer-api.stone.com.br/v0/portal/users/${encodeURIComponent(this.emailPortal)}`);
+    const codes = u?.data?.affiliationCodes || u?.data?.associatedStoneCodeCollection || [];
+    if (!codes.length) throw new Error('usuário do portal sem maquininhas (affiliationCodes)');
+    const m = await this.getServico(`https://customer-api.stone.com.br/v0/merchants/summary?affiliationCodes=${codes.join(',')}`);
+    const merchants = m?.data || [];
+    const porCnpj = new Map();
+    for (const x of merchants) {
+      const cnpj = soDigitos(x.document);
+      if (!cnpj) continue;
+      if (!porCnpj.has(cnpj)) porCnpj.set(cnpj, { liquido: 0, bruto: 0, detalhe: [], erros: [] });
+      const g = porCnpj.get(cnpj);
+      try {
+        const fp = await this.getServico(`https://prepayment-v2.stone.com.br/customer/${cnpj}/financial-position?customerExternalKey=${x.affiliationKey}`);
+        const liq = Number(fp?.netReceivablesAmount || 0) / 100;
+        const bru = Number(fp?.grossReceivablesAmount || 0) / 100;
+        g.liquido = Math.round((g.liquido + liq) * 100) / 100;
+        g.bruto = Math.round((g.bruto + bru) * 100) / 100;
+        g.detalhe.push({ stonecode: x.affiliationCode, chave: x.affiliationKey, liquido: liq, bruto: bru });
+      } catch (e) {
+        g.erros.push(`${x.affiliationCode}: ${e.message}`);
+      }
+    }
+    return porCnpj;
+  }
+
+  /**
+   * Comprovante (PDF) de uma saída, pela mesma chamada do botão "Baixar
+   * comprovante" do portal. O resource_type certo depende do tipo do
+   * lançamento (validado em 26/10/2026): Pix = outbound_pix_payment + pix_id;
+   * boleto/conta = payment + operation_id. Outros tipos tentam variantes.
+   */
+  async comprovante(accountId, entrada) {
+    await this.garantirApi();
+    const det = await this.apiGet(`/api/v1/fma/accounts/${accountId}/statement/${entrada.id}`).catch(() => ({}));
+    const tipo = String(entrada.type || '').toLowerCase();
+    const tentativas = [];
+    const add = (rt, rid) => rid && !tentativas.some((t) => t.rt === rt && t.rid === rid) && tentativas.push({ rt, rid });
+    if (/pix/.test(tipo)) {
+      add('outbound_pix_payment', det.pix_id);
+      add('pix_payment', det.pix_id);
+    } else if (/payment|boleto|barcode/.test(tipo)) {
+      add('payment', det.operation_id || entrada.operation_id);
+      add('payment', det.id || entrada.id);
+      add('barcode_payment', det.operation_id || entrada.operation_id);
+    } else if (/internal/.test(tipo)) {
+      add('internal_transfer', det.transfer_id);
+      add('internal_transfer', det.operation_id || entrada.operation_id);
+      add('internal_transfer', det.id || entrada.id);
+    } else if (/external|ted/.test(tipo)) {
+      add('external_transfer', det.transfer_id);
+      add('external_transfer', det.operation_id || entrada.operation_id);
+      add('external_transfer', det.id || entrada.id);
+      add('ted', det.id || entrada.id);
+    } else {
+      add('internal_transfer', det.operation_id || entrada.operation_id);
+      add('internal_transfer', det.id || entrada.id);
+    }
+    const erros = [];
+    for (const t of tentativas) {
+      const r = await fetch(`${this.api.base}/api/v1/fma/accounts/${accountId}/statement/${entrada.id}/receipt`, {
+        method: 'POST',
+        headers: { ...this.api.headers, accept: 'application/json', 'content-type': 'application/json', 'user-agent': this.ua || 'Mozilla/5.0', origin: this.url, referer: `${this.url}/extrato` },
+        body: JSON.stringify({ resource_id: t.rid, resource_type: t.rt }),
+      });
+      if (r.status === 401) throw new Error('token do portal venceu ao baixar comprovante');
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (r.ok && buf.subarray(0, 4).toString() === '%PDF') return { buffer: buf, resourceType: t.rt, detalhe: det };
+      erros.push(`${t.rt}:${r.status}`);
+    }
+    throw new Error(`sem comprovante (${erros.join(', ') || 'nenhuma variante'})`);
   }
 
   /**

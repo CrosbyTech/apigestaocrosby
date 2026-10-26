@@ -19,6 +19,7 @@ import crypto from 'node:crypto';
 import supabase from '../config/supabase.js';
 import { lerExtratoBancario, BANCOS, FORMAS } from '../utils/extratosBancariosPdf.js';
 import { anexarConciliacoes } from './fluxoCaixaConciliacao.js';
+import { anexarComprovantes } from './comprovantesStone.js';
 
 const T = {
   contas: 'fluxo_caixa_contas',
@@ -579,6 +580,7 @@ export async function painel(f) {
 
   // conciliação: justificativas gravadas + transferências casadas (derivadas)
   await anexarConciliacoes(todos, { de: f.de, ate: f.ate });
+  await anexarComprovantes(todos);
 
   // filtros em memória (volume mensal é pequeno)
   const formas = f.formas?.length ? new Set(f.formas) : null;

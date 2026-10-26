@@ -227,6 +227,8 @@ export async function gravarSaldos(execucaoId, saldos, { data } = {}) {
       saldo: round2(s.saldo),
       saldo_bloqueado: s.bloqueado == null ? null : round2(s.bloqueado),
       saldo_agendado: s.agendado == null ? null : round2(s.agendado),
+      saldo_antecipavel: s.antecipavel == null ? null : round2(s.antecipavel),
+      antecipavel_detalhe: s.antecipavelDetalhe || null,
       capturado_em: agora(),
     }));
   if (!linhas.length) throw new Error('Nenhum saldo válido recebido.');
@@ -239,12 +241,13 @@ export async function gravarSaldos(execucaoId, saldos, { data } = {}) {
     .upsert({ banco: BANCO_SALDO_STONE, valor: total, updated_at: agora(), updated_by: 'bot-stone' }, { onConflict: 'banco' });
   if (e2) throw new Error(`saldo_bancario: ${e2.message}`);
 
+  const antecipavel = round2(linhas.reduce((a, l) => a + Number(l.saldo_antecipavel || 0), 0));
   if (execucaoId)
     await registrarLog(execucaoId, {
       nivel: 'ok',
-      msg: `Saldo STONE atualizado na Liberação de Pagamento: R$ ${total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} (${linhas.length} conta(s))`,
+      msg: `Saldo STONE atualizado na Liberação de Pagamento: R$ ${total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} (${linhas.length} conta(s))${antecipavel ? ` · antecipável R$ ${antecipavel.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : ''}`,
     });
-  return { data: dia, contas: linhas.length, total };
+  return { data: dia, contas: linhas.length, total, antecipavel };
 }
 
 export async function ultimosSaldos() {

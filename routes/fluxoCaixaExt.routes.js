@@ -27,6 +27,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { FORMAS } from '../utils/extratosBancariosPdf.js';
 import fluxo, { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 import conciliacao from '../services/fluxoCaixaConciliacao.js';
+import { urlComprovante } from '../services/comprovantesStone.js';
 
 const router = express.Router();
 
@@ -106,6 +107,18 @@ router.delete(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await fluxo.excluirImportacao(Number(req.params.id)), 'Importação removida');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// comprovante de saída baixado do portal Stone pelo bot (link temporário)
+router.get(
+  '/comprovantes/:id/arquivo',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await urlComprovante(Number(req.params.id)));
     } catch (e) {
       return tratar(res, e);
     }
