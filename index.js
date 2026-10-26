@@ -115,6 +115,7 @@ import dreAuditoriaRoutes from './routes/dreAuditoria.routes.js';
 import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarJojoGrupoJob } from './jobs/jojo-grupo.job.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
+import { iniciarTheoBot } from './services/theoBot.js';
 import contasReceberHojeRoutes, { iniciarJobHoje } from './routes/contasReceberHoje.routes.js';
 import receitaFinanceiraRoutes from './routes/receitaFinanceira.routes.js';
 import drylandBaixasRoutes from './routes/drylandBaixas.routes.js';
@@ -297,6 +298,7 @@ app.listen(PORT, async () => {
   iniciarJojoBot().catch((e) => console.warn(`[jojo] falha ao iniciar: ${e.message}`)); // JOJO — assistente fiscal no grupo do Contas a Pagar
   iniciarJojoGrupoJob(); // JOJO — job 5min que lê o grupo (sem IA): planilha de observações → cruzamento → SUBIR grava
   iniciarBruceBot().catch((e) => console.warn(`[bruce] falha ao iniciar: ${e.message}`)); // BRUCE — assistente do Contas a Receber no grupo BRUCE - CAR HEADCOACH
+  iniciarTheoBot().catch((e) => console.warn(`[theo] falha ao iniciar: ${e.message}`)); // THEO — assistente do Contas a Pagar (Wendy) no grupo THEO - CAP HEADCOACH
   iniciarJobHoje(); // tela Hoje do Contas a Receber — snapshot diário + na subida
   iniciarJobDrylandBaixas(); // ponte Dryland → Solicitações de Baixa (só liga com DRYLAND_COB_USUARIO/SENHA)
   iniciarJobBaixaAutomaticaPagarme(); // baixa automática Pagar.me — só com PAGARME_BAIXA_AUTO=on (OK do Yago)

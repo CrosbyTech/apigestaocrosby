@@ -18,6 +18,7 @@
 //   GET  /eventos?limit                  últimos eventos recebidos
 //   GET  /jojo/status · POST /jojo/simular     JOJO (assistente fiscal)           [simular: admin]
 //   GET  /bruce/status · POST /bruce/simular   BRUCE (assistente contas a receber)[simular: admin]
+//   GET  /theo/status · POST /theo/simular     THEO (assistente contas a pagar)    [simular: admin]
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
@@ -25,6 +26,7 @@ import { requireAuth, requireRole } from '../middlewares/auth.js';
 import * as wa from '../services/whatsappContasPagar.js';
 import * as jojo from '../services/jojoBot.js';
 import * as bruce from '../services/bruceBot.js';
+import * as theo from '../services/theoBot.js';
 
 const router = express.Router();
 
@@ -55,6 +57,7 @@ router.post(
     // Agentes: cada um responde só no seu grupo (assíncrono, não segura o webhook)
     jojo.processarEvento(ev).catch((e) => console.error(`[jojo] webhook: ${e.message}`));
     bruce.processarEvento(ev).catch((e) => console.error(`[bruce] webhook: ${e.message}`));
+    theo.processarEvento(ev).catch((e) => console.error(`[theo] webhook: ${e.message}`));
     return res.json({ success: true });
   },
 );
@@ -239,9 +242,10 @@ router.post(
   }),
 );
 
-// ─── JOJO (fiscal) e BRUCE (contas a receber) ──────────────────────────────
+// ─── JOJO (fiscal), BRUCE (contas a receber) e THEO (contas a pagar) ───────
 router.get('/jojo/status', (req, res) => successResponse(res, jojo.statusJojo()));
 router.get('/bruce/status', (req, res) => successResponse(res, bruce.statusBruce()));
+router.get('/theo/status', (req, res) => successResponse(res, theo.statusTheo()));
 
 // Simula uma mensagem do grupo (testes) — só admin. Responde DE VERDADE no grupo.
 function simular(agente, grupoDefault) {
@@ -264,6 +268,7 @@ function simular(agente, grupoDefault) {
 }
 router.post('/jojo/simular', admin, simular(jojo, process.env.JOJO_GRUPO_CHATID || '120363414933413909@g.us'));
 router.post('/bruce/simular', admin, simular(bruce, process.env.BRUCE_GRUPO_CHATID || '120363411253432671@g.us'));
+router.post('/theo/simular', admin, simular(theo, process.env.THEO_GRUPO_CHATID || '120363432001142287@g.us'));
 
 router.get('/eventos', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, EVENTOS_MAX);
