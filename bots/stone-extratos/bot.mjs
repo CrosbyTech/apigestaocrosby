@@ -136,6 +136,13 @@ async function executar(exec, { visivel = false } = {}) {
         saldos.push({ accountId: c.id, agencia: c.branch_code, conta: c.account_code, titular: c.owner_name, cnpj: soDigitos(c.owner_document), saldo: disp, bloqueado: saldo.blocked_balance == null ? null : saldo.blocked_balance / 100, agendado: saldo.scheduled_balance == null ? null : saldo.scheduled_balance / 100 });
         log(`${rot}: saldo R$ ${disp.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`);
       } catch (e) {
+        if (e.semPermissao) {
+          // o usuário logado não enxerga essa conta no portal: não é falha do bot
+          log(`${rot}: pulada — ${e.message}`, 'aviso');
+          resumo.avisos.push(`${c.account_code} (${c.owner_name || ''}): sem permissão do usuário logado`);
+          resumo.semPermissao = (resumo.semPermissao || 0) + 1;
+          continue;
+        }
         resumo.falhas += 1;
         log(`${rot}: saldo FALHOU — ${e.message}`, 'erro');
       }
@@ -144,14 +151,23 @@ async function executar(exec, { visivel = false } = {}) {
       let importado = false;
       if (pdfLigado) {
         try {
-          const vars = { de, ate, deBr: brDe(de), ateBr: brDe(ate), titular: c.owner_name || '', conta: c.account_code || '', agencia: c.branch_code || '', cnpj: soDigitos(c.owner_document) };
-          if (contas.length > 1 && cfg.pdf?.trocarConta?.length) await stone.roteiro(cfg.pdf.trocarConta, vars, { rotulo: `${rot} trocar conta` });
-          const baixado = await stone.roteiro(cfg.pdf.passos, vars, { rotulo: `${rot} PDF` });
-          if (!baixado) throw new Error('roteiro terminou sem download (falta o passo esperarDownload?)');
           const nome = `Stone_${soDigitos(c.account_code)}_${de}_${ate}.pdf`;
           const destino = path.join(dirs.downloads, nome);
-          fs.renameSync(baixado, destino);
-          log(`${rot}: PDF baixado (${(fs.statSync(destino).size / 1024).toFixed(0)} KB) → enviando ao HeadCoach…`);
+          if ((cfg.pdf?.modo || 'api') === 'api') {
+            // mesma chamada do botão "Baixar" do portal, sem clique nenhum
+            const buf = await stone.exportarPdf(c.id, { de, ate });
+            fs.writeFileSync(destino, buf);
+          } else {
+            // modo "roteiro": clica no portal seguindo config.json > pdf.passos
+            const cnpj = soDigitos(c.owner_document);
+            const cnpjFmt = cnpj.length === 14 ? cnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : cnpj.length === 11 ? cnpj.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4') : cnpj;
+            const vars = { de, ate, deBr: brDe(de), ateBr: brDe(ate), titular: c.owner_name || '', conta: c.account_code || '', agencia: c.branch_code || '', cnpj, cnpjFmt, contaId: c.id };
+            if (contas.length > 1 && cfg.pdf?.trocarConta?.length) await stone.roteiro(cfg.pdf.trocarConta, vars, { rotulo: `${rot} trocar conta` });
+            const baixado = await stone.roteiro(cfg.pdf.passos, vars, { rotulo: `${rot} PDF` });
+            if (!baixado) throw new Error('roteiro terminou sem download (falta o passo esperarDownload?)');
+            fs.renameSync(baixado, destino);
+          }
+          log(`${rot}: PDF gerado (${(fs.statSync(destino).size / 1024).toFixed(0)} KB) → enviando ao HeadCoach…`);
           const r = await hc.enviarPdf(execId, destino, { accountId: c.id, conta: c.account_code, agencia: c.branch_code, titular: c.owner_name, cnpj: soDigitos(c.owner_document), de, ate });
           if (r?.ok) {
             resumo.pdfs += 1;
@@ -161,6 +177,12 @@ async function executar(exec, { visivel = false } = {}) {
             throw new Error(`HeadCoach não importou o PDF: ${r?.erro || 'motivo desconhecido'}`);
           }
         } catch (e) {
+          if (e.semPermissao) {
+            log(`${rot}: pulada — ${e.message}`, 'aviso');
+            resumo.avisos.push(`${c.account_code} (${c.owner_name || ''}): sem permissão do usuário logado`);
+            resumo.semPermissao = (resumo.semPermissao || 0) + 1;
+            continue;
+          }
           log(`${rot}: PDF não saiu (${e.message}) — vou mandar o extrato pela API.`, 'aviso');
           resumo.avisos.push(`${c.account_code}: PDF falhou — ${e.message}`);
           if (/não achei|download não terminou/.test(e.message)) {

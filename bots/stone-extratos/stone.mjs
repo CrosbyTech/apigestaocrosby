@@ -54,6 +54,7 @@ export class Stone {
     const paginas = await this.browser.pages();
     this.page = paginas[0] || (await this.browser.newPage());
     this.page.setDefaultTimeout(30000);
+    this.ua = (await this.browser.userAgent()).replace(/HeadlessChrome/, 'Chrome');
     this.cdp = await this.page.createCDPSession();
     await this.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.dirs.downloads, eventsEnabled: true });
     this.downloads = new Map(); // guid → { nome, estado }
@@ -78,10 +79,18 @@ export class Stone {
   #observarRequisicao(req) {
     try {
       const u = req.url();
-      if (this.api || !this.apiRegex.test(u)) return;
+      if (!this.apiRegex.test(u)) return;
+      // conta que o portal está mostrando agora (as chamadas levam o id dela na URL)
+      const mConta = u.match(/\/accounts\/([0-9a-f]{8}-[0-9a-f-]{27})\//i);
+      if (mConta) this.contaAtual = mConta[1];
       const h = req.headers();
       const auth = h.authorization || h.Authorization;
       if (!auth) return;
+      if (this.api) {
+        // o portal renova o token sozinho (refresh-token): acompanha o mais recente
+        if (this.api.headers.authorization !== auth) this.api.headers.authorization = auth;
+        return;
+      }
       const headers = { authorization: auth };
       for (const [k, v] of Object.entries(h)) if (/^x-/i.test(k) && !/idempotency/i.test(k)) headers[k] = v;
       if (h.accept) headers.accept = h.accept;
@@ -147,21 +156,53 @@ export class Stone {
     return this.api;
   }
 
-  async apiGet(rota) {
+  async apiGet(rota, tentativa = 0) {
     await this.garantirApi();
     const url = /^https?:/i.test(rota) ? rota : `${this.api.base}${rota}`;
-    const r = await this.page.evaluate(
-      async (u, headers) => {
-        const resp = await fetch(u, { method: 'GET', headers, credentials: 'include' });
-        const texto = await resp.text();
-        return { status: resp.status, texto };
-      },
-      url,
-      this.api.headers,
-    );
-    if (r.status === 401 || r.status === 403) {
-      this.api = null; // token venceu: tenta recapturar na próxima
-      throw new Error(`API ${r.status} em ${rota} (token do portal expirou?)`);
+    let r = null;
+    // 1) direto do Node com o mesmo token (sem CORS, sem cookies)
+    try {
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers: { ...this.api.headers, accept: 'application/json', 'user-agent': this.ua || 'Mozilla/5.0', origin: this.url, referer: `${this.url}/` },
+      });
+      r = { status: resp.status, texto: await resp.text(), via: 'node' };
+    } catch (e) {
+      this.log(`API via Node falhou (${e.message}) — tentando pela página…`, 'aviso');
+    }
+    // 2) de dentro da página (mesma origem do portal), sem credentials para o CORS não barrar
+    if (!r || (r.status >= 400 && r.status !== 404)) {
+      try {
+        const rp = await this.page.evaluate(
+          async (u, headers) => {
+            const resp = await fetch(u, { method: 'GET', headers });
+            return { status: resp.status, texto: await resp.text() };
+          },
+          url,
+          this.api.headers,
+        );
+        if (!r || rp.status < r.status) r = { ...rp, via: 'pagina' };
+      } catch (e) {
+        if (!r) throw new Error(`API ${rota}: falhou pelo Node e pela página (${e.message})`);
+      }
+    }
+    if (!this.apiVia) {
+      this.apiVia = r.via;
+      this.log(`API respondendo via ${r.via === 'node' ? 'Node (token do portal)' : 'página'}`);
+    }
+    if (r.status === 401) {
+      if (tentativa >= 1) throw new Error(`API 401 em ${rota} mesmo depois de renovar o token (sessão do portal expirou? rode login.bat)`);
+      // token venceu: recarrega o portal para ele renovar e captura o novo
+      this.log('token do portal venceu — recarregando para renovar…', 'aviso');
+      this.api = null;
+      await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+      await this.garantirApi({ timeoutMs: 30000 });
+      return this.apiGet(rota, tentativa + 1);
+    }
+    if (r.status === 403) {
+      const e = new Error(`sem permissão nesta conta (API 403) — o usuário logado não tem acesso a ela no portal`);
+      e.semPermissao = true;
+      throw e;
     }
     if (r.status >= 400) throw new Error(`API ${r.status} em ${rota}: ${r.texto.slice(0, 200)}`);
     try {
@@ -189,22 +230,80 @@ export class Stone {
     return { balance: j.balance, blocked_balance: j.blocked_balance, scheduled_balance: j.scheduled_balance };
   }
 
-  /** Lançamentos do período (de/ate ISO, inclusivos) — pagina pelo cursor. */
+  /**
+   * Lançamentos do período (de/ate ISO, inclusivos) — pagina pelo cursor.
+   * Usa o endpoint "fma" (o mesmo do portal), que traz title/subtitle no
+   * formato do extrato ("NOME - Transferência | Pix"); se falhar, cai para o
+   * endpoint público. Deduplica por id (as páginas se sobrepõem).
+   */
   async extrato(accountId, { de, ate }) {
     const limite = this.cfg.stone?.limitePagina || 100;
     const ini = encodeURIComponent(`${de}T00:00:00-03:00`);
     const fim = encodeURIComponent(`${ate}T23:59:59-03:00`);
-    const entradas = [];
-    let after = null;
-    for (let pagina = 0; pagina < 200; pagina++) {
-      const rota = `/api/v1/accounts/${accountId}/statement?limit=${limite}&start_datetime=${ini}&end_datetime=${fim}${after ? `&after=${encodeURIComponent(after)}` : ''}`;
-      const j = await this.apiGet(rota);
-      const dados = Array.isArray(j) ? j : j?.data || [];
-      entradas.push(...dados);
-      after = j?.cursor?.after || null;
-      if (!after || dados.length < limite || !dados.length) break;
+    const bases = [`/api/v1/fma/accounts/${accountId}/statement`, `/api/v1/accounts/${accountId}/statement`];
+    let ultimoErro = null;
+    for (const basePath of bases) {
+      try {
+        const vistos = new Map();
+        let after = null;
+        for (let pagina = 0; pagina < 200; pagina++) {
+          const rota = `${basePath}?limit=${limite}&start_datetime=${ini}&end_datetime=${fim}${after ? `&after=${encodeURIComponent(after)}` : ''}`;
+          const j = await this.apiGet(rota);
+          const dados = Array.isArray(j) ? j : j?.data || [];
+          let novos = 0;
+          for (const e of dados) {
+            // depósito de boleto e a tarifa dele compartilham o mesmo id → chave composta
+            const k = `${e.id || e.created_at}|${e.type}|${e.amount}|${e.balance_after}`;
+            if (!vistos.has(k)) {
+              vistos.set(k, e);
+              novos += 1;
+            }
+          }
+          after = j?.cursor?.after || null;
+          if (!after || !dados.length || !novos) break;
+        }
+        return [...vistos.values()];
+      } catch (e) {
+        if (e.semPermissao) throw e;
+        ultimoErro = e;
+        this.log(`extrato por ${basePath.includes('/fma/') ? 'fma' : 'API pública'} falhou (${e.message})`, 'aviso');
+      }
     }
-    return entradas;
+    throw ultimoErro || new Error('extrato indisponível');
+  }
+
+  /**
+   * PDF oficial do extrato pela mesma chamada que o botão "Baixar" do portal
+   * faz: POST /api/v1/fma/accounts/:id/statement/export → bytes do PDF.
+   * Datas em UTC cobrindo o dia local inteiro (-03:00).
+   */
+  async exportarPdf(accountId, { de, ate }, tentativa = 0) {
+    await this.garantirApi();
+    const fimLocal = new Date(`${ate}T23:59:59.999-03:00`).toISOString();
+    const body = JSON.stringify({ resource_type: 'statement', resource_id: accountId, start_date: new Date(`${de}T00:00:00.000-03:00`).toISOString(), end_date: fimLocal, operation_type: [] });
+    const url = `${this.api.base}/api/v1/fma/accounts/${accountId}/statement/export`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { ...this.api.headers, accept: 'application/json', 'content-type': 'application/json', 'user-agent': this.ua || 'Mozilla/5.0', origin: this.url, referer: `${this.url}/extrato` },
+      body,
+    });
+    if (resp.status === 401 && tentativa < 1) {
+      this.log('token do portal venceu — recarregando para renovar…', 'aviso');
+      this.api = null;
+      await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+      await this.garantirApi({ timeoutMs: 30000 });
+      return this.exportarPdf(accountId, { de, ate }, tentativa + 1);
+    }
+    if (resp.status === 403) {
+      const e = new Error('sem permissão nesta conta (export 403)');
+      e.semPermissao = true;
+      throw e;
+    }
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const ct = resp.headers.get('content-type') || '';
+    if (resp.status >= 400) throw new Error(`export ${resp.status}: ${buf.toString('utf8').slice(0, 200)}`);
+    if (!/pdf/i.test(ct) && buf.subarray(0, 4).toString() !== '%PDF') throw new Error(`export não devolveu PDF (${ct}): ${buf.toString('utf8').slice(0, 120)}`);
+    return buf;
   }
 
   // ─── roteiro de cliques (PDF) ──────────────────────────────────────────────
@@ -233,14 +332,16 @@ export class Stone {
           };
           const cands = [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="link"], li, label, span, div, p')];
           for (const alvo of alvos) {
-            const a = norm(alvo);
-            if (!a) continue;
+            // "re:^...$" = expressão regular sobre o texto normalizado (minúsculo, sem acento)
+            const re = /^re:/.test(alvo) ? new RegExp(alvo.slice(3), 'i') : null;
+            const a = re ? null : norm(alvo);
+            if (!re && !a) continue;
             let melhor = null;
             for (const el of cands) {
               if (!visivel(el)) continue;
               const t = norm(el.innerText || el.textContent);
               if (!t || t.length > 120) continue;
-              const bate = exato ? t === a : t === a || t.startsWith(a) || t.includes(a);
+              const bate = re ? re.test(t) : exato ? t === a : t === a || t.startsWith(a) || t.includes(a);
               if (!bate) continue;
               // prefere o elemento mais específico (menor texto) e nativamente clicável
               const peso = (t === a ? 0 : 10) + t.length / 100 + (/^(button|a)$/i.test(el.tagName) || el.getAttribute('role') ? 0 : 5);
@@ -306,6 +407,59 @@ export class Stone {
     throw new Error(`não achei campo com rótulo ${alvos.map((t) => `"${t}"`).join(' / ')}`);
   }
 
+  /** true se algum elemento visível tem esse texto (mesma regra do clicarTexto, sem clicar). */
+  async textoVisivel(textos) {
+    const alvos = (Array.isArray(textos) ? textos : [textos]).map((t) => String(t).trim()).filter(Boolean);
+    return this.page.evaluate((alvos) => {
+      const norm = (s) =>
+        String(s || '')
+          .normalize('NFD')
+          .replace(/[̀-ͯ]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+      const els = [...document.querySelectorAll('button, a, [role], li, label, span, div, p, h1, h2, h3')].filter((el) => el.getBoundingClientRect().width > 0);
+      return alvos.some((alvo) => {
+        const re = /^re:/.test(alvo) ? new RegExp(alvo.slice(3), 'i') : null;
+        const a = norm(alvo);
+        return els.some((el) => {
+          const t = norm(el.innerText || el.textContent);
+          return t && t.length <= 160 && (re ? re.test(t) : t.includes(a));
+        });
+      });
+    }, alvos);
+  }
+
+  /** Escolhe a opção de um <select> pelo texto da opção (dispara change para o React). */
+  async selecionar(opcaoTexto, { timeoutMs = 6000 } = {}) {
+    const fim = Date.now() + timeoutMs;
+    const alvo = String(opcaoTexto).trim();
+    while (Date.now() < fim) {
+      const ok = await this.page.evaluate((alvo) => {
+        const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const a = norm(alvo);
+        for (const sel of document.querySelectorAll('select')) {
+          if (sel.getBoundingClientRect().width === 0) continue;
+          const op = [...sel.options].find((o) => norm(o.textContent) === a || norm(o.textContent).includes(a));
+          if (!op) continue;
+          const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+          setter.call(sel, op.value);
+          sel.dispatchEvent(new Event('input', { bubbles: true }));
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        return false;
+      }, alvo);
+      if (ok) {
+        this.log(`selecionei "${alvo}"`);
+        await dormir(500);
+        return true;
+      }
+      await dormir(300);
+    }
+    throw new Error(`não achei um <select> com a opção "${alvo}"`);
+  }
+
   async esperarDownload({ timeoutSeg = 90, antes = new Set() } = {}) {
     const fim = Date.now() + timeoutSeg * 1000;
     while (Date.now() < fim) {
@@ -333,7 +487,18 @@ export class Stone {
       const p = passos[i];
       const desc = `${rotulo} passo ${i + 1}/${passos.length} (${p.acao})`;
       try {
-        if (p.acao === 'ir') {
+        if (p.aMenosQue && (await this.textoVisivel((Array.isArray(p.aMenosQue) ? p.aMenosQue : [p.aMenosQue]).map((t) => this.#substituir(t, vars))))) {
+          this.log(`${desc}: pulado (já está em "${this.#substituir(Array.isArray(p.aMenosQue) ? p.aMenosQue[0] : p.aMenosQue, vars)}")`);
+          continue;
+        }
+        if (p.acao === 'selecionar') {
+          await this.selecionar(this.#substituir(p.opcao, vars), { timeoutMs: p.timeoutMs || 6000 });
+        } else if (p.acao === 'conferirConta') {
+          // o portal precisa estar mostrando a conta certa antes de exportar
+          const fim = Date.now() + (p.timeoutMs || 15000);
+          while (this.contaAtual !== vars.contaId && Date.now() < fim) await dormir(500);
+          if (this.contaAtual !== vars.contaId) throw new Error(`o portal está em outra conta (${this.contaAtual || '?'}), não na ${vars.contaId}`);
+        } else if (p.acao === 'ir') {
           await this.page.goto(this.#substituir(p.url, vars), { waitUntil: 'networkidle2', timeout: 60000 });
           await this.#fecharCookies();
         } else if (p.acao === 'clicar') {

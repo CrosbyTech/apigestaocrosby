@@ -228,7 +228,23 @@ async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPa
   const fim = extrato.periodo.fim || extrato.periodo.ultimoLancamento;
 
   // reimportação: o PDF é a fonte da verdade do período que cobre
+  // edições manuais (fornecedor/observação) dos lançamentos que vão ser
+  // substituídos são reaplicadas nos novos pela chave data|valor|memo
+  const manuais = new Map();
   if (inicio && fim) {
+    const { data: antigos, error: eAnt } = await supabase
+      .from(T.lanc)
+      .select('data,valor,memo,fornecedor,observacao')
+      .eq('conta_id', conta.id)
+      .gte('data', inicio)
+      .lte('data', fim)
+      .or('fornecedor.not.is.null,observacao.not.is.null');
+    lancar(eAnt);
+    for (const a of antigos || []) {
+      const k = `${a.data}|${Number(a.valor)}|${a.memo || ''}`;
+      if (!manuais.has(k)) manuais.set(k, []);
+      manuais.get(k).push({ fornecedor: a.fornecedor, observacao: a.observacao });
+    }
     const del = await supabase.from(T.lanc).delete().eq('conta_id', conta.id).gte('data', inicio).lte('data', fim);
     lancar(del.error);
     // importações anteriores da mesma conta totalmente cobertas por este período ficam obsoletas
@@ -278,6 +294,11 @@ async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPa
     loja: l.loja || null,
     saldo_apos: l.saldoApos,
     pagina: l.pagina,
+    ...(() => {
+      const fila = manuais.get(`${l.data}|${Number(l.valor)}|${l.memo || ''}`);
+      const m = fila?.shift();
+      return m ? { fornecedor: m.fornecedor, observacao: m.observacao } : {};
+    })(),
   }));
   for (let i = 0; i < rows.length; i += 500) {
     const ins = await supabase.from(T.lanc).insert(rows.slice(i, i + 500));

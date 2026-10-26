@@ -14,19 +14,22 @@
   },
   "pdf": {
     "ativo": true,
+    "modo": "api",
     "timeoutDownloadSeg": 90,
+    "_comentario": "modo 'api' = mesma chamada do botão Baixar do portal (POST .../statement/export), sem clique. modo 'roteiro' = clica no portal seguindo trocarConta + passos (reserva, caso a Stone mude a API).",
     "trocarConta": [
-      { "acao": "ir", "url": "https://conta.stone.com.br" },
-      { "acao": "clicar", "texto": ["Trocar conta", "Trocar de conta", "Alterar conta", "Minhas contas", "Contas"] },
-      { "acao": "clicar", "texto": ["{titular}", "{conta}"] }
+      { "acao": "ir", "url": "https://conta.stone.com.br/home" },
+      { "acao": "clicar", "texto": ["Voltar"], "exato": true, "opcional": true, "timeoutMs": 1500 },
+      { "acao": "clicar", "texto": ["re:(\\d{2}\\.\\d{3}\\.\\d{3}/\\d{4}-\\d{2}|\\d{3}\\.\\d{3}\\.\\d{3}-\\d{2})$"], "aMenosQue": "{cnpjFmt} Ativa" },
+      { "acao": "clicar", "texto": ["{cnpjFmt}"], "aMenosQue": "{cnpjFmt} Ativa" }
     ],
     "passos": [
-      { "acao": "clicar", "texto": ["Extrato"], "opcional": true },
-      { "acao": "clicar", "texto": ["Exportar", "Exportar extrato", "Baixar extrato", "Download"] },
-      { "acao": "preencher", "rotulo": ["Data inicial", "Início", "De"], "valor": "{deBr}", "opcional": true },
-      { "acao": "preencher", "rotulo": ["Data final", "Fim", "Até"], "valor": "{ateBr}", "opcional": true },
+      { "acao": "clicar", "texto": ["Extrato"], "exato": true },
+      { "acao": "conferirConta" },
+      { "acao": "clicar", "texto": ["Baixar extrato"], "exato": true },
+      { "acao": "selecionar", "opcao": "Extrato da conta" },
       { "acao": "clicar", "texto": ["PDF"] },
-      { "acao": "clicar", "texto": ["Exportar", "Baixar", "Confirmar", "Gerar"], "opcional": true },
+      { "acao": "clicar", "texto": ["Baixar"], "exato": true },
       { "acao": "esperarDownload" }
     ]
   }

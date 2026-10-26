@@ -257,6 +257,12 @@ export function classificarStoneNormalizado(l) {
     let m;
     if ((m = up.match(/^(.*?)\s*-\s*(CREDITO|DEBITO)\s*\|\s*PRE-?PAGO$/))) {
       forma = FORMAS.COMPRA_CARTAO; categoria = 'cartao_compra'; descricao = 'COMPRA CARTÃO STONE (PRÉ-PAGO)'; nome = m[1].trim();
+    } else if ((m = up.match(/^(.*?)\s*-\s*ESTORNO\s*\|\s*CARTAO$/))) {
+      forma = FORMAS.COMPRA_CARTAO; categoria = 'cartao_compra'; descricao = 'ESTORNO COMPRA CARTÃO STONE'; nome = m[1].trim();
+    } else if (/^COBRANCA DE TARIFA|\s-\s*TARIFA\s*\|/.test(up)) {
+      forma = FORMAS.TARIFA; categoria = 'tarifa'; descricao = `TARIFA STONE${(m = up.match(/TARIFA\s*\|\s*(.+)$/)) ? ` ${m[1].trim()}` : ''}`; nome = 'STONE';
+    } else if (/^MENSALIDADE/.test(up)) {
+      forma = FORMAS.TARIFA; categoria = 'tarifa'; descricao = 'MENSALIDADE MAQUININHA STONE'; nome = 'STONE';
     } else if (/DINHEIRO RESGATADO|MAIS LIMITE|EMPRESTIMO|CAPITAL DE GIRO/.test(up)) {
       forma = FORMAS.EMPRESTIMO; categoria = 'emprestimo'; descricao = l.valor < 0 ? 'PAGAMENTO LIMITE/EMPRÉSTIMO STONE' : 'RESGATE LIMITE/EMPRÉSTIMO STONE'; nome = 'STONE';
     } else if (/RENDIMENTO|APLICACAO|RESGATE/.test(up)) {
