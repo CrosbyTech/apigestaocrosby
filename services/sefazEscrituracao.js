@@ -2,7 +2,7 @@
 // No TOTVS, a nota escriturada e a que tem fatura vinculada — quem esta em
 // manifestacoes sem fatura ainda nao foi escriturada.
 import supabase from '../config/supabase.js';
-import { parseCsvManifestacoes } from '../utils/manifestacaoCsv.js';
+import { parseArquivoManifestacoes } from '../utils/manifestacaoCsv.js';
 
 const nfDaChave = (chave) =>
   chave && chave.length === 44 ? parseInt(chave.slice(25, 34), 10) : null;
@@ -25,10 +25,19 @@ async function carregarNotas() {
   return todas;
 }
 
-export async function importarEscrituradas(textoCsv) {
-  const { registros, ignoradas } = parseCsvManifestacoes(textoCsv);
+// `arquivo` e o Buffer enviado (CSV ; do TOTVS ou Excel .xlsx/.xls salvo a
+// partir dele). Texto puro tambem e aceito (compatibilidade).
+export async function importarEscrituradas(arquivo, nomeArquivo = '') {
+  const buffer = Buffer.isBuffer(arquivo) ? arquivo : Buffer.from(String(arquivo ?? ''), 'latin1');
+  const { registros, ignoradas, formato } = parseArquivoManifestacoes(buffer, nomeArquivo);
   if (registros.length === 0) {
-    return { ok: false, erro: 'Nenhuma linha valida no arquivo' };
+    return {
+      ok: false,
+      erro:
+        formato === 'xlsx'
+          ? 'Nenhuma linha valida na planilha: confira se a 1a aba tem as 14 colunas do export do TOTVS (Cod. Empresa ... Dt. Fatura)'
+          : 'Nenhuma linha valida no arquivo: envie o export do TOTVS (CSV separado por ; ou Excel .xlsx)',
+    };
   }
 
   const notas = await carregarNotas();

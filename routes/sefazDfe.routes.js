@@ -140,9 +140,8 @@ router.post(
     if (!req.file) {
       return errorResponse(res, 'Envie o arquivo no campo "arquivo"', 400, 'ARQUIVO_AUSENTE');
     }
-    // O export do TOTVS vem em ISO-8859-1
-    const texto = req.file.buffer.toString('latin1');
-    const r = await importarEscrituradas(texto);
+    // CSV (;) ou Excel (.xlsx/.xls) — a deteccao e pelo conteudo
+    const r = await importarEscrituradas(req.file.buffer, req.file.originalname);
     if (!r.ok) return errorResponse(res, r.erro, 400, 'CSV_INVALIDO');
     successResponse(res, r.resumo, 'Escrituracao atualizada');
   }),
