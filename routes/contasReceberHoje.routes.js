@@ -312,7 +312,7 @@ async function pendenciasHeadCoach() {
   // João (23/10/2026): separar o que precisa baixar por origem — Pix (BlueCard)
   // e boleto Pagar.me recebido — e mostrar também os boletos pagos que ainda
   // não creditaram (não dá pra baixar antes do recebimento).
-  const pix = baixas.filter((x) => x.origem === 'bluecard_pagarme');
+  const pix = baixas.filter((x) => x.origem === 'bluecard_pagarme' || x.origem === 'pix_pagarme_tadeu');
   const boletoRecebido = baixas.filter((x) => x.origem === 'pagarme_boleto');
   let boletosAguardandoCredito = { n: 0, valor: 0 };
   try {
@@ -430,7 +430,7 @@ async function montar() {
   if (pend?.pixParaBaixar?.n) {
     demandas.push({
       chave: 'pix_baixar',
-      titulo: 'Pix recebidos (BlueCard) a baixar',
+      titulo: 'Pix recebidos (BlueCard + Pix do Tadeu) a baixar',
       descricao: `${pend.pixParaBaixar.n} pagamento(s) via Pix, R$ ${pend.pixParaBaixar.valor.toFixed(2)} — baixar como cartão débito PAGARME na data do pagamento.`,
       oQueFazer: 'Solicitações de Baixa → caixa "Pix a baixar" → marcar → Processar → Cartão de Débito → Confirmar (cada uma sai na sua data).',
       qtd: pend.pixParaBaixar.n,
