@@ -299,8 +299,8 @@ export function status() {
   return { contas: contasInfo().contas, dias: DIAS_PADRAO, intervalo_min: INTERVALO_MS / 60000, ultima };
 }
 export function iniciarJobPixTadeu() {
-  if (String(process.env.PIX_TADEU_JOB || '').toLowerCase() !== 'on') {
-    console.log('ℹ️ [pix-tadeu] job desligado (PIX_TADEU_JOB≠on) — use GET /api/pix-tadeu/previa e POST /sincronizar');
+  if (String(process.env.PIX_TADEU_JOB || 'on').toLowerCase() === 'off') {
+    console.log('ℹ️ [pix-tadeu] job desligado (PIX_TADEU_JOB=off) — use GET /api/pix-tadeu/previa e POST /sincronizar');
     return;
   }
   if (!contasInfo().contas.some((c) => c.configurada)) {
