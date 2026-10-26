@@ -397,6 +397,10 @@ function filtrarElegiveis(faturas, hoje, alvoD3) {
 // PLANNER — monta a fila do dia (idempotente via UNIQUE)
 // ─────────────────────────────────────────────────────────────────────────────
 export async function planejarEnvios({ dryRun = false } = {}) {
+  if (!ENABLED && !dryRun) {
+    console.log('⛔ [boleto-cobranca] planejarEnvios ignorado — automação desligada (KILL_SWITCH)');
+    return { desligado: true, inseridos: 0 };
+  }
   const hoje = ymd();
   const alvoD3 = addDays(hoje, 3);
   const t0 = Date.now();
