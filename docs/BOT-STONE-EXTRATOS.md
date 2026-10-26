@@ -73,6 +73,35 @@ traz agência `0001` e conta `21774800` + DV `3`; a API traz `branch_code "1"` e
 para cair na MESMA conta. Reimportar preserva `fornecedor`/`observacao`
 editados à mão (chave data|valor|memo).
 
+## Pagar.me (adquirente / subconta da Stone)
+
+Boletos e vendas online caem na Pagar.me e o financeiro transfere todo dia para
+a Stone. Não precisa de bot: a API core/v5 responde com as chaves que o
+HeadCoach já tem (`PAGARME_SECRET_KEY` = FERREIRA, `PAGARME_SECRET_KEY_FABIO` =
+FA MODA, as duas só no Render; a do `.env` local está vencida). Tudo em
+`services/pagarmeConta.js`, só leitura:
+
+| Chamada | Uso |
+| --- | --- |
+| `GET /recipients?size=10` | recebedor da conta (id `re_…`, nome, CNPJ) |
+| `GET /recipients/:id/balance` | `available_amount` (disponível), `waiting_funds_amount` (a receber), `transferred_amount` — centavos |
+| `GET /payables?payment_date_since&payment_date_until&size=100&cursor` | recebíveis creditados (`status = paid`): entradas, estornos, chargebacks, com `fee`/`anticipation_fee` |
+| `GET /transfers?…` → fallback `GET /recipients/:id/withdrawals` | saques para a conta bancária (saídas) |
+
+A `/balance/operations` (extrato antigo) está em descontinuação, por isso o
+extrato é montado por payables + transfers (`utils/extratoPagarmeApi.js`, mesmas
+formas/categorias da planilha `.xlsx`, conta `PAGARME CROSBY` / `PAGARME FABIO`).
+O saque entra como saída TED com contraparte = a própria empresa (CNPJ do
+recebedor) para o casamento automático com a entrada na conta Stone.
+
+Grava `stone_bot_saldos` (banco `PAGARME`, colunas `saldo` = disponível e
+`saldo_a_receber`) e duas linhas em `saldo_bancario`: `PAGARME` (disponível) e
+`PAGARME A RECEBER` — as duas somam no saldo do dia da Liberação (lista
+`BANCOS_SALDO` do front). Dispara: fim da execução do bot (`POST
+/agente/execucoes/:id/pagarme`, log junto), botão "Atualizar Pagar.me agora" na
+aba Bot Stone (`POST /api/stone-bot/pagarme/executar`) e cron 07:20 no servidor
+(`jobs/pagarme-saldo.job.js`, `PAGARME_SALDO_CRON`, `PAGARME_SALDO_JOB_ENABLED`).
+
 ## Saldo na Liberação de Pagamento
 
 `saldo_bancario` tem uma linha por banco (`STONE`, `SICREDI CROSBY`, …) e a
