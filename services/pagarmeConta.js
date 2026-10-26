@@ -84,8 +84,10 @@ export async function saldosPagarme() {
 /** Lista paginada (cursor forward_cursor ou page) com dedupe por id. */
 async function listarTudo(contaId, path, { max = 60 } = {}) {
   const itens = new Map();
+  const meta = { paginas: 0, cursores: 0, repetidas: 0, chavesPaging: null };
   let cursor = null;
   for (let pagina = 1; pagina <= max; pagina++) {
+    meta.paginas += 1;
     const sep = path.includes('?') ? '&' : '?';
     const q = `${path}${sep}size=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : `&page=${pagina}`}`;
     const r = await pagarme('GET', q, null, contaId);
@@ -95,6 +97,7 @@ async function listarTudo(contaId, path, { max = 60 } = {}) {
       throw e;
     }
     const lote = Array.isArray(r.data?.data) ? r.data.data : Array.isArray(r.data) ? r.data : [];
+    if (!meta.chavesPaging && r.data?.paging) meta.chavesPaging = Object.keys(r.data.paging).join(',');
     let novos = 0;
     for (const x of lote) {
       const k = String(x.id ?? JSON.stringify(x).slice(0, 80));
@@ -103,16 +106,21 @@ async function listarTudo(contaId, path, { max = 60 } = {}) {
         novos += 1;
       }
     }
+    if (!novos && lote.length) meta.repetidas += 1;
     if (!lote.length || !novos) break;
     const next = r.data?.paging?.forward_cursor || r.data?.paging?.next_cursor || null;
     if (next) {
+      meta.cursores += 1;
       cursor = next;
       continue;
     }
     if (lote.length < 100 || cursor) break;
   }
-  return [...itens.values()];
+  const lista = [...itens.values()];
+  lista.meta = meta;
+  return lista;
 }
+const resumoMeta = (lista) => (lista.meta ? `${lista.meta.paginas} pág${lista.meta.cursores ? `, cursor ${lista.meta.cursores}x` : ''}${lista.meta.repetidas ? ', página repetida' : ''}${lista.meta.chavesPaging ? ` [paging: ${lista.meta.chavesPaging}]` : ''}` : '');
 
 const dentro = (iso, de, ate) => {
   const d = String(iso || '').slice(0, 10);
@@ -161,7 +169,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
       },
     });
   }
-  fontes.push(`payables ${pagos}/${payables.length}`);
+  fontes.push(`payables ${pagos}/${payables.length} (${resumoMeta(payables)})`);
 
   // 2) saques / transferências para a conta bancária
   let saidas = [];
@@ -183,6 +191,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
     }
   }
   if (!origemSaida) throw new Error(`saques indisponíveis — ${errosSaida.join(' | ')}`);
+  if (errosSaida.length) fontes.push(`saídas: ${errosSaida.join(' | ')}`);
   let saquesNoPeriodo = 0;
   for (const s of saidas) {
     const status = String(s.status || '').toLowerCase();
@@ -199,7 +208,7 @@ export async function extratoPagarme(contaId, { de, ate }) {
       movement_object: { object: 'transfer', id: s.id, type: 'transfer', status, bank_account: s.bank_account || null, description: `Saque ${status}` },
     });
   }
-  fontes.push(`${origemSaida} ${saquesNoPeriodo}/${saidas.length}`);
+  fontes.push(`${origemSaida} ${saquesNoPeriodo}/${saidas.length} (${resumoMeta(saidas)})`);
 
   return { recebedor: rec, operacoes, fontes };
 }

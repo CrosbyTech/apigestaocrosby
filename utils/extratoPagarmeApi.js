@@ -69,7 +69,7 @@ export function classificarOperacaoPagarme(op, valor) {
     categoria = 'antecipacao';
     tipoTxt = 'Liquidação';
     descTxt = bandeira || metodoTxt || 'Antecipação';
-    descricao = `ANTECIPAÇÃO ${bandeira || metodoTxt || ''}`.trim();
+    descricao = semAcento(`ANTECIPAÇÃO ${bandeira || (metodoTxt ? `CARTÃO ${metodoTxt}` : '')}`).toUpperCase().trim();
   } else if (metodo === 'pix') {
     forma = F.PIX;
     categoria = 'pix';
@@ -121,7 +121,7 @@ export function extratoPagarmeDaApi({ token, recebedor, operacoes, saldo, period
     if (bruto && bruto !== valor) memoPartes.push(`bruto ${bruto.toFixed(2)}`);
     if (taxa) memoPartes.push(`taxa ${taxa.toFixed(2)}`);
     const mo = op.movement_object || {};
-    if (mo.installment) memoPartes.push(`parcela ${mo.installment}`);
+    if (Number(mo.installment) > 0) memoPartes.push(`parcela ${mo.installment}`);
     const saqueProprio = cls.categoria === 'transferencia' && valor < 0;
     lancamentos.push({
       pagina: null,
