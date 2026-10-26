@@ -120,6 +120,8 @@ import drylandBaixasRoutes from './routes/drylandBaixas.routes.js';
 import { iniciarJobDrylandBaixas } from './services/drylandBaixas.js';
 import baixaAutomaticaPagarmeRoutes from './routes/baixaAutomaticaPagarme.routes.js';
 import { iniciarJobBaixaAutomaticaPagarme } from './services/baixaAutomaticaPagarme.js';
+import conferenciaBaixasRoutes from './routes/conferenciaBaixas.routes.js';
+import { iniciarJobConferenciaBaixas } from './services/conferenciaSolicitacoesTotvs.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -221,6 +223,7 @@ app.use('/api/contas-receber', receitaFinanceiraRoutes); // Contas a Receber —
 app.use('/api/contas-receber', contasReceberHojeRoutes); // Contas a Receber — tela Hoje (entrou / vai entrar / precisa de você)
 app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa do link do Dryland → aba Solicitações de Baixa (ponte, precisa de DRYLAND_COB_*)
 app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automática Pagar.me (cartão débito PAGARME) — status/prévia/executar; liga com PAGARME_BAIXA_AUTO=on
+app.use('/api/conferencia-baixas', conferenciaBaixasRoutes); // Solicitações de Baixa × TOTVS: baixadas na mão viram processadas, desfeitas voltam a pendentes
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
 app.use('/api/dre-auditoria', dreAuditoriaRoutes); // DRE — auditoria (Contratos PJ do Dryland × DRE Analítica), só leitura
@@ -287,6 +290,7 @@ app.listen(PORT, async () => {
   iniciarJobHoje(); // tela Hoje do Contas a Receber — snapshot diário + na subida
   iniciarJobDrylandBaixas(); // ponte Dryland → Solicitações de Baixa (só liga com DRYLAND_COB_USUARIO/SENHA)
   iniciarJobBaixaAutomaticaPagarme(); // baixa automática Pagar.me — só com PAGARME_BAIXA_AUTO=on (OK do Yago)
+  iniciarJobConferenciaBaixas(); // conferência bidirecional das Solicitações de Baixa com o TOTVS (30 min)
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
