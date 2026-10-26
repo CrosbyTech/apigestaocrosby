@@ -35,9 +35,14 @@ import { listUazapiInstancesRaw } from '../config/uazapi.js';
 // ─── Config ──────────────────────────────────────────────────────────────────
 const UAZ_BASE = process.env.UAZAPI_BASE_URL || '';
 const INSTANCE = process.env.UAZAPI_COBRANCA_INSTANCE || 'cobranca';
+// ⛔ KILL SWITCH (26/10/2026): automação de cobrança DESLIGADA a pedido do Yago.
+// Enquanto for `true`, o job NÃO agenda, NÃO planeja e NÃO envia nada,
+// independentemente de BOLETO_COBRANCA_ENABLED no Render.
+const KILL_SWITCH = true;
 const ENABLED =
+  !KILL_SWITCH &&
   String(process.env.BOLETO_COBRANCA_ENABLED || 'false').toLowerCase() ===
-  'true';
+    'true';
 const REMETENTE = process.env.BOLETO_COBRANCA_REMETENTE || 'Grupo Crosby';
 const TZ = process.env.BOLETO_COBRANCA_TZ || 'America/Sao_Paulo';
 // TRAVA DE TESTE: se definido, TODOS os envios são redirecionados para este
