@@ -67,7 +67,8 @@ async function clientesPorCanal() {
   for (const c of CANAIS) {
     try {
       const json = await getInterno(c.rota);
-      const lista = Array.isArray(json.data) ? json.data : json.data?.codes || json.data?.lista || [];
+      // reseller-clients devolve { data: { data: [...], meta } }; os outros, { data: [...] }
+      const lista = Array.isArray(json.data) ? json.data : Array.isArray(json.data?.data) ? json.data.data : json.data?.codes || json.data?.lista || [];
       let n = 0;
       for (const item of lista) {
         const code = Number(typeof item === 'object' ? item.code : item);
