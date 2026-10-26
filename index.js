@@ -124,6 +124,9 @@ import { iniciarJobBaixaAutomaticaPagarme } from './services/baixaAutomaticaPaga
 import conferenciaBaixasRoutes from './routes/conferenciaBaixas.routes.js';
 import { iniciarJobConferenciaBaixas } from './services/conferenciaSolicitacoesTotvs.js';
 import pixTadeuRoutes from './routes/pixTadeu.routes.js';
+import baixaLotesRoutes from './routes/baixaLotes.routes.js';
+import inadimplenciaMensalRoutes from './routes/inadimplenciaMensal.routes.js';
+import { iniciarJobInadimplenciaMensal } from './services/inadimplenciaMensal.js';
 import { iniciarJobPixTadeu } from './services/pixTadeuPagarme.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
@@ -228,6 +231,8 @@ app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa 
 app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automática Pagar.me (cartão débito PAGARME) — status/prévia/executar; liga com PAGARME_BAIXA_AUTO=on
 app.use('/api/conferencia-baixas', conferenciaBaixasRoutes); // Solicitações de Baixa × TOTVS: baixadas na mão viram processadas, desfeitas voltam a pendentes
 app.use('/api/pix-tadeu', pixTadeuRoutes); // Pix recebidos na Pagar.me fora do HeadCoach (links/Gerador do Dryland) → Solicitações de Baixa
+app.use('/api/baixa-lotes', baixaLotesRoutes); // histórico dos lotes de baixa (Solicitações de Baixa → TOTVS)
+app.use('/api/inadimplencia', inadimplenciaMensalRoutes); // inadimplência mensal (>60 dias) — snapshot diário
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
 app.use('/api/dre-auditoria', dreAuditoriaRoutes); // DRE — auditoria (Contratos PJ do Dryland × DRE Analítica), só leitura
@@ -297,6 +302,7 @@ app.listen(PORT, async () => {
   iniciarJobBaixaAutomaticaPagarme(); // baixa automática Pagar.me — só com PAGARME_BAIXA_AUTO=on (OK do Yago)
   iniciarJobConferenciaBaixas(); // conferência bidirecional das Solicitações de Baixa com o TOTVS (30 min)
   iniciarJobPixTadeu(); // só com PIX_TADEU_JOB=on (parser do pedido a confirmar em produção)
+  iniciarJobInadimplenciaMensal(); // série mensal de inadimplência (>60 dias): na subida + diário
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
