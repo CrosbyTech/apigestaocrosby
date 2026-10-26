@@ -14,7 +14,7 @@ import { postTotvs } from './bluecardLimite.js';
 
 const INTERVALO_MS = Number(process.env.CONFERENCIA_BAIXAS_INTERVALO_MIN || 30) * 60 * 1000;
 const DIAS_PROCESSADAS = Number(process.env.CONFERENCIA_BAIXAS_DIAS || 45);
-const AUTOR = 'conferência TOTVS';
+const AUTOR = 'conferência TOTVS'; // só na observação (processado_por é UUID)
 const agoraBR = () => new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }).slice(0, 16);
 
 async function situacaoTitulo(s) {
@@ -52,11 +52,12 @@ export async function conferir({ limite = 400 } = {}) {
       const t = await situacaoTitulo(s);
       resumo.conferidas++;
       if (t.situacao === 'baixado') {
-        await supabase
+        // processado_por é UUID — o autor vai na observação (gravar texto aqui falhava em silêncio)
+        const { error: e1 } = await supabase
           .from('solicitacoes_baixa')
           .update({
             status: 'processada',
-            processado_por: AUTOR,
+            processado_por: null,
             processado_em: agora,
             forma_pagamento: 'cartao_debito',
             observacao: `${s.observacao || ''} [${agoraBR()}: título já BAIXADO no TOTVS em ${t.em} (liq. emp. ${t.empLiq ?? '?'}, usuário ${t.user ?? '?'}) — marcada como processada pela conferência]`.trim(),
@@ -64,6 +65,7 @@ export async function conferir({ limite = 400 } = {}) {
           })
           .eq('id', s.id)
           .eq('status', 'pendente');
+        if (e1) throw new Error(e1.message);
         resumo.viraram_processadas++;
         resumo.detalhes.push({ titulo: `${s.cd_empresa}-${s.nr_fat}/${s.nr_parcela}`, cliente: s.nm_cliente, valor: Number(s.vl_fatura), de: 'pendente', para: 'processada', em: t.em });
       } else if (t.situacao === 'nao_encontrado') resumo.nao_encontradas++;
@@ -77,7 +79,7 @@ export async function conferir({ limite = 400 } = {}) {
       const t = await situacaoTitulo(s);
       resumo.conferidas++;
       if (t.situacao === 'aberto') {
-        await supabase
+        const { error: e2 } = await supabase
           .from('solicitacoes_baixa')
           .update({
             status: 'pendente',
@@ -88,6 +90,7 @@ export async function conferir({ limite = 400 } = {}) {
           })
           .eq('id', s.id)
           .eq('status', 'processada');
+        if (e2) throw new Error(e2.message);
         resumo.voltaram_pendentes++;
         resumo.detalhes.push({ titulo: `${s.cd_empresa}-${s.nr_fat}/${s.nr_parcela}`, cliente: s.nm_cliente, valor: Number(s.vl_fatura), de: 'processada', para: 'pendente' });
       }
