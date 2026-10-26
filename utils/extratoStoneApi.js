@@ -56,11 +56,19 @@ export function memoDaEntrada(e) {
   if (title) return subtitle ? `${title} - ${subtitle}` : title;
   // a descrição do portal já costuma vir no formato "NOME - Transferência | Pix"
   if (/\s-\s.*\|/.test(desc) || /^recebimento vendas/i.test(desc) || /^tarifa do boleto$/i.test(desc) || /^dep[óo]sito por boleto$/i.test(desc)) return desc;
-  if (tipo === 'instant_payment') return `${nome || desc || 'PIX'} - ${/devolu/i.test(desc) ? 'Devolução' : 'Transferência'} | Pix`;
-  if (tipo === 'internal') return `${nome || desc || 'CONTA STONE'} - Transferência | Conta Stone`;
+  // Fallback (endpoint público, sem title/subtitle) — tipos vistos em 26/10/2026
+  if (/^(instant_payment|pix_payment|outbound_pix_payment)$/.test(tipo)) return `${nome || desc || 'PIX'} - ${/devolu/i.test(desc) ? 'Devolução' : 'Transferência'} | Pix`;
+  if (/refund_for_outbound_pix|pix.*refund/.test(tipo)) return `${nome || desc || 'PIX'} - Devolução | Pix`;
+  if (tipo === 'pix_payment_pos') return `${nome || desc || 'CLIENTE'} - Pix | Maquininha`;
+  if (tipo === 'internal') return /antecipa/i.test(desc) ? 'Recebimento vendas - Antecipação' : `${nome || desc || 'CONTA STONE'} - Transferência | Conta Stone`;
   if (tipo === 'external' || tipo === 'external_refund') return `${nome || desc || 'TED'} - ${tipo === 'external_refund' ? 'Devolução' : 'Transferência'} | TED`;
-  if (tipo === 'payment' || tipo === 'payment_refund') return `${nome || e?.details?.bank_name || desc || 'PAGAMENTO'} - Pagamento`;
-  if (tipo === 'card_payment') return `${nome || desc || 'CARTÃO'} - ${deb ? 'Débito' : 'Crédito'} | Pré-pago`;
+  if (tipo === 'payment' || tipo === 'payment_refund') return deb ? `${nome || e?.details?.bank_name || desc || 'PAGAMENTO'} - Pagamento` : desc || 'Depósito por boleto';
+  if (tipo === 'fee') return 'Cobrança de tarifa - Tarifa';
+  // card_payment (crédito) = venda no cartão liquidada; sem a bandeira no endpoint público
+  if (tipo === 'card_payment') return deb ? `${nome || desc || 'CARTÃO'} - Estorno | Cartão` : 'Recebimento vendas - Cartão | Crédito';
+  if (tipo === 'outbound_stone_prepaid_card_payment') return `${nome || desc || 'CARTÃO'} - Crédito | Pré-pago`;
+  if (tipo === 'outbound_stone_prepaid_card_payment_refund') return `${nome || desc || 'CARTÃO'} - Estorno | Cartão`;
+  if (/rent|mensalidade/.test(tipo)) return 'Mensalidade - Maquininha Stone';
   if (tipo === 'balance_block') return desc || 'Bloqueio de saldo';
   return desc || nome || tipo || 'Lançamento Stone';
 }
