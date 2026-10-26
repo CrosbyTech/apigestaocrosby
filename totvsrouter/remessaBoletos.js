@@ -464,7 +464,7 @@ router.get(
   '/remessa-boletos/contas',
   asyncHandler(async (req, res) => {
     const testar = req.query.testar === '1' || req.query.testar === 'true';
-    return successResponse(res, testar ? await testarContas() : contasInfo(), 'Contas Pagar.me');
+    return successResponse(res, { ...(testar ? await testarContas() : contasInfo()), acrescimo: ACRESCIMO_BOLETO }, 'Contas Pagar.me');
   }),
 );
 
