@@ -38,38 +38,46 @@ na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
 1. Abre o Chrome com a sessão guardada e confere se está logado.
 2. Captura o `Authorization` que o próprio portal manda para a API
    (`api.openbank.stone.com.br/api/v1/...`) e, por ela, lista **todas as contas**
-   acessíveis, o **saldo** de cada uma e os **lançamentos** do período.
-3. Para cada conta tenta exportar o **PDF oficial** seguindo `pdf.passos`
-   (roteiro de cliques por texto). Conseguiu → envia o PDF ao HeadCoach, que
-   importa pelo parser do PDF e guarda o arquivo no Storage (aba Importações,
-   ícone de PDF). Não conseguiu → envia os lançamentos em JSON (a importação
-   fica marcada `bot·API`) e segue.
+   acessíveis, o **saldo** de cada uma e os **lançamentos** do período (endpoint
+   `fma`, o mesmo do portal, com título/subtítulo iguais aos do extrato).
+3. Para cada conta gera o **PDF oficial** pela mesma chamada do botão “Baixar”
+   do portal (`POST .../statement/export`, sem clique nenhum) e envia ao
+   HeadCoach, que importa pelo parser do PDF e guarda o arquivo no Storage
+   (aba Importações, ícone de PDF). Se a exportação falhar, envia os
+   lançamentos em JSON (importação marcada `bot·API`) e segue.
+   Contas em que o seu usuário não tem permissão no portal (ex.: Crosby Recife
+   Mall) aparecem como “pulada — sem permissão” e não contam como falha.
 4. Envia os saldos: histórico por conta (`stone_bot_saldos`) + soma em
    `saldo_bancario.STONE` (Liberação de Pagamento).
 5. Fecha o Chrome e finaliza a execução com o resumo (contas, PDFs, falhas).
 
 Capturas de tela de erros ficam em `capturas/`; PDFs baixados em `downloads/`.
 
-## Roteiro de PDF (`config.json → pdf`)
+## Roteiro de PDF (`config.json → pdf`) — só reserva
 
-Lista de passos executados por conta. Placeholders: `{de}`, `{ate}` (ISO),
-`{deBr}`, `{ateBr}` (dd/mm/aaaa), `{titular}`, `{conta}`, `{agencia}`, `{cnpj}`.
+`pdf.modo` padrão é `api` (exportação direta pela API do portal). `modo:
+"roteiro"` faz o bot clicar no portal seguindo `trocarConta` + `passos`, reserva
+para o caso de a Stone mudar a API. Placeholders: `{de}`, `{ate}` (ISO),
+`{deBr}`, `{ateBr}` (dd/mm/aaaa), `{titular}`, `{conta}`, `{agencia}`, `{cnpj}`,
+`{cnpjFmt}`, `{contaId}`.
 
 | Ação | Campos | O que faz |
 | --- | --- | --- |
 | `ir` | `url` | navega |
-| `clicar` | `texto: [...]`, `exato?`, `opcional?` | clica no primeiro botão/link/menu cujo texto bate com algum da lista |
+| `clicar` | `texto: [...]`, `exato?`, `opcional?`, `aMenosQue?` | clica no primeiro botão/link/menu cujo texto bate (`re:` = expressão regular); `aMenosQue` pula o passo se aquele texto já está na tela |
+| `selecionar` | `opcao` | escolhe a opção de um `<select>` pelo texto |
+| `conferirConta` | — | garante que o portal está mostrando a conta certa (`{contaId}`) |
 | `preencher` | `rotulo: [...]`, `valor` | preenche o input pelo placeholder / aria-label / label |
 | `seletor` | `seletor` | clica num seletor CSS |
 | `esperar` | `ms` | pausa |
 | `esperarDownload` | — | espera o download terminar (`timeoutDownloadSeg`) |
 
-`trocarConta` roda antes de `passos` quando há mais de uma conta. Passo com
-`opcional: true` não interrompe quando falha. O roteiro que vem no
-`config.example.json` é um palpite inicial: na primeira vez, rode `mapear.bat`,
-abra o Extrato → Exportar no portal e ajuste os textos pelo que aparecer em
-`mapa/*.json`. Enquanto o roteiro não bate, os extratos chegam pela API
-(`pdf.ativo: false` desliga a tentativa de PDF de vez).
+Mapa do portal (26/10/2026): a lista de contas abre pelo botão do cabeçalho
+(“NOME 17.177.680/0010-07”), cada conta é um botão “NOME CNPJ” e o painel fecha
+em “Voltar”; a página Extrato tem “Filtrar” (Hoje / Ontem / Este mês /
+Personalizado + calendário) e “Baixar extrato” (PDF/OFX/XLS/CSV + select
+“Extrato da conta”). `mapear.bat` grava tudo isso em `mapa/`. `pdf.ativo: false`
+desliga o PDF de vez (só JSON).
 
 ## Segurança
 

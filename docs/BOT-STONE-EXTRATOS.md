@@ -44,17 +44,34 @@ enfileira a execução (`origem = agendado`) e a executa.
 ## Dados vindos do portal
 
 O bot não digita nada no portal para ler os dados: captura o header
-`Authorization` que o próprio front da Stone manda e chama a mesma API
-(`/api/v1/accounts`, `/accounts/:id/balance`, `/accounts/:id/statement`,
-contrato público em docs.openbank.stone.com.br — valores em centavos, cursor
-`after`). O PDF oficial sai pelo roteiro de cliques (`pdf.passos`), ajustável
-sem código; se falhar, os lançamentos chegam pela API e a importação fica
-marcada `origem = bot-stone-api`.
+`Authorization` que o próprio front da Stone manda e chama a mesma API, do
+Node (de dentro da página o CORS barra):
+
+| Chamada | Uso |
+| --- | --- |
+| `GET /api/v1/accounts?paginate=false` | contas acessíveis (15 em 26/10/2026) |
+| `GET /api/v1/accounts/:id/balance` | saldo (centavos) |
+| `GET /api/v1/fma/accounts/:id/statement?start_datetime&end_datetime&limit` | lançamentos com `title`/`subtitle` no formato do extrato (“NOME - Transferência \| Pix”); páginas se sobrepõem → dedupe por id+type+amount+balance_after; depósito de boleto e a tarifa dele compartilham o id |
+| `POST /api/v1/fma/accounts/:id/statement/export` `{resource_type:'statement', resource_id, start_date, end_date (UTC), operation_type:[]}` | **PDF oficial** (bytes), a mesma chamada do botão “Baixar” |
+
+O token vence em ~15 min; o portal renova sozinho e o bot acompanha o header
+mais recente (e recarrega a página em caso de 401). 403 numa conta = usuário
+sem permissão nela (pulada, não é falha). Se a exportação do PDF falhar, os
+lançamentos vão em JSON e a importação fica marcada `origem = bot-stone-api`.
+
+`utils/extratoStoneApi.js` converte o JSON no objeto do parser: reordena pela
+cadeia `balance_before → balance_after` (a API devolve lançamentos do mesmo
+segundo fora de ordem), trata o par depósito+tarifa como uma unidade, usa o
+bruto (`operation_amount`) quando há tarifa separada e pega o saldo inicial de
+`balance_before`. Validado: 0 inconsistências e saldo final igual ao real em
+duas contas (122 e 32 lançamentos).
 
 Chave da conta no Extrato Bancário é `banco + agência + conta`. O PDF da Stone
 traz agência `0001` e conta `21774800` + DV `3`; a API traz `branch_code "1"` e
-`account_code` com DV junto → `extratoStoneApi.js` normaliza (agência com 4
-dígitos, último dígito vira DV quando há 9+) para cair na MESMA conta.
+`account_code` sempre com o DV junto (`217748003`, `83579664`) →
+`extratoStoneApi.js` normaliza (agência com 4 dígitos, último dígito vira DV)
+para cair na MESMA conta. Reimportar preserva `fornecedor`/`observacao`
+editados à mão (chave data|valor|memo).
 
 ## Saldo na Liberação de Pagamento
 
@@ -67,11 +84,9 @@ com o saldo real.
 
 ## Status (26/10/2026)
 
-- Backend, migration e bucket aplicados; rotas testadas localmente (token do
-  agente, bloqueio sem login, claim/log/finalizar).
-- Bot testado ponta a ponta até o Chrome; o roteiro de PDF e a captura da API
-  **ainda não foram validados com login real** (precisa do login do Yago no PC
-  do bot). Primeiro uso: `login.bat` → `agora.bat` → conferir log; se o PDF
-  não sair, `mapear.bat` e ajustar `pdf.passos`.
-- Pendente no Render: variável `STONE_BOT_TOKEN` (mesmo valor do `.env` local
-  e do `config.json` do bot).
+- Backend, migration, bucket e deploy no Render feitos; `STONE_BOT_TOKEN`
+  configurado. Primeira execução real: 15 contas, 14 saldos (R$ 27.552,14 na
+  Liberação), 1 conta sem permissão (Crosby Recife Mall).
+- PDF: o roteiro de cliques inicial não bateu (lista de contas/período); trocado
+  pela exportação via API (`pdf.modo: api`), que devolve o PDF oficial por conta
+  e período sem clique. Roteiro mantido só como reserva.
