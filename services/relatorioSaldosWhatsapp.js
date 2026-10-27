@@ -84,16 +84,53 @@ export async function montarDados() {
   const semana = semanaDe();
   const { data: prov } = await supabase
     .from('pagamentos_liberacao')
-    .select('id,nm_fornecedor,vl_duplicata,vl_real,dt_vencimento,nm_empresa,forma_pagamento,dados_completos')
+    .select('id,nm_fornecedor,vl_duplicata,vl_real,dt_vencimento,nm_empresa,forma_pagamento,cd_despesaitem,ds_despesaitem,dados_completos')
     .eq('status', 'PROVISAO')
     .gte('dt_vencimento', semana.de)
     .lte('dt_vencimento', semana.ate)
     .order('dt_vencimento')
     .order('nm_fornecedor');
-  const programacao = (prov || []).map((p) => ({ id: p.id, fornecedor: p.nm_fornecedor || '—', valor: Number(p.vl_real ?? p.vl_duplicata ?? 0), vencimento: p.dt_vencimento, empresa: p.nm_empresa, origem: p.dados_completos?.origem || null }));
+  const programacao = (prov || []).map((p) => ({ id: p.id, fornecedor: p.nm_fornecedor || '—', valor: Number(p.vl_real ?? p.vl_duplicata ?? 0), vencimento: p.dt_vencimento, empresa: p.nm_empresa, despesaCodigo: p.cd_despesaitem, despesa: p.ds_despesaitem, origem: p.dados_completos?.origem || null }));
   const totalProgramacao = round2(programacao.reduce((a, p) => a + p.valor, 0));
+  const itensSemana = agruparProgramacao(programacao);
 
-  return { geradoEm: agoraBr(), capturadoEm, dia, bancos, total, stone, pagarme, antecipavel, semana, programacao, totalProgramacao };
+  return { geradoEm: agoraBr(), capturadoEm, dia, bancos, total, stone, pagarme, antecipavel, semana, programacao, itensSemana, totalProgramacao };
+}
+
+// ─── despesas fixas agrupadas (uma linha por despesa, somando as duplicatas) ──
+// Regra do Yago (27/10/2026): água/esgoto, energia, internet, vale transporte e
+// vale alimentação viram UMA linha cada, com o total; o resto fica por fornecedor.
+const GRUPOS_FIXOS = [
+  { rotulo: 'ÁGUA E ESGOTO', codigos: ['6011'], re: /AGUA|ESGOTO|CAERN|CAGEPA|COMPESA|SANEAMENTO/i },
+  { rotulo: 'ENERGIA', codigos: ['6010'], re: /ENERGIA|ENERGISA|COSERN|NEOENERGIA|CELPE|ELETRIC|COMPANHIA ENERGETICA/i },
+  { rotulo: 'INTERNET', codigos: ['6028'], re: /INTERNET|PROVEDOR|FIBRA|TELECOM|BRISANET|VIVO FIBRA|CLARO NET/i },
+  { rotulo: 'VALE TRANSPORTE', codigos: ['3036'], re: /VALE TRANSPORTE|TRANSP COL|TRANSPORTE COLETIVO|SINDICATO DAS EMPRESAS DE TRANSP|SIND DAS EMP DE TRANSP/i },
+  { rotulo: 'VALE ALIMENTAÇÃO', codigos: ['3003'], re: /VALE ALIMENTACAO|VALE REFEICAO|PLUXEE|SODEXO|ALELO|TICKET|VR BENEFICIOS|FLASH/i },
+];
+const semAcento = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+function grupoDe(p) {
+  const cod = String(p.despesaCodigo || '').replace(/\D/g, '');
+  const texto = semAcento(`${p.despesa || ''} ${p.fornecedor || ''}`).toUpperCase();
+  return GRUPOS_FIXOS.find((g) => (cod && g.codigos.includes(cod)) || g.re.test(texto)) || null;
+}
+/** @returns [{ rotulo, valor, vencimento, vencimentoAte, qtd, agrupado }] em ordem de vencimento */
+export function agruparProgramacao(programacao) {
+  const grupos = new Map();
+  const itens = [];
+  for (const p of programacao) {
+    const g = grupoDe(p);
+    if (!g) {
+      itens.push({ rotulo: p.fornecedor, valor: round2(p.valor), vencimento: p.vencimento, vencimentoAte: p.vencimento, qtd: 1, agrupado: false });
+      continue;
+    }
+    if (!grupos.has(g.rotulo)) grupos.set(g.rotulo, { rotulo: g.rotulo, valor: 0, vencimento: p.vencimento, vencimentoAte: p.vencimento, qtd: 0, agrupado: true });
+    const x = grupos.get(g.rotulo);
+    x.valor = round2(x.valor + p.valor);
+    x.qtd += 1;
+    if (p.vencimento < x.vencimento) x.vencimento = p.vencimento;
+    if (p.vencimento > x.vencimentoAte) x.vencimentoAte = p.vencimento;
+  }
+  return [...itens, ...grupos.values()].sort((a, b) => (a.vencimento < b.vencimento ? -1 : a.vencimento > b.vencimento ? 1 : b.valor - a.valor));
 }
 
 // ─── imagem (HTML → PNG) ──────────────────────────────────────
@@ -123,15 +160,11 @@ function htmlDoCard(d) {
   .foot{margin-top:12px;font-size:10px;color:#9ca3af;display:flex;justify-content:space-between}
   </style></head><body><div class="card">
     <div class="head"><div class="ico">R$</div><div><div class="t1">Saldo Bancário <small>· ${d.bancos.filter((b) => b.valor > 0).length} banco(s) · HeadCoach</small></div><div class="total">${fmt(d.total)}</div></div></div>
-    <div class="chips">${d.bancos.map(chip).join('')}</div>
-    <div class="sec">
+    <div class="chips" style="margin-bottom:0">${d.bancos.map(chip).join('')}</div>
+    ${d.detalhado ? `<div class="sec" style="margin-top:14px">
       <div class="box"><h4>Stone por conta${d.antecipavel > 0 ? ` · <b>${fmt(d.antecipavel)} para antecipar</b>` : ''}</h4>${d.stone.length ? d.stone.map(linhaStone).join('') : '<div class="row"><span class="rot">sem captura do bot</span></div>'}</div>
-      <div class="box"><h4>Pagar.me${d.pagarme.some((p) => p.aReceber > 0) ? ` · <i>${fmt(d.pagarme.reduce((a, p) => a + p.aReceber, 0))} a receber</i>` : ''}</h4>${d.pagarme.length ? d.pagarme.map(linhaPg).join('') : '<div class="row"><span class="rot">sem captura</span></div>'}
-        <h4 style="margin-top:12px">Programação da semana (${fmtData(d.semana.de)} a ${fmtData(d.semana.ate)})</h4>
-        <div class="row"><span class="rot">${d.programacao.length} título(s) em previsão</span><span class="val">${fmt(d.totalProgramacao)}</span><span class="ant"></span></div>
-      </div>
-    </div>
-    <div class="foot"><span>Saldos capturados ${d.capturadoEm ? new Date(d.capturadoEm).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'} pelo bot Stone/Pagar.me</span><span>gerado ${esc(d.geradoEm)}</span></div>
+      <div class="box"><h4>Pagar.me${d.pagarme.some((p) => p.aReceber > 0) ? ` · <i>${fmt(d.pagarme.reduce((a, p) => a + p.aReceber, 0))} a receber</i>` : ''}</h4>${d.pagarme.length ? d.pagarme.map(linhaPg).join('') : '<div class="row"><span class="rot">sem captura</span></div>'}</div>
+    </div>` : ''}
   </div></body></html>`;
 }
 
@@ -151,19 +184,16 @@ export async function gerarImagem(dados) {
 }
 
 // ─── textos ───────────────────────────────────────────────────
+const fmtDiaMes = (iso) => (iso ? `${String(iso).slice(8, 10)}/${String(iso).slice(5, 7)}` : '');
 export function textoProgramacao(d) {
-  const linhas = [`*Programação da semana* (${fmtData(d.semana.de)} a ${fmtData(d.semana.ate)}) — títulos em previsão na Liberação de Pagamento:`];
-  if (!d.programacao.length) linhas.push('• nenhum título em previsão para esta semana.');
-  let diaAtual = null;
-  for (const p of d.programacao) {
-    if (p.vencimento !== diaAtual) {
-      diaAtual = p.vencimento;
-      linhas.push(`\n📅 *${fmtData(p.vencimento)}*`);
-    }
-    linhas.push(`• ${p.fornecedor} — ${fmt(p.valor)}`);
-  }
-  linhas.push(`\nTotal: *${fmt(d.totalProgramacao)}* em ${d.programacao.length} título(s).`);
-  linhas.push(`\nPara incluir algo na lista, é só me chamar aqui: "caixa, adiciona <fornecedor> <valor> vence <data>".`);
+  const itens = d.itensSemana || agruparProgramacao(d.programacao || []);
+  const linhas = [`*Programação da semana* (${fmtDiaMes(d.semana.de)} a ${fmtDiaMes(d.semana.ate)})`];
+  if (!itens.length) linhas.push('Nenhum título em previsão para esta semana.');
+  itens.forEach((it, i) => {
+    const quando = it.agrupado && it.vencimento !== it.vencimentoAte ? `${fmtDiaMes(it.vencimento)} a ${fmtDiaMes(it.vencimentoAte)}` : fmtDiaMes(it.vencimento);
+    linhas.push(`${i + 1} - ${it.rotulo} — ${fmt(it.valor)} (${quando}${it.agrupado && it.qtd > 1 ? `, ${it.qtd} contas` : ''})`);
+  });
+  linhas.push(`\nTotal: *${fmt(d.totalProgramacao)}*`);
   return linhas.join('\n');
 }
 
