@@ -126,6 +126,7 @@ import { iniciarJobBaixaAutomaticaPagarme } from './services/baixaAutomaticaPaga
 import conferenciaBaixasRoutes from './routes/conferenciaBaixas.routes.js';
 import { iniciarJobConferenciaBaixas } from './services/conferenciaSolicitacoesTotvs.js';
 import pixTadeuRoutes from './routes/pixTadeu.routes.js';
+import previsaoRecebimentoRoutes from './routes/previsaoRecebimento.routes.js';
 import baixaLotesRoutes from './routes/baixaLotes.routes.js';
 import { iniciarJobPixTadeu } from './services/pixTadeuPagarme.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
@@ -231,6 +232,7 @@ app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa 
 app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automática Pagar.me (cartão débito PAGARME) — status/prévia/executar; liga com PAGARME_BAIXA_AUTO=on
 app.use('/api/conferencia-baixas', conferenciaBaixasRoutes); // Solicitações de Baixa × TOTVS: baixadas na mão viram processadas, desfeitas voltam a pendentes
 app.use('/api/pix-tadeu', pixTadeuRoutes); // Pix recebidos na Pagar.me fora do HeadCoach (links/Gerador do Dryland) → Solicitações de Baixa
+app.use('/api/previsao-recebimento', previsaoRecebimentoRoutes); // Fluxo de Recebíveis / Previsão de Recebimento (João, 27/10/2026)
 app.use('/api/baixa-lotes', baixaLotesRoutes); // histórico dos lotes de baixa (Solicitações de Baixa → TOTVS)
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
