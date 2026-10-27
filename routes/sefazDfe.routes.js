@@ -70,7 +70,7 @@ router.get(
       let query = supabase
         .from('sefaz_dfe_notas')
         .select(
-          'id, setor, cnpj_destinatario, empresa_codigo, empresa_nome, escriturada, nr_fatura, dt_fatura, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
+          'id, setor, status_manual, outros_justificativa, outros_em, outros_por, cnpj_destinatario, empresa_codigo, empresa_nome, escriturada, nr_fatura, dt_fatura, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
         )
         .order('data_emissao', { ascending: false })
         .range(offset, offset + PAGINA - 1);
@@ -104,8 +104,12 @@ router.get(
       } else if (escrituracao === 'pendente') {
         query = query
           .or('escriturada.is.null,escriturada.eq.false')
+          .or('status_manual.is.null,status_manual.neq.outros')
           .eq('situacao', '1')
           .eq('tipo_operacao', '1');
+      } else if (escrituracao === 'outros') {
+        // tiradas de pendentes com justificativa (Niziany, 27/10/2026)
+        query = query.eq('status_manual', 'outros');
       }
       if (origem === 'sefaz')
         query = query.in('schema_origem', ['resNFe', 'procNFe']);
@@ -194,6 +198,52 @@ router.patch(
       }
     }
     successResponse(res, { ...data, propagadas }, 'Setor da nota atualizado');
+  }),
+);
+
+// "Outros": tira a nota de Pendentes sem contar como escriturada, sempre com
+// justificativa (Niziany, 27/10/2026). { justificativa, usuario } marca;
+// { desfazer: true } volta para pendente. Nunca apaga a nota.
+router.patch(
+  '/notas/:id/outros',
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    if (!id) return errorResponse(res, 'id da nota ausente', 400, 'ID_INVALIDO');
+    const { desfazer, justificativa, usuario } = req.body || {};
+    const { data: nota, error: e0 } = await supabase
+      .from('sefaz_dfe_notas')
+      .select('id, escriturada, status_manual')
+      .eq('id', id)
+      .maybeSingle();
+    if (e0) return errorResponse(res, e0.message, 500, 'SUPABASE_ERROR');
+    if (!nota) return errorResponse(res, 'Nota não encontrada', 404, 'NAO_ENCONTRADA');
+
+    let patch;
+    if (desfazer) {
+      patch = { status_manual: null, outros_justificativa: null, outros_em: null, outros_por: null };
+    } else {
+      const just = String(justificativa || '').trim();
+      if (just.length < 10) {
+        return errorResponse(res, 'Escreva uma justificativa com pelo menos 10 caracteres', 400, 'JUSTIFICATIVA_CURTA');
+      }
+      if (nota.escriturada) {
+        return errorResponse(res, 'Esta nota já está escriturada no TOTVS', 400, 'JA_ESCRITURADA');
+      }
+      patch = {
+        status_manual: 'outros',
+        outros_justificativa: just.slice(0, 500),
+        outros_em: new Date().toISOString(),
+        outros_por: String(usuario || '').trim().slice(0, 120) || null,
+      };
+    }
+    const { data, error } = await supabase
+      .from('sefaz_dfe_notas')
+      .update({ ...patch, atualizado_em: new Date().toISOString() })
+      .eq('id', id)
+      .select('id, status_manual, outros_justificativa, outros_em, outros_por')
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
+    successResponse(res, data, desfazer ? 'Nota voltou para pendentes' : 'Nota movida para Outros');
   }),
 );
 
