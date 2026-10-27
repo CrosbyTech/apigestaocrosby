@@ -298,10 +298,8 @@ export async function executarPagarme({ execucaoId = null, de, ate, diasRetroati
   if (linhas.length) {
     const { error } = await supabase.from('stone_bot_saldos').upsert(linhas, { onConflict: 'data,conta' });
     if (error) throw new Error(`stone_bot_saldos: ${error.message}`);
-    const up = [
-      { banco: BANCO_SALDO_PAGARME, valor: resumo.disponivel, updated_at: agora(), updated_by: 'bot-pagarme' },
-      { banco: BANCO_SALDO_PAGARME_RECEBER, valor: resumo.aReceber, updated_at: agora(), updated_by: 'bot-pagarme' },
-    ];
+    // só o DISPONÍVEL entra no saldo da Liberação; o "a receber" demora até 2 dias e fica fora da contagem (Yago, 27/10)
+    const up = [{ banco: BANCO_SALDO_PAGARME, valor: resumo.disponivel, updated_at: agora(), updated_by: 'bot-pagarme' }];
     const { error: e2 } = await supabase.from('saldo_bancario').upsert(up, { onConflict: 'banco' });
     if (e2) throw new Error(`saldo_bancario: ${e2.message}`);
     await log(`Saldo PAGARME atualizado na Liberação de Pagamento: disponível R$ ${resumo.disponivel.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} · a receber R$ ${resumo.aReceber.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 'ok');

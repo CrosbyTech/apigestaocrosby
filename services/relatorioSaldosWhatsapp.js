@@ -64,7 +64,7 @@ export async function grupoChatid() {
 
 // ─── dados ────────────────────────────────────────────────────
 export async function montarDados() {
-  const BANCOS = ['STONE', 'PAGARME', 'PAGARME A RECEBER', 'ITAU RECIFE', 'MENTORE'];
+  const BANCOS = ['STONE', 'PAGARME', 'ITAU RECIFE', 'MENTORE']; // PAGARME A RECEBER fora da contagem (pedido do Yago, 27/10)
   const { data: sb } = await supabase.from('saldo_bancario').select('*').in('banco', BANCOS);
   const saldoDe = (b) => Number((sb || []).find((x) => x.banco === b)?.valor || 0);
   const bancos = BANCOS.map((b) => ({ banco: b, valor: round2(saldoDe(b)) }));
