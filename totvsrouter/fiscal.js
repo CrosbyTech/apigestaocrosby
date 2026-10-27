@@ -1909,12 +1909,35 @@ router.post(
       const errors = [];
       const enviadosAR = []; // espelho no HeadCoach (ERP fase 1)
 
+      // Pagamento único por Pix (João, 27/10/2026): itens com o mesmo `grupo`
+      // (= mesmo pedido/cobrança Pagar.me, mandado pela tela a partir da
+      // ref_externa) vão numa única chamada invoices-payment: N faturas e UM
+      // pagamento com a soma (título + juros de cada). O 1º item do grupo faz a
+      // chamada; os demais pulam o loop e recebem o mesmo resultado no fim.
+      // Pix separados (grupos diferentes ou sem grupo) = baixas separadas.
+      const grupos = new Map();
+      items.forEach((it, idx) => {
+        const g = String(it.grupo || '').trim();
+        if (!g) return;
+        if (!grupos.has(g)) grupos.set(g, []);
+        grupos.get(g).push(idx);
+      });
+      const membrosDe = (idx) => {
+        const g = String(items[idx].grupo || '').trim();
+        const l = g ? grupos.get(g) : null;
+        return l && l.length > 1 ? l : [idx];
+      };
+      const numero = (v) => (typeof v === 'string' ? parseFloat(v) : Number(v));
+      const inteiro = (v) => (typeof v === 'string' ? parseInt(v, 10) : v);
+
       // Agrupar itens por branchCode (empresa de liquidaÃ§Ã£o)
       // O invoices-payment exige um branchCode de liquidaÃ§Ã£o + settlementDate no nÃ­vel raiz
       // e aceita mÃºltiplas faturas + mÃºltiplos pagamentos
       // Processamos cada item individualmente para melhor controle de erros
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
+        const membros = membrosDe(i);
+        if (membros[0] !== i) continue; // já vai na chamada do 1º título do mesmo Pix
         const branchCode =
           typeof item.branchCode === 'string'
             ? parseInt(item.branchCode, 10)
@@ -1987,22 +2010,32 @@ router.post(
         // título + juros (TOTVS exige payments.value = invoices.paidValue + juros).
         const interestValue = Math.round((Number(item.interestValue) || 0) * 100) / 100;
         const valorPagamento = Math.round((paidValue + (interestValue > 0 ? interestValue : 0)) * 100) / 100;
+        // Faturas da chamada: só este título, ou todos os títulos do mesmo Pix (grupo).
+        // TOTVS: Vl. Pago = total recebido (título + juros); interestValue discrimina os juros (sonda 26/10/2026)
+        const invoicesLote = membros.map((idx) => {
+          const m = items[idx];
+          const iv = Math.round((Number(m.interestValue) || 0) * 100) / 100;
+          const pv = Math.round((numero(m.paidValue) + (iv > 0 ? iv : 0)) * 100) / 100;
+          return {
+            branchCode: inteiro(m.branchCode),
+            customerCode: inteiro(m.customerCode),
+            receivableCode: inteiro(m.receivableCode),
+            installmentCode: inteiro(m.installmentCode),
+            paidValue: pv,
+            ...(iv > 0 ? { interestValue: iv } : {}),
+          };
+        });
+        const valorLote = Math.round(invoicesLote.reduce((a, x) => a + x.paidValue, 0) * 100) / 100;
+        if (membros.length > 1) {
+          console.log(`🔗 [${i + 1}/${items.length}] Pagamento único (${item.grupo}): ${membros.length} títulos, R$ ${valorLote.toFixed(2)}`);
+        }
         const buildPayload = (sBranchCode) => ({
           branchCode: sBranchCode,
           settlementDate,
-          invoices: [
-            {
-              branchCode,
-              customerCode,
-              receivableCode,
-              installmentCode,
-              paidValue: valorPagamento, // TOTVS: Vl. Pago = total recebido (titulo + juros); interestValue discrimina os juros (sonda 26/10/2026)
-              ...(interestValue > 0 ? { interestValue } : {}),
-            },
-          ],
+          invoices: invoicesLote,
           payments: [
             {
-              value: valorPagamento,
+              value: valorLote,
               paidType: requestPaidType,
               movementDate: settlementDate,
               ...(temCard ? { card: temCard } : {}),
@@ -2202,6 +2235,27 @@ router.post(
             payloadSent: payload,
           });
           enviadosAR.push({ payload, sucesso: false, http_status: itemError.response?.status ?? null, resposta: itemError.response?.data ?? null, erro: itemError.message });
+        }
+      }
+
+      // Pagamento único: os demais títulos do grupo recebem o resultado do 1º
+      // (a tela marca cada solicitação pelo título; o histórico lista um a um).
+      for (const idxs of grupos.values()) {
+        if (idxs.length < 2) continue;
+        const primeiro = idxs[0];
+        const base = results.find((r) => r.index === primeiro) || errors.find((r) => r.index === primeiro);
+        if (!base) continue;
+        base.pagamentoUnico = { grupo: items[primeiro].grupo, titulos: idxs.length };
+        const lista = base.success ? results : errors;
+        for (const idx of idxs.slice(1)) {
+          const m = items[idx];
+          lista.push({
+            ...base,
+            index: idx,
+            receivableCode: inteiro(m.receivableCode),
+            installmentCode: inteiro(m.installmentCode),
+            branchCode: inteiro(m.branchCode),
+          });
         }
       }
 
