@@ -381,7 +381,8 @@ async function modoAgora() {
 
 async function modoAgente() {
   console.log(`Bot Stone Extratos v${VERSAO} — agente em ${host} → ${cfg.headcoachUrl}`);
-  console.log(`Horário diário: ${cfg.horarioDiario || '(desligado)'} · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar\n`);
+  const listaHorarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : [cfg.horarioDiario]).filter(Boolean).join(', ');
+  console.log(`Horários: ${listaHorarios || '(desligado)'} · keep-alive a cada ${cfg.sessao?.keepAliveMin ?? 20} min · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar\n`);
   let ultimoPing = 0;
   let ultimoAgendado = null; // AAAA-MM-DD do último disparo automático
   let sessaoOk = null;
