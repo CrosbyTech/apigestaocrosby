@@ -30,6 +30,7 @@ import bot from '../services/stoneBot.js';
 import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { salvarComprovante } from '../services/comprovantesStone.js';
 import { enviarRelatorio, statusRelatorio, testarImagem } from '../services/relatorioSaldosWhatsapp.js';
+import { conciliarAprovados } from '../services/conciliacaoAprovados.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
@@ -144,6 +145,29 @@ tela.post(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await enviarRelatorio({ motivo: `manual por ${req.user?.email || 'tela'}`, soTexto: !!req.body?.soTexto }), 'Relatório enviado no grupo');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// Conciliação dos APROVADOS × extrato → marca PAGO (banco + data)
+tela.get(
+  '/aprovados/conciliar',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await conciliarAprovados({ dryRun: true, dataSaida: dataIso(req.query.dia) || undefined }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+tela.post(
+  '/aprovados/conciliar',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await conciliarAprovados({ dryRun: !!req.body?.dryRun, dataSaida: dataIso(req.body?.dia) || undefined, usuario: `conciliação de aprovados (${req.user?.email || 'tela'})` });
+      return successResponse(res, r, r.dryRun ? 'Simulação' : `${r.pagos} título(s) marcado(s) como pago`);
     } catch (e) {
       return tratar(res, e);
     }
