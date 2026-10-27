@@ -62,9 +62,16 @@ const CACHE_MS = 5 * 60 * 1000;
 export async function chamadosAbertosDeNota({ forcar = false } = {}) {
   if (!forcar && Date.now() - cache.em < CACHE_MS && cache.itens.length) return cache.itens;
   const lista = await drylandRpc('chamado_listar', {});
-  const abertos = (Array.isArray(lista) ? lista : []).filter(
-    (c) => !STATUS_FECHADOS.has(String(c.status)) && RE_ASSUNTO_NF.test(c.assunto || ''),
-  );
+  // Abertos + concluídos recentes (45 dias), para a Niziany acompanhar o
+  // retorno pela própria tela de Pendentes; cancelados ficam fora.
+  const limite = Date.now() - 45 * 86400000;
+  const abertos = (Array.isArray(lista) ? lista : []).filter((c) => {
+    if (!RE_ASSUNTO_NF.test(c.assunto || '')) return false;
+    const st = String(c.status);
+    if (st === 'cancelado') return false;
+    if (st === 'concluido') return new Date(c.criado_em || 0).getTime() >= limite;
+    return true;
+  });
   const itens = [];
   for (const c of abertos) {
     let texto = '';
