@@ -59,15 +59,23 @@ async function pedidosPagosPix({ conta, dias }) {
  *   tadeu_loja    → metadata { origem, loja: "99", vendedor }                                 (link da loja)
  * Qualquer outro pedido (loja virtual/revenda por payment link, BlueCard, boleto) é ignorado.
  */
-export const ORIGENS_TADEU = ['tadeu_pix', 'tadeu_gerador', 'tadeu_loja'];
+// João (27/10/2026): nas Solicitações só o link do cliente (tadeu_pix) e o Gerador
+// (tadeu_gerador). O link da loja (tadeu_loja = setor de vendas, loja/vendedor) fica fora.
+export const ORIGENS_TADEU = ['tadeu_pix', 'tadeu_gerador'];
+const ORIGENS_IGNORADAS = ['tadeu_loja'];
 function lerPedido({ conta, order: o, charge: c }) {
   const md = o.metadata || {};
   const item = (o.items || [])[0] || {};
   const ref = md.ref || item.description || o.code || '';
   let cd = Number(String(md.cd_cliente || '').replace(/\D/g, '')) || null;
-  // Gerador: a referência é "Nome - número" e o número NÃO é cliente nem fatura
-  // (visto 26/10/2026: "Betania - 115281" → 115281 é a própria Crosby CR). Só o nome vale.
+  // Gerador: a referência é "Nome - código do cliente TOTVS" (João, 27/10/2026:
+  // "Exclusive Mens - 119344", "Donna Monny - 43572"). O código vale quando o
+  // metadata.cd_cliente vem vazio; o nome fica na observação pra conferência.
   const nomeRef = md.origem === 'tadeu_gerador' ? String(ref).split(' - ')[0].trim() : '';
+  if (!cd && md.origem === 'tadeu_gerador') {
+    const m = /\s-\s*(\d{1,8})\s*$/.exec(String(ref));
+    if (m) cd = Number(m[1]) || null;
+  }
   const titulos = String(md.titulos || '')
     .split(/[,;\s]+/)
     .map((t) => /^(\d+)-(\d+)-(\d+)$/.exec(t.trim()))
@@ -141,6 +149,33 @@ function casar(abertos, valorCents) {
   return null;
 }
 
+/**
+ * Gerador de QR (João, 27/10/2026): o Pix cobre os títulos VENCIDOS MAIS ANTIGOS do
+ * cliente até o valor; o que sobra é juros/encargos (inclui a tarifa Pix de R$ 0,98
+ * por título que o link soma). Ex.: 3.554,79 → 3 títulos (3.501,05) + 53,74 de juros;
+ * 569,22 → 2 títulos (567,26) + 1,96. Valor exato de 1 título continua valendo.
+ * Sobra acima de 15% do que foi casado = não é isso → null (a conferir).
+ */
+function casarGerador(abertos, valorCents) {
+  if (!abertos.length || valorCents <= 0) return null;
+  const exato = abertos.find((t) => t.valorCents === valorCents);
+  if (exato) return { titulos: [exato], criterio: 'valor exato', juros: 0 };
+  const ord = abertos.slice().sort((a, b) => String(a.vencimento).localeCompare(String(b.vencimento)) || a.receivableCode - b.receivableCode || a.installmentCode - b.installmentCode);
+  const comb = [];
+  let soma = 0;
+  for (const t of ord) {
+    if (soma + t.valorCents <= valorCents) { comb.push(t); soma += t.valorCents; }
+  }
+  if (!comb.length) return null;
+  const sobra = valorCents - soma;
+  if (sobra > soma * 0.15) return null;
+  return {
+    titulos: comb,
+    criterio: `${comb.length} título(s) mais antigo(s) do cliente até o valor do Pix`,
+    juros: r2(sobra / 100),
+  };
+}
+
 // ── solicitações ───────────────────────────────────────────────────────────
 async function refsExistentes(prefixos) {
   const set = new Set();
@@ -169,23 +204,27 @@ export async function listar({ dias = DIAS_PADRAO, bruto = false } = {}) {
     try { todos.push(...(await pedidosPagosPix({ conta, dias }))); } catch (e) { avisos.push(e.message); }
   }
   const bc = await orderIdsBlueCard(dias + 5);
+  const ignoradosLoja = todos.filter(({ order }) => ORIGENS_IGNORADAS.includes(order.metadata?.origem || '')).length;
   const lidos = todos
     .filter(({ order }) => ORIGENS_TADEU.includes(order.metadata?.origem || ''))
     .filter(({ order }) => !bc.has(order.id))
     .map(lerPedido);
-  return { contas, dias, total: lidos.length, avisos, itens: bruto ? todos.slice(0, 5).map(({ conta, order, charge }) => ({ conta, order: { id: order.id, code: order.code, amount: order.amount, metadata: order.metadata, items: order.items, customer: { name: order.customer?.name, document: order.customer?.document, code: order.customer?.code } }, charge: { id: charge.id, status: charge.status, paid_at: charge.paid_at, paid_amount: charge.paid_amount, amount: charge.amount } })) : lidos };
+  return { contas, dias, total: lidos.length, ignorados_loja: ignoradosLoja, avisos, itens: bruto ? todos.slice(0, 5).map(({ conta, order, charge }) => ({ conta, order: { id: order.id, code: order.code, amount: order.amount, metadata: order.metadata, items: order.items, customer: { name: order.customer?.name, document: order.customer?.document, code: order.customer?.code } }, charge: { id: charge.id, status: charge.status, paid_at: charge.paid_at, paid_amount: charge.paid_amount, amount: charge.amount } })) : lidos };
 }
 
 /** Cria as solicitações dos Pix ainda não espelhados. */
 export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
-  const { itens, avisos } = await listar({ dias });
+  const { itens, avisos, ignorados_loja } = await listar({ dias });
   const existentes = await refsExistentes(itens.map((p) => `pagarme:pix:${p.order_id}`));
-  const resumo = { lidos: itens.length, novos: 0, ja_existiam: 0, abertas: 0, a_conferir: 0, avisos, erros: [] };
+  const resumo = { lidos: itens.length, ignorados_loja, novos: 0, ja_existiam: 0, abertas: 0, a_conferir: 0, avisos, erros: [] };
   for (const p of itens) {
     const refBase = `pagarme:pix:${p.order_id}`;
     if (existentes.has(refBase)) { resumo.ja_existiam++; continue; }
     try {
-      const titulos = p.origem === 'tadeu_gerador' ? [] : await titulosDoCliente({ cd: p.cd_cliente, cpf: p.cpf });
+      // Gerador: só pelo código da referência (o CPF do pedido é de quem pagou o QR, não do cliente)
+      const titulos = p.origem === 'tadeu_gerador'
+        ? (p.cd_cliente ? await titulosDoCliente({ cd: p.cd_cliente }) : [])
+        : await titulosDoCliente({ cd: p.cd_cliente, cpf: p.cpf });
       const abertos = titulos.filter((t) => t.aberto);
       const cliente = titulos[0] ? { code: titulos[0].customerCode, name: titulos[0].customerName } : null;
       let achado = null;
@@ -200,24 +239,19 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
           achado = { titulos: alvo, criterio: 'título(s) do link do cliente', juros };
         }
       } else if (p.origem === 'tadeu_gerador') {
-        // Gerador: só o nome do cliente é confiável → linha "a conferir" (João identifica cliente/títulos)
-        achado = null;
-      } else if (p.origem === 'tadeu_loja') {
-        // link da loja: só títulos abertos que somam exatamente o valor (senão é compra — não entra)
-        const c0 = p.valor > 0 ? casar(abertos, cents(p.valor)) : null;
-        achado = c0 && c0.juros === 0 ? c0 : null;
-        if (!achado) { resumo.compras_loja = (resumo.compras_loja || 0) + 1; continue; }
+        // Gerador: cliente pelo código da referência; títulos vencidos mais antigos até o valor (+ juros)
+        achado = casarGerador(abertos, cents(p.valor));
       }
       const quem = `Pix ${p.origem.replace('tadeu_', '')} · ${p.conta === 'fabio' ? 'FA MODA' : 'Crosby'}${p.loja ? ` · loja ${p.loja}` : ''}${p.vendedor ? ` · ${p.vendedor}` : ''}`;
       const cabec = [
         `Pix recebido na Pagar.me (${quem}) em ${p.dia} — R$ ${p.valor.toFixed(2)}. Pedido ${p.order_id} · cobrança ${p.charge_id}${p.ref ? ` · ref "${String(p.ref).slice(0, 80)}"` : ''}.`,
         p.origem === 'tadeu_gerador'
-          ? `Cliente (nome na referência do Gerador): ${p.nome || '?'} — quem pagou o QR: ${p.pagador || '?'}${p.cpf ? ` (${p.cpf})` : ''}. Identificar o cliente e os títulos manualmente.`
+          ? `Cliente: ${cliente?.name || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ' (sem código na referência)'} — nome na referência do Gerador: ${p.nome || '?'}; quem pagou o QR: ${p.pagador || '?'}${p.cpf ? ` (${p.cpf})` : ''}.${achado?.juros ? ' A sobra sobre os títulos (inclui a tarifa Pix de R$ 0,98/título) entra como juros.' : ''}`
           : `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ''}${p.cpf ? ` CPF/CNPJ ${p.cpf}` : ''}.`,
       ];
       const filialFallback = titulos.slice().sort((x, y) => String(y.emissao).localeCompare(String(x.emissao)))[0]?.branchCode ?? 0;
       const base = {
-        nm_cliente: p.origem === 'tadeu_gerador' ? `${p.nome || '?'} (Pix do Gerador — identificar cliente)` : cliente?.name || p.nome || '',
+        nm_cliente: cliente?.name || (p.origem === 'tadeu_gerador' ? `${p.nome || '?'} (Pix do Gerador — identificar cliente)` : p.nome || ''),
         comprovante_url: '',
         comprovante_path: '',
         status: 'pendente',
@@ -257,7 +291,7 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
             dt_emissao: null,
             cd_portador: null,
             nm_portador: null,
-            observacao: [...cabec, `⚠️ TÍTULO NÃO LOCALIZADO${cliente ? ` (cliente ${cliente.code} tem ${abertos.length} aberto(s), nenhum/combinação bate com o valor)` : ' — cliente não identificado no pedido (sem código/CPF)'}. Conferir manualmente.`, `[${refBase}]`].join(' '),
+            observacao: [...cabec, `⚠️ TÍTULO NÃO LOCALIZADO${cliente ? ` (cliente ${cliente.code} tem ${abertos.length} aberto(s), nenhum/combinação bate com o valor)` : p.cd_cliente ? ` — cliente ${p.cd_cliente} sem título aberto no TOTVS` : ' — cliente não identificado no pedido (sem código/CPF)'}. Conferir manualmente.`, `[${refBase}]`].join(' '),
             ref_externa: refBase,
           }];
       for (const row of linhas) {
