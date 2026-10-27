@@ -644,3 +644,6 @@ router.post(
 );
 
 export default router;
+
+// Reaproveitada pelo cruzamento notas × chamados (services/sefazChamados.js)
+export { rpc as drylandRpc };

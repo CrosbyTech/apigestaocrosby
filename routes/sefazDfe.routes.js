@@ -18,6 +18,7 @@ import {
   obterXmlNota,
 } from '../services/sefazDfe.js';
 import { importarEscrituradas } from '../services/sefazEscrituracao.js';
+import { cruzarNotasComChamados } from '../services/sefazChamados.js';
 
 const router = express.Router();
 
@@ -244,6 +245,20 @@ router.patch(
       .single();
     if (error) return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
     successResponse(res, data, desfazer ? 'Nota voltou para pendentes' : 'Nota movida para Outros');
+  }),
+);
+
+// Notas pendentes × chamados abertos do Dryland (fornecedor + nº da NF/valor).
+// Niziany, 27/10/2026. ?forcar=1 ignora o cache de 5 min.
+router.get(
+  '/notas/chamados',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await cruzarNotasComChamados({ forcar: req.query.forcar === '1' });
+      successResponse(res, r, `${r.resumo.notasComChamado} nota(s) pendente(s) com chamado aberto`);
+    } catch (e) {
+      errorResponse(res, e.message, 502, 'CHAMADOS_ERRO');
+    }
   }),
 );
 
