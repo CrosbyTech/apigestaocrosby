@@ -37,6 +37,7 @@ import {
   interpretarPagarme,
   ehXlsx,
 } from './extratosBancariosExtra.js';
+import { interpretarBb, interpretarItau } from './extratosBancariosBbItau.js';
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const soDigitos = (v) => String(v ?? '').replace(/\D/g, '');
@@ -56,6 +57,8 @@ export const BANCOS = {
   DAYCOVAL: { codigo: '707', nome: 'Daycoval' },
   PAGBANK: { codigo: '290', nome: 'PagBank' },
   PAGARME: { codigo: 'PAGARME', nome: 'Pagar.me' },
+  BB: { codigo: '001', nome: 'Banco do Brasil' },
+  ITAU: { codigo: '341', nome: 'Itaú' },
 };
 
 // formas de pagamento (gerencial) — valores livres, mas padronizados aqui
@@ -139,6 +142,8 @@ export function detectarBanco(paginas) {
   if (/COOP: \d+ - AG: \d+ - CONTA:/.test(texto) || /UNICRED/.test(texto)) return 'UNICRED';
   if (/DAYCOVAL|DAYCONNECT/.test(texto)) return 'DAYCOVAL';
   if (/PAGSEGURO INTERNET|PAGBANK/.test(texto) && /EXTRATO DA CONTA/.test(texto)) return 'PAGBANK';
+  if (/OUVIDORIA BB|SAC 0800 729 0722|BANCO DO BRASIL/.test(texto) && /EXTRATO DE CONTA CORRENTE/.test(texto)) return 'BB';
+  if (/ITAU\.COM\.BR|BANCO ITAU|SISPAG/.test(texto) && /AG\/ORIGEM|LANCAMENTOS/.test(texto)) return 'ITAU';
   return null;
 }
 
@@ -613,7 +618,7 @@ export async function lerExtratoBancario(buffer, opts = {}) {
       const legivel = paginas.some((p) => p.items.some((it) => /[A-Za-z]{4,}/.test(it.s)));
       throw new Error(
         legivel
-          ? 'Banco não reconhecido no PDF (esperado: Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval, PagBank ou planilha Pagar.me).'
+          ? 'Banco não reconhecido no PDF (esperado: Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval, PagBank, Banco do Brasil, Itaú ou planilha Pagar.me).'
           : 'PDF sem texto legível (fonte sem mapa de caracteres — comum no Bradesco). Exporte o extrato em OFX/CSV/TXT ou use outro formato de PDF.',
       );
     }
@@ -627,6 +632,8 @@ export async function lerExtratoBancario(buffer, opts = {}) {
       UNICRED: interpretarUnicred,
       DAYCOVAL: interpretarDaycoval,
       PAGBANK: interpretarPagbank,
+      BB: interpretarBb,
+      ITAU: interpretarItau,
     };
     r = parsers[banco](paginas);
   }

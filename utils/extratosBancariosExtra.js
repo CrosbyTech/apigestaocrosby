@@ -188,6 +188,59 @@ function acharCabecalho(paginas) {
 }
 
 // ─── BNB ───────────────────────────────────────────────────────
+// Leitura por linha: data à esquerda; os dois números mais à direita são
+// valor e saldo (saldo = o último); documento = número inteiro entre o
+// histórico e o valor; linhas sem data continuam o histórico anterior.
+function lerLinhasBnb(paginas, cab) {
+  const lanc = [];
+  const avisos = [];
+  let parou = false;
+  for (const pg of paginas) {
+    if (parou) break;
+    let linhas = agruparLinhas(pg.items).filter((l) => pg.numero !== cab.pagina || l.y > cab.y + 3);
+    const fim = linhas.findIndex((l) => /^Detalhamento do Saldo$/i.test(textoDe(l.items)));
+    if (fim >= 0) {
+      linhas = linhas.slice(0, fim);
+      parou = true;
+    }
+    const ehData = (l) => RE_DATA4.test(limpar(l.items[0].s)) && l.items[0].x < cab.xDesc;
+    const idxDatas = linhas.map((l, i) => (ehData(l) ? i : -1)).filter((i) => i >= 0);
+    // texto sem data pertence ao lançamento mais próximo (meio-termo entre as datas vizinhas),
+    // porque o histórico do BNB pode começar na linha ACIMA da data e continuar na de baixo
+    const dono = new Map();
+    linhas.forEach((l, i) => {
+      if (ehData(l)) return;
+      const antes = [...idxDatas].reverse().find((d) => d < i);
+      const depois = idxDatas.find((d) => d > i);
+      let alvo = null;
+      if (antes != null && depois != null) alvo = l.y >= (linhas[antes].y + linhas[depois].y) / 2 ? depois : antes;
+      else alvo = antes ?? depois ?? null;
+      if (alvo != null) dono.set(i, alvo);
+    });
+    const extraDe = (l) => limpar(l.items.filter((it) => it.x >= cab.xDesc - 80 && (!cab.xDoc || it.x < cab.xDoc - 25) && !ehNumero(it.s)).map((it) => it.s).join(' '));
+    for (const d of idxDatas) {
+      const linha = linhas[d];
+      const first = linha.items[0];
+      const data = dataIso4(first.s);
+      const nums = linha.items.filter((it) => it !== first && it.x > cab.xDesc + 40 && ehNumero(it.s)).sort((a, b) => a.x - b.x);
+      const saldoIt = nums.length >= 2 ? nums.at(-1) : null;
+      const valorIt = nums.length >= 2 ? nums.at(-2) : nums[0] || null;
+      // documento fica numa coluna à esquerda do título "Documento" (x ≈ xDoc − 20); o histórico termina antes dela
+      const descIts = linha.items.filter((it) => it !== first && it !== valorIt && it !== saldoIt && it.x >= cab.xDesc - 80 && (!cab.xDoc || it.x < cab.xDoc - 25));
+      const docIts = cab.xDoc ? linha.items.filter((it) => it !== valorIt && it !== saldoIt && it.x >= cab.xDoc - 25 && it.x < (valorIt ? valorIt.x - 5 : cab.rValor - 60)) : [];
+      const acima = linhas.filter((l, i) => dono.get(i) === d && l.y < linha.y).map(extraDe).filter(Boolean);
+      const abaixo = linhas.filter((l, i) => dono.get(i) === d && l.y > linha.y).map(extraDe).filter(Boolean);
+      const desc = limpar([...acima, textoDe(descIts), ...abaixo].join(' '));
+      if (!valorIt) {
+        if (desc) avisos.push(`pág. ${pg.numero} ${limpar(first.s)}: linha sem valor ("${desc}")`);
+        continue;
+      }
+      lanc.push({ pagina: pg.numero, data, hora: null, descricao: desc, documento: textoDe(docIts) || null, valor: parseNumBr(valorIt.s), saldoApos: saldoIt ? parseNumBr(saldoIt.s) : null });
+    }
+  }
+  return { lanc, avisos };
+}
+
 export function interpretarBnb(paginas) {
   const p1 = paginas[0].items;
   const avisos = [];
@@ -207,6 +260,15 @@ export function interpretarBnb(paginas) {
     const r = lerTabela(paginas, cab, { stop: /^Detalhamento do Saldo$/i, inicioPg1: cab.y + 3 });
     lanc = r.lanc;
     avisos.push(...r.avisos);
+    // layout com colunas deslocadas (valor/saldo não encostam no cabeçalho): lê por linha
+    if (!lanc.length || r.avisos.some((a) => /linha sem valor/.test(a))) {
+      const alt = lerLinhasBnb(paginas, cab);
+      if (alt.lanc.length > lanc.length) {
+        lanc = alt.lanc;
+        avisos.length = 0;
+        avisos.push(...alt.avisos);
+      }
+    }
   } else {
     avisos.push('BNB informa que não houve movimentação no período.');
   }

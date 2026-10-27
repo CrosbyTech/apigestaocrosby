@@ -126,7 +126,7 @@ const bancoBate = (textoBanco, banco) => {
 // apelido curto para a tela: "Stone 0001-03", "Sicredi 36733-8", "Mêntore A01"
 export function apelidoPadrao(extrato) {
   const { banco, titular } = extrato;
-  const nomeBanco = { STONE: 'Stone', SICREDI: 'Sicredi', CAIXA: 'Caixa', MENTORE: 'Mêntore', BNB: 'BNB', SANTANDER: 'Santander', UNICRED: 'Unicred', DAYCOVAL: 'Daycoval', PAGBANK: 'PagBank', PAGARME: 'Pagar.me' }[banco] || BANCOS[banco]?.nome || banco;
+  const nomeBanco = { STONE: 'Stone', SICREDI: 'Sicredi', CAIXA: 'Caixa', MENTORE: 'Mêntore', BNB: 'BNB', SANTANDER: 'Santander', UNICRED: 'Unicred', DAYCOVAL: 'Daycoval', PAGBANK: 'PagBank', PAGARME: 'Pagar.me', BB: 'BB', ITAU: 'Itaú' }[banco] || BANCOS[banco]?.nome || banco;
   if (banco === 'MENTORE') {
     const m = String(titular.nome || '').match(/\b([A-Z]\d{2})\b/);
     if (m) return `${nomeBanco} ${m[1]}`;

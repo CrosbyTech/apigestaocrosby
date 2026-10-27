@@ -39,7 +39,7 @@ const upload = multer({
   limits: { fileSize: 30 * 1024 * 1024, files: 60 },
   fileFilter: (req, file, cb) => {
     const ok = /\.(pdf|xlsx)$/i.test(file.originalname || '') || file.mimetype === 'application/pdf';
-    cb(ok ? null : new Error('Envie o PDF do extrato (Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval) ou a planilha .xlsx do Pagar.me.'), ok);
+    cb(ok ? null : new Error('Envie o PDF do extrato (Stone, Sicredi, Caixa, Mêntore, BNB, Santander, Unicred, Daycoval, Banco do Brasil, Itaú) ou a planilha .xlsx do Pagar.me.'), ok);
   },
 });
 
