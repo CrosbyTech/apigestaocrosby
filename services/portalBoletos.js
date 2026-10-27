@@ -20,6 +20,35 @@ const TABELA = 'pagarme_boletos';
 const VIVOS = ['pending', 'paid'];
 const soDigitos = (v) => String(v || '').replace(/\D/g, '');
 const chave = (e, f, p) => `${e}-${f}-${p || 1}`;
+// Encargos do Pix (regra do Tadeu, João 27/10/2026): sem juro/multa se pagar no
+// dia ou 1 dia depois; a partir daí, multa + juros diário (mesmos % do boleto).
+const MULTA_PCT = Number(process.env.PAGARME_BOLETO_MULTA_PCT ?? 2);
+const JUROS_PCT_MES = Number(process.env.PAGARME_BOLETO_JUROS_PCT_MES ?? 1);
+const CARENCIA_DIAS = Number(process.env.PAGARME_PIX_CARENCIA_DIAS ?? 1);
+// Telefone é OBRIGATÓRIO no pedido Pagar.me; quando não vier o do cliente, usa este.
+const FONE_FALLBACK = soDigitos(process.env.PAGARME_PIX_FONE_FALLBACK || '5584999999999');
+
+/** Encargos do Pix de um título, pela data de vencimento (hoje = BRT). */
+export function encargosPix(vlFatura, dtVencimento, hojeStr) {
+  const face = Math.round((Number(vlFatura) || 0) * 100) / 100;
+  const venc = String(dtVencimento || '').slice(0, 10);
+  const hoje = hojeStr || new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(venc)) return { face, multa: 0, juros: 0, dias_atraso: 0, valor: face };
+  const dias = Math.round((new Date(`${hoje}T12:00:00Z`) - new Date(`${venc}T12:00:00Z`)) / 86400000);
+  if (dias <= CARENCIA_DIAS) return { face, multa: 0, juros: 0, dias_atraso: Math.max(0, dias), valor: face };
+  const multa = Math.round(face * (MULTA_PCT / 100) * 100) / 100;
+  const juros = Math.round(face * (JUROS_PCT_MES / 100) * (dias / 30) * 100) / 100;
+  return { face, multa, juros, dias_atraso: dias, valor: Math.round((face + multa + juros) * 100) / 100 };
+}
+
+function fonePagarme(telefone) {
+  let d = soDigitos(telefone);
+  if (d.length < 10 || d.length > 13) d = FONE_FALLBACK;
+  if (d.startsWith('55') && d.length >= 12) d = d.slice(2); // tira DDI
+  const area = d.slice(0, 2);
+  const number = d.slice(2);
+  return { country_code: '55', area_code: area, number };
+}
 
 /** Boletos Pagar.me vivos dos títulos informados → Map chave → dados. */
 export async function boletosPorTitulos(titulos = []) {
@@ -66,12 +95,12 @@ export async function boletosPorTitulos(titulos = []) {
 }
 
 /** Cria uma cobrança Pix na Pagar.me para um título. Valor = valor do título. */
-export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, nm_cliente, documento, vl_fatura, conta }) {
+export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, nm_cliente, documento, telefone, vl_fatura, dt_vencimento, conta }) {
   const e = Number(cd_empresa);
   const f = Number(nr_fatura);
   const p = Number(nr_parcela ?? 1);
-  const valor = Math.round((Number(vl_fatura) || 0) * 100) / 100;
-  if (!Number.isFinite(e) || !Number.isFinite(f) || valor <= 0) {
+  const face = Math.round((Number(vl_fatura) || 0) * 100) / 100;
+  if (!Number.isFinite(e) || !Number.isFinite(f) || face <= 0) {
     throw new Error('título ou valor inválido');
   }
   // conta: a do boleto existente, senão a conta de emissão (FA MODA em prod)
@@ -79,7 +108,7 @@ export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, 
   if (!contaId) {
     const { data } = await supabase
       .from(TABELA)
-      .select('conta, nr_documento, nm_cliente')
+      .select('conta, nr_documento, nm_cliente, dt_vencimento')
       .eq('cd_empresa', e)
       .eq('nr_fatura', f)
       .eq('nr_parcela', p)
@@ -91,11 +120,15 @@ export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, 
       contaId = data.conta || null;
       documento = documento || data.nr_documento;
       nm_cliente = nm_cliente || data.nm_cliente;
+      dt_vencimento = dt_vencimento || data.dt_vencimento;
     }
   }
   if (!contaId) contaId = contaEmissao();
   if (!CONTAS[contaId]?.sk) throw new Error(`conta Pagar.me "${contaId}" não configurada no servidor`);
 
+  // Valor = face + encargos (juros diário a partir do atraso, carência de 1 dia)
+  const enc = encargosPix(face, dt_vencimento);
+  const valor = enc.valor;
   const doc = soDigitos(documento);
   const titulo = `Fatura ${f}/${p}`;
   const code = `PIX-${chave(e, f, p)}-${Date.now().toString(36)}`.slice(0, 52);
@@ -103,6 +136,7 @@ export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, 
     name: String(nm_cliente || `Cliente ${cd_cliente || ''}`).slice(0, 64) || 'Cliente',
     type: doc.length > 11 ? 'company' : 'individual',
     ...(doc.length === 11 || doc.length === 14 ? { document: doc, document_type: doc.length > 11 ? 'CNPJ' : 'CPF' } : {}),
+    phones: { mobile_phone: fonePagarme(telefone) },
   };
   const pedido = {
     code,
@@ -129,6 +163,10 @@ export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, 
   return {
     ok: true,
     valor,
+    face: enc.face,
+    multa: enc.multa,
+    juros: enc.juros,
+    dias_atraso: enc.dias_atraso,
     conta: contaId,
     order_id: order.id,
     charge_id: charge.id || null,
