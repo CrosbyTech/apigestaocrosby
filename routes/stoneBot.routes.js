@@ -29,7 +29,7 @@ import { requireAuth } from '../middlewares/auth.js';
 import bot from '../services/stoneBot.js';
 import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { salvarComprovante } from '../services/comprovantesStone.js';
-import { enviarRelatorio, statusRelatorio } from '../services/relatorioSaldosWhatsapp.js';
+import { enviarRelatorio, statusRelatorio, testarImagem } from '../services/relatorioSaldosWhatsapp.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
@@ -312,12 +312,18 @@ agente.post(
   }),
 );
 
+// diagnóstico: gera a imagem do relatório no servidor sem enviar
+agente.get(
+  '/relatorio-whatsapp/imagem',
+  asyncHandler(async (req, res) => successResponse(res, await testarImagem())),
+);
+
 // o bot (ou um teste) pede o envio do relatório de saldos no WhatsApp
 agente.post(
   '/relatorio-whatsapp',
   asyncHandler(async (req, res) => {
     try {
-      return successResponse(res, await enviarRelatorio({ motivo: req.body?.motivo || 'agente', soTexto: !!req.body?.soTexto }));
+      return successResponse(res, await enviarRelatorio({ motivo: req.body?.motivo || 'agente', soTexto: !!req.body?.soTexto, soImagem: !!req.body?.soImagem }));
     } catch (e) {
       return tratar(res, e);
     }

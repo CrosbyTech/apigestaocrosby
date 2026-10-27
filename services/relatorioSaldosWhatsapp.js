@@ -216,7 +216,7 @@ export function statusRelatorio() {
  * Manda imagem + programação no grupo. `motivo` só para log.
  * @returns {{ok, grupo, imagem, texto}}
  */
-export async function enviarRelatorio({ motivo = 'manual', soTexto = false } = {}) {
+export async function enviarRelatorio({ motivo = 'manual', soTexto = false, soImagem = false } = {}) {
   if (!wa.isConfigurado()) throw new Error('WhatsApp Contas a Pagar não configurado');
   const grupo = await grupoChatid();
   const dados = await montarDados();
@@ -227,7 +227,7 @@ export async function enviarRelatorio({ motivo = 'manual', soTexto = false } = {
       try {
         png = await gerarImagem(dados);
       } catch (e) {
-        out.imagemErro = e.message;
+        out.imagemErro = `${e.message} | ${String(e.stack || '').split(/\r?\n/).slice(1, 3).join(' ')}`;
         console.warn(`[relatorio-saldos] imagem falhou (${e.message}) — mando só texto`);
       }
       if (png) {
@@ -238,8 +238,10 @@ export async function enviarRelatorio({ motivo = 'manual', soTexto = false } = {
         out.imagem = r?.resposta?.id || true;
       }
     }
-    const r2 = await wa.enviarTexto({ number: grupo, text: textoProgramacao(dados), trackId: TRACK_ID });
-    out.texto = r2?.resposta?.id || true;
+    if (!soImagem) {
+      const r2 = await wa.enviarTexto({ number: grupo, text: textoProgramacao(dados), trackId: TRACK_ID });
+      out.texto = r2?.resposta?.id || true;
+    }
     out.ok = true;
     ultimoEnvio = { em: Date.now(), motivo, ok: true, erro: null };
   } catch (e) {
@@ -248,6 +250,17 @@ export async function enviarRelatorio({ motivo = 'manual', soTexto = false } = {
   }
   console.log(`[relatorio-saldos] enviado (${motivo}) → ${grupo}`);
   return out;
+}
+
+/** Diagnóstico: gera a imagem sem enviar (tamanho ou erro com stack). */
+export async function testarImagem() {
+  const t0 = Date.now();
+  try {
+    const png = await gerarImagem(await montarDados());
+    return { ok: true, bytes: png.length, ms: Date.now() - t0 };
+  } catch (e) {
+    return { ok: false, erro: e.message, stack: String(e.stack || '').split(/\r?\n/).slice(0, 6), ms: Date.now() - t0 };
+  }
 }
 
 /** Chamado quando uma execução AGENDADA do bot Stone termina. */
