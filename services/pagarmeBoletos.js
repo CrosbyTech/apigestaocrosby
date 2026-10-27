@@ -777,6 +777,30 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
   if (retentarErros) {
     await supabase.from(TABELA).update({ baixa_status: 'pendente' }).eq('status', 'paid').eq('baixa_status', 'erro');
   }
+  // Cancelados/falhos recentes (candidatos a "reemitir" no Retorno Boleto): confere
+  // no TOTVS se o título ainda está aberto. Renegociado/baixado → a tela marca
+  // "não reemitir" (Yago, 27/10/2026). Só os não conferidos nas últimas 12 h.
+  try {
+    const corte = new Date(Date.now() - 120 * 86400000).toISOString().slice(0, 10);
+    const limiteConf = new Date(Date.now() - 12 * 3600000).toISOString();
+    const { data: cand } = await supabase
+      .from(TABELA)
+      .select('id, cd_empresa, cd_cliente, nr_fatura, nr_parcela, totvs_conferido_em')
+      .in('status', ['canceled', 'failed'])
+      .gte('dt_vencimento', corte)
+      .or(`totvs_conferido_em.is.null,totvs_conferido_em.lt.${limiteConf}`)
+      .order('id', { ascending: false })
+      .limit(1500);
+    if (cand?.length) {
+      const c2 = await conferirTitulosTotvs(cand);
+      r.canceladosConferidos = c2.conferidos;
+      r.canceladosFechadosTotvs = c2.fechados.length;
+      if (c2.fechados.length) console.log(`🔎 [retorno-boleto] ${c2.fechados.length} cancelado(s) com título já renegociado/baixado no TOTVS (não reemitir)`);
+    }
+  } catch (e) {
+    console.warn(`⚠️ [retorno-boleto] conferência dos cancelados: ${e.message}`);
+  }
+
   // Baixas desfeitas no TOTVS (ex.: as 23 feitas em conta corrente que o João
   // está desfazendo): boleto pago e 'processada' aqui, mas título ABERTO no
   // TOTVS → volta a 'pendente' pra virar Solicitação de Baixa.
