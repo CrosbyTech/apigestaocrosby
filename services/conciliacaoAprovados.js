@@ -47,7 +47,10 @@ const fmt = (v) => `R$ ${Number(v || 0).toLocaleString('pt-BR', { minimumFractio
 
 const VALOR_TOL = 0.011;
 const NOME_MIN = 0.6; // fração de tokens do fornecedor que precisam aparecer na contraparte
-const JANELA_ANTES = 10; // dias antes do vencimento que o pagamento pode ter saído
+// âncora da data: a INCLUSÃO como aprovado (o pagamento sai perto de quando é
+// aprovado, não do vencimento — regra do Yago, 27/10). A saída pode ter ocorrido
+// alguns dias antes (aprovação retroativa) ou a partir dali.
+const JANELA_ANTES = 7;
 
 // rótulo de banco_pagamento (convenção da Liberação) a partir da conta do extrato
 function labelBanco(conta) {
@@ -111,12 +114,14 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
   const ordenados = aprovados.sort((a, b) => (a.dt_vencimento || '').localeCompare(b.dt_vencimento || ''));
   for (const t of ordenados) {
     const V = round2(Math.abs(t.vl_duplicata));
-    const limiteAntes = t.dt_vencimento ? addDias(t.dt_vencimento, -JANELA_ANTES) : de;
+    // janela a partir da inclusão como aprovado (fallback: vencimento)
+    const ancora = (t.aprovado_em ? String(t.aprovado_em).slice(0, 10) : null) || t.dt_vencimento || de;
+    const limiteAntes = addDias(ancora, -JANELA_ANTES);
     const cand = saidas.filter(
       (l) => Math.abs(round2(Math.abs(l.valor)) - V) < VALOR_TOL && !usados.has(l.id) && !lancUsado.has(l.id) && l.data >= limiteAntes && l.data <= ate,
     );
     const scored = cand
-      .map((l) => ({ l, ns: nomeScore(t.nm_fornecedor, l.contraparte_nome || l.memo || ''), dv: t.dt_vencimento ? Math.abs((new Date(l.data) - new Date(t.dt_vencimento)) / 864e5) : 99 }))
+      .map((l) => ({ l, ns: nomeScore(t.nm_fornecedor, l.contraparte_nome || l.memo || ''), dv: Math.abs((new Date(l.data) - new Date(ancora)) / 864e5) }))
       .sort((a, b) => b.ns - a.ns || a.dv - b.dv);
     const top = scored[0];
     if (!top || top.ns < NOME_MIN) continue;
