@@ -19,7 +19,8 @@ import axios from 'axios';
 const BASE_URL = (process.env.WHATSAPP_CP_BASE_URL || 'https://techcrosby.uazapi.com').replace(/\/+$/, '');
 const INSTANCE_NAME = process.env.WHATSAPP_CP_INSTANCE || 'CONTAS A PAGAR';
 const TOKEN_ENV = process.env.WHATSAPP_CP_TOKEN || '';
-const ADMIN_TOKEN = process.env.WHATSAPP_CP_ADMIN_TOKEN || '';
+// sem o token da instância, resolve pelo admintoken do servidor (o mesmo do CRM, UAZAPI_ADMIN_TOKEN)
+const ADMIN_TOKEN = process.env.WHATSAPP_CP_ADMIN_TOKEN || process.env.UAZAPI_ADMIN_TOKEN || '';
 const TRACK_SOURCE = 'headcoach';
 
 let tokenCache = { token: TOKEN_ENV || null, ate: 0 };
