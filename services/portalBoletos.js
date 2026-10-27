@@ -25,8 +25,10 @@ const chave = (e, f, p) => `${e}-${f}-${p || 1}`;
 const MULTA_PCT = Number(process.env.PAGARME_BOLETO_MULTA_PCT ?? 2);
 const JUROS_PCT_MES = Number(process.env.PAGARME_BOLETO_JUROS_PCT_MES ?? 1);
 const CARENCIA_DIAS = Number(process.env.PAGARME_PIX_CARENCIA_DIAS ?? 1);
-// Telefone é OBRIGATÓRIO no pedido Pagar.me; quando não vier o do cliente, usa este.
+// Telefone e e-mail são OBRIGATÓRIOS no pedido Pagar.me; sem o do cliente, usa estes.
 const FONE_FALLBACK = soDigitos(process.env.PAGARME_PIX_FONE_FALLBACK || '5584999999999');
+const EMAIL_FALLBACK = process.env.PAGARME_PIX_EMAIL_FALLBACK || 'cobranca@crosby.app';
+const emailValido = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(v || '').trim());
 
 /** Encargos do Pix de um título, pela data de vencimento (hoje = BRT). */
 export function encargosPix(vlFatura, dtVencimento, hojeStr) {
@@ -95,7 +97,7 @@ export async function boletosPorTitulos(titulos = []) {
 }
 
 /** Cria uma cobrança Pix na Pagar.me para um título. Valor = valor do título. */
-export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, nm_cliente, documento, telefone, vl_fatura, dt_vencimento, conta }) {
+export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, nm_cliente, documento, telefone, email, vl_fatura, dt_vencimento, conta }) {
   const e = Number(cd_empresa);
   const f = Number(nr_fatura);
   const p = Number(nr_parcela ?? 1);
@@ -136,6 +138,7 @@ export async function gerarPix({ cd_empresa, nr_fatura, nr_parcela, cd_cliente, 
     name: String(nm_cliente || `Cliente ${cd_cliente || ''}`).slice(0, 64) || 'Cliente',
     type: doc.length > 11 ? 'company' : 'individual',
     ...(doc.length === 11 || doc.length === 14 ? { document: doc, document_type: doc.length > 11 ? 'CNPJ' : 'CPF' } : {}),
+    email: emailValido(email) ? String(email).trim().toLowerCase() : EMAIL_FALLBACK,
     phones: { mobile_phone: fonePagarme(telefone) },
   };
   const pedido = {
