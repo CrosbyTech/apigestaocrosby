@@ -86,9 +86,7 @@ export async function montarDados() {
   const { data: prov } = await supabase
     .from('pagamentos_liberacao')
     .select('id,nm_fornecedor,vl_duplicata,vl_real,dt_vencimento,nm_empresa,forma_pagamento,cd_despesaitem,ds_despesaitem,dados_completos')
-    .eq('status', 'PROVISAO')
-    .gte('dt_vencimento', semana.de)
-    .lte('dt_vencimento', semana.ate)
+    .eq('status', 'PROVISAO') // tudo que está em previsão: vencidos, de hoje e a vencer (pedido do Yago, 27/10)
     .order('dt_vencimento')
     .order('nm_fornecedor');
   const programacao = (prov || []).map((p) => ({ id: p.id, fornecedor: p.nm_fornecedor || '—', valor: Number(p.vl_real ?? p.vl_duplicata ?? 0), vencimento: p.dt_vencimento, empresa: p.nm_empresa, despesaCodigo: p.cd_despesaitem, despesa: p.ds_despesaitem, origem: p.dados_completos?.origem || null }));
@@ -188,8 +186,10 @@ export async function gerarImagem(dados) {
 const fmtDiaMes = (iso) => (iso ? `${String(iso).slice(8, 10)}/${String(iso).slice(5, 7)}` : '');
 export function textoProgramacao(d) {
   const itens = d.itensSemana || agruparProgramacao(d.programacao || []);
-  const linhas = [`*Programação da semana* (${fmtDiaMes(d.semana.de)} a ${fmtDiaMes(d.semana.ate)})`];
-  if (!itens.length) linhas.push('Nenhum título em previsão para esta semana.');
+  const hoje = hojeBr();
+  const vencidos = itens.filter((it) => it.vencimentoAte < hoje).length;
+  const linhas = [`*Previsão de pagamentos* (${fmtDiaMes(hoje)})${vencidos ? ` · ${vencidos} vencido(s)` : ''}`];
+  if (!itens.length) linhas.push('Nenhum título em previsão.');
   itens.forEach((it, i) => {
     const quando = it.agrupado && it.vencimento !== it.vencimentoAte ? `${fmtDiaMes(it.vencimento)} a ${fmtDiaMes(it.vencimentoAte)}` : fmtDiaMes(it.vencimento);
     linhas.push(`${i + 1} - ${it.rotulo} — ${fmt(it.valor)} (${quando}${it.agrupado && it.qtd > 1 ? `, ${it.qtd} contas` : ''})`);
@@ -199,9 +199,9 @@ export function textoProgramacao(d) {
   return linhas.join('\n');
 }
 
-function legendaImagem(d) {
-  const quem = MENCIONAR ? `@${MENCIONAR} ` : '';
-  return `${quem}${NOME_MENCIONADO}, segue o saldo do momento (${d.geradoEm}):\n• Total: *${fmt(d.total)}*\n• Stone: ${fmt(d.bancos.find((b) => b.banco === 'STONE')?.valor)}${d.antecipavel > 0 ? ` (+${fmt(d.antecipavel)} para antecipar)` : ''}\n• Pagar.me: ${fmt(d.bancos.find((b) => b.banco === 'PAGARME')?.valor)} disponível + ${fmt(d.bancos.find((b) => b.banco === 'PAGARME A RECEBER')?.valor)} a receber
+function legendaImagem() {
+  // só a marcação do Fábio: o print já traz os números
+  return `${MENCIONAR ? `@${MENCIONAR}` : NOME_MENCIONADO}, segue o saldo atual
 
 ${ASSINATURA}`;
 }
@@ -231,10 +231,10 @@ export async function enviarRelatorio({ motivo = 'manual', soTexto = false } = {
         console.warn(`[relatorio-saldos] imagem falhou (${e.message}) — mando só texto`);
       }
       if (png) {
-        const r = await wa.enviarMidia({ number: grupo, type: 'image', file: `data:image/png;base64,${png.toString('base64')}`, text: legendaImagem(dados), mentions: MENCIONAR, trackId: TRACK_ID });
+        const r = await wa.enviarMidia({ number: grupo, type: 'image', file: `data:image/png;base64,${png.toString('base64')}`, text: legendaImagem(), mentions: MENCIONAR, trackId: TRACK_ID });
         out.imagem = r?.resposta?.id || true;
       } else {
-        const r = await wa.enviarTexto({ number: grupo, text: legendaImagem(dados), mentions: MENCIONAR, trackId: TRACK_ID });
+        const r = await wa.enviarTexto({ number: grupo, text: legendaImagem(), mentions: MENCIONAR, trackId: TRACK_ID });
         out.imagem = r?.resposta?.id || true;
       }
     }

@@ -31,7 +31,7 @@ const hojeBr = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_P
 
 const SYSTEM = `Você é o VEVETO, assistente financeiro da Crosby dentro do HeadCoach (sistema de gestão da empresa). Você atende no grupo de WhatsApp "CONTAS A PAGAR CROSBY OFC". Seu principal interlocutor é o Fábio Ferreira, CEO da Crosby; o Yago (tecnologia) também fala com você. Trate o Fábio por "Fábio".
 
-Você recebe, antes de cada mensagem, os DADOS ATUAIS do HeadCoach: saldo bancário total e por banco, saldo de cada conta Stone (identificada pelo final do CNPJ, ex.: "Stone 0549") com o valor disponível para antecipar, saldos da Pagar.me (disponível e a receber) e a programação da semana (títulos em previsão na Liberação de Pagamento: fornecedor, valor, vencimento). Use SEMPRE esses dados para responder; nunca invente valores. Se perguntarem algo que não está nos dados, diga o que não tem.
+Você recebe, antes de cada mensagem, os DADOS ATUAIS do HeadCoach: saldo bancário total e por banco, saldo de cada conta Stone (identificada pelo final do CNPJ, ex.: "Stone 0549") com o valor disponível para antecipar, saldos da Pagar.me (disponível e a receber) e a previsão de pagamentos (TODOS os títulos em provisão na Liberação de Pagamento, vencidos ou não: fornecedor, valor, vencimento). Use SEMPRE esses dados para responder; nunca invente valores. Se perguntarem algo que não está nos dados, diga o que não tem.
 
 Papel:
 - Responder sobre saldos (total, por banco, por conta Stone, antecipação, Pagar.me) e sobre a programação de pagamentos da semana.
@@ -51,7 +51,7 @@ async function contextoExtra() {
   if (d.stone.length) linhas.push(`Contas Stone: ${d.stone.map((s) => `${s.rotulo} (${s.titular || ''}) ${fmt(s.saldo)}${s.antecipavel > 0 ? ` [antecipável ${fmt(s.antecipavel)}]` : ''}`).join(' · ')}`);
   if (d.antecipavel > 0) linhas.push(`Total disponível para antecipar na Stone: ${fmt(d.antecipavel)}`);
   if (d.pagarme.length) linhas.push(`Pagar.me: ${d.pagarme.map((p) => `${p.rotulo} disponível ${fmt(p.saldo)}, a receber ${fmt(p.aReceber)}`).join(' · ')}`);
-  linhas.push(`Programação da semana ${fmtData(d.semana.de)} a ${fmtData(d.semana.ate)} (${d.programacao.length} títulos, ${fmt(d.totalProgramacao)}):`);
+  linhas.push(`Previsão de pagamentos — todos os títulos em provisão na Liberação (vencidos, de hoje e a vencer): ${d.programacao.length} títulos, ${fmt(d.totalProgramacao)}:`);
   for (const p of d.programacao.slice(0, 60)) linhas.push(`  - ${fmtData(p.vencimento)} · ${p.fornecedor} · ${fmt(p.valor)}${p.empresa ? ` · ${p.empresa}` : ''}${p.origem === 'whatsapp_ceo' ? ' · (incluído pelo WhatsApp)' : ''}`);
   linhas.push(`Hoje é ${fmtData(hojeBr())}.`);
   return linhas.join('\n');
