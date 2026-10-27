@@ -36,7 +36,8 @@ export class HeadCoach {
         e.body = j;
         throw e;
       }
-      return j?.data ?? j;
+      // envelope do HeadCoach: { success, data } — data pode ser null (ex.: fila vazia) e TEM que voltar null
+      return j && typeof j === 'object' && 'data' in j ? j.data : j;
     } finally {
       clearTimeout(t);
     }
