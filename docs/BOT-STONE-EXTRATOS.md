@@ -119,6 +119,15 @@ público `solicitacoes-crosby/comprovantes/<solId>/…`, grava
 (se não paga), põe o título da Liberação em PAGO (se existir e não estiver) e
 registra o anexo na conciliação. Desfazer a conciliação NÃO desfaz isso.
 
+## Keep-alive da sessão (27/10/2026)
+
+A sessão do portal expirava em poucas horas de inatividade. O agente agora
+roda `manterSessao()` (stone.mjs) a cada `sessao.keepAliveMin` minutos (20):
+abre o Chrome escondido, carrega a home (o portal faz `POST
+/api/v2/identity/refresh-token` a cada carga), passa pelo Extrato e fecha;
+manda o ping com `sessao_ok`. Depois de uma execução o contador reinicia.
+`parar.bat` encerra o agente (inclusive o escondido) e o Chrome do perfil.
+
 ## Horários e relatório no WhatsApp (27/10/2026)
 
 - Bot Stone no PC: `config.json → horarios: ["09:30","14:00","18:00"]`

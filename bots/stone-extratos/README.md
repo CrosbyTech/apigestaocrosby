@@ -30,7 +30,8 @@ na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
 | Todo dia de manhã | `config.json` → `horarioDiario` (padrão `07:30`), `diasSemana` (0 = domingo). O agente precisa estar ligado. |
 | Quantos dias para trás | `diasRetroativos` (padrão 3). Reimportar o mesmo período substitui os lançamentos — não duplica. |
 | Testar com o Chrome visível | `agora.bat` (aceita `--de=2026-10-01 --ate=2026-10-10`) |
-| Sessão da Stone expirou | A aba Bot Stone mostra “sessão expirada” e o log pede: rode `login.bat` de novo. |
+| Sessão da Stone expirou | Normalmente não expira: o agente abre o portal escondido a cada 20 min (`config.json → sessao.keepAliveMin`) e o token é renovado. Se mesmo assim cair, a aba Bot Stone mostra “sessão expirada” e o log pede: rode `login.bat` de novo. |
+| Parar o agente | `parar.bat` (mata o agente, inclusive o escondido, e fecha o Chrome do bot). Nunca rode dois agentes ao mesmo tempo: os dois disputam o mesmo perfil do Chrome. |
 | Portal mudou e o PDF parou | `mapear.bat` grava em `mapa/` os botões/links e as chamadas de API que o portal faz; ajuste `config.json → pdf.passos` (ver abaixo). |
 
 ## O que o bot faz em cada execução
