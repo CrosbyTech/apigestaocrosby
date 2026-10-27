@@ -33,6 +33,8 @@ import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import extratoStoneRoutes from './routes/extratoStone.routes.js';
 import stoneBotRoutes from './routes/stoneBot.routes.js';
 import { iniciarJobPagarmeSaldo } from './jobs/pagarme-saldo.job.js';
+import { iniciarCaixaBot } from './services/caixaBot.js';
+import { iniciarRelatorioSaldos } from './services/relatorioSaldosWhatsapp.js';
 import fluxoCaixaExtRoutes from './routes/fluxoCaixaExt.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
@@ -287,6 +289,8 @@ app.listen(PORT, async () => {
   iniciarJobConversaoTemplate();
   iniciarJobProvisaoLiberacao();
   iniciarJobPagarmeSaldo();
+  iniciarRelatorioSaldos(); // saldos + programação no grupo CONTAS A PAGAR CROSBY OFC (fallback 09:50/14:20/18:20)
+  iniciarCaixaBot().catch((e) => console.warn(`[caixa] falha ao iniciar: ${e.message}`)); // CAIXA — saldos/programação p/ o CEO Fábio
   iniciarJobBoletoCobranca();
   iniciarBluecardPagamentosSync();
   iniciarBluecardLimiteWatchdog();

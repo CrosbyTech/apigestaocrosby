@@ -387,26 +387,29 @@ async function modoAgente() {
   let sessaoOk = null;
   let ocupado = false;
 
+  // horários do dia: "horarios": ["09:30","14:00","18:00"] (ou o antigo "horarioDiario")
+  const horarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : cfg.horarioDiario ? [cfg.horarioDiario] : []).map((h) => String(h).trim());
   const dispararAgendado = async () => {
-    if (!cfg.horarioDiario) return;
+    if (!horarios.length) return;
     const agora = new Date();
     const hh = `${String(agora.getHours()).padStart(2, '0')}:${String(agora.getMinutes()).padStart(2, '0')}`;
     const dia = hojeIso(agora);
     const semana = cfg.diasSemana || [0, 1, 2, 3, 4, 5, 6];
-    if (hh !== cfg.horarioDiario || ultimoAgendado === dia || !semana.includes(agora.getDay())) return;
-    ultimoAgendado = dia;
+    const slot = `${dia} ${hh}`;
+    if (!horarios.includes(hh) || ultimoAgendado === slot || !semana.includes(agora.getDay())) return;
+    ultimoAgendado = slot;
     try {
       const r = await hc.criarExecucao({ origem: 'agendado' });
-      console.log(`${hora()} ⏰ execução diária #${r.execucao.id} enfileirada`);
+      console.log(`${hora()} ⏰ execução das ${hh} #${r.execucao.id} enfileirada`);
     } catch (e) {
-      console.error(`${hora()} ❌ não consegui enfileirar a execução diária: ${e.message}`);
+      console.error(`${hora()} ❌ não consegui enfileirar a execução das ${hh}: ${e.message}`);
     }
   };
 
   for (;;) {
     try {
       if (Date.now() - ultimoPing > 60000) {
-        await hc.ping({ versao: VERSAO, sessaoOk, proximaAgendada: cfg.horarioDiario || null, detalhes: { pdfAtivo: cfg.pdf?.ativo !== false, diasRetroativos: cfg.diasRetroativos } });
+        await hc.ping({ versao: VERSAO, sessaoOk, proximaAgendada: (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : [cfg.horarioDiario]).filter(Boolean).join(', ') || null, detalhes: { pdfAtivo: cfg.pdf?.ativo !== false, diasRetroativos: cfg.diasRetroativos } });
         ultimoPing = Date.now();
       }
       await dispararAgendado();

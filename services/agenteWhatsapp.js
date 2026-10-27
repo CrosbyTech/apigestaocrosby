@@ -103,8 +103,16 @@ export function criarAgente(cfg) {
   const P = cfg.prefixoEnv;
   const env = (k, d) => process.env[`${P}_${k}`] ?? d;
   const ENABLED = String(env('ENABLED', 'true')).toLowerCase() !== 'false';
-  const GRUPO = env('GRUPO_CHATID', cfg.grupoDefault);
-  const AUTORIZADOR = String(env('NUMERO_AUTORIZADOR', '5584987187425')).replace(/\D/g, '');
+  let GRUPO = env('GRUPO_CHATID', cfg.grupoDefault) || null; // pode ser resolvido pelo nome (cfg.grupoNome) no iniciar()
+  const GRUPO_NOME = env('GRUPO_NOME', cfg.grupoNome) || null;
+  // um ou mais números que autorizam alterações (env NUMEROS_AUTORIZADORES "a,b" ou NUMERO_AUTORIZADOR)
+  const AUTORIZADORES = new Set(
+    String(env('NUMEROS_AUTORIZADORES', env('NUMERO_AUTORIZADOR', (cfg.autorizadores || ['5584987187425']).join(','))))
+      .split(',')
+      .map((x) => x.replace(/\D/g, ''))
+      .filter(Boolean),
+  );
+  const AUTORIZADOR = [...AUTORIZADORES][0];
   const MODEL = env('MODEL', 'claude-opus-5-5');
   const POLL_SEGUNDOS = Number(env('POLL_SEGUNDOS')) || 0;
   const CONTEXTO_N = Number(env('CONTEXTO_MENSAGENS')) || 30;
@@ -128,7 +136,8 @@ export function criarAgente(cfg) {
   const historicoAcoes = []; // últimas decisões (para /status)
   const HIST_MAX = 100;
   let ownerNumero = null; // número da instância (prefixo dos ids das msgs fromMe)
-  let autorizadorLid = null; // lid do autorizador (grupos podem vir com sender @lid)
+  let autorizadorLid = null; // lid do 1º autorizador (compat)
+  const autorizadoresLid = new Set(); // lids de todos os autorizadores (grupos podem vir com sender @lid)
   let ultimoTsPolling = Date.now();
   let pollTimer = null;
   const stats = { recebidas: 0, ignoradas: 0, respondidas: 0, erros: 0, iniciadoEm: new Date().toISOString() };
@@ -146,10 +155,11 @@ export function criarAgente(cfg) {
   }
   function ehAutorizador(m) {
     const n = numeroDoRemetente(m);
-    if (n && n === AUTORIZADOR) return true;
+    if (n && AUTORIZADORES.has(n)) return true;
     const s = String(m.sender || '');
-    if (autorizadorLid && s === autorizadorLid) return true;
-    if (String(m.sender_lid || '') && autorizadorLid && String(m.sender_lid) === autorizadorLid) return true;
+    if (s && autorizadoresLid.has(s)) return true;
+    const sl = String(m.sender_lid || '');
+    if (sl && autorizadoresLid.has(sl)) return true;
     return false;
   }
   function ehRespostaParaMim(m) {
@@ -182,10 +192,24 @@ export function criarAgente(cfg) {
       console.warn(`⚠️ ${tag} não consegui ler o status da instância: ${e.message}`);
     }
     try {
-      const [r] = await wa.verificarNumeros([AUTORIZADOR]);
-      autorizadorLid = r?.lid || null;
+      const rs = await wa.verificarNumeros([...AUTORIZADORES]);
+      for (const r of rs || []) if (r?.lid) autorizadoresLid.add(String(r.lid));
+      autorizadorLid = rs?.[0]?.lid || null;
     } catch (e) {
       console.warn(`⚠️ ${tag} não consegui resolver o lid do autorizador: ${e.message}`);
+    }
+    // grupo pelo nome (quando não há chatid fixo)
+    if (!GRUPO && GRUPO_NOME) {
+      try {
+        const g = await wa.acharGrupoPorNome(GRUPO_NOME);
+        if (g?.id) {
+          GRUPO = g.id;
+          agente.grupo = GRUPO;
+          console.log(`🤖 ${tag} grupo "${g.nome}" → ${GRUPO}`);
+        } else console.warn(`⚠️ ${tag} grupo "${GRUPO_NOME}" não encontrado na instância — ${NOME} inativo até encontrar`);
+      } catch (e) {
+        console.warn(`⚠️ ${tag} não consegui listar os grupos: ${e.message}`);
+      }
     }
     if (POLL_SEGUNDOS > 0) {
       ultimoTsPolling = Date.now();
@@ -228,7 +252,7 @@ export function criarAgente(cfg) {
     if (!ENABLED) return { ignorado: 'desabilitado' };
     stats.recebidas++;
     const chatid = String(m.chatid || '');
-    if (chatid !== GRUPO) {
+    if (!GRUPO || chatid !== GRUPO) {
       stats.ignoradas++;
       return { ignorado: 'outro chat', chatid };
     }
@@ -370,7 +394,16 @@ export function criarAgente(cfg) {
   }
 
   async function gerarResposta({ contexto, texto, remetente, autorizador }) {
-    const user = `Histórico recente do grupo (mais antigo → mais novo):\n${contexto || '(vazio)'}\n\nMensagem atual de ${remetente}${autorizador ? ` (é o ${NOME_AUT}, o número autorizador)` : ''}:\n${texto}`;
+    // dados vivos do HeadCoach que o agente pode citar (ex.: saldos do dia) — cfg.contextoExtra()
+    let extra = '';
+    if (typeof cfg.contextoExtra === 'function') {
+      try {
+        extra = (await cfg.contextoExtra()) || '';
+      } catch (e) {
+        extra = `(não consegui carregar os dados do HeadCoach: ${e.message})`;
+      }
+    }
+    const user = `${extra ? `Dados atuais do HeadCoach:\n${extra}\n\n` : ''}Histórico recente do grupo (mais antigo → mais novo):\n${contexto || '(vazio)'}\n\nMensagem atual de ${remetente}${autorizador ? ` (é ${NOME_AUT}, número autorizador)` : ''}:\n${texto}`;
 
     // Sem chave da Anthropic: usa o provedor do chat (Groq grátis / OpenAI / xAI)
     if (!process.env.ANTHROPIC_API_KEY) {
@@ -411,7 +444,9 @@ export function criarAgente(cfg) {
       ativa: ENABLED && wa.isConfigurado(), // compat (JOJO)
       ia: provedorAtual(),
       grupo: GRUPO,
+      grupoNome: GRUPO_NOME,
       autorizador: AUTORIZADOR,
+      autorizadores: [...AUTORIZADORES],
       autorizadorLid,
       ownerNumero,
       polling: POLL_SEGUNDOS,

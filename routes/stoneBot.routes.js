@@ -29,6 +29,7 @@ import { requireAuth } from '../middlewares/auth.js';
 import bot from '../services/stoneBot.js';
 import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { salvarComprovante } from '../services/comprovantesStone.js';
+import { enviarRelatorio, statusRelatorio } from '../services/relatorioSaldosWhatsapp.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
@@ -127,6 +128,22 @@ tela.get(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await bot.ultimosSaldos());
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// Relatório de saldos no WhatsApp (grupo CONTAS A PAGAR CROSBY OFC) — manda agora
+tela.get(
+  '/relatorio-whatsapp',
+  asyncHandler(async (req, res) => successResponse(res, statusRelatorio())),
+);
+tela.post(
+  '/relatorio-whatsapp',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await enviarRelatorio({ motivo: `manual por ${req.user?.email || 'tela'}`, soTexto: !!req.body?.soTexto }), 'Relatório enviado no grupo');
     } catch (e) {
       return tratar(res, e);
     }
@@ -289,6 +306,18 @@ agente.post(
       const { de, ate } = req.body || {};
       const r = await executarPagarme({ execucaoId: Number(req.params.id), de: dataIso(de) || undefined, ate: dataIso(ate) || undefined });
       return successResponse(res, r);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// o bot (ou um teste) pede o envio do relatório de saldos no WhatsApp
+agente.post(
+  '/relatorio-whatsapp',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await enviarRelatorio({ motivo: req.body?.motivo || 'agente', soTexto: !!req.body?.soTexto }));
     } catch (e) {
       return tratar(res, e);
     }

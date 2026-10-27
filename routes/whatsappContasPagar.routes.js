@@ -19,6 +19,7 @@
 //   GET  /jojo/status · POST /jojo/simular     JOJO (assistente fiscal)           [simular: admin]
 //   GET  /bruce/status · POST /bruce/simular   BRUCE (assistente contas a receber)[simular: admin]
 //   GET  /theo/status · POST /theo/simular     THEO (assistente contas a pagar)    [simular: admin]
+//   GET  /caixa/status · POST /caixa/simular   CAIXA (saldos + programação p/ o CEO) [simular: admin]
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
@@ -27,6 +28,7 @@ import * as wa from '../services/whatsappContasPagar.js';
 import * as jojo from '../services/jojoBot.js';
 import * as bruce from '../services/bruceBot.js';
 import * as theo from '../services/theoBot.js';
+import * as caixa from '../services/caixaBot.js';
 
 const router = express.Router();
 
@@ -58,6 +60,7 @@ router.post(
     jojo.processarEvento(ev).catch((e) => console.error(`[jojo] webhook: ${e.message}`));
     bruce.processarEvento(ev).catch((e) => console.error(`[bruce] webhook: ${e.message}`));
     theo.processarEvento(ev).catch((e) => console.error(`[theo] webhook: ${e.message}`));
+    caixa.processarEvento(ev).catch((e) => console.error(`[caixa] webhook: ${e.message}`));
     return res.json({ success: true });
   },
 );
@@ -246,6 +249,7 @@ router.post(
 router.get('/jojo/status', (req, res) => successResponse(res, jojo.statusJojo()));
 router.get('/bruce/status', (req, res) => successResponse(res, bruce.statusBruce()));
 router.get('/theo/status', (req, res) => successResponse(res, theo.statusTheo()));
+router.get('/caixa/status', (req, res) => successResponse(res, caixa.statusCaixa()));
 
 // Simula uma mensagem do grupo (testes) — só admin. Responde DE VERDADE no grupo.
 function simular(agente, grupoDefault) {
@@ -254,7 +258,7 @@ function simular(agente, grupoDefault) {
     if (!text) return errorResponse(res, 'text obrigatório', 400, 'VALIDATION');
     const r = await agente.processarMensagem({
       id: id || `sim:${Date.now()}`,
-      chatid: chatid || grupoDefault,
+      chatid: chatid || (typeof grupoDefault === 'function' ? grupoDefault() : grupoDefault),
       fromMe: false,
       text,
       senderName: senderName || req.user.name,
@@ -269,6 +273,7 @@ function simular(agente, grupoDefault) {
 router.post('/jojo/simular', admin, simular(jojo, process.env.JOJO_GRUPO_CHATID || '120363414933413909@g.us'));
 router.post('/bruce/simular', admin, simular(bruce, process.env.BRUCE_GRUPO_CHATID || '120363411253432671@g.us'));
 router.post('/theo/simular', admin, simular(theo, process.env.THEO_GRUPO_CHATID || '120363432001142287@g.us'));
+router.post('/caixa/simular', admin, simular(caixa, () => process.env.CAIXA_GRUPO_CHATID || caixa.caixa.grupo));
 
 router.get('/eventos', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, EVENTOS_MAX);

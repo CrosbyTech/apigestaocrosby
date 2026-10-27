@@ -1,8 +1,20 @@
 {
   "headcoachUrl": "https://apigestaocrosby-bw2v.onrender.com",
   "token": "COLE_AQUI_O_STONE_BOT_TOKEN_DO_RENDER",
-  "horarioDiario": "07:30",
-  "diasSemana": [0, 1, 2, 3, 4, 5, 6],
+  "horarios": [
+    "09:30",
+    "14:00",
+    "18:00"
+  ],
+  "diasSemana": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
   "diasRetroativos": 3,
   "headless": false,
   "janelaOculta": true,
@@ -22,19 +34,72 @@
     "timeoutDownloadSeg": 90,
     "_comentario": "modo 'api' = mesma chamada do botão Baixar do portal (POST .../statement/export), sem clique. modo 'roteiro' = clica no portal seguindo trocarConta + passos (reserva, caso a Stone mude a API).",
     "trocarConta": [
-      { "acao": "ir", "url": "https://conta.stone.com.br/home" },
-      { "acao": "clicar", "texto": ["Voltar"], "exato": true, "opcional": true, "timeoutMs": 1500 },
-      { "acao": "clicar", "texto": ["re:(\\d{2}\\.\\d{3}\\.\\d{3}/\\d{4}-\\d{2}|\\d{3}\\.\\d{3}\\.\\d{3}-\\d{2})$"], "aMenosQue": "{cnpjFmt} Ativa" },
-      { "acao": "clicar", "texto": ["{cnpjFmt}"], "aMenosQue": "{cnpjFmt} Ativa" }
+      {
+        "acao": "ir",
+        "url": "https://conta.stone.com.br/home"
+      },
+      {
+        "acao": "clicar",
+        "texto": [
+          "Voltar"
+        ],
+        "exato": true,
+        "opcional": true,
+        "timeoutMs": 1500
+      },
+      {
+        "acao": "clicar",
+        "texto": [
+          "re:(\\d{2}\\.\\d{3}\\.\\d{3}/\\d{4}-\\d{2}|\\d{3}\\.\\d{3}\\.\\d{3}-\\d{2})$"
+        ],
+        "aMenosQue": "{cnpjFmt} Ativa"
+      },
+      {
+        "acao": "clicar",
+        "texto": [
+          "{cnpjFmt}"
+        ],
+        "aMenosQue": "{cnpjFmt} Ativa"
+      }
     ],
     "passos": [
-      { "acao": "clicar", "texto": ["Extrato"], "exato": true },
-      { "acao": "conferirConta" },
-      { "acao": "clicar", "texto": ["Baixar extrato"], "exato": true },
-      { "acao": "selecionar", "opcao": "Extrato da conta" },
-      { "acao": "clicar", "texto": ["PDF"] },
-      { "acao": "clicar", "texto": ["Baixar"], "exato": true },
-      { "acao": "esperarDownload" }
+      {
+        "acao": "clicar",
+        "texto": [
+          "Extrato"
+        ],
+        "exato": true
+      },
+      {
+        "acao": "conferirConta"
+      },
+      {
+        "acao": "clicar",
+        "texto": [
+          "Baixar extrato"
+        ],
+        "exato": true
+      },
+      {
+        "acao": "selecionar",
+        "opcao": "Extrato da conta"
+      },
+      {
+        "acao": "clicar",
+        "texto": [
+          "PDF"
+        ]
+      },
+      {
+        "acao": "clicar",
+        "texto": [
+          "Baixar"
+        ],
+        "exato": true
+      },
+      {
+        "acao": "esperarDownload"
+      }
     ]
   }
 }

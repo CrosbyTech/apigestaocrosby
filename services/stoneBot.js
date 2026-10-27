@@ -151,6 +151,15 @@ export async function finalizarExecucao(id, { status = 'concluido', resumo = nul
     .select()
     .single();
   lancar(error);
+  // execução agendada (09:30/14:00/18:00) → relatório de saldos no grupo do WhatsApp (não bloqueia a resposta ao bot)
+  if (data?.origem === 'agendado') {
+    import('./relatorioSaldosWhatsapp.js')
+      .then((m) => m.aposExecucaoBot(data))
+      .then((r) => {
+        if (r?.ok) registrarLog(id, { nivel: 'ok', msg: `Relatório de saldos enviado no WhatsApp (${r.grupo})` }).catch(() => {});
+      })
+      .catch((e) => console.error('[stone-bot] relatório WhatsApp:', e.message));
+  }
   return data;
 }
 

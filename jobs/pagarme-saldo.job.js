@@ -24,13 +24,19 @@ export function iniciarJobPagarmeSaldo() {
     console.log('[pagarme-saldo] job desligado (PAGARME_SALDO_JOB_ENABLED=false)');
     return;
   }
-  const expr = process.env.PAGARME_SALDO_CRON || '20 7 * * *';
-  cron.schedule(
-    expr,
-    () => {
-      rodarPagarmeSaldo().catch((e) => console.error('[pagarme-saldo] erro:', e.message));
-    },
-    { timezone: 'America/Sao_Paulo' },
-  );
-  console.log(`[pagarme-saldo] agendado (${expr} America/Sao_Paulo)`);
+  // 3x ao dia, 10 min antes do bot Stone (09:30 / 14:00 / 18:00) — várias expressões separadas por ";"
+  const exprs = String(process.env.PAGARME_SALDO_CRON || '20 9 * * *;50 13 * * *;50 17 * * *')
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const expr of exprs) {
+    cron.schedule(
+      expr,
+      () => {
+        rodarPagarmeSaldo().catch((e) => console.error('[pagarme-saldo] erro:', e.message));
+      },
+      { timezone: 'America/Sao_Paulo' },
+    );
+  }
+  console.log(`[pagarme-saldo] agendado (${exprs.join(' | ')} America/Sao_Paulo)`);
 }

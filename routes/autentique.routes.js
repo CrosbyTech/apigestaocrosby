@@ -1263,7 +1263,7 @@ const ensureChromePath = async () => {
 //      Chrome pelo puppeteer fica estagnado ali).
 //   3) fallback: download sob demanda (ensureChromePath)
 // Retorna { browser, via } — `via` diz qual caminho foi usado (pra diagnóstico).
-async function launchPuppeteer() {
+export async function launchPuppeteer() {
   const base = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
   const localChrome = getChromePath();
   if (localChrome) {

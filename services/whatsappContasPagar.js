@@ -159,12 +159,21 @@ export async function desconectar() {
 }
 
 // ─── envio ───────────────────────────────────────────────────────────────
-export async function enviarTexto({ number, text, replyid, linkPreview, delay, trackId, readchat } = {}) {
+// mentions: números (só dígitos) a marcar numa mensagem de grupo — a uazapi aceita
+// "5511999999999,5511888888888"; o texto deve trazer "@<número>" para a marcação aparecer.
+const mentionsDe = (v) => {
+  const lista = (Array.isArray(v) ? v : String(v || '').split(',')).map((x) => String(x).replace(/\D/g, '')).filter(Boolean);
+  return lista.length ? lista.join(',') : null;
+};
+
+export async function enviarTexto({ number, text, replyid, linkPreview, delay, trackId, readchat, mentions } = {}) {
   const n = normalizarNumero(number);
   if (!n) throw Object.assign(new Error('Número inválido'), { status: 400 });
   const t = String(text || '').trim();
   if (!t) throw Object.assign(new Error('Texto vazio'), { status: 400 });
   const body = { number: n, text: t, track_source: TRACK_SOURCE };
+  const men = mentionsDe(mentions);
+  if (men) body.mentions = men;
   if (trackId) body.track_id = String(trackId).slice(0, 120);
   if (replyid) body.replyid = replyid;
   if (typeof linkPreview === 'boolean') body.linkPreview = linkPreview;
@@ -177,13 +186,15 @@ export async function enviarTexto({ number, text, replyid, linkPreview, delay, t
 const TIPOS_MIDIA = new Set(['image', 'video', 'videoplay', 'document', 'audio', 'myaudio', 'ptt', 'ptv', 'sticker']);
 
 // file: URL http(s), data URL ou base64 puro
-export async function enviarMidia({ number, type = 'document', file, text, docName, mimetype, replyid, delay, trackId } = {}) {
+export async function enviarMidia({ number, type = 'document', file, text, docName, mimetype, replyid, delay, trackId, mentions } = {}) {
   const n = normalizarNumero(number);
   if (!n) throw Object.assign(new Error('Número inválido'), { status: 400 });
   if (!TIPOS_MIDIA.has(type)) throw Object.assign(new Error(`Tipo de mídia inválido: ${type}`), { status: 400 });
   const f = String(file || '').trim();
   if (!f) throw Object.assign(new Error('Arquivo vazio (file: URL ou base64)'), { status: 400 });
   const body = { number: n, type, file: f, track_source: TRACK_SOURCE };
+  const men = mentionsDe(mentions);
+  if (men) body.mentions = men;
   if (text) body.text = String(text);
   if (docName) body.docName = String(docName).slice(0, 200);
   if (mimetype) body.mimetype = mimetype;
@@ -224,6 +235,29 @@ function resumirChat(c) {
     ultimaMensagemTexto: c.wa_lastMessageTextVote || null,
     foto: c.imagePreview || c.image || null,
   };
+}
+
+/**
+ * Grupos da instância (GET /group/list?force=true) — é o jeito confiável de achar
+ * o chatid de um grupo pelo nome (/chat/find não acha grupo recém-criado).
+ * @returns [{ id: '...@g.us', nome, participantes }]
+ */
+export async function listarGrupos({ force = true } = {}) {
+  const data = await chamar('get', '/group/list', { params: { force: force ? 'true' : 'false' }, timeout: 60_000, contexto: 'listar grupos' });
+  const lista = Array.isArray(data?.groups) ? data.groups : Array.isArray(data) ? data : [];
+  return lista.map((g) => ({
+    id: g.JID || g.jid || g.id || g.chatid || null,
+    nome: g.Name || g.name || g.subject || g.wa_name || '',
+    participantes: Array.isArray(g.Participants) ? g.Participants.length : Array.isArray(g.participants) ? g.participants.length : null,
+  }));
+}
+
+const normNomeGrupo = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+/** Acha um grupo pelo nome (sem acento/caixa), aceitando correspondência parcial. */
+export async function acharGrupoPorNome(nome) {
+  const alvo = normNomeGrupo(nome);
+  const grupos = await listarGrupos();
+  return grupos.find((g) => normNomeGrupo(g.nome) === alvo) || grupos.find((g) => normNomeGrupo(g.nome).includes(alvo)) || null;
 }
 
 export async function listarChats({ limit = 50, offset = 0, somenteNaoLidas = false, incluirGrupos = true, nome } = {}) {
