@@ -155,6 +155,34 @@ async function colunaEmpresaNomeExiste() {
   return temColunaNome;
 }
 
+// Memória fornecedor → setor (sefaz_dfe_fornecedor_setor): preenche o setor
+// das notas que ainda não têm, para os emitentes conhecidos. `emitentes` =
+// lista de CNPJs (só dígitos) ou null para todos. Devolve quantas notas
+// foram preenchidas. (Niziany, 27/10/2026)
+export async function aplicarSetorConhecido(emitentes = null) {
+  let q = supabase.from('sefaz_dfe_fornecedor_setor').select('emitente_cnpj, setor');
+  const lista = Array.isArray(emitentes) ? emitentes.filter(Boolean) : null;
+  if (lista && lista.length === 0) return 0;
+  if (lista) q = q.in('emitente_cnpj', lista);
+  const { data: mapa, error } = await q;
+  if (error) throw new Error(`fornecedor_setor: ${error.message}`);
+  let total = 0;
+  for (const m of mapa || []) {
+    const { data, error: e2 } = await supabase
+      .from('sefaz_dfe_notas')
+      .update({ setor: m.setor })
+      .eq('emitente_cnpj', m.emitente_cnpj)
+      .is('setor', null)
+      .select('id');
+    if (e2) {
+      console.warn(`⚠️ [SefazDFe] setor do fornecedor ${m.emitente_cnpj}: ${e2.message}`);
+      continue;
+    }
+    total += (data || []).length;
+  }
+  return total;
+}
+
 async function getControle(cnpj) {
   const { data } = await supabase
     .from('sefaz_dfe_controle')
@@ -339,6 +367,14 @@ export async function sincronizarFilial(filial, cert) {
           .upsert(notas, { onConflict: 'cnpj_destinatario,chave_acesso' });
         if (error) throw new Error(`Supabase upsert: ${error.message}`);
         resultado.novosDocs += notas.length;
+        // notas novas de fornecedor conhecido já entram com o setor
+        try {
+          const emit = [...new Set(notas.map((n) => n.emitente_cnpj).filter(Boolean))];
+          const n = await aplicarSetorConhecido(emit);
+          if (n) resultado.setoresAplicados = (resultado.setoresAplicados || 0) + n;
+        } catch (e) {
+          console.warn(`⚠️ [SefazDFe] setor por fornecedor: ${e.message}`);
+        }
       }
 
       for (const ev of eventos) {

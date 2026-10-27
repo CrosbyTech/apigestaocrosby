@@ -14,6 +14,7 @@ import supabase from '../config/supabase.js';
 import {
   sincronizarTodos,
   listarEmpresas,
+  aplicarSetorConhecido,
 } from '../services/sefazDfe.js';
 import { importarEscrituradas } from '../services/sefazEscrituracao.js';
 
@@ -164,10 +165,34 @@ router.patch(
       .from('sefaz_dfe_notas')
       .update({ setor })
       .eq('id', id)
-      .select('id, setor')
+      .select('id, setor, emitente_cnpj, emitente_nome')
       .single();
     if (error) return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
-    successResponse(res, data, 'Setor da nota atualizado');
+    // Aprende o setor do fornecedor e preenche as outras notas dele que
+    // ainda estão sem setor (Niziany, 27/10/2026). Limpar o setor de uma
+    // nota não apaga a memória do fornecedor.
+    let propagadas = 0;
+    if (setor && data?.emitente_cnpj) {
+      const { error: e2 } = await supabase.from('sefaz_dfe_fornecedor_setor').upsert(
+        {
+          emitente_cnpj: data.emitente_cnpj,
+          setor,
+          origem: 'manual',
+          emitente_nome: data.emitente_nome || null,
+          atualizado_em: new Date().toISOString(),
+        },
+        { onConflict: 'emitente_cnpj' },
+      );
+      if (e2) console.warn(`⚠️ [SefazDFe] memória fornecedor_setor: ${e2.message}`);
+      else {
+        try {
+          propagadas = await aplicarSetorConhecido([data.emitente_cnpj]);
+        } catch (e) {
+          console.warn(`⚠️ [SefazDFe] propagar setor: ${e.message}`);
+        }
+      }
+    }
+    successResponse(res, { ...data, propagadas }, 'Setor da nota atualizado');
   }),
 );
 
