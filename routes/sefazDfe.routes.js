@@ -68,7 +68,7 @@ router.get(
       let query = supabase
         .from('sefaz_dfe_notas')
         .select(
-          'cnpj_destinatario, empresa_codigo, empresa_nome, escriturada, nr_fatura, dt_fatura, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
+          'id, setor, cnpj_destinatario, empresa_codigo, empresa_nome, escriturada, nr_fatura, dt_fatura, chave_acesso, nsu, emitente_cnpj, emitente_nome, data_emissao, tipo_operacao, valor_total, situacao, manifestacao, manifestacao_descricao, xml_completo, schema_origem, atualizado_em',
         )
         .order('data_emissao', { ascending: false })
         .range(offset, offset + PAGINA - 1);
@@ -118,6 +118,56 @@ router.get(
     }
 
     successResponse(res, todos, `${todos.length} notas`);
+  }),
+);
+
+// ─── Setor responsável pela nota (Niziany, 27/10/2026) ───
+// Tabela sefaz_dfe_setores (migrations/sefaz_dfe_setores.sql); a nota guarda
+// o nome do setor em sefaz_dfe_notas.setor.
+router.get(
+  '/setores',
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase
+      .from('sefaz_dfe_setores')
+      .select('id, nome, ordem')
+      .eq('ativo', true)
+      .order('ordem')
+      .order('nome');
+    if (error) return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
+    successResponse(res, data || [], 'Setores');
+  }),
+);
+
+router.post(
+  '/setores',
+  asyncHandler(async (req, res) => {
+    const nome = String(req.body?.nome || '').trim();
+    if (!nome) return errorResponse(res, 'Informe o nome do setor', 400, 'NOME_AUSENTE');
+    if (nome.length > 60) return errorResponse(res, 'Nome do setor muito longo', 400, 'NOME_LONGO');
+    const { data, error } = await supabase
+      .from('sefaz_dfe_setores')
+      .upsert({ nome, ativo: true }, { onConflict: 'nome' })
+      .select('id, nome, ordem')
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
+    successResponse(res, data, 'Setor salvo');
+  }),
+);
+
+router.patch(
+  '/notas/:id/setor',
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id || '').trim();
+    if (!id) return errorResponse(res, 'id da nota ausente', 400, 'ID_INVALIDO');
+    const setor = req.body?.setor ? String(req.body.setor).trim() : null;
+    const { data, error } = await supabase
+      .from('sefaz_dfe_notas')
+      .update({ setor })
+      .eq('id', id)
+      .select('id, setor')
+      .single();
+    if (error) return errorResponse(res, error.message, 500, 'SUPABASE_ERROR');
+    successResponse(res, data, 'Setor da nota atualizado');
   }),
 );
 
