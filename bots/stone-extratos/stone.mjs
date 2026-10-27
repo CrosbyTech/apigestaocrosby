@@ -69,10 +69,17 @@ export class Stone {
   }
 
   async fechar() {
-    try {
-      await this.browser?.close();
-    } catch {
-      /* ignore */
+    const b = this.browser;
+    if (!b) return;
+    this.browser = null;
+    // browser.close() às vezes não volta no Windows com janela fora da tela: dá 8 s e mata o processo
+    const fechou = await Promise.race([b.close().then(() => true).catch(() => false), dormir(8000).then(() => false)]);
+    if (!fechou) {
+      try {
+        b.process()?.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -663,19 +670,19 @@ export class Stone {
  * pelo Extrato para gerar tráfego autenticado e fecha. Devolve se a sessão
  * continua válida. Usado pelo agente a cada N minutos (config sessao.keepAliveMin).
  */
-export async function manterSessao(cfg, dirs, log = () => {}) {
+export async function manterSessao(cfg, dirs, log = () => {}, { timeoutMs = 90000 } = {}) {
   const stone = new Stone(cfg, dirs, () => {});
-  try {
+  // limite duro: nunca segura o agente mais que timeoutMs (goto/reload podem travar)
+  const trabalho = (async () => {
     await stone.abrir({ visivel: false });
-    await stone.irParaInicio();
+    await stone.page.goto(stone.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await dormir(4000); // a home chama o refresh-token e as APIs nesse intervalo
     const ok = await stone.sessaoOk();
-    if (ok) {
-      await stone.clicarTexto(['Extrato'], { timeoutMs: 4000, silencioso: true, exato: true }).catch(() => {});
-      await dormir(4000);
-      await stone.garantirApi({ timeoutMs: 8000 }).catch(() => {});
-    }
     log(ok ? `keep-alive: sessão da Stone renovada${stone.api ? ' (token ativo)' : ''}` : 'keep-alive: sessão da Stone EXPIROU — rode login.bat', ok ? 'info' : 'aviso');
     return ok;
+  })();
+  try {
+    return await Promise.race([trabalho, dormir(timeoutMs).then(() => { throw new Error(`keep-alive passou de ${Math.round(timeoutMs / 1000)}s`); })]);
   } finally {
     await stone.fechar();
   }
