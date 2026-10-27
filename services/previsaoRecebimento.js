@@ -38,6 +38,8 @@ const LOTES_SIMULTANEOS = 3;
 const CANAL_NOME = { FRANQUIAS: 'franquia', MTM: 'multimarca', REVENDA: 'revenda', BLUECRED: 'bluecred' };
 const TABELA_MARCACOES = 'previsao_recebimento_marcacoes';
 const TABELA_SEMANAS = 'previsao_recebimento_semanas';
+const TABELA_SNAP = 'previsao_recebimento_snapshot';
+const SNAP_VELHO_H = Number(process.env.PREVISAO_SNAP_VELHO_H || 6);
 const ST_LABEL = { sim: 'Sim', talvez: 'Talvez', nao: 'Não' };
 
 const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
@@ -325,16 +327,66 @@ export async function calcular(idx = 0) {
   return dados;
 }
 
+/** Calcula e grava o snapshot FIXO da semana (João, 27/10/2026). */
+export async function gerarSnapshot(idx = 0) {
+  const dados = await calcular(idx);
+  const { error } = await supabase
+    .from(TABELA_SNAP)
+    .upsert({ semana: dados.semana.de, idx, dados, gerado_em: dados.gerado_em }, { onConflict: 'semana' });
+  if (error) throw new Error(`${TABELA_SNAP}: ${error.message}`);
+  cache.set(idx, { em: Date.now(), dados });
+  return dados;
+}
+
+// estrutura vazia válida: a tela nunca recebe erro/branco, mesmo se o TOTVS cair
+const vazio = (idx, aviso) => ({
+  ok: true,
+  gerado_em: new Date().toISOString(),
+  hoje: hojeBR(),
+  semana: semanaInfo(idx),
+  semanas: [0, 1, 2, 3, 4, 5].map((i) => semanaInfo(i)),
+  clientes: [],
+  por_dia: [],
+  recebido_dia: [],
+  recebido_hoje: { valor: 0, n: 0, clientes: 0 },
+  totais: { sim: { clientes: 0, valor: 0, label: 'Sim' }, talvez: { clientes: 0, valor: 0, label: 'Talvez' }, nao: { clientes: 0, valor: 0, label: 'Não' } },
+  avisos: [aviso],
+  gerando: true,
+});
+
+/**
+ * A tela LÊ o snapshot fixo da semana (não calcula ao abrir → carrega na hora e
+ * nunca fica em branco). Se o snapshot ainda não existe, gera na 1ª vez; se
+ * falhar, devolve estrutura vazia com aviso (a rota nunca dá 500). O job mantém
+ * as semanas 0 e 1 atualizadas e cria a nova no sábado.
+ */
 export async function obter({ semana = 0, refresh = false } = {}) {
   const idx = Math.min(Math.max(Number(semana) || 0, 0), 7);
   const c = cache.get(idx);
-  if (c && !refresh && Date.now() - c.em < CACHE_MIN * 60 * 1000) return { ...c.dados, cache: true };
+  if (c && !refresh && Date.now() - c.em < CACHE_MIN * 60 * 1000) return { ...c.dados, fonte: 'cache' };
+
+  const sab = semanaInfo(idx).de;
+  let snap = null;
+  try {
+    const { data } = await supabase.from(TABELA_SNAP).select('dados, gerado_em').eq('semana', sab).maybeSingle();
+    snap = data || null;
+  } catch {
+    /* sem snapshot */
+  }
+  if (snap?.dados) {
+    cache.set(idx, { em: Date.now(), dados: snap.dados });
+    const velho = Date.now() - new Date(snap.gerado_em).getTime() > SNAP_VELHO_H * 3600 * 1000;
+    if ((refresh || velho) && !emCurso.has(idx)) {
+      const p = gerarSnapshot(idx).catch(() => {}).finally(() => emCurso.delete(idx));
+      emCurso.set(idx, p);
+    }
+    return { ...snap.dados, fonte: 'snapshot', gerado_em: snap.gerado_em };
+  }
+
+  // primeira vez: gera agora; nunca propaga erro pra tela
   if (emCurso.has(idx)) return emCurso.get(idx);
-  const p = calcular(idx)
-    .then((dados) => {
-      cache.set(idx, { em: Date.now(), dados });
-      return dados;
-    })
+  const p = gerarSnapshot(idx)
+    .catch((e) => vazio(idx, `gerando a previsão em segundo plano — atualize em instantes (${e.message})`))
     .finally(() => emCurso.delete(idx));
   emCurso.set(idx, p);
   return p;
@@ -342,6 +394,21 @@ export async function obter({ semana = 0, refresh = false } = {}) {
 
 export function invalidar() {
   cache.clear();
+}
+
+export function iniciarJobPrevisao() {
+  if (String(process.env.PREVISAO_JOB || 'on').toLowerCase() === 'off') {
+    console.log('ℹ️ [previsao-recebimento] job desligado (PREVISAO_JOB=off)');
+    return;
+  }
+  const rodar = async () => {
+    for (const i of [0, 1]) {
+      try { await gerarSnapshot(i); } catch (e) { console.warn(`⚠️ [previsao-recebimento] snapshot semana ${i}: ${e.message}`); }
+    }
+  };
+  setTimeout(() => rodar().catch(() => {}), 3 * 60 * 1000);
+  setInterval(() => rodar().catch(() => {}), 60 * 60 * 1000); // de hora em hora: atualiza e cria a nova semana no sábado
+  console.log('🗓️ [previsao-recebimento] job: snapshot das semanas 0 e 1 na subida (+3min) e de hora em hora');
 }
 
 /** Marcação manual: sim/talvez/nao, ou 'auto' para voltar ao automático (sem apagar a linha). */

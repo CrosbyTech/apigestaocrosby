@@ -127,6 +127,7 @@ import conferenciaBaixasRoutes from './routes/conferenciaBaixas.routes.js';
 import { iniciarJobConferenciaBaixas } from './services/conferenciaSolicitacoesTotvs.js';
 import pixTadeuRoutes from './routes/pixTadeu.routes.js';
 import previsaoRecebimentoRoutes from './routes/previsaoRecebimento.routes.js';
+import { iniciarJobPrevisao } from './services/previsaoRecebimento.js';
 import portalBoletosRoutes from './routes/portalBoletos.routes.js';
 import baixaLotesRoutes from './routes/baixaLotes.routes.js';
 import { iniciarJobPixTadeu } from './services/pixTadeuPagarme.js';
@@ -307,6 +308,7 @@ app.listen(PORT, async () => {
   iniciarJobBaixaAutomaticaPagarme(); // baixa automática Pagar.me — só com PAGARME_BAIXA_AUTO=on (OK do Yago)
   iniciarJobConferenciaBaixas(); // conferência bidirecional das Solicitações de Baixa com o TOTVS (30 min)
   iniciarJobPixTadeu(); // só com PIX_TADEU_JOB=on (parser do pedido a confirmar em produção)
+  iniciarJobPrevisao(); // snapshot semanal fixo da Previsão de Recebimento (João, 27/10/2026)
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();

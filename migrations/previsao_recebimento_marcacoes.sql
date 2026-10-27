@@ -24,3 +24,11 @@ create index if not exists previsao_recebimento_semanas_semana_idx on previsao_r
 -- 'auto' = marcação manual desfeita (mantém o registro; não apagamos linhas)
 alter table previsao_recebimento_marcacoes drop constraint if exists previsao_recebimento_marcacoes_status_check;
 alter table previsao_recebimento_marcacoes add constraint previsao_recebimento_marcacoes_status_check check (status in ('sim','talvez','nao','auto'));
+
+-- Snapshot semanal FIXO (João, 27/10/2026): a tela lê daqui, não calcula ao abrir.
+create table if not exists previsao_recebimento_snapshot (
+  semana date primary key,
+  idx int,
+  dados jsonb not null,
+  gerado_em timestamptz not null default now()
+);
