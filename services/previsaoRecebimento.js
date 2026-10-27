@@ -61,9 +61,23 @@ export function semanaInfo(idx, hoje = hojeBR()) {
 }
 
 async function getInterno(path, params = {}, timeout = 10 * 60 * 1000) {
-  const r = await axios.get(`${INTERNAL_API_BASE}${path}`, { params, timeout });
-  if (r.data?.success === false) throw new Error(r.data?.message || path);
-  return r.data;
+  // O TOTVS 500/estoura timeout de vez em quando (a consulta da semana sem
+  // cd_cliente é pesada) e derrubava a tela toda. 3 tentativas com espera.
+  let ultimoErro = null;
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    try {
+      const r = await axios.get(`${INTERNAL_API_BASE}${path}`, { params, timeout });
+      if (r.data?.success === false) throw new Error(r.data?.message || path);
+      return r.data;
+    } catch (e) {
+      ultimoErro = e;
+      const status = e.response?.status;
+      const retriavel = !status || status >= 500 || e.code === 'ECONNABORTED' || e.code === 'ECONNRESET';
+      if (!retriavel || tentativa === 3) break;
+      await new Promise((r) => setTimeout(r, 2000 * tentativa));
+    }
+  }
+  throw ultimoErro;
 }
 async function postInterno(path, body, timeout = 2 * 60 * 1000) {
   const r = await axios.post(`${INTERNAL_API_BASE}${path}`, body, { timeout });
