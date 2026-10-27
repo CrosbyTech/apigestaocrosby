@@ -246,12 +246,13 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
       const cabec = [
         `Pix recebido na Pagar.me (${quem}) em ${p.dia} — R$ ${p.valor.toFixed(2)}. Pedido ${p.order_id} · cobrança ${p.charge_id}${p.ref ? ` · ref "${String(p.ref).slice(0, 80)}"` : ''}.`,
         p.origem === 'tadeu_gerador'
-          ? `Cliente: ${cliente?.name || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ' (sem código na referência)'} — nome na referência do Gerador: ${p.nome || '?'}; quem pagou o QR: ${p.pagador || '?'}${p.cpf ? ` (${p.cpf})` : ''}.${achado?.juros ? ' A sobra sobre os títulos (inclui a tarifa Pix de R$ 0,98/título) entra como juros.' : ''}`
+          ? `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ' (sem código na referência)'} — nome na referência do Gerador: ${p.nome || '?'}; quem pagou o QR: ${p.pagador || '?'}${p.cpf ? ` (${p.cpf})` : ''}.${achado?.juros ? ' A sobra sobre os títulos (inclui a tarifa Pix de R$ 0,98/título) entra como juros.' : ''}`
           : `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ''}${p.cpf ? ` CPF/CNPJ ${p.cpf}` : ''}.`,
       ];
       const filialFallback = titulos.slice().sort((x, y) => String(y.emissao).localeCompare(String(x.emissao)))[0]?.branchCode ?? 0;
       const base = {
-        nm_cliente: cliente?.name || (p.origem === 'tadeu_gerador' ? `${p.nome || '?'} (Pix do Gerador — identificar cliente)` : p.nome || ''),
+        // documents/search não devolve o nome do cliente → vale o nome da referência do Gerador
+        nm_cliente: cliente?.name || (p.origem === 'tadeu_gerador' && !achado ? `${p.nome || '?'} (Pix do Gerador — identificar cliente)` : p.nome || ''),
         comprovante_url: '',
         comprovante_path: '',
         status: 'pendente',
