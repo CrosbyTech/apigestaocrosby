@@ -118,7 +118,6 @@ import { iniciarJojoBot } from './services/jojoBot.js';
 import { iniciarJojoGrupoJob } from './jobs/jojo-grupo.job.js';
 import { iniciarBruceBot } from './services/bruceBot.js';
 import { iniciarTheoBot } from './services/theoBot.js';
-import contasReceberHojeRoutes, { iniciarJobHoje } from './routes/contasReceberHoje.routes.js';
 import receitaFinanceiraRoutes from './routes/receitaFinanceira.routes.js';
 import drylandBaixasRoutes from './routes/drylandBaixas.routes.js';
 import { iniciarJobDrylandBaixas } from './services/drylandBaixas.js';
@@ -128,8 +127,6 @@ import conferenciaBaixasRoutes from './routes/conferenciaBaixas.routes.js';
 import { iniciarJobConferenciaBaixas } from './services/conferenciaSolicitacoesTotvs.js';
 import pixTadeuRoutes from './routes/pixTadeu.routes.js';
 import baixaLotesRoutes from './routes/baixaLotes.routes.js';
-import inadimplenciaMensalRoutes from './routes/inadimplenciaMensal.routes.js';
-import { iniciarJobInadimplenciaMensal } from './services/inadimplenciaMensal.js';
 import { iniciarJobPixTadeu } from './services/pixTadeuPagarme.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
@@ -229,13 +226,11 @@ app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOT
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
 app.use('/api/contas-receber', receitaFinanceiraRoutes); // Contas a Receber — Receita Financeira (faturas pagas × valor pago: juros, multa, taxas)
-app.use('/api/contas-receber', contasReceberHojeRoutes); // Contas a Receber — tela Hoje (entrou / vai entrar / precisa de você)
 app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa do link do Dryland → aba Solicitações de Baixa (ponte, precisa de DRYLAND_COB_*)
 app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automática Pagar.me (cartão débito PAGARME) — status/prévia/executar; liga com PAGARME_BAIXA_AUTO=on
 app.use('/api/conferencia-baixas', conferenciaBaixasRoutes); // Solicitações de Baixa × TOTVS: baixadas na mão viram processadas, desfeitas voltam a pendentes
 app.use('/api/pix-tadeu', pixTadeuRoutes); // Pix recebidos na Pagar.me fora do HeadCoach (links/Gerador do Dryland) → Solicitações de Baixa
 app.use('/api/baixa-lotes', baixaLotesRoutes); // histórico dos lotes de baixa (Solicitações de Baixa → TOTVS)
-app.use('/api/inadimplencia', inadimplenciaMensalRoutes); // inadimplência mensal (>60 dias) — snapshot diário
 app.use('/api/fiscal-impostos', fiscalImpostosRoutes); // Painel de Impostos (Fiscal) — ICMS provisão (notas) + realizado (SPED)
 app.use('/api/dre-observacoes', dreObservacoesRoutes); // DRE — importação de observações de lançamentos via planilha
 app.use('/api/dre-auditoria', dreAuditoriaRoutes); // DRE — auditoria (Contratos PJ do Dryland × DRE Analítica), só leitura
@@ -303,12 +298,10 @@ app.listen(PORT, async () => {
   iniciarJojoGrupoJob(); // JOJO — job 5min que lê o grupo (sem IA): planilha de observações → cruzamento → SUBIR grava
   iniciarBruceBot().catch((e) => console.warn(`[bruce] falha ao iniciar: ${e.message}`)); // BRUCE — assistente do Contas a Receber no grupo BRUCE - CAR HEADCOACH
   iniciarTheoBot().catch((e) => console.warn(`[theo] falha ao iniciar: ${e.message}`)); // THEO — assistente do Contas a Pagar (Wendy) no grupo THEO - CAP HEADCOACH
-  iniciarJobHoje(); // tela Hoje do Contas a Receber — snapshot diário + na subida
   iniciarJobDrylandBaixas(); // ponte Dryland → Solicitações de Baixa (só liga com DRYLAND_COB_USUARIO/SENHA)
   iniciarJobBaixaAutomaticaPagarme(); // baixa automática Pagar.me — só com PAGARME_BAIXA_AUTO=on (OK do Yago)
   iniciarJobConferenciaBaixas(); // conferência bidirecional das Solicitações de Baixa com o TOTVS (30 min)
   iniciarJobPixTadeu(); // só com PIX_TADEU_JOB=on (parser do pedido a confirmar em produção)
-  iniciarJobInadimplenciaMensal(); // série mensal de inadimplência (>60 dias): na subida + diário
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPagarmeBoletosRetorno();
