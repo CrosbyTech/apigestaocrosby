@@ -56,7 +56,10 @@ function extrair(ch) {
 }
 
 let cache = { em: 0, itens: [] };
-const CACHE_MS = 5 * 60 * 1000;
+// Resultado completo vale 60 s; o texto de abertura de cada chamado não muda,
+// então fica guardado por id e só os chamados novos pagam o chamado_get.
+const CACHE_MS = 60 * 1000;
+const textoPorId = new Map();
 
 // Chamados abertos que falam de nota fiscal, já com o texto e os campos extraídos
 export async function chamadosAbertosDeNota({ forcar = false } = {}) {
@@ -74,13 +77,17 @@ export async function chamadosAbertosDeNota({ forcar = false } = {}) {
   });
   const itens = [];
   for (const c of abertos) {
-    let texto = '';
-    try {
-      const det = await drylandRpc('chamado_get', { p_id: c.id });
-      const ch = (Array.isArray(det) ? det[0] : det)?.chamado || {};
-      texto = ch.texto || '';
-    } catch (e) {
-      console.warn(`⚠️ [SefazChamados] chamado_get ${c.id}: ${e.message}`);
+    let texto = textoPorId.get(c.id);
+    if (texto === undefined) {
+      try {
+        const det = await drylandRpc('chamado_get', { p_id: c.id });
+        const ch = (Array.isArray(det) ? det[0] : det)?.chamado || {};
+        texto = ch.texto || '';
+        textoPorId.set(c.id, texto);
+      } catch (e) {
+        texto = '';
+        console.warn(`⚠️ [SefazChamados] chamado_get ${c.id}: ${e.message}`);
+      }
     }
     const base = { ...c, texto };
     itens.push({
