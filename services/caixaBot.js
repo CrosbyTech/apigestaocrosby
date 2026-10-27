@@ -169,7 +169,7 @@ async function executarAcao(pedido) {
 export const caixa = criarAgente({
   nome: 'CAIXA',
   prefixoEnv: 'CAIXA',
-  grupoDefault: null,
+  grupoDefault: '120363427439356982@g.us', // CONTAS A PAGAR CROSBY OFC (27/10/2026)
   grupoNome: 'CONTAS A PAGAR CROSBY OFC',
   autorizadores: [FABIO, YAGO],
   nomeAutorizador: 'o Fábio ou o Yago',
@@ -177,6 +177,7 @@ export const caixa = criarAgente({
   trackId: 'caixa',
   system: SYSTEM,
   contextoExtra,
+  pollSegundosDefault: 20, // lê o grupo a cada 20 s mesmo sem webhook da uazapi apontando p/ o Render
 });
 caixa.executarAcao = executarAcao;
 

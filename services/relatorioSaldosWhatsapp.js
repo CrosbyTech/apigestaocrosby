@@ -51,7 +51,8 @@ export function semanaDe(iso = hojeBr()) {
   return { de: seg, ate: addDias(seg, 6) };
 }
 
-let grupoCache = { id: env('RELATORIO_SALDOS_GRUPO_CHATID', null) || null, em: 0 };
+// chatid conhecido (27/10/2026) — se o grupo for recriado, o nome resolve de novo
+let grupoCache = { id: env('RELATORIO_SALDOS_GRUPO_CHATID', '120363427439356982@g.us') || null, em: 0 };
 export async function grupoChatid() {
   if (grupoCache.id) return grupoCache.id;
   const g = await wa.acharGrupoPorNome(GRUPO_NOME);

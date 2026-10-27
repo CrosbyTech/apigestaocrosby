@@ -114,7 +114,7 @@ export function criarAgente(cfg) {
   );
   const AUTORIZADOR = [...AUTORIZADORES][0];
   const MODEL = env('MODEL', 'claude-opus-5-5');
-  const POLL_SEGUNDOS = Number(env('POLL_SEGUNDOS')) || 0;
+  const POLL_SEGUNDOS = Number(env('POLL_SEGUNDOS', cfg.pollSegundosDefault ?? 0)) || 0;
   const CONTEXTO_N = Number(env('CONTEXTO_MENSAGENS')) || 30;
   const NOME_AUT = cfg.nomeAutorizador || 'Yago';
   const TRACK_ID = cfg.trackId || NOME.toLowerCase();
