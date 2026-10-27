@@ -28,6 +28,35 @@ const T = {
   transf: 'fluxo_caixa_transferencias',
 };
 
+// Escopo dos extratos: 'crosby' = Extrato Bancário do grupo (padrão);
+// 'dr_ygor' = Financeiro → Dr Ygor → Extratos Bancários (mesmas tabelas,
+// separadas pela coluna fluxo_caixa_contas.escopo — migrations/fluxo_caixa_escopo_dr_ygor.sql).
+export const ESCOPOS = ['crosby', 'dr_ygor'];
+export const ESCOPO_PADRAO = 'crosby';
+export const normEscopo = (e) => (ESCOPOS.includes(String(e || '').toLowerCase()) ? String(e).toLowerCase() : ESCOPO_PADRAO);
+
+// Enquanto a migration do escopo não roda, o módulo segue funcionando para o
+// escopo padrão (sem filtro) e só o Dr Ygor responde MIGRATION_PENDING.
+let _escopoColuna = null; // null = ainda não verificado
+async function escopoColunaExiste() {
+  if (_escopoColuna != null) return _escopoColuna;
+  const { error } = await supabase.from(T.contas).select('escopo').limit(1);
+  if (error && /escopo/i.test(error.message || '') && /does not exist|schema cache/i.test(error.message || '')) _escopoColuna = false;
+  else {
+    lancar(error);
+    _escopoColuna = true;
+  }
+  return _escopoColuna;
+}
+async function prepararEscopo(escopo) {
+  const esc = normEscopo(escopo);
+  const existe = await escopoColunaExiste();
+  if (!existe && esc !== ESCOPO_PADRAO)
+    throw new MigrationPendingError('Coluna fluxo_caixa_contas.escopo não existe — rode migrations/fluxo_caixa_escopo_dr_ygor.sql no SQL Editor do Supabase (ou node scripts/migrar-fluxo-caixa-escopo.mjs).');
+  return { esc, existe };
+}
+const eqEscopo = (q, esc, existe) => (existe ? q.eq('escopo', esc) : q);
+
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const soDigitos = (v) => String(v ?? '').replace(/\D/g, '');
 const semAcento = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -107,9 +136,11 @@ export function apelidoPadrao(extrato) {
 }
 
 // ─── contas ────────────────────────────────────────────────────
-export async function listarContas() {
-  const contas = await buscarTodos(() => supabase.from(T.contas).select('*').order('banco').order('conta'));
-  const imps = await buscarTodos(() => supabase.from(T.imp).select('*').order('importado_em', { ascending: false }));
+export async function listarContas(escopo = ESCOPO_PADRAO) {
+  const { esc, existe } = await prepararEscopo(escopo);
+  const contas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('*'), esc, existe).order('banco').order('conta'));
+  const ids = contas.map((c) => c.id);
+  const imps = ids.length ? await buscarTodos(() => supabase.from(T.imp).select('*').in('conta_id', ids).order('importado_em', { ascending: false })) : [];
   const porConta = new Map();
   for (const i of imps) {
     const c = porConta.get(i.conta_id) || { importacoes: 0, ultima: null, periodoInicio: null, periodoFim: null };
@@ -152,8 +183,9 @@ export async function atualizarConta(id, patch) {
   return data;
 }
 
-async function garantirConta(extrato) {
-  const chave = { banco: extrato.banco, agencia: extrato.titular.agencia || '', conta: extrato.titular.conta };
+async function garantirConta(extrato, escopo = ESCOPO_PADRAO) {
+  const { esc, existe } = await prepararEscopo(escopo);
+  const chave = { banco: extrato.banco, agencia: extrato.titular.agencia || '', conta: extrato.titular.conta, ...(existe ? { escopo: esc } : {}) };
   if (!chave.conta) throw new Error('Conta não identificada no extrato.');
   const { data: existente, error } = await supabase.from(T.contas).select('*').match(chave).maybeSingle();
   lancar(error);
@@ -208,23 +240,23 @@ export async function lerExtrato(buffer, opts = {}) {
   return { ...resumoExtrato(extrato), apelido: apelidoPadrao(extrato), lancamentos: extrato.lancamentos };
 }
 
-export async function importarExtrato(buffer, { nomeArquivo, usuario, banco, arquivoPath, origem } = {}) {
+export async function importarExtrato(buffer, { nomeArquivo, usuario, banco, arquivoPath, origem, escopo } = {}) {
   const extrato = await lerExtratoBancario(buffer, { nomeArquivo, banco });
   const hash = crypto.createHash('sha1').update(buffer).digest('hex');
-  return persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem: origem || 'upload' });
+  return persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem: origem || 'upload', escopo });
 }
 
 /**
  * Importa um extrato já interpretado (ex.: JSON da API do portal Stone montado
  * por utils/extratoStoneApi.js). Mesma regra de reimportação do PDF.
  */
-export async function importarExtratoObjeto(extrato, { nomeArquivo, usuario, arquivoPath, origem } = {}) {
+export async function importarExtratoObjeto(extrato, { nomeArquivo, usuario, arquivoPath, origem, escopo } = {}) {
   const hash = crypto.createHash('sha1').update(JSON.stringify(extrato.lancamentos || [])).digest('hex');
-  return persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem: origem || 'api' });
+  return persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem: origem || 'api', escopo });
 }
 
-async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem } = {}) {
-  const conta = await garantirConta(extrato);
+async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPath, origem, escopo } = {}) {
+  const conta = await garantirConta(extrato, escopo);
   const inicio = extrato.periodo.inicio || extrato.periodo.primeiroLancamento;
   const fim = extrato.periodo.fim || extrato.periodo.ultimoLancamento;
 
@@ -313,15 +345,16 @@ async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPa
  * Importa vários PDFs e recasa as transferências do período coberto.
  * @param arquivos [{ buffer, nome }]
  */
-export async function importarVarios(arquivos, { usuario, origem } = {}) {
+export async function importarVarios(arquivos, { usuario, origem, escopo } = {}) {
+  const esc = normEscopo(escopo);
   const resultados = [];
   let de = null;
   let ate = null;
   for (const a of arquivos) {
     try {
       const r = a.extrato
-        ? await importarExtratoObjeto(a.extrato, { nomeArquivo: a.nome, usuario, arquivoPath: a.arquivoPath, origem: a.origem || origem })
-        : await importarExtrato(a.buffer, { nomeArquivo: a.nome, usuario, arquivoPath: a.arquivoPath, origem: a.origem || origem });
+        ? await importarExtratoObjeto(a.extrato, { nomeArquivo: a.nome, usuario, arquivoPath: a.arquivoPath, origem: a.origem || origem, escopo: esc })
+        : await importarExtrato(a.buffer, { nomeArquivo: a.nome, usuario, arquivoPath: a.arquivoPath, origem: a.origem || origem, escopo: esc });
       const p = r.extrato.periodo;
       if (p.inicio && (!de || p.inicio < de)) de = p.inicio;
       if (p.fim && (!ate || p.fim > ate)) ate = p.fim;
@@ -345,13 +378,16 @@ export async function importarVarios(arquivos, { usuario, origem } = {}) {
     }
   }
   let transferencias = null;
-  if (de && ate) transferencias = await casarTransferencias({ de, ate });
+  if (de && ate) transferencias = await casarTransferencias({ de, ate, escopo: esc });
   return { resultados, periodo: { de, ate }, transferencias };
 }
 
-export async function listarImportacoes() {
-  const imps = await buscarTodos(() => supabase.from(T.imp).select('*').order('importado_em', { ascending: false }));
-  const contas = await buscarTodos(() => supabase.from(T.contas).select('id,apelido,banco,titular_nome'));
+export async function listarImportacoes(escopo = ESCOPO_PADRAO) {
+  const { esc, existe } = await prepararEscopo(escopo);
+  const contas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('id,apelido,banco,titular_nome'), esc, existe));
+  const ids = contas.map((c) => c.id);
+  if (!ids.length) return [];
+  const imps = await buscarTodos(() => supabase.from(T.imp).select('*').in('conta_id', ids).order('importado_em', { ascending: false }));
   const porId = new Map(contas.map((c) => [c.id, c]));
   return imps.map((i) => ({ ...i, conta: porId.get(i.conta_id) || null }));
 }
@@ -390,7 +426,10 @@ export async function excluirImportacao(id) {
   lancar(d1.error);
   const d2 = await supabase.from(T.imp).delete().eq('id', id);
   lancar(d2.error);
-  if (imp.periodo_inicio && imp.periodo_fim) await casarTransferencias({ de: imp.periodo_inicio, ate: imp.periodo_fim });
+  if (imp.periodo_inicio && imp.periodo_fim) {
+    const { data: conta } = await supabase.from(T.contas).select('*').eq('id', imp.conta_id).maybeSingle();
+    await casarTransferencias({ de: imp.periodo_inicio, ate: imp.periodo_fim, escopo: conta?.escopo });
+  }
   return imp;
 }
 
@@ -402,14 +441,18 @@ export async function excluirImportacao(id) {
  * outra conta, ou banco da contraparte = banco da outra conta).
  * Pares automáticos anteriores do período são refeitos.
  */
-export async function casarTransferencias({ de, ate }) {
+export async function casarTransferencias({ de, ate, escopo }) {
   const deM = addDias(de, -1);
   const ateM = addDias(ate, 1);
-  const contas = await buscarTodos(() => supabase.from(T.contas).select('*'));
+  // só casa contas do mesmo escopo (Crosby × Dr Ygor nunca se misturam)
+  const { esc, existe } = await prepararEscopo(escopo);
+  const contas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('*'), esc, existe));
   const porId = new Map(contas.map((c) => [c.id, c]));
+  const idsEscopo = contas.map((c) => c.id);
+  if (!idsEscopo.length) return { periodo: { de, ate }, desfeitas: 0, criadas: 0 };
 
   // desfaz pares automáticos do período
-  const antigos = await buscarTodos(() => supabase.from(T.transf).select('id').eq('metodo', 'auto').gte('data', deM).lte('data', ateM));
+  const antigos = await buscarTodos(() => supabase.from(T.transf).select('id').eq('metodo', 'auto').in('origem_conta_id', idsEscopo).gte('data', deM).lte('data', ateM));
   if (antigos.length) {
     const ids = antigos.map((t) => t.id);
     for (let i = 0; i < ids.length; i += 200) {
@@ -424,6 +467,7 @@ export async function casarTransferencias({ de, ate }) {
     supabase
       .from(T.lanc)
       .select('id,conta_id,data,valor,forma,categoria,contraparte_nome,contraparte_doc,contraparte_banco')
+      .in('conta_id', idsEscopo)
       .gte('data', deM)
       .lte('data', ateM)
       .in('categoria', ['pix', 'transferencia'])
@@ -534,10 +578,13 @@ function somar(mapa, chave, criar, aplicar) {
  */
 export async function painel(f) {
   if (!f.de || !f.ate) throw new Error('Informe o período (de/ate).');
-  const contas = await listarContas();
+  const contas = await listarContas(f.escopo);
   const porConta = new Map(contas.map((c) => [c.id, c]));
+  const idsEscopo = contas.map((c) => c.id);
 
-  let contaIds = f.contas?.length ? f.contas.map(Number).filter(Boolean) : null;
+  // sempre restringe às contas do escopo (sem contas → nada)
+  let contaIds = f.contas?.length ? f.contas.map(Number).filter((id) => idsEscopo.includes(id)) : [...idsEscopo];
+  if (!contaIds.length) contaIds = [-1];
   if (f.bancos?.length) {
     const set = new Set(f.bancos.map((b) => String(b).toUpperCase()));
     const ids = contas.filter((c) => set.has(c.banco)).map((c) => c.id);
@@ -554,7 +601,7 @@ export async function painel(f) {
   const raizesGrupo = new Set(contas.map((c) => (c.titular_cnpj || '').slice(0, 8)).filter((r) => r.length === 8));
   const docsGrupo = new Set(contas.map((c) => c.titular_cnpj).filter(Boolean));
 
-  const transfRows = await buscarTodos(() => supabase.from(T.transf).select('*').gte('data', addDias(f.de, -1)).lte('data', f.ate).order('data'));
+  const transfRows = await buscarTodos(() => supabase.from(T.transf).select('*').in('origem_conta_id', idsEscopo.length ? idsEscopo : [-1]).gte('data', addDias(f.de, -1)).lte('data', f.ate).order('data'));
   const transfPorId = new Map(transfRows.map((t) => [t.id, t]));
 
   // enriquece com a conta e a "outra ponta" da transferência
@@ -735,7 +782,7 @@ export async function painel(f) {
         destino: { contaId: t.destino_conta_id, conta: cd?.apelido, banco: cd?.banco, titular: cd?.titular_nome, lancamentoId: t.destino_lancamento_id, descricao: d?.descricao, contraparte: d?.contraparte_nome, forma: d?.forma },
       };
     })
-    .filter((t) => !contaIds || contaIds.includes(t.origem.contaId) || contaIds.includes(t.destino.contaId));
+    .filter((t) => contaIds.includes(t.origem.contaId) || contaIds.includes(t.destino.contaId));
 
   const opcoesFormas = [...new Set(todos.map((l) => l.forma))].sort();
   const opcoesContrapartes = [...new Map(todos.filter((l) => l.nomeExibicao).map((l) => [chaveNome(l), { chave: chaveNome(l), nome: l.nomeExibicao, doc: l.contraparte_doc || null }])).values()].sort((a, b) => a.nome.localeCompare(b.nome));
@@ -758,6 +805,9 @@ export async function painel(f) {
 }
 
 export default {
+  ESCOPOS,
+  ESCOPO_PADRAO,
+  normEscopo,
   listarContas,
   atualizarConta,
   lerExtrato,

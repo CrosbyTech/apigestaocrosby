@@ -20,6 +20,11 @@
 //   POST   /conciliacao {lancamentoId, origem, referencia, justificativa} → grava/justifica
 //   DELETE /conciliacao/:id                  → desfaz
 // Sem as tabelas → 503 MIGRATION_PENDING (migrations/fluxo_caixa_ext.sql).
+//
+// ESCOPO: o mesmo router é montado duas vezes (index.js), cada um preso a um
+// escopo de contas (coluna fluxo_caixa_contas.escopo):
+//   /api/fluxo-caixa-ext              → 'crosby'  (Extrato Bancário do grupo)
+//   /api/dr-ygor/extratos-bancarios   → 'dr_ygor' (Financeiro → Dr Ygor)
 // ============================================================
 import express from 'express';
 import multer from 'multer';
@@ -28,8 +33,6 @@ import { FORMAS } from '../utils/extratosBancariosPdf.js';
 import fluxo, { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 import conciliacao from '../services/fluxoCaixaConciliacao.js';
 import { urlComprovante } from '../services/comprovantesStone.js';
-
-const router = express.Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -64,6 +67,10 @@ const lista = (v) =>
 
 const usuarioDe = (req) => req.headers['x-user-email'] || req.headers['x-user-name'] || req.body?.usuario || null;
 
+export function criarRouter(escopoFixo = fluxo.ESCOPO_PADRAO) {
+const escopo = fluxo.normEscopo(escopoFixo);
+const router = express.Router();
+
 router.get(
   '/formas',
   asyncHandler(async (req, res) => successResponse(res, Object.values(FORMAS))),
@@ -73,7 +80,7 @@ router.get(
   '/contas',
   asyncHandler(async (req, res) => {
     try {
-      return successResponse(res, await fluxo.listarContas());
+      return successResponse(res, await fluxo.listarContas(escopo));
     } catch (e) {
       return tratar(res, e);
     }
@@ -95,7 +102,7 @@ router.get(
   '/importacoes',
   asyncHandler(async (req, res) => {
     try {
-      return successResponse(res, await fluxo.listarImportacoes());
+      return successResponse(res, await fluxo.listarImportacoes(escopo));
     } catch (e) {
       return tratar(res, e);
     }
@@ -165,7 +172,7 @@ router.post(
     try {
       const r = await fluxo.importarVarios(
         req.arquivos.map((f) => ({ buffer: f.buffer, nome: f.originalname })),
-        { usuario: usuarioDe(req) },
+        { usuario: usuarioDe(req), escopo },
       );
       const ok = r.resultados.filter((x) => x.ok).length;
       return successResponse(res, r, `${ok} de ${r.resultados.length} extrato(s) importado(s)`);
@@ -182,6 +189,7 @@ router.get(
     if (!q.de || !q.ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
     try {
       const data = await fluxo.painel({
+        escopo,
         de: String(q.de),
         ate: String(q.ate),
         contas: lista(q.contas)?.map(Number),
@@ -208,7 +216,7 @@ router.post(
     const ate = req.query.ate || req.body?.ate;
     if (!de || !ate) return errorResponse(res, 'Informe de e ate.', 400);
     try {
-      return successResponse(res, await fluxo.casarTransferencias({ de: String(de), ate: String(ate) }), 'Transferências recasadas');
+      return successResponse(res, await fluxo.casarTransferencias({ de: String(de), ate: String(ate), escopo }), 'Transferências recasadas');
     } catch (e) {
       return tratar(res, e);
     }
@@ -340,4 +348,9 @@ router.delete(
   }),
 );
 
+return router;
+}
+
+const router = criarRouter('crosby');
+export const routerDrYgor = criarRouter('dr_ygor');
 export default router;

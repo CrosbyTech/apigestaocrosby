@@ -35,7 +35,7 @@ import stoneBotRoutes from './routes/stoneBot.routes.js';
 import { iniciarJobPagarmeSaldo } from './jobs/pagarme-saldo.job.js';
 import { iniciarVevetoBot } from './services/vevetoBot.js';
 import { iniciarRelatorioSaldos } from './services/relatorioSaldosWhatsapp.js';
-import fluxoCaixaExtRoutes from './routes/fluxoCaixaExt.routes.js';
+import fluxoCaixaExtRoutes, { routerDrYgor as drYgorExtratosRoutes } from './routes/fluxoCaixaExt.routes.js';
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
@@ -212,6 +212,7 @@ app.use('/api/monitoring', monitoringRoutes); // Monitoramento consumo TOTVS
 app.use('/api/conciliacao-stone', conciliacaoStoneRoutes); // Conciliação Stone (cartões)
 app.use('/api/extrato-stone', extratoStoneRoutes); // Extrato Stone: OFX → leitura + CNAB 240 p/ TOTVS
 app.use('/api/fluxo-caixa-ext', fluxoCaixaExtRoutes); // Fluxo de Caixa Ext: extratos PDF (Stone/Sicredi/Caixa/Mêntore) → entradas, saídas, transferências
+app.use('/api/dr-ygor/extratos-bancarios', drYgorExtratosRoutes); // Financeiro → Dr Ygor → Extratos Bancários: mesmo módulo, contas no escopo 'dr_ygor'
 app.use('/api/stone-bot', stoneBotRoutes); // Bot Stone Extratos: fila/log do agente local (bots/stone-extratos) que baixa os extratos Stone e sobe o saldo
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
