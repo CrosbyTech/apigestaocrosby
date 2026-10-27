@@ -206,6 +206,13 @@ export async function enviarMidia({ number, type = 'document', file, text, docNa
   return { numero: n, resposta: data };
 }
 
+/** Apaga para todos uma mensagem enviada pela instância (id "owner:XXXX"). Testado em 27/10/2026. */
+export async function apagarMensagem(id) {
+  if (!id) throw Object.assign(new Error('Informe o id da mensagem'), { status: 400 });
+  const data = await chamar('post', '/message/delete', { body: { id: String(id) }, timeout: 60_000, contexto: 'apagar mensagem' });
+  return { id: String(id), resposta: data };
+}
+
 // ─── consultas ───────────────────────────────────────────────────────────
 export async function verificarNumeros(numbers) {
   const lista = (Array.isArray(numbers) ? numbers : [numbers]).map(normalizarNumero).filter(Boolean);

@@ -3,7 +3,7 @@
 //
 // 3x ao dia (depois da execução agendada do bot Stone das 09:30/14:00/18:00,
 // com fallback por cron) o HeadCoach manda no grupo, pela instância CONTAS A
-// PAGAR (a mesma dos agentes JOJO/BRUCE/THEO/CAIXA):
+// PAGAR (a mesma dos agentes JOJO/BRUCE/THEO/VEVETO), assinadas "— Veveto":
 //   1) uma IMAGEM com o card "Saldo Bancário" (total, Stone por final de CNPJ
 //      com antecipável, Pagar.me disponível/a receber, demais bancos) marcando
 //      o CEO Fábio Ferreira (+55 84 8782-0986);
@@ -27,7 +27,8 @@ const ENABLED = String(env('RELATORIO_SALDOS_ENABLED', 'true')).toLowerCase() !=
 const GRUPO_NOME = env('RELATORIO_SALDOS_GRUPO_NOME', 'CONTAS A PAGAR CROSBY OFC');
 const MENCIONAR = String(env('RELATORIO_SALDOS_MENCIONAR', '558487820986')).replace(/\D/g, '');
 const NOME_MENCIONADO = env('RELATORIO_SALDOS_NOME_MENCIONADO', 'Fábio');
-const TRACK_ID = 'relatorio-saldos';
+const TRACK_ID = 'veveto';
+const ASSINATURA = '— Veveto';
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const fmt = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -194,12 +195,15 @@ export function textoProgramacao(d) {
     linhas.push(`${i + 1} - ${it.rotulo} — ${fmt(it.valor)} (${quando}${it.agrupado && it.qtd > 1 ? `, ${it.qtd} contas` : ''})`);
   });
   linhas.push(`\nTotal: *${fmt(d.totalProgramacao)}*`);
+  linhas.push(`\n${ASSINATURA}`);
   return linhas.join('\n');
 }
 
 function legendaImagem(d) {
   const quem = MENCIONAR ? `@${MENCIONAR} ` : '';
-  return `${quem}${NOME_MENCIONADO}, segue o saldo do momento (${d.geradoEm}):\n• Total: *${fmt(d.total)}*\n• Stone: ${fmt(d.bancos.find((b) => b.banco === 'STONE')?.valor)}${d.antecipavel > 0 ? ` (+${fmt(d.antecipavel)} para antecipar)` : ''}\n• Pagar.me: ${fmt(d.bancos.find((b) => b.banco === 'PAGARME')?.valor)} disponível + ${fmt(d.bancos.find((b) => b.banco === 'PAGARME A RECEBER')?.valor)} a receber`;
+  return `${quem}${NOME_MENCIONADO}, segue o saldo do momento (${d.geradoEm}):\n• Total: *${fmt(d.total)}*\n• Stone: ${fmt(d.bancos.find((b) => b.banco === 'STONE')?.valor)}${d.antecipavel > 0 ? ` (+${fmt(d.antecipavel)} para antecipar)` : ''}\n• Pagar.me: ${fmt(d.bancos.find((b) => b.banco === 'PAGARME')?.valor)} disponível + ${fmt(d.bancos.find((b) => b.banco === 'PAGARME A RECEBER')?.valor)} a receber
+
+${ASSINATURA}`;
 }
 
 // ─── envio ────────────────────────────────────────────────────

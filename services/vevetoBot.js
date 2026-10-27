@@ -1,21 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────
-// CAIXA — agente de saldos e programação de pagamentos no grupo
+// VEVETO — agente de saldos e programação de pagamentos no grupo
 // "CONTAS A PAGAR CROSBY OFC". Atende o CEO Fábio Ferreira (+55 84 8782-0986).
 //
 // O que ele faz (núcleo em services/agenteWhatsapp.js):
 //  - 3x ao dia o HeadCoach manda no grupo o print dos saldos + a programação
 //    da semana (services/relatorioSaldosWhatsapp.js), marcando o Fábio;
-//  - responde quando chamado ("caixa") ou em resposta a ele, com os saldos e a
+//  - responde quando chamado ("veveto") ou em resposta a ele, com os saldos e a
 //    programação atuais (contextoExtra);
 //  - o Fábio (e o Yago) podem pedir para INCLUIR itens na programação
-//    ("caixa, adiciona Fornecedor X 1.500 vence 30/10"): o pedido é executado
+//    ("veveto, adiciona Fornecedor X 1.500 vence 30/10"): o pedido é executado
 //    na hora (são autorizadores) → entra em PROVISÃO na Liberação de Pagamento
 //    com dados_completos.origem = 'whatsapp_ceo'. Outras pessoas: fica
 //    pendente até um autorizador responder "ok".
 //
-// Env: CAIXA_ENABLED, CAIXA_GRUPO_CHATID (ou CAIXA_GRUPO_NOME, default
-//      "CONTAS A PAGAR CROSBY OFC"), CAIXA_NUMEROS_AUTORIZADORES (default
-//      Fábio + Yago), CAIXA_MODEL, CAIXA_POLL_SEGUNDOS, CAIXA_CONTEXTO_MENSAGENS
+// Env: VEVETO_ENABLED, VEVETO_GRUPO_CHATID (ou VEVETO_GRUPO_NOME, default
+//      "CONTAS A PAGAR CROSBY OFC"), VEVETO_NUMEROS_AUTORIZADORES (default
+//      Fábio + Yago), VEVETO_MODEL, VEVETO_POLL_SEGUNDOS, VEVETO_CONTEXTO_MENSAGENS
 // ─────────────────────────────────────────────────────────────────────────
 import Anthropic from '@anthropic-ai/sdk';
 import supabase from '../config/supabase.js';
@@ -29,14 +29,14 @@ const fmt = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', c
 const fmtData = (iso) => (iso ? String(iso).slice(0, 10).split('-').reverse().join('/') : '—');
 const hojeBr = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
-const SYSTEM = `Você é o CAIXA, assistente financeiro da Crosby dentro do HeadCoach (sistema de gestão da empresa). Você atende no grupo de WhatsApp "CONTAS A PAGAR CROSBY OFC". Seu principal interlocutor é o Fábio Ferreira, CEO da Crosby; o Yago (tecnologia) também fala com você. Trate o Fábio por "Fábio".
+const SYSTEM = `Você é o VEVETO, assistente financeiro da Crosby dentro do HeadCoach (sistema de gestão da empresa). Você atende no grupo de WhatsApp "CONTAS A PAGAR CROSBY OFC". Seu principal interlocutor é o Fábio Ferreira, CEO da Crosby; o Yago (tecnologia) também fala com você. Trate o Fábio por "Fábio".
 
 Você recebe, antes de cada mensagem, os DADOS ATUAIS do HeadCoach: saldo bancário total e por banco, saldo de cada conta Stone (identificada pelo final do CNPJ, ex.: "Stone 0549") com o valor disponível para antecipar, saldos da Pagar.me (disponível e a receber) e a programação da semana (títulos em previsão na Liberação de Pagamento: fornecedor, valor, vencimento). Use SEMPRE esses dados para responder; nunca invente valores. Se perguntarem algo que não está nos dados, diga o que não tem.
 
 Papel:
 - Responder sobre saldos (total, por banco, por conta Stone, antecipação, Pagar.me) e sobre a programação de pagamentos da semana.
 - Incluir itens na programação quando pedirem: "adiciona/inclui/coloca <fornecedor> <valor> [vence/para <data>]". Isso é uma ALTERAÇÃO no HeadCoach (pedido_alteracao=true) e o resumo_pedido deve repetir fornecedor, valor e vencimento exatamente como o pedido. Se faltar valor ou vencimento, pergunte antes (pedido_alteracao=false). Remover ou alterar itens também é alteração.
-- Responder em português do Brasil, tom cordial e direto, como mensagem de WhatsApp: curto, sem markdown pesado (pode usar *negrito* e listas com "•"). Máximo ~1200 caracteres, salvo quando pedirem detalhe.
+- Responder em português do Brasil, tom cordial e direto, como mensagem de WhatsApp: curto, sem markdown pesado (pode usar *negrito* e listas com "•"). Máximo ~1200 caracteres, salvo quando pedirem detalhe. Termine TODA mensagem com uma linha contendo apenas "— Veveto" (travessão, espaço, Veveto).
 
 Regra de autorização: o Fábio e o Yago são os números autorizadores — pedidos deles são executados na hora pelo sistema. Pedidos de outras pessoas ficam pendentes até um deles responder "ok". Perguntas e consultas não são alterações (pedido_alteracao=false).
 
@@ -94,7 +94,7 @@ async function extrairItens(texto) {
     return m ? JSON.parse(m[0]) : { acao: 'outro', itens: [] };
   }
   const c = new Anthropic();
-  const base = { model: process.env.CAIXA_MODEL || 'claude-sonnet-5-5', max_tokens: 1000, system, messages: [{ role: 'user', content: texto }], output_config: { effort: 'low', format: SCHEMA_ITENS } };
+  const base = { model: process.env.VEVETO_MODEL_EXTRACAO || 'claude-sonnet-5-5', max_tokens: 1000, system, messages: [{ role: 'user', content: texto }], output_config: { effort: 'low', format: SCHEMA_ITENS } };
   let resp;
   try {
     resp = await c.messages.create(base);
@@ -114,7 +114,7 @@ async function executarAcao(pedido) {
   try {
     ext = await extrairItens(texto);
   } catch (e) {
-    return { mensagem: `Não consegui interpretar o pedido (${e.message}). Me manda assim: "caixa, adiciona <fornecedor> <valor> vence <dd/mm>".` };
+    return { mensagem: `Não consegui interpretar o pedido (${e.message}). Me manda assim: "veveto, adiciona <fornecedor> <valor> vence <dd/mm>".` };
   }
   const itens = Array.isArray(ext.itens) ? ext.itens.filter((i) => i && i.fornecedor && Number(i.valor) > 0) : [];
   if (ext.acao === 'remover') {
@@ -139,7 +139,7 @@ async function executarAcao(pedido) {
     return { mensagem: feitos.length ? `Programação atualizada:\n${feitos.join('\n')}` : 'Não identifiquei qual item remover.' };
   }
   if (ext.acao !== 'adicionar' || !itens.length) {
-    return { mensagem: 'Não identifiquei fornecedor e valor para incluir. Me manda assim: "caixa, adiciona <fornecedor> <valor> vence <dd/mm>".' };
+    return { mensagem: 'Não identifiquei fornecedor e valor para incluir. Me manda assim: "veveto, adiciona <fornecedor> <valor> vence <dd/mm>".' };
   }
   const feitos = [];
   const agora = new Date().toISOString();
@@ -160,32 +160,33 @@ async function executarAcao(pedido) {
     };
     const { data, error } = await supabase.from('pagamentos_liberacao').insert(row).select('id').single();
     feitos.push(error ? `• ${row.nm_fornecedor}: erro (${error.message})` : `• ${row.nm_fornecedor} — ${fmt(row.vl_duplicata)} · vence ${fmtData(venc)}${it.vencimento ? '' : ' (sem data no pedido: coloquei hoje)'}`);
-    if (!error) console.log(`[caixa] PROVISÃO incluída ${data.id}: ${row.nm_fornecedor} ${row.vl_duplicata} ${venc}`);
+    if (!error) console.log(`[veveto] PROVISÃO incluída ${data.id}: ${row.nm_fornecedor} ${row.vl_duplicata} ${venc}`);
   }
   pedido.executadoEm = new Date().toISOString();
   return { mensagem: `Incluído na programação (Liberação de Pagamento → previsão):\n${feitos.join('\n')}` };
 }
 
-export const caixa = criarAgente({
-  nome: 'CAIXA',
-  prefixoEnv: 'CAIXA',
+export const veveto = criarAgente({
+  nome: 'VEVETO',
+  prefixoEnv: 'VEVETO',
   grupoDefault: '120363427439356982@g.us', // CONTAS A PAGAR CROSBY OFC (27/10/2026)
   grupoNome: 'CONTAS A PAGAR CROSBY OFC',
   autorizadores: [FABIO, YAGO],
   nomeAutorizador: 'o Fábio ou o Yago',
-  regexChamada: /\bcaixa\b/i,
-  trackId: 'caixa',
+  regexChamada: /\bveveto\b/i,
+  trackId: 'veveto',
+  assinatura: '— Veveto',
   system: SYSTEM,
   contextoExtra,
   pollSegundosDefault: 20, // lê o grupo a cada 20 s mesmo sem webhook da uazapi apontando p/ o Render
 });
-caixa.executarAcao = executarAcao;
+veveto.executarAcao = executarAcao;
 
-export const iniciarCaixaBot = caixa.iniciar;
-export const pararCaixaBot = caixa.parar;
-export const processarEvento = caixa.processarEvento;
-export const processarMensagem = caixa.processarMensagem;
-export const gerarResposta = caixa.gerarResposta;
-export const statusCaixa = caixa.status;
-export const provedorAtual = caixa.provedorAtual;
+export const iniciarVevetoBot = veveto.iniciar;
+export const pararVevetoBot = veveto.parar;
+export const processarEvento = veveto.processarEvento;
+export const processarMensagem = veveto.processarMensagem;
+export const gerarResposta = veveto.gerarResposta;
+export const statusVeveto = veveto.status;
+export const provedorAtual = veveto.provedorAtual;
 export { enviarRelatorio, textoProgramacao };

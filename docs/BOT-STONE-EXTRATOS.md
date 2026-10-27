@@ -133,14 +133,14 @@ registra o anexo na conciliação. Desfazer a conciliação NÃO desfaz isso.
   e um texto com a programação da semana (seg–dom) = títulos em PROVISÃO na
   Liberação (fornecedor · valor · vencimento). Fallback por cron 09:50/14:20/18:20
   se o PC não rodou. Manual: `POST /api/stone-bot/relatorio-whatsapp`.
-- `services/caixaBot.js`: agente **CAIXA** no mesmo grupo (chamado por "caixa"
+- `services/vevetoBot.js`: agente **VEVETO** no mesmo grupo (chamado por "veveto"
   ou em resposta a ele). Autorizadores: Fábio (558487820986) e Yago. Recebe os
   dados vivos (saldos, antecipação, Pagar.me, programação) em cada resposta.
   Pedido "adiciona <fornecedor> <valor> vence <data>" → extração estruturada →
   INSERT em `pagamentos_liberacao` status PROVISAO (`nr_duplicata WA-…`,
   `dados_completos.origem = whatsapp_ceo`); "remove …" cancela só itens
-  incluídos pelo WhatsApp. Rotas `/api/whatsapp-cp/caixa/status` e
-  `/caixa/simular`. O núcleo (`agenteWhatsapp.js`) ganhou vários autorizadores,
+  incluídos pelo WhatsApp. Toda mensagem dele (e os relatórios) terminam com "— Veveto". Rotas
+  `/api/whatsapp-cp/veveto/status` e `/veveto/simular`. O núcleo (`agenteWhatsapp.js`) ganhou vários autorizadores,
   grupo por nome e `contextoExtra`.
 
 ## Pagar.me (adquirente / subconta da Stone)

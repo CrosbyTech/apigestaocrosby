@@ -353,8 +353,15 @@ export function criarAgente(cfg) {
     return pendentes.length === 1 ? pendentes[0] : null;
   }
 
+  // cfg.assinatura (ex.: "— Veveto"): toda mensagem do agente termina com ela
+  function assinar(texto) {
+    const t = String(texto || '').trimEnd();
+    if (!cfg.assinatura) return t;
+    return t.endsWith(cfg.assinatura) ? t : `${t}\n\n${cfg.assinatura}`;
+  }
+
   async function responder(texto, replyid) {
-    const r = await wa.enviarTexto({ number: GRUPO, text: texto, replyid, trackId: TRACK_ID });
+    const r = await wa.enviarTexto({ number: GRUPO, text: assinar(texto), replyid, trackId: TRACK_ID });
     const id = r?.resposta?.id;
     if (id) minhasRespostas.add(id);
     if (minhasRespostas.size > 1000) {
