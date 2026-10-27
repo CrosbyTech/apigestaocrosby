@@ -119,6 +119,30 @@ público `solicitacoes-crosby/comprovantes/<solId>/…`, grava
 (se não paga), põe o título da Liberação em PAGO (se existir e não estiver) e
 registra o anexo na conciliação. Desfazer a conciliação NÃO desfaz isso.
 
+## Horários e relatório no WhatsApp (27/10/2026)
+
+- Bot Stone no PC: `config.json → horarios: ["09:30","14:00","18:00"]`
+  (substitui `horarioDiario`; o agente precisa ser reiniciado para ler).
+- Pagar.me no servidor 10 min antes: `PAGARME_SALDO_CRON="20 9 * * *;50 13 * * *;50 17 * * *"`.
+- `services/relatorioSaldosWhatsapp.js`: ao fim de cada execução AGENDADA do
+  bot (`finalizarExecucao`) manda no grupo **CONTAS A PAGAR CROSBY OFC** (pela
+  instância CONTAS A PAGAR, chatid achado pelo nome via `GET /group/list`) uma
+  imagem do card "Saldo Bancário" (HTML → puppeteer → PNG: total, chips por
+  banco, Stone por final de CNPJ com antecipável, Pagar.me disponível/a receber,
+  total da programação) com legenda marcando o Fábio (`mentions=558487820986`),
+  e um texto com a programação da semana (seg–dom) = títulos em PROVISÃO na
+  Liberação (fornecedor · valor · vencimento). Fallback por cron 09:50/14:20/18:20
+  se o PC não rodou. Manual: `POST /api/stone-bot/relatorio-whatsapp`.
+- `services/caixaBot.js`: agente **CAIXA** no mesmo grupo (chamado por "caixa"
+  ou em resposta a ele). Autorizadores: Fábio (558487820986) e Yago. Recebe os
+  dados vivos (saldos, antecipação, Pagar.me, programação) em cada resposta.
+  Pedido "adiciona <fornecedor> <valor> vence <data>" → extração estruturada →
+  INSERT em `pagamentos_liberacao` status PROVISAO (`nr_duplicata WA-…`,
+  `dados_completos.origem = whatsapp_ceo`); "remove …" cancela só itens
+  incluídos pelo WhatsApp. Rotas `/api/whatsapp-cp/caixa/status` e
+  `/caixa/simular`. O núcleo (`agenteWhatsapp.js`) ganhou vários autorizadores,
+  grupo por nome e `contextoExtra`.
+
 ## Pagar.me (adquirente / subconta da Stone)
 
 Boletos e vendas online caem na Pagar.me e o financeiro transfere todo dia para
