@@ -34,7 +34,7 @@ const fmt = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', c
 const fmtData = (iso) => (iso ? String(iso).slice(0, 10).split('-').reverse().join('/') : '—');
 const sufixoCnpj = (cnpj) => {
   const d = String(cnpj || '').replace(/\D/g, '');
-  return d.length === 14 ? d.slice(8, 12) : d.slice(-4);
+  return d.slice(-4); // 27.728.810/0005-49 → "0549" (como o Yago identifica as contas)
 };
 const agoraBr = () => new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const hojeBr = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
