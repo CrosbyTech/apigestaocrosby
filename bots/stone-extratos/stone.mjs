@@ -657,4 +657,28 @@ export class Stone {
   }
 }
 
+/**
+ * Keep-alive da sessão: abre o portal escondido, carrega a home (o portal
+ * renova o token em POST /api/v2/identity/refresh-token a cada carga), passa
+ * pelo Extrato para gerar tráfego autenticado e fecha. Devolve se a sessão
+ * continua válida. Usado pelo agente a cada N minutos (config sessao.keepAliveMin).
+ */
+export async function manterSessao(cfg, dirs, log = () => {}) {
+  const stone = new Stone(cfg, dirs, () => {});
+  try {
+    await stone.abrir({ visivel: false });
+    await stone.irParaInicio();
+    const ok = await stone.sessaoOk();
+    if (ok) {
+      await stone.clicarTexto(['Extrato'], { timeoutMs: 4000, silencioso: true, exato: true }).catch(() => {});
+      await dormir(4000);
+      await stone.garantirApi({ timeoutMs: 8000 }).catch(() => {});
+    }
+    log(ok ? `keep-alive: sessão da Stone renovada${stone.api ? ' (token ativo)' : ''}` : 'keep-alive: sessão da Stone EXPIROU — rode login.bat', ok ? 'info' : 'aviso');
+    return ok;
+  } finally {
+    await stone.fechar();
+  }
+}
+
 export const helpers = { brDe, soDigitos, dormir };

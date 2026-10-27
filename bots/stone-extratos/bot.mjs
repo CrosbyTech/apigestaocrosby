@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HeadCoach } from './headcoach.mjs';
-import { Stone, helpers } from './stone.mjs';
+import { Stone, helpers, manterSessao } from './stone.mjs';
 
 const VERSAO = '1.0.0';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -386,6 +386,9 @@ async function modoAgente() {
   let ultimoAgendado = null; // AAAA-MM-DD do último disparo automático
   let sessaoOk = null;
   let ocupado = false;
+  // keep-alive: visita o portal a cada N min para a sessão não expirar entre as rodadas
+  const keepAliveMin = Number(cfg.sessao?.keepAliveMin ?? 20);
+  let ultimoKeepAlive = Date.now();
 
   // horários do dia: "horarios": ["09:30","14:00","18:00"] (ou o antigo "horarioDiario")
   const horarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : cfg.horarioDiario ? [cfg.horarioDiario] : []).map((h) => String(h).trim());
@@ -413,6 +416,19 @@ async function modoAgente() {
         ultimoPing = Date.now();
       }
       await dispararAgendado();
+      if (!ocupado && keepAliveMin > 0 && Date.now() - ultimoKeepAlive > keepAliveMin * 60000) {
+        ocupado = true;
+        try {
+          const ok = await manterSessao(cfg, dirs, (m, nivel) => console.log(`${hora()} ${nivel === 'aviso' ? '⚠️ ' : '  '} ${m}`));
+          sessaoOk = ok;
+          ultimoPing = 0; // manda o ping já com o estado da sessão
+        } catch (e) {
+          console.error(`${hora()} ❌ keep-alive: ${e.message}`);
+        } finally {
+          ultimoKeepAlive = Date.now();
+          ocupado = false;
+        }
+      }
       if (!ocupado) {
         const exec = await hc.proxima();
         if (exec) {
@@ -423,6 +439,7 @@ async function modoAgente() {
             else if (r.status === 'concluido' || r.resumo?.contas > 0) sessaoOk = true;
           } finally {
             ocupado = false;
+            ultimoKeepAlive = Date.now(); // a execução já renovou a sessão
           }
         }
       }

@@ -16,6 +16,10 @@
     6
   ],
   "diasRetroativos": 3,
+  "sessao": {
+    "keepAliveMin": 20,
+    "_comentario": "a cada N min o agente abre o portal escondido e recarrega a home: o token é renovado e a sessão não expira entre as rodadas (0 desliga)"
+  },
   "headless": false,
   "janelaOculta": true,
   "intervaloFilaSeg": 15,
