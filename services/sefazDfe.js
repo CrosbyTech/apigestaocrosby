@@ -5,6 +5,7 @@ import { DistribuicaoDFe } from 'node-mde';
 import supabase from '../config/supabase.js';
 import { carregarCertificados } from '../config/sefazCerts.js';
 import { FILIAIS, filialPorCnpj } from '../config/sefazFiliais.js';
+import { registrarCienciaOperacao, EVENTO_CIENCIA } from './sefazManifestacao.js';
 
 const TP_AMB = process.env.SEFAZ_TP_AMB || '1'; // 1 = produção
 // A SEFAZ bloqueia por ~1h em caso de consumo indevido (cStat 656)
@@ -446,23 +447,69 @@ export async function obterXmlNota(id) {
     cUFAutor: cert.cUF,
     tpAmb: TP_AMB,
   });
-  const consulta = await distribuicao.consultaChNFe(nota.chave_acesso);
-  if (consulta.error) return { ok: false, status: 502, erro: `SEFAZ: ${consulta.error}` };
-  const d = consulta.data || {};
-  if (String(d.cStat) !== '138') {
-    const msg = `SEFAZ ${d.cStat || '?'}: ${d.xMotivo || 'sem resposta'}`;
-    return { ok: false, status: String(d.cStat) === '656' ? 429 : 502, erro: msg };
-  }
-  const doc = (Array.isArray(d.docZip) ? d.docZip : []).find((x) => x.json?.nfeProc && x.xml);
+  const buscarProc = async () => {
+    const consulta = await distribuicao.consultaChNFe(nota.chave_acesso);
+    if (consulta.error) return { erro: { status: 502, msg: `SEFAZ: ${consulta.error}` } };
+    const d = consulta.data || {};
+    if (String(d.cStat) !== '138') {
+      return {
+        erro: {
+          status: String(d.cStat) === '656' ? 429 : 502,
+          msg: `SEFAZ ${d.cStat || '?'}: ${d.xMotivo || 'sem resposta'}`,
+        },
+      };
+    }
+    const doc = (Array.isArray(d.docZip) ? d.docZip : []).find((x) => x.json?.nfeProc && x.xml);
+    return { doc: doc || null };
+  };
+
+  let { doc, erro: erroBusca } = await buscarProc();
+  if (erroBusca) return { ok: false, status: erroBusca.status, erro: erroBusca.msg };
+
+  let ciencia = null;
   if (!doc) {
-    // Sem a Ciência da Operação (evento 210210) do destinatário, a Distribuição
-    // DFe só devolve o resumo (resNFe) — confirmado em 27/10/2026.
-    return {
-      ok: false,
-      status: 409,
-      erro:
-        'Esta nota chegou da SEFAZ só como resumo. O XML completo (e o PDF) só é liberado depois de registrar a Ciência da Operação no portal da SEFAZ ou no TOTVS.',
-    };
+    // Sem a Ciência da Operação (210210) do destinatário, a Distribuição DFe
+    // só devolve o resumo (resNFe). Registra a Ciência (autorizado pelo Yago em
+    // 27/10/2026) e consulta de novo por chave até o XML completo aparecer.
+    if (String(nota.chave_acesso).substring(20, 22) !== '55') {
+      return { ok: false, status: 409, erro: 'Só NF-e (modelo 55) tem XML completo por aqui; CT-e ainda não é suportado.' };
+    }
+    try {
+      ciencia = await registrarCienciaOperacao({ chave: nota.chave_acesso, cnpjDestinatario: cnpjDest });
+    } catch (e) {
+      return { ok: false, status: 502, erro: `Ciência da Operação: ${e.message}` };
+    }
+    if (!ciencia.ok) {
+      return {
+        ok: false,
+        status: 502,
+        erro: `A SEFAZ recusou a Ciência da Operação (${ciencia.cStat}): ${ciencia.xMotivo}`,
+      };
+    }
+    await supabase
+      .from('sefaz_dfe_notas')
+      .update({
+        manifestacao: EVENTO_CIENCIA,
+        manifestacao_descricao: 'Ciência da Operação',
+        atualizado_em: new Date().toISOString(),
+      })
+      .eq('id', nota.id);
+    for (const espera of [2000, 3000, 4000]) {
+      await new Promise((r) => setTimeout(r, espera));
+      const r2 = await buscarProc();
+      if (r2.erro) return { ok: false, status: r2.erro.status, erro: r2.erro.msg };
+      if (r2.doc) {
+        doc = r2.doc;
+        break;
+      }
+    }
+    if (!doc) {
+      return {
+        ok: false,
+        status: 409,
+        erro: `Ciência da Operação registrada na SEFAZ (${ciencia.cStat}), mas o XML completo ainda não foi liberado. Clique de novo em alguns segundos.`,
+      };
+    }
   }
 
   const parsed = parseDoc(doc, cnpjDest);
@@ -474,7 +521,7 @@ export async function obterXmlNota(id) {
     const { error: e2 } = await supabase.from('sefaz_dfe_notas').update(patch).eq('id', nota.id);
     if (e2) console.warn(`⚠️ [SefazDFe] gravar XML da nota ${nota.id}: ${e2.message}`);
   }
-  return { ok: true, xml: doc.xml, chave: nota.chave_acesso, baixadoAgora: true };
+  return { ok: true, xml: doc.xml, chave: nota.chave_acesso, baixadoAgora: true, ciencia: ciencia ? { cStat: ciencia.cStat, nProt: ciencia.nProt } : null };
 }
 
 export async function sincronizarTodos({ cnpj = null, codigo = null } = {}) {

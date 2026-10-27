@@ -204,7 +204,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const r = await obterXmlNota(String(req.params.id || '').trim());
     if (!r.ok) return errorResponse(res, r.erro, r.status || 400, 'XML_INDISPONIVEL');
-    successResponse(res, { chave: r.chave, xml: r.xml, baixadoAgora: r.baixadoAgora }, 'XML da nota');
+    successResponse(res, { chave: r.chave, xml: r.xml, baixadoAgora: r.baixadoAgora, ciencia: r.ciencia || null }, 'XML da nota');
   }),
 );
 

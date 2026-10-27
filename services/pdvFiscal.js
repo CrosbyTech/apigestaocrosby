@@ -844,3 +844,6 @@ export async function statusSefaz({ modelo, emit, cfg, cert }) {
 export function limparCache() {
   cache.clear();
 }
+
+// Reaproveitados pela manifestação do destinatário (services/sefazManifestacao.js)
+export { postSoap, corpoSoap, envelopar, urlWs };
