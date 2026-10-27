@@ -167,9 +167,41 @@ function htmlDoCard(d) {
   </div></body></html>`;
 }
 
-export async function gerarImagem(dados) {
+/**
+ * Abre um Chrome para a captura. No servidor (Linux) prefere o Chromium
+ * empacotado do @sparticuz/chromium (extraído em /tmp, não depende do Chrome
+ * baixado pelo puppeteer, que no Render às vezes está "ocupado" — ETXTBSY —
+ * enquanto o prewarm reinstala). Localmente usa o launcher do autentique.
+ */
+async function abrirNavegador() {
+  const erros = [];
+  if (process.platform === 'linux') {
+    try {
+      const chromium = (await import('@sparticuz/chromium')).default;
+      const puppeteer = (await import('puppeteer')).default;
+      const execPath = await chromium.executablePath();
+      const browser = await puppeteer.launch({ headless: true, args: [...chromium.args, '--disable-dev-shm-usage'], defaultViewport: { width: 760, height: 600 }, executablePath: execPath });
+      return browser;
+    } catch (e) {
+      erros.push(`sparticuz: ${e.message}`);
+    }
+  }
   const { launchPuppeteer } = await import('../routes/autentique.routes.js');
-  const { browser } = await launchPuppeteer();
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    try {
+      const { browser } = await launchPuppeteer();
+      return browser;
+    } catch (e) {
+      erros.push(`launcher ${tentativa}: ${e.message}`);
+      if (!/ETXTBSY|EBUSY|ENOENT/i.test(e.message) || tentativa === 3) break;
+      await new Promise((r) => setTimeout(r, 10000));
+    }
+  }
+  throw new Error(`não consegui abrir o Chrome (${erros.join(' | ')})`);
+}
+
+export async function gerarImagem(dados) {
+  const browser = await abrirNavegador();
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 760, height: 600, deviceScaleFactor: 2 });
