@@ -417,6 +417,66 @@ function certificadoDaFilial(filial, certs) {
   );
 }
 
+// XML completo (procNFe) de uma nota, para montar o DANFE no HeadCoach
+// (Niziany, 27/10/2026). Se a nota só veio como resumo (resNFe), busca o
+// XML por chave na Distribuição DFe com o certificado da filial
+// destinatária e grava na nota (vira xml_completo = true).
+export async function obterXmlNota(id) {
+  const { data: nota, error } = await supabase
+    .from('sefaz_dfe_notas')
+    .select('id, chave_acesso, cnpj_destinatario, empresa_codigo, xml, xml_completo, schema_origem')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) return { ok: false, status: 500, erro: `Supabase: ${error.message}` };
+  if (!nota) return { ok: false, status: 404, erro: 'Nota não encontrada' };
+  if (nota.xml_completo && nota.xml) {
+    return { ok: true, xml: nota.xml, chave: nota.chave_acesso, baixadoAgora: false };
+  }
+
+  const cnpjDest = somenteDigitos(nota.cnpj_destinatario);
+  const filial = filialPorCnpj(cnpjDest) || { cnpj: cnpjDest, cert: null };
+  const cert = certificadoDaFilial(filial, carregarCertificados());
+  if (!cert) {
+    return { ok: false, status: 400, erro: 'Sem certificado para a filial destinatária desta nota' };
+  }
+  const distribuicao = new DistribuicaoDFe({
+    pfx: cert.pfx,
+    passphrase: cert.senha,
+    cnpj: cnpjDest,
+    cUFAutor: cert.cUF,
+    tpAmb: TP_AMB,
+  });
+  const consulta = await distribuicao.consultaChNFe(nota.chave_acesso);
+  if (consulta.error) return { ok: false, status: 502, erro: `SEFAZ: ${consulta.error}` };
+  const d = consulta.data || {};
+  if (String(d.cStat) !== '138') {
+    const msg = `SEFAZ ${d.cStat || '?'}: ${d.xMotivo || 'sem resposta'}`;
+    return { ok: false, status: String(d.cStat) === '656' ? 429 : 502, erro: msg };
+  }
+  const doc = (Array.isArray(d.docZip) ? d.docZip : []).find((x) => x.json?.nfeProc && x.xml);
+  if (!doc) {
+    // Sem a Ciência da Operação (evento 210210) do destinatário, a Distribuição
+    // DFe só devolve o resumo (resNFe) — confirmado em 27/10/2026.
+    return {
+      ok: false,
+      status: 409,
+      erro:
+        'Esta nota chegou da SEFAZ só como resumo. O XML completo (e o PDF) só é liberado depois de registrar a Ciência da Operação no portal da SEFAZ ou no TOTVS.',
+    };
+  }
+
+  const parsed = parseDoc(doc, cnpjDest);
+  if (parsed.tipo === 'nota') {
+    // mantém cnpj_destinatario/chave/nsu da nota; atualiza o resto com o procNFe
+    const { cnpj_destinatario, chave_acesso, nsu, ...resto } = parsed.registro;
+    const patch = { ...resto, atualizado_em: new Date().toISOString() };
+    if (!(await colunaEmpresaNomeExiste())) delete patch.empresa_nome;
+    const { error: e2 } = await supabase.from('sefaz_dfe_notas').update(patch).eq('id', nota.id);
+    if (e2) console.warn(`⚠️ [SefazDFe] gravar XML da nota ${nota.id}: ${e2.message}`);
+  }
+  return { ok: true, xml: doc.xml, chave: nota.chave_acesso, baixadoAgora: true };
+}
+
 export async function sincronizarTodos({ cnpj = null, codigo = null } = {}) {
   const certs = carregarCertificados();
   if (certs.length === 0) {

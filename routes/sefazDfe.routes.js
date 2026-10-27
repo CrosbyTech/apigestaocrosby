@@ -15,6 +15,7 @@ import {
   sincronizarTodos,
   listarEmpresas,
   aplicarSetorConhecido,
+  obterXmlNota,
 } from '../services/sefazDfe.js';
 import { importarEscrituradas } from '../services/sefazEscrituracao.js';
 
@@ -193,6 +194,17 @@ router.patch(
       }
     }
     successResponse(res, { ...data, propagadas }, 'Setor da nota atualizado');
+  }),
+);
+
+// XML completo da nota (para o DANFE no front). Busca na SEFAZ por chave
+// quando a nota só veio como resumo.
+router.get(
+  '/notas/:id/xml',
+  asyncHandler(async (req, res) => {
+    const r = await obterXmlNota(String(req.params.id || '').trim());
+    if (!r.ok) return errorResponse(res, r.erro, r.status || 400, 'XML_INDISPONIVEL');
+    successResponse(res, { chave: r.chave, xml: r.xml, baixadoAgora: r.baixadoAgora }, 'XML da nota');
   }),
 );
 
