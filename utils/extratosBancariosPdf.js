@@ -142,8 +142,11 @@ export function detectarBanco(paginas) {
   if (/COOP: \d+ - AG: \d+ - CONTA:/.test(texto) || /UNICRED/.test(texto)) return 'UNICRED';
   if (/DAYCOVAL|DAYCONNECT/.test(texto)) return 'DAYCOVAL';
   if (/PAGSEGURO INTERNET|PAGBANK/.test(texto) && /EXTRATO DA CONTA/.test(texto)) return 'PAGBANK';
-  if (/OUVIDORIA BB|SAC 0800 729 0722|BANCO DO BRASIL/.test(texto) && /EXTRATO DE CONTA CORRENTE/.test(texto)) return 'BB';
-  if (/ITAU\.COM\.BR|BANCO ITAU|SISPAG/.test(texto) && /AG\/ORIGEM|LANCAMENTOS/.test(texto)) return 'ITAU';
+  if (/EXTRATO MENSAL/.test(texto) && /\bAG \d+ CC [\d-]+/.test(texto)) return 'ITAU';
+  if (/OUVIDORIA BB|SAC 0800 729 0722|BANCO DO BRASIL|BB\.COM\.BR|BB DIGITAL/.test(texto) && /EXTRATO DE CONTA CORRENTE|DT\. BALANCETE/.test(texto)) return 'BB';
+  if (/ITAU\.COM\.BR|BANCO ITAU|SISPAG|SALDO TOTAL DISPON/.test(texto) && /AG\/ORIGEM|LANCAMENTOS/.test(texto)) return 'ITAU';
+  // BNB do aplicativo: "Extrato de Conta Corrente" / "TITULAR:" / "AGÊNCIA:35 / CONTA:69361-2"
+  if (/EXTRATO DE CONTA CORRENTE/.test(texto) && /TITULAR:/.test(texto) && /AGENCIA:\s*\d+\s*\/\s*CONTA:/.test(texto)) return 'BNB';
   return null;
 }
 
@@ -299,8 +302,11 @@ function interpretarSicredi(paginas) {
   const avisos = [];
   const titularNome = valorAoLado(p1, /^Associado:$/i);
   const cooperativa = soDigitos(valorAoLado(p1, /^Cooperativa:$/i));
-  const contaTxt = soDigitos(valorAoLado(p1, /^Conta:$/i));
-  const per = textoDe(p1).match(/Per[íi]odo de (\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/i);
+  const contaTxt = soDigitos((valorAoLado(p1, /^Conta:$/i) || valorAoLado(p1, /^Conta Corrente:$/i) || '').split(' ')[0]);
+  const per =
+    textoDe(p1).match(/Per[íi]odo de (\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/i) ||
+    textoDe(p1).match(/Dados referentes ao per[íi]odo\s*(\d{2}\/\d{2}\/\d{4})\s*a\s*(\d{2}\/\d{2}\/\d{4})/i);
+  const fimIso = dataIso4(per?.[2]);
 
   const docCab = achar(p1, /^Documento$/i);
   if (!docCab && /N[ãa]o h[áa] lan[çc]amentos no per[íi]odo/i.test(textoDe(p1))) {
@@ -318,8 +324,11 @@ function interpretarSicredi(paginas) {
   const cDesc = achar(cab, /^Descri[çc][ãa]o$/i);
   const cValor = achar(cab, /^Valor/i);
   const cSaldo = achar(cab, /^Saldo/i);
+  const cData = achar(cab, /^Data$/i);
   if (!cDesc || !cValor || !cSaldo) throw new Error('Sicredi: colunas da tabela não reconhecidas.');
   const xDesc = cDesc.x;
+  // no layout novo o título "Descrição" fica centralizado (x≈235) e o texto começa logo após a data (x≈129)
+  const xDescMin = cData ? cData.x + 30 : xDesc - 5;
   const xDoc = docCab.x;
   const rValor = direita(cValor);
   const rSaldo = direita(cSaldo);
@@ -339,12 +348,12 @@ function interpretarSicredi(paginas) {
       const nums = its.filter((it) => it.x >= xDoc - 5 && ehNumero(it.s));
       const valorIt = nums.find((it) => Math.abs(direita(it) - rValor) <= 8);
       const saldoIt = nums.find((it) => it !== valorIt && Math.abs(direita(it) - rSaldo) <= 8);
-      const descIts = its.filter((it) => it.x >= xDesc - 5 && it.x < xDoc - 5);
+      const descIts = its.filter((it) => it.x >= Math.min(xDesc - 5, xDescMin) && it !== dataIt && it.x < xDoc - 5);
       const docIts = its.filter((it) => it.x >= xDoc - 5 && it !== valorIt && it !== saldoIt && it.x < rValor - 45);
       const desc = textoDe(descIts);
       const doc = textoDe(docIts);
       if (!dataIt) {
-        if (/^SALDO ANTERIOR$/i.test(desc)) {
+        if (/^SALDO( ANTERIOR)?$/i.test(desc)) {
           saldoAnterior = saldoIt ? parseNumBr(saldoIt.s) : null;
           continue;
         }
@@ -356,7 +365,8 @@ function interpretarSicredi(paginas) {
         continue;
       }
       if (!valorIt) {
-        if (desc) avisos.push(`pág. ${pg.numero} ${limpar(dataIt.s)}: linha sem valor ("${desc}")`);
+        // "Juros Cheque Especial" etc. com data futura = lançamentos programados do rodapé
+        if (desc && !(fimIso && dataIso4(dataIt.s) > fimIso)) avisos.push(`pág. ${pg.numero} ${limpar(dataIt.s)}: linha sem valor ("${desc}")`);
         continue;
       }
       lanc.push({
@@ -394,13 +404,28 @@ function interpretarCaixa(paginas) {
   const linhas1 = agruparLinhas(p1);
   const texto1 = linhas1.map((l) => textoDe(l.items)).join('\n');
   const idxCnpj = linhas1.findIndex((l) => /^CNPJ:/i.test(textoDe(l.items)));
-  const nome = idxCnpj > 0 ? textoDe(linhas1[idxCnpj - 1].items) : null;
+  const nome = idxCnpj > 0 ? textoDe(linhas1[idxCnpj - 1].items) : texto1.match(/Cliente:\s*(.+)/i)?.[1]?.trim() || null;
   const cnpj = soDigitos(texto1.match(/CNPJ:\s*([\d./-]+)/i)?.[1]);
-  const agCc = texto1.match(/Ag[êe]ncia:\s*(\d+)\s*(?:Produto:\s*\d+\s*)?Conta:\s*([\d-]+)/i);
+  // "Agência: 02044 Produto: 1292 Conta: 000578136635-7" ou (Gerenciador) "Conta: 2044 | 1292 | 000578136635-7"
+  const agCc = texto1.match(/Ag[êe]ncia:\s*(\d+)\s*(?:Produto:\s*\d+\s*)?Conta:\s*([\d-]+)/i) || (() => {
+    const g = texto1.match(/Conta:\s*(\d+)\s*\|\s*\d+\s*\|\s*([\d-]+)/i);
+    return g ? [g[0], g[1].padStart(5, '0'), g[2]] : null;
+  })();
   const contaDig = soDigitos(agCc?.[2]);
-  const per =
+  let per =
     texto1.match(/Extrato no per[íi]odo de (\d{2}\/\d{2}\/\d{4}) [àa] (\d{2}\/\d{2}\/\d{4})/i) ||
     texto1.match(/Lan[çc]amentos de (\d{2}\/\d{2}\/\d{4}) [àa] (\d{2}\/\d{2}\/\d{4})/i);
+  if (!per) {
+    // Gerenciador: "Mês: Agosto/2025" + "Período: 1 - 31"
+    const mesM = texto1.match(/M[êe]s:\s*([A-Za-zçÇ]+)\s*\/\s*(\d{4})/i);
+    const diasM = texto1.match(/Per[íi]odo:\s*(\d{1,2})\s*-\s*(\d{1,2})/i);
+    const MES = { janeiro: 1, fevereiro: 2, marco: 3, abril: 4, maio: 5, junho: 6, julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12 };
+    const mes = mesM ? MES[semAcento(mesM[1]).toLowerCase()] : null;
+    if (mes && diasM) {
+      const mm = String(mes).padStart(2, '0');
+      per = [null, `${diasM[1].padStart(2, '0')}/${mm}/${mesM[2]}`, `${diasM[2].padStart(2, '0')}/${mm}/${mesM[2]}`];
+    }
+  }
   const semLancamentos = /N[ÃA]O CONSTA LAN[ÇC]AMENTO/i.test(semAcento(texto1).toUpperCase().replace(/[ÇC]/g, 'C'));
 
   // saldo anterior: valor na linha do rótulo (pode vir fragmentado "R", "$ 146,99", "C")
@@ -417,7 +442,7 @@ function interpretarCaixa(paginas) {
     const hist = achar(pg.items, /^Hist[óo]rico$/i);
     if (hist) {
       const linhaCab = pg.items.filter((it) => Math.abs(it.y - hist.y) <= 2.5);
-      const doc = achar(linhaCab, /^Documento$/i);
+      const doc = achar(linhaCab, /^Documento$/i) || achar(linhaCab, /^Nr\.?\s*Doc\.?$/i);
       const val = achar(linhaCab, /^Valor$/i);
       const sal = achar(linhaCab, /^Saldo$/i);
       if (doc && val && sal) cab = { y: hist.y, xDoc: doc.x, xHist: hist.x, rValor: direita(val), rSaldo: direita(sal) };
@@ -427,7 +452,11 @@ function interpretarCaixa(paginas) {
     const yMin = hist ? cab.y + 8 : 0;
     const yMax = rodape ? rodape.y - 4 : pg.altura;
     const corpo = pg.items.filter((it) => it.y > yMin && it.y < yMax);
-    const datas = corpo.filter((it) => it.x < cab.xDoc - 5 && RE_DATA4.test(limpar(it.s))).sort((a, b) => a.y - b.y);
+    // o layout com "Data de lançamento | Data de movimento" tem duas datas por linha: fica só a da esquerda
+    const datas = corpo
+      .filter((it) => it.x < cab.xDoc - 5 && RE_DATA4.test(limpar(it.s)))
+      .sort((a, b) => a.y - b.y || a.x - b.x)
+      .filter((it, i, arr) => i === 0 || Math.abs(it.y - arr[i - 1].y) > 2.5);
     const xMeio = (cab.rValor + cab.rSaldo) / 2;
     datas.forEach((d, i) => {
       const topo = d.y - 10;
@@ -441,8 +470,9 @@ function interpretarCaixa(paginas) {
       const saldoTxt = textoDe(numIts.filter((it) => direita(it) > xMeio));
       const valor = parseNumBr(valorTxt);
       const saldo = parseNumBr(saldoTxt);
+      if (/^SALDO DIA/i.test(histLinhas[0] || '')) return; // linha de fechamento do dia, não é lançamento
       if (valor == null) {
-        if (!/^SALDO DIA/i.test(histLinhas[0] || '')) avisos.push(`pág. ${pg.numero} ${limpar(d.s)}: valor não reconhecido ("${valorTxt}")`);
+        avisos.push(`pág. ${pg.numero} ${limpar(d.s)}: valor não reconhecido ("${valorTxt}")`);
         return;
       }
       lanc.push({
@@ -458,6 +488,18 @@ function interpretarCaixa(paginas) {
   }
   if (!cab && !semLancamentos) throw new Error('Caixa: cabeçalho da tabela (Documento/Histórico/Valor/Saldo) não encontrado.');
   if (semLancamentos) avisos.push('Caixa informa que não consta lançamento no período.');
+  // sem "Saldo anterior" impresso (Gerenciador): deriva do primeiro lançamento
+  if (saldoAnterior == null && lanc.length && lanc[0].saldoApos != null) saldoAnterior = round2(lanc[0].saldoApos - lanc[0].valor);
+  // o layout "Data de lançamento | Data de movimento" imprime o saldo devedor SEM sinal ("R$ 9.990,57"
+  // quando a conta está em −9.990,57): corrige pelo encadeamento com o saldo anterior
+  if (saldoAnterior != null) {
+    let corrente = saldoAnterior;
+    for (const l of lanc) {
+      corrente = round2(corrente + l.valor);
+      if (l.saldoApos != null && l.saldoApos > 0 && corrente < 0 && Math.abs(corrente + l.saldoApos) < 0.005) l.saldoApos = -l.saldoApos;
+      if (l.saldoApos != null && Math.abs(corrente - l.saldoApos) < 0.005) corrente = l.saldoApos;
+    }
+  }
 
   const lancamentos = lanc.map((l) => {
     const c = classificarCaixa(l.descricaoLinhas, l.valor);

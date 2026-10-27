@@ -241,11 +241,75 @@ function lerLinhasBnb(paginas, cab) {
   return { lanc, avisos };
 }
 
+// BNB do aplicativo/novo internet banking: "Extrato de Conta Corrente" /
+// "TITULAR: X" / "AGÊNCIA:35 / CONTA:69361-2" / "Período: X até Y" /
+// "Saldo anterior 569,58 C"; seções por mês ("março/2025") com cabeçalho
+// Data | Histórico | Documento | Valor R$ (sem coluna de saldo, valor com C/D);
+// o histórico pode começar na linha ACIMA da data e continuar abaixo;
+// "Saldo atual 0,00 C" fecha; "Sem lançamentos no período." = vazio.
+function interpretarBnbApp(paginas) {
+  const avisos = [];
+  const l1 = agruparLinhas(paginas[0].items);
+  const texto = l1.map((l) => textoDe(l.items)).join('\n');
+  const nome = texto.match(/TITULAR:\s*(.+)/i)?.[1]?.trim() || null;
+  const agCc = texto.match(/AG[ÊE]NCIA:\s*(\d+)\s*\/\s*CONTA:\s*([\d-]+)/i);
+  const contaDig = soDigitos(agCc?.[2]);
+  const per = texto.match(/Per[íi]odo:\s*(\d{2}\/\d{2}\/\d{4})\s*(?:at[ée]|a)\s*(\d{2}\/\d{2}\/\d{4})/i);
+  const saldoAnt = texto.match(/Saldo anterior\s*(-?\s*R?\$?\s*[\d.]*\d,\d{2}\s*[CD]?)/i);
+  const saldoAtu = texto.match(/Saldo atual\s*(-?\s*R?\$?\s*[\d.]*\d,\d{2}\s*[CD]?)/i);
+  const vazio = /Sem lan[çc]amentos no per[íi]odo/i.test(texto);
+  const lanc = [];
+  if (!vazio) {
+    const ehData = (l) => RE_DATA4.test(limpar(l.items[0].s)) && l.items[0].x < 70;
+    const ignorar = (t) => /^(Extrato de Conta Corrente|TITULAR:|AG[ÊE]NCIA:|Per[íi]odo:|Saldo anterior|Data\b.*Hist|[a-zç]+\/\d{4}$|N[ãa]o constam|Extrato gerado)/i.test(t);
+    for (const pg of paginas) {
+      let linhas = agruparLinhas(pg.items);
+      const fim = linhas.findIndex((l) => /^Saldo atual/i.test(textoDe(l.items)));
+      if (fim >= 0) linhas = linhas.slice(0, fim);
+      linhas = linhas.filter((l) => !ignorar(textoDe(l.items)));
+      const idxDatas = linhas.map((l, i) => (ehData(l) ? i : -1)).filter((i) => i >= 0);
+      const dono = new Map();
+      linhas.forEach((l, i) => {
+        if (ehData(l)) return;
+        const antes = [...idxDatas].reverse().find((d) => d < i);
+        const depois = idxDatas.find((d) => d > i);
+        const alvo = antes != null && depois != null ? (l.y >= (linhas[antes].y + linhas[depois].y) / 2 ? depois : antes) : (antes ?? depois ?? null);
+        if (alvo != null) dono.set(i, alvo);
+      });
+      const textoDesc = (l, semData) => limpar(l.items.filter((it) => (!semData || it !== l.items[0]) && it.x >= 70 && it.x < 400).map((it) => it.s).join(' '));
+      for (const d of idxDatas) {
+        const linha = linhas[d];
+        const valorIt = linha.items.filter((it) => it.x >= 450 && ehNumero(it.s)).at(-1) || null;
+        const docIts = linha.items.filter((it) => it !== valorIt && it.x >= 400 && it.x < 500 && !ehNumero(it.s));
+        const acima = linhas.filter((l, i) => dono.get(i) === d && l.y < linha.y).map((l) => textoDesc(l, false)).filter(Boolean);
+        const abaixo = linhas.filter((l, i) => dono.get(i) === d && l.y > linha.y).map((l) => textoDesc(l, false)).filter(Boolean);
+        const desc = limpar([...acima, textoDesc(linha, true), ...abaixo].join(' '));
+        if (!valorIt) {
+          if (desc) avisos.push(`pág. ${pg.numero} ${limpar(linha.items[0].s)}: linha sem valor ("${desc}")`);
+          continue;
+        }
+        lanc.push({ pagina: pg.numero, data: dataIso4(linha.items[0].s), hora: null, descricao: desc, documento: textoDe(docIts) || null, valor: parseNumBr(valorIt.s), saldoApos: null });
+      }
+      if (fim >= 0) break;
+    }
+  } else avisos.push('BNB informa que não houve lançamentos no período.');
+  const lancamentos = lanc.map((l) => ({ ...l, memo: l.descricao, ...classificarGenerico(l.descricao, l.valor), documento: l.documento }));
+  return {
+    titular: { nome, cnpj: null, agencia: agCc ? agCc[1].padStart(4, '0') : null, conta: contaDig ? String(Number(contaDig.slice(0, -1))) : null, contaDv: contaDig ? contaDig.slice(-1) : null },
+    periodo: { inicio: dataIso4(per?.[1]), fim: dataIso4(per?.[2]) },
+    saldoInicial: saldoAnt ? parseNumBr(saldoAnt[1]) : null,
+    saldoFinalInformado: saldoAtu ? parseNumBr(saldoAtu[1]) : null,
+    lancamentos,
+    avisos,
+  };
+}
+
 export function interpretarBnb(paginas) {
   const p1 = paginas[0].items;
   const avisos = [];
   const l1 = agruparLinhas(p1);
   const texto = l1.map((l) => textoDe(l.items)).join('\n');
+  if (/AG[ÊE]NCIA:\s*\d+\s*\/\s*CONTA:/i.test(texto)) return interpretarBnbApp(paginas);
   const nome = texto.match(/Titular:\s*(.+)/i)?.[1]?.trim() || null;
   const agCc = texto.match(/Ag[êe]ncia\/Conta Corrente:\s*(\d+)\s*-\s*[^/]*\/\s*([\d-]+)/i);
   const contaDig = soDigitos(agCc?.[2]);
