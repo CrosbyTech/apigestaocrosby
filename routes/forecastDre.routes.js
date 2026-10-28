@@ -296,12 +296,17 @@ async function drylandRpcDp(fn, args = {}) {
   return data;
 }
 
+const nz = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 const semAcentoUp = (s) =>
   String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim();
 // Proventos que NÃO entram na DRE (compensados em outra conta)
 const ehProventoForaDre = (desc) => /MATERNIDADE/.test(semAcentoUp(desc));
+// Diretor (pró-labore) — mesma régua do Dryland; fica fora da folha de pessoal.
+const ehDiretor = (l) =>
+  /diretor/i.test(l.funcao || '') || (l.eventos || []).some((e) => /pro-?labore/.test(nz(e.desc)));
 
-// Lê a folha de uma competência e soma os proventos que entram na DRE.
+// Lê a folha de uma competência: rubricas (proventos + descontos, como no
+// Dryland) e o total de Pessoal Fixo (proventos que entram na DRE).
 async function calcularPessoalFixo(mes) {
   if (!DP_USUARIO || !DP_SENHA) {
     throw Object.assign(new Error('Acesso ao DP do Dryland não configurado (DRYLAND_DP_USUARIO/SENHA).'), { status: 503 });
@@ -311,39 +316,42 @@ async function calcularPessoalFixo(mes) {
     throw Object.assign(new Error(`login no DP do Dryland falhou (${(lg && lg.erro) || 'recusado'})`), { status: 502 });
   }
   try {
-    // competência da folha é 'AAAA-MM-01'
-    const comp = `${mes}-01`;
+    const comp = `${mes}-01`; // competência da folha é 'AAAA-MM-01'
     const r = await drylandRpcDp('dp_folha_dados', { p_token: lg.token, p_competencia: comp });
     if (!r || r.ok === false) {
       throw Object.assign(new Error(`folha ${mes}: ${(r && r.erro) || 'sem resposta'}`), { status: 502 });
     }
-    const linhas = (r.linhas || []).filter((l) => !l._resumo);
-    const porRubrica = {};
+    // Empregados (exclui linhas de resumo por CNPJ e diretores/pró-labore —
+    // mesma régua do Dryland, pra bater com a tela de rubricas da folha).
+    const linhas = (r.linhas || []).filter((l) => !l._resumo && !ehDiretor(l));
+    const agg = {}; // desc → {desc, tipo, qtd, valor}
     let totalProventos = 0;
-    let foraDre = 0;
+    let maternidade = 0;
     for (const l of linhas) {
       for (const e of l.eventos || []) {
-        if (e.tipo !== 'P') continue; // só proventos
+        const tipo = e.tipo === 'P' ? 'provento' : 'desconto';
         const v = Number(e.valor) || 0;
-        if (ehProventoForaDre(e.desc)) {
-          foraDre += v;
-          continue;
+        const desc = semAcentoUp(e.desc) || '(sem descrição)';
+        const k = tipo + '|' + desc;
+        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0 });
+        a.qtd += 1;
+        a.valor += v;
+        if (e.tipo === 'P') {
+          if (ehProventoForaDre(e.desc)) maternidade += v;
+          else totalProventos += v;
         }
-        totalProventos += v;
-        const k = semAcentoUp(e.desc) || '(sem descrição)';
-        porRubrica[k] = (porRubrica[k] || 0) + v;
       }
     }
-    const rubricas = Object.entries(porRubrica)
-      .map(([desc, valor]) => ({ desc, valor: Math.round(valor * 100) / 100 }))
+    const rubricas = Object.values(agg)
+      .map((a) => ({ ...a, valor: Math.round(a.valor * 100) / 100 }))
       .sort((a, b) => b.valor - a.valor);
     return {
       mes,
       pessoal_fixo: -Math.round(totalProventos * 100) / 100, // despesa → negativo
       total_proventos: Math.round(totalProventos * 100) / 100,
-      maternidade_fora: Math.round(foraDre * 100) / 100,
+      maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
-      rubricas,
+      rubricas, // proventos + descontos, como no Dryland
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
