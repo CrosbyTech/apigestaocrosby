@@ -411,7 +411,6 @@ async function calcularPessoalFixo(mes) {
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
       rubricas, // pró-labore + proventos + descontos, com grupo fixo/variavel
-      _secoes: [...new Set(linhas.map((l) => l.secao || '(vazio)'))], // debug
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
