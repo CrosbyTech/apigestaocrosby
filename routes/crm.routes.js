@@ -1440,6 +1440,158 @@ router.post(
   }),
 );
 
+// =============================================================================
+// GET /api/crm/franquia-cashback-dryrun
+// DRY-RUN (NÃO grava nada): simula o cashback de 20% que SERIA gerado para as
+// vendas de FRANQUIA — que hoje não passam pelo PDV Varejo e por isso não
+// geram bônus no TOTVS (caso Ceará Mirim). Fonte: analytics/v2/fiscal-movement
+// (pega a venda mesmo sem NF, ex.: operação 9009).
+// Query (todos opcionais):
+//   branches (default 6106,6107) · datemin,datemax YYYY-MM-DD (default últ.30d)
+//   ops (default 9009,9063) · percent (default 20)
+// =============================================================================
+router.get(
+  '/franquia-cashback-dryrun',
+  asyncHandler(async (req, res) => {
+    const branches = String(req.query.branches || '6106,6107')
+      .split(',')
+      .map((n) => parseInt(n, 10))
+      .filter(Boolean);
+    const ops = new Set(
+      String(req.query.ops || '9009,9063')
+        .split(',')
+        .map((n) => parseInt(n, 10))
+        .filter(Boolean),
+    );
+    const percent = Number(req.query.percent || 20);
+    const isoD = (d) => d.toISOString().slice(0, 10);
+    const ymd = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? s : null);
+    const hoje = new Date();
+    const dmax = ymd(req.query.datemax) || isoD(hoje);
+    const dmin = ymd(req.query.datemin) || isoD(new Date(hoje.getTime() - 30 * 86400000));
+
+    let tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    let token = tokenData.access_token;
+
+    const FM_URL = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+    const porPessoa = new Map(); // personCode -> { valor, qtd }
+    const opsVistas = {}; // operationCode -> count (diagnóstico)
+    let totalMov = 0;
+    for (let pg = 1; pg <= 200; pg++) {
+      let data = null;
+      for (let t = 0; t < 3 && !data; t++) {
+        try {
+          const r = await axios.post(
+            FM_URL,
+            {
+              filter: {
+                branchCodeList: branches,
+                startMovementDate: dmin,
+                endMovementDate: dmax,
+              },
+              page: pg,
+              pageSize: 1000,
+            },
+            {
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              timeout: 120000,
+            },
+          );
+          data = r.data;
+        } catch (err) {
+          if (err.response?.status === 401) {
+            try {
+              token = (await getToken(true)).access_token;
+            } catch {}
+          } else {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        }
+      }
+      if (!data) break;
+      for (const it of data.items || []) {
+        const op = Number(it.operationCode);
+        opsVistas[op] = (opsVistas[op] || 0) + 1;
+        const val = Number(it.netValue || 0);
+        const pc = it.personCode;
+        if (!ops.has(op) || !pc || val <= 0) continue;
+        totalMov++;
+        const a = porPessoa.get(pc) || { valor: 0, qtd: 0 };
+        a.valor += val;
+        a.qtd += 1;
+        porPessoa.set(pc, a);
+      }
+      if (!data.hasNext) break;
+    }
+
+    // Resolve CPF/nome (só vendas com CPF são creditáveis)
+    const codes = [...porPessoa.keys()];
+    const info = new Map();
+    for (let i = 0; i < codes.length; i += 300) {
+      const chunk = codes.slice(i, i + 300);
+      const { data } = await supabase
+        .from('pes_pessoa')
+        .select('code,cpf,nm_pessoa')
+        .in('code', chunk);
+      for (const r of data || []) {
+        info.set(Number(r.code), {
+          cpf: String(r.cpf || '').replace(/\D/g, ''),
+          nome: r.nm_pessoa || '',
+        });
+      }
+    }
+
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const clientes = [];
+    let totalVendido = 0;
+    let totalCashback = 0;
+    let semCpfClientes = 0;
+    let semCpfValor = 0;
+    for (const [pc, a] of porPessoa) {
+      const inf = info.get(pc) || {};
+      const cashback = r2((a.valor * percent) / 100);
+      totalVendido += a.valor;
+      const temCpf = !!inf.cpf;
+      if (temCpf) totalCashback += cashback;
+      else {
+        semCpfClientes++;
+        semCpfValor += a.valor;
+      }
+      clientes.push({
+        code: pc,
+        cpf: inf.cpf || null,
+        nome: inf.nome || null,
+        valor: r2(a.valor),
+        qtd: a.qtd,
+        cashback,
+        temCpf,
+      });
+    }
+    clientes.sort((a, b) => b.valor - a.valor);
+
+    return successResponse(
+      res,
+      {
+        dryRun: true,
+        periodo: { datemin: dmin, datemax: dmax },
+        branches,
+        ops: [...ops],
+        percent,
+        totalMovimentos: totalMov,
+        totalVendido: r2(totalVendido),
+        totalCashback_creditavel: r2(totalCashback),
+        sem_cpf: { clientes: semCpfClientes, valor: r2(semCpfValor) },
+        clientes,
+        ops_vistas_no_periodo: opsVistas,
+      },
+      `DRY-RUN: ${clientes.length} clientes · cashback creditável R$ ${r2(totalCashback)}`,
+    );
+  }),
+);
+
 // GET /api/crm/lead-generation/cashback-vendedor
 //   Monta a lista de clientes do vendedor a partir do Supabase
 //   (notas_fiscais.dealer_code), sem depender da carteira do ERP, e consulta
