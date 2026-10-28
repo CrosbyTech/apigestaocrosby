@@ -305,6 +305,21 @@ const ehProventoForaDre = (desc) => /MATERNIDADE/.test(semAcentoUp(desc));
 const ehDiretor = (l) =>
   /diretor/i.test(l.funcao || '') || (l.eventos || []).some((e) => /pro-?labore/.test(nz(e.desc)));
 
+const PROLABORE_PADRAO = 80000;
+async function lerProlabore(mes) {
+  try {
+    const { data } = await supabase
+      .from('forecast_dre_prolabore')
+      .select('valor')
+      .eq('mes', mes)
+      .maybeSingle();
+    if (data && data.valor != null) return Number(data.valor) || 0;
+  } catch (e) {
+    console.warn(`[forecast-dre prolabore ${mes}] ${e.message}`);
+  }
+  return PROLABORE_PADRAO;
+}
+
 // Lê a folha de uma competência: rubricas (proventos + descontos, como no
 // Dryland) e o total de Pessoal Fixo (proventos que entram na DRE).
 async function calcularPessoalFixo(mes) {
@@ -345,13 +360,28 @@ async function calcularPessoalFixo(mes) {
     const rubricas = Object.values(agg)
       .map((a) => ({ ...a, valor: Math.round(a.valor * 100) / 100 }))
       .sort((a, b) => b.valor - a.valor);
+
+    // Pró-labore dos diretores (Niziany 28/10): entra no Pessoal Fixo com um
+    // valor FIXO e EDITÁVEL por mês (padrão R$ 80.000), não o da folha.
+    const prolabore = await lerProlabore(mes);
+    rubricas.unshift({
+      desc: 'PRÓ-LABORE (DIRETORES)',
+      tipo: 'provento',
+      qtd: null,
+      valor: prolabore,
+      editavel: true,
+    });
+
+    const totalDespesa = totalProventos + prolabore;
     return {
       mes,
-      pessoal_fixo: -Math.round(totalProventos * 100) / 100, // despesa → negativo
+      pessoal_fixo: -Math.round(totalDespesa * 100) / 100, // despesa → negativo
+      proventos_empregados: Math.round(totalProventos * 100) / 100,
+      prolabore: Math.round(prolabore * 100) / 100,
       total_proventos: Math.round(totalProventos * 100) / 100,
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
-      rubricas, // proventos + descontos, como no Dryland
+      rubricas, // pró-labore + proventos + descontos, como no Dryland
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
@@ -385,6 +415,37 @@ router.get(
     const fechado = ultimoDia(mes) < hojeIso();
     CACHE_PF.set(mes, { dados, expira: agora + (fechado ? 24 * 60 : 30) * 60 * 1000 });
     return successResponse(res, dados, 'OK');
+  }),
+);
+
+// Pró-labore editável por mês (entra no Pessoal Fixo)
+router.get(
+  '/prolabore',
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase.from('forecast_dre_prolabore').select('mes, valor');
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    const overrides = {};
+    for (const r of data || []) overrides[r.mes] = Number(r.valor) || 0;
+    return successResponse(res, { overrides, padrao: PROLABORE_PADRAO }, 'OK');
+  }),
+);
+router.post(
+  '/prolabore',
+  asyncHandler(async (req, res) => {
+    const mes = String(req.body?.mes || '');
+    const valor = Number(req.body?.valor);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    if (!Number.isFinite(valor) || valor < 0) {
+      return errorResponse(res, 'valor inválido', 400, 'BAD_VALOR');
+    }
+    const { error } = await supabase
+      .from('forecast_dre_prolabore')
+      .upsert({ mes, valor, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    CACHE_PF.delete(mes); // força recalcular o Pessoal Fixo com o novo pró-labore
+    return successResponse(res, { mes, valor }, 'OK');
   }),
 );
 
