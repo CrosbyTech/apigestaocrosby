@@ -63,37 +63,14 @@ async function getFiliais(base) {
   return _filiaisCache;
 }
 
-// CREDEV por canal — só para visualização (Niziany, 28/10/2026): vem do mesmo
-// caminho do New Forecast (faturamento-por-segmento → credev_por_segmento),
-// mapeado para os canais da DRE. NÃO entra em cálculo nenhum.
-async function calcularCredevPorCanal(base, mes) {
-  const datemin = `${mes}-01`;
-  const datemax = ultimoDia(mes);
-  let seg = {};
-  try {
-    const r = await axios.post(
-      `${base}/api/crm/faturamento-por-segmento`,
-      { datemin, datemax },
-      { timeout: 290000 },
-    );
-    seg = (r.data?.data || r.data)?.credev_por_segmento || {};
-  } catch (e) {
-    console.warn(`[forecast-dre credev-canal ${mes}] ${e.message}`);
-    return null;
-  }
-  const v = (k) => Number(seg[k]) || 0;
-  // Negativo (é redução). Mesma consolidação de canais da receita.
-  const neg = (x) => (x ? -Math.round(x * 100) / 100 : 0);
-  return {
-    varejo: neg(v('varejo')),
-    multimarcas: neg(v('multimarcas') + v('inbound_david') + v('inbound_rafael')),
-    franquia: neg(v('franquia') + v('showroom') + v('novidadesfranquia')),
-    revenda: neg(v('revenda') + v('business') + v('ricardoeletro')),
-    bazar: neg(v('bazar')),
-  };
-}
-
-async function calcularCredev(base, mes) {
+// CREDEV do Contas a Receber: total e por canal (a soma por canal BATE com o
+// total — Niziany, 28/10/2026). Classifica cada fatura CREDEV pelo cliente:
+//   pessoa física (CPF)                 → VAREJO (crédito de loja ao consumidor)
+//   CNPJ "F<nº> - CROSBY" / contém CROSBY → FRANQUIA
+//   CNPJ "MTM ..."                       → MULTIMARCAS
+//   demais CNPJ                          → REVENDA
+// O por-canal é só visualização; o total é o que entra na linha CREDEV.
+async function calcularCredevCompleto(base, mes) {
   const datemin = `${mes}-01`;
   const datemax = ultimoDia(mes);
   const filiais = await getFiliais(base);
@@ -110,9 +87,47 @@ async function calcularCredev(base, mes) {
     { timeout: 300000 },
   );
   const items = r.data?.data?.items || r.data?.items || [];
-  const total = items.reduce((a, x) => a + (Number(x.vl_fatura) || 0), 0);
-  // No DRE o CREDEV é uma redução → valor negativo.
-  return -Math.round(total * 100) / 100;
+
+  // Nome fantasia dos clientes (pes_pessoa) p/ classificar os CNPJ
+  const codes = [...new Set(items.map((it) => Number(it.cd_cliente)).filter(Boolean))];
+  const porCode = {};
+  for (let i = 0; i < codes.length; i += 300) {
+    try {
+      const { data } = await supabase
+        .from('pes_pessoa')
+        .select('code, fantasy_name')
+        .in('code', codes.slice(i, i + 300));
+      for (const p of data || []) porCode[String(p.code)] = p;
+    } catch (e) {
+      console.warn(`[forecast-dre credev pes_pessoa ${mes}] ${e.message}`);
+    }
+  }
+
+  const canais = { varejo: 0, multimarcas: 0, franquia: 0, revenda: 0, bazar: 0 };
+  let total = 0;
+  for (const it of items) {
+    const v = Number(it.vl_fatura) || 0;
+    total += v;
+    const doc = String(it.nr_cpfcnpj || '').replace(/\D/g, '');
+    const fn = String(porCode[String(it.cd_cliente)]?.fantasy_name || '').toUpperCase();
+    let canal;
+    if (doc.length !== 14) canal = 'varejo';
+    else if (ehClienteFranquia(fn)) canal = 'franquia';
+    else if (fn.startsWith('MTM')) canal = 'multimarcas';
+    else canal = 'revenda';
+    canais[canal] += v;
+  }
+  const neg = (x) => (x ? -Math.round(x * 100) / 100 : 0);
+  return {
+    total: -Math.round(total * 100) / 100,
+    canais: {
+      varejo: neg(canais.varejo),
+      multimarcas: neg(canais.multimarcas),
+      franquia: neg(canais.franquia),
+      revenda: neg(canais.revenda),
+      bazar: neg(canais.bazar),
+    },
+  };
 }
 
 const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
@@ -165,16 +180,17 @@ async function calcularMes(mes) {
   const franquia = franquiasBase + showroomFranquia;
   const multimarcas = multimarcasBase + showroomMultimarcas;
 
-  // CREDEV do Contas a Receber (não deixa a tela inteira cair se falhar)
+  // CREDEV do Contas a Receber: total (linha CREDEV) + por canal (visualização).
+  // Não deixa a tela inteira cair se falhar.
   let credev = null;
+  let credevCanais = null;
   try {
-    credev = await calcularCredev(base, mes);
+    const cc = await calcularCredevCompleto(base, mes);
+    credev = cc.total;
+    credevCanais = cc.canais;
   } catch (e) {
     console.warn(`[forecast-dre credev ${mes}] ${e.message}`);
   }
-
-  // CREDEV por canal (só visualização, não entra em cálculo)
-  const credevCanais = await calcularCredevPorCanal(base, mes);
 
   const dados = {
     mes,
