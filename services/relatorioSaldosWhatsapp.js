@@ -68,7 +68,6 @@ export async function montarDados() {
   const { data: sb } = await supabase.from('saldo_bancario').select('*').in('banco', BANCOS);
   const saldoDe = (b) => Number((sb || []).find((x) => x.banco === b)?.valor || 0);
   const bancos = BANCOS.map((b) => ({ banco: b, valor: round2(saldoDe(b)) }));
-  const total = round2(bancos.reduce((a, b) => a + b.valor, 0));
 
   const { data: ult } = await supabase.from('stone_bot_saldos').select('data,capturado_em').order('capturado_em', { ascending: false }).limit(1);
   const dia = ult?.[0]?.data || null;
@@ -80,6 +79,8 @@ export async function montarDados() {
     pagarme = (linhas || []).filter((l) => l.banco === 'PAGARME').map((l) => ({ rotulo: l.titular_nome || l.conta, saldo: Number(l.saldo || 0), aReceber: Number(l.saldo_a_receber || 0) }));
   }
   const antecipavel = round2(stone.reduce((a, s) => a + s.antecipavel, 0));
+  // total inclui o antecipável da STONE (pedido do Yago, 28/10); a Pagar.me NÃO soma o "a receber"
+  const total = round2(bancos.reduce((a, b) => a + b.valor, 0) + antecipavel);
   const capturadoEm = ult?.[0]?.capturado_em || null;
 
   const semana = semanaDe();
