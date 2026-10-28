@@ -351,9 +351,17 @@ async function calcularPessoalFixo(mes) {
         // Entra na DRE: só provento que não seja salário maternidade.
         const entra = prov && !ehProventoForaDre(e.desc);
         const k = tipo + '|' + desc;
-        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0, entra });
+        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0, entra, _func: [] });
         a.qtd += 1;
         a.valor += v;
+        // Funcionário que compõe a rubrica (pra abrir e ver, como no Dryland)
+        a._func.push({
+          nome: l.nome || '',
+          chapa: l.chapa || '',
+          funcao: l.funcao || '',
+          empresa: l.empresa || '',
+          valor: Math.round(v * 100) / 100,
+        });
         if (prov) {
           if (ehProventoForaDre(e.desc)) maternidade += v;
           else totalProventos += v;
@@ -361,7 +369,14 @@ async function calcularPessoalFixo(mes) {
       }
     }
     const rubricas = Object.values(agg)
-      .map((a) => ({ ...a, valor: Math.round(a.valor * 100) / 100 }))
+      .map((a) => ({
+        desc: a.desc,
+        tipo: a.tipo,
+        qtd: a.qtd,
+        valor: Math.round(a.valor * 100) / 100,
+        entra: a.entra,
+        funcionarios: a._func.sort((x, y) => y.valor - x.valor),
+      }))
       .sort((a, b) => b.valor - a.valor);
 
     // Pró-labore dos diretores (Niziany 28/10): entra no Pessoal Fixo com um
