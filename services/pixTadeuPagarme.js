@@ -235,8 +235,15 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
           .filter(Boolean);
         if (alvo.length) {
           const soma = alvo.reduce((a, t) => a + t.valorCents, 0);
-          const juros = cents(p.valor) > soma ? r2((cents(p.valor) - soma) / 100) : 0;
-          achado = { titulos: alvo, criterio: 'título(s) do link do cliente', juros };
+          // A baixa tem que bater com o que o cliente pagou (João, 28/10/2026): se o
+          // Pix veio MENOR que a soma dos títulos, não baixa (baixaria valor errado) —
+          // vira "a conferir". Se veio maior, a diferença entra como juros (total = Pix).
+          if (cents(p.valor) >= soma) {
+            const juros = r2((cents(p.valor) - soma) / 100);
+            achado = { titulos: alvo, criterio: 'título(s) do link do cliente', juros };
+          } else {
+            resumo.pix_menor_que_titulos = (resumo.pix_menor_que_titulos || 0) + 1;
+          }
         }
       } else if (p.origem === 'tadeu_gerador') {
         // Gerador: cliente pelo código da referência; títulos vencidos mais antigos até o valor (+ juros)
