@@ -301,6 +301,8 @@ const semAcentoUp = (s) =>
   String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim();
 // Proventos que NÃO entram na DRE (compensados em outra conta)
 const ehProventoForaDre = (desc) => /MATERNIDADE/.test(semAcentoUp(desc));
+// Proventos que vão para PESSOAL VARIÁVEL (Niziany 28/10): comissão.
+const ehProventoVariavel = (desc) => /COMISSAO/.test(semAcentoUp(desc));
 // Diretor (pró-labore) — mesma régua do Dryland; fica fora da folha de pessoal.
 const ehDiretor = (l) =>
   /diretor/i.test(l.funcao || '') || (l.eventos || []).some((e) => /pro-?labore/.test(nz(e.desc)));
@@ -340,7 +342,8 @@ async function calcularPessoalFixo(mes) {
     // mesma régua do Dryland, pra bater com a tela de rubricas da folha).
     const linhas = (r.linhas || []).filter((l) => !l._resumo && !ehDiretor(l));
     const agg = {}; // desc → {desc, tipo, qtd, valor}
-    let totalProventos = 0;
+    let totalFixo = 0;
+    let totalVariavel = 0;
     let maternidade = 0;
     for (const l of linhas) {
       for (const e of l.eventos || []) {
@@ -350,8 +353,10 @@ async function calcularPessoalFixo(mes) {
         const desc = semAcentoUp(e.desc) || '(sem descrição)';
         // Entra na DRE: só provento que não seja salário maternidade.
         const entra = prov && !ehProventoForaDre(e.desc);
+        // Grupo: comissão vai pra Pessoal Variável; o resto, Pessoal Fixo.
+        const grupo = entra && ehProventoVariavel(e.desc) ? 'variavel' : 'fixo';
         const k = tipo + '|' + desc;
-        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0, entra, _func: [] });
+        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0, entra, grupo, _func: [] });
         a.qtd += 1;
         a.valor += v;
         // Funcionário que compõe a rubrica (pra abrir e ver, como no Dryland)
@@ -364,7 +369,8 @@ async function calcularPessoalFixo(mes) {
         });
         if (prov) {
           if (ehProventoForaDre(e.desc)) maternidade += v;
-          else totalProventos += v;
+          else if (ehProventoVariavel(e.desc)) totalVariavel += v;
+          else totalFixo += v;
         }
       }
     }
@@ -375,6 +381,7 @@ async function calcularPessoalFixo(mes) {
         qtd: a.qtd,
         valor: Math.round(a.valor * 100) / 100,
         entra: a.entra,
+        grupo: a.grupo,
         funcionarios: a._func.sort((x, y) => y.valor - x.valor),
       }))
       .sort((a, b) => b.valor - a.valor);
@@ -389,18 +396,20 @@ async function calcularPessoalFixo(mes) {
       valor: prolabore,
       editavel: true,
       entra: true,
+      grupo: 'fixo',
     });
 
-    const totalDespesa = totalProventos + prolabore;
     return {
       mes,
-      pessoal_fixo: -Math.round(totalDespesa * 100) / 100, // despesa → negativo
-      proventos_empregados: Math.round(totalProventos * 100) / 100,
+      // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
+      pessoal_fixo: -Math.round((totalFixo + prolabore) * 100) / 100,
+      pessoal_variavel: -Math.round(totalVariavel * 100) / 100,
+      proventos_fixo: Math.round(totalFixo * 100) / 100,
+      proventos_variavel: Math.round(totalVariavel * 100) / 100,
       prolabore: Math.round(prolabore * 100) / 100,
-      total_proventos: Math.round(totalProventos * 100) / 100,
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
-      rubricas, // pró-labore + proventos + descontos, como no Dryland
+      rubricas, // pró-labore + proventos + descontos, com grupo fixo/variavel
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
