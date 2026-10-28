@@ -174,6 +174,26 @@ tela.post(
   }),
 );
 
+// Botão "Rodar baixa": o agente puxa os extratos atuais da Stone, importa e,
+// ao concluir, o backend concilia os APROVADOS e marca PAGO (ver finalizarExecucao).
+tela.post(
+  '/aprovados/rodar-baixa',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await bot.solicitarExecucao({ solicitadoPor: req.user?.email, origem: 'baixa-aprovados' });
+      return successResponse(
+        res,
+        r,
+        r.reaproveitada
+          ? 'Já existe uma execução em andamento — a baixa dos aprovados roda quando ela terminar.'
+          : 'Baixa iniciada: o bot está puxando os extratos da Stone; a baixa dos aprovados roda ao terminar.',
+      );
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Pagar.me (roda no servidor, não depende do PC do bot)
 tela.get(
   '/pagarme/saldos',

@@ -160,6 +160,23 @@ export async function finalizarExecucao(id, { status = 'concluido', resumo = nul
       })
       .catch((e) => console.error('[stone-bot] relatório WhatsApp:', e.message));
   }
+  // botão "Rodar baixa" na tela Aprovados → ao terminar de importar, concilia os
+  // APROVADOS com o extrato recém-puxado e marca PAGO; grava o resultado no resumo.
+  if (ok === 'concluido' && data?.origem === 'baixa-aprovados') {
+    import('../jobs/conciliacao-aprovados.job.js')
+      .then((m) => m.rodarConciliacaoAprovados({}))
+      .then(async (r) => {
+        const msg = r?.pulado
+          ? 'Baixa dos aprovados: já havia uma rodada em andamento.'
+          : `Baixa dos aprovados: ${r?.pagos || 0} título(s) marcados PAGO (R$ ${Number(r?.total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}).`;
+        await registrarLog(id, { nivel: 'ok', msg }).catch(() => {});
+        const resumoNovo = { ...(data.resumo || {}), baixaAprovados: { pagos: r?.pagos || 0, total: round2(r?.total || 0), pulado: !!r?.pulado, em: agora() } };
+        await supabase.from(T.exec).update({ resumo: resumoNovo }).eq('id', id);
+      })
+      .catch((e) => {
+        registrarLog(id, { nivel: 'erro', msg: `Baixa dos aprovados falhou: ${e.message}` }).catch(() => {});
+      });
+  }
   return data;
 }
 
