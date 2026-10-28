@@ -28,11 +28,34 @@ const normNome = (s) =>
     .replace(/[^A-Z0-9 ]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-const tokensNome = (s) => new Set(normNome(s).split(' ').filter((t) => t.length > 2));
+// apelidos de concessionárias: a marca no extrato × a razão social no título.
+// Cada regra injeta um token canônico nos dois lados quando o nome casa.
+// regex testadas contra o nome JÁ NORMALIZADO (sem DO/DA/DE/E, maiúsculo)
+const APELIDOS = [
+  { re: /COSERN|COMENER|ENERGETICA.*RIO GRANDE.*NORTE|ENERGETICA.*\bRN\b/, tok: 'ENERGIARN' },
+  { re: /ENERGISA/, tok: 'ENERGISA' },
+  { re: /EQUATORIAL/, tok: 'EQUATORIAL' },
+  { re: /NEOENERGIA|CELPE/, tok: 'NEOENERGIA' },
+  { re: /CAGEPA|AGUA.*ESGOTO.*PARAIBA/, tok: 'CAGEPA' },
+  { re: /CAERN|AGUA.*ESGOTO.*RIO GRANDE.*NORTE|AGUA.*ESGOTO.*\bRN\b/, tok: 'AGUARN' },
+  { re: /COMPESA/, tok: 'AGUAPE' },
+  { re: /CLARO/, tok: 'CLARO' },
+  { re: /\bVIVO\b|TELEFONICA/, tok: 'VIVO' },
+  { re: /\bTIM\b/, tok: 'TIM' },
+  { re: /BRISANET/, tok: 'BRISANET' },
+];
+function tokensNome(s) {
+  const norm = normNome(s);
+  const set = new Set(norm.split(' ').filter((t) => t.length > 2));
+  for (const a of APELIDOS) if (a.re.test(norm)) set.add(a.tok);
+  return set;
+}
 function nomeScore(a, b) {
   const A = tokensNome(a);
   const B = tokensNome(b);
   if (!A.size || !B.size) return 0;
+  // apelido canônico em comum já basta (COSERN × "COMPANHIA ENERGETICA DO RN")
+  for (const al of APELIDOS) if (A.has(al.tok) && B.has(al.tok)) return 1;
   let inter = 0;
   for (const t of A) if (B.has(t)) inter += 1;
   return inter / Math.min(A.size, B.size);
@@ -87,11 +110,16 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
   const contaById = new Map((contas || []).map((c) => [c.id, c]));
   const contaIds = (contas || []).map((c) => c.id);
 
-  const { data: aprovados, error: eA } = await supabase
+  const { data: aprovados0, error: eA } = await supabase
     .from('pagamentos_liberacao')
     .select('id,nm_fornecedor,vl_duplicata,vl_real,dt_vencimento,dt_emissao,nm_empresa,banco_pagamento,aprovado_em,aprovado_por,dados_completos')
     .eq('status', 'APROVADO');
   if (eA) throw new Error(eA.message);
+  // VALOR REAL (vl_real) é o que o Yago pagou de fato — quando preenchido, é o
+  // valor a procurar no extrato (pode diferir da duplicata: juros/desconto).
+  // vl_real = 0 explícito = não foi pago → fica de fora.
+  const valorAlvo = (t) => (t.vl_real != null ? round2(Number(t.vl_real)) : round2(Math.abs(t.vl_duplicata)));
+  const aprovados = aprovados0.filter((t) => valorAlvo(t) > VALOR_TOL);
 
   // saídas candidatas no período
   const { data: saidas, error: eS } = await supabase
@@ -131,7 +159,7 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
   const ordenados = aprovados.slice().sort((a, b) => (a.dt_vencimento || '').localeCompare(b.dt_vencimento || ''));
   const pagos1 = new Set();
   for (const t of ordenados) {
-    const V = round2(Math.abs(t.vl_duplicata));
+    const V = valorAlvo(t);
     const cand = saidas.filter((l) => Math.abs(round2(Math.abs(l.valor)) - V) < VALOR_TOL && !usados.has(l.id) && !lancUsado.has(l.id) && janelaOk(t, l));
     const ancora = (t.aprovado_em ? String(t.aprovado_em).slice(0, 10) : null) || t.dt_vencimento || de;
     const scored = cand
@@ -146,7 +174,7 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
     const conta = contaById.get(top.l.conta_id);
     const item = { id: t.id, fornecedor: t.nm_fornecedor, valor: V, vencimento: t.dt_vencimento, dataPagamento: top.l.data, banco: labelBanco(conta), conta: conta?.apelido, lancamentoId: top.l.id, score: round2(top.ns), tipo: 'individual' };
     if (!dryRun) {
-      const r = await pagarTitulo(t, top.l, conta, round2(Math.abs(top.l.valor)));
+      const r = await pagarTitulo(t, top.l, conta, t.vl_real != null ? round2(Number(t.vl_real)) : round2(Math.abs(top.l.valor)));
       if (r.error) {
         item.erro = r.error.message;
         resultados.push(item);
@@ -177,7 +205,7 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
       continue;
     }
     // saídas candidatas do fornecedor (nome bate), não usadas, na janela de algum título
-    const vals = titulos.map((t) => round2(Math.abs(t.vl_duplicata)));
+    const vals = titulos.map((t) => valorAlvo(t));
     const somaTudo = round2(vals.reduce((a, v) => a + v, 0));
     const cand = saidas.filter(
       (l) => !usados.has(l.id) && !lancUsado.has(l.id) && nomeScore(titulos[0].nm_fornecedor, l.contraparte_nome || l.memo || '') >= NOME_MIN && titulos.some((t) => janelaOk(t, l)) && round2(Math.abs(l.valor)) <= round2(somaTudo * 1.1) + 1,
@@ -202,14 +230,14 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
         if (!dryRun) {
           let okAll = true;
           for (const t of sel) {
-            const r = await pagarTitulo(t, l, conta, round2(Math.abs(t.vl_duplicata)));
+            const r = await pagarTitulo(t, l, conta, t.vl_real != null ? round2(Number(t.vl_real)) : round2(Math.abs(t.vl_duplicata)));
             if (r.error) okAll = false;
           }
           try {
             await salvarConciliacao({
               lancamentoId: l.id,
               origem: 'LIBERACAO',
-              referencia: { itens: sel.map((t) => ({ origem: 'LIBERACAO', id: t.id, nome: t.nm_fornecedor, valor: round2(Math.abs(t.vl_duplicata)), valorDuplicata: round2(Math.abs(t.vl_duplicata)), vencimento: t.dt_vencimento, empresa: t.nm_empresa, detalhe: 'aprovado pago (soma)' })) },
+              referencia: { itens: sel.map((t) => ({ origem: 'LIBERACAO', id: t.id, nome: t.nm_fornecedor, valor: valorAlvo(t), valorDuplicata: valorAlvo(t), vencimento: t.dt_vencimento, empresa: t.nm_empresa, detalhe: 'aprovado pago (soma)' })) },
               justificativa: `${sel[0].nm_fornecedor} · ${sel.length} duplicatas pagas juntas (conciliação automática)`,
               usuario,
               automatico: true,
@@ -219,13 +247,13 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
           }
           void okAll;
         }
-        resultados.push({ tipo: 'grupo', fornecedor: sel[0].nm_fornecedor, valor: round2(Math.abs(l.valor)), dataPagamento: l.data, banco, conta: conta?.apelido, lancamentoId: l.id, titulos: sel.map((t) => ({ id: t.id, valor: round2(Math.abs(t.vl_duplicata)), vencimento: t.dt_vencimento })) });
+        resultados.push({ tipo: 'grupo', fornecedor: sel[0].nm_fornecedor, valor: round2(Math.abs(l.valor)), dataPagamento: l.data, banco, conta: conta?.apelido, lancamentoId: l.id, titulos: sel.map((t) => ({ id: t.id, valor: valorAlvo(t), vencimento: t.dt_vencimento })) });
       }
     }
     // sugestão: saída ≈ soma do grupo + extra (provável juros/multa) — não aplica, só reporta
     const restaDoGrupo = titulos.filter((t) => !pagos1.has(t.id));
     if (restaDoGrupo.length >= 1) {
-      const somaResta = round2(restaDoGrupo.reduce((a, t) => a + Math.abs(t.vl_duplicata), 0));
+      const somaResta = round2(restaDoGrupo.reduce((a, t) => a + valorAlvo(t), 0));
       const perto = saidas.find(
         (l) => !usados.has(l.id) && !lancUsado.has(l.id) && nomeScore(restaDoGrupo[0].nm_fornecedor, l.contraparte_nome || l.memo || '') >= NOME_MIN && restaDoGrupo.some((t) => janelaOk(t, l)) && round2(Math.abs(l.valor)) > somaResta + 0.02 && round2(Math.abs(l.valor)) <= round2(somaResta * 1.08) + 1,
       );
@@ -240,7 +268,7 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
           data: perto.data,
           conta: conta?.apelido,
           banco: labelBanco(conta),
-          titulos: restaDoGrupo.map((t) => ({ id: t.id, valor: round2(Math.abs(t.vl_duplicata)), vencimento: t.dt_vencimento })),
+          titulos: restaDoGrupo.map((t) => ({ id: t.id, valor: valorAlvo(t), vencimento: t.dt_vencimento })),
         });
       }
     }
