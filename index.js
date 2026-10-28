@@ -41,6 +41,7 @@ import fluxoCaixaExtRoutes, { routerDrYgor as drYgorExtratosRoutes } from './rou
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
+import balancoRfidRoutes from './routes/balancoRfid.routes.js';
 import erpRoutes from './routes/erp.routes.js';
 import { iniciarJobErpSync } from './jobs/erp-sync.job.js';
 import { iniciarJobIntegracaoOutbox } from './jobs/integracao-outbox.job.js';
@@ -230,6 +231,7 @@ app.use('/api/cobranca', cobrancaRoutes); // Cobrança — devedores consolidado
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
+app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos de contagem do app Android (Urovo)
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar

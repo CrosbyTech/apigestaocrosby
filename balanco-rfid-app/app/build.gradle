@@ -1,0 +1,78 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Versão: incrementada pelo scripts/release.mjs a cada publicação
+def versionProps = new Properties()
+rootProject.file('version.properties').withInputStream { versionProps.load(it) }
+
+// Chave de assinatura FORA do git (keystore.properties + .jks). Toda versão
+// precisa da MESMA chave, senão o Android não aceita a atualização.
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file('keystore.properties')
+if (keystoreFile.exists()) keystoreFile.withInputStream { keystoreProps.load(it) }
+
+android {
+    namespace 'br.com.crosby.balancorfid'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'br.com.crosby.balancorfid'
+        minSdk 24
+        targetSdk 34
+        versionCode versionProps['versionCode'].toInteger()
+        versionName versionProps['versionName']
+        // Página do HeadCoach que o app abre (login normal do HeadCoach)
+        buildConfigField 'String', 'START_URL', '"https://headcoach.crosbytech.com.br/balanco-rfid"'
+        buildConfigField 'String', 'HOST', '"headcoach.crosbytech.com.br"'
+        // Manifesto da última versão publicada (bucket pdv-updates do Supabase)
+        buildConfigField 'String', 'UPDATE_URL', '"https://dorztqiunewggydvkjnf.supabase.co/storage/v1/object/public/pdv-updates/balanco-rfid/apk-latest.json"'
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    packagingOptions {
+        jniLibs {
+            // .so da porta serial da pistola precisam ficar extraídos
+            useLegacyPackaging true
+        }
+    }
+}
+
+dependencies {
+    // SDK UHF da Urovo (URFIDLibrary) + dependências dele. Ver README.md.
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+}

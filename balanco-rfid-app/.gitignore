@@ -1,0 +1,13 @@
+# build
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+dist/
+# máquina local
+local.properties
+# CHAVE DE ASSINATURA — nunca no git; guardar backup (ver README)
+keystore.properties
+keystore/
+*.jks
