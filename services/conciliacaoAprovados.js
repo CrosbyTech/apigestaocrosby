@@ -110,71 +110,50 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
 
   const usados = new Set();
   const resultados = [];
-  // mais antigos primeiro, para o pagamento mais próximo do vencimento casar primeiro
-  const ordenados = aprovados.sort((a, b) => (a.dt_vencimento || '').localeCompare(b.dt_vencimento || ''));
+  const agora = () => new Date().toISOString();
+  const janelaOk = (t, l) => {
+    const ancora = (t.aprovado_em ? String(t.aprovado_em).slice(0, 10) : null) || t.dt_vencimento || de;
+    return l.data >= addDias(ancora, -JANELA_ANTES) && l.data <= ate;
+  };
+
+  // marca um título como PAGO; só grava a conciliação quando ÚNICO (1:1). Em grupo,
+  // a conciliação MULTIPLO é gravada uma vez com todos os títulos.
+  async function pagarTitulo(t, l, conta, valorReal) {
+    const banco = labelBanco(conta);
+    const { error } = await supabase
+      .from('pagamentos_liberacao')
+      .update({ status: 'PAGO', banco_pagamento: banco, dt_pagamento: l.data, vl_real: valorReal, pago_em: agora(), pago_por: usuario, aprovado_em: t.aprovado_em || agora(), aprovado_por: t.aprovado_por || usuario })
+      .eq('id', t.id);
+    return { banco, error };
+  }
+
+  // ── passo 1: 1 título ↔ 1 saída (valor exato) ──
+  const ordenados = aprovados.slice().sort((a, b) => (a.dt_vencimento || '').localeCompare(b.dt_vencimento || ''));
+  const pagos1 = new Set();
   for (const t of ordenados) {
     const V = round2(Math.abs(t.vl_duplicata));
-    // janela a partir da inclusão como aprovado (fallback: vencimento)
+    const cand = saidas.filter((l) => Math.abs(round2(Math.abs(l.valor)) - V) < VALOR_TOL && !usados.has(l.id) && !lancUsado.has(l.id) && janelaOk(t, l));
     const ancora = (t.aprovado_em ? String(t.aprovado_em).slice(0, 10) : null) || t.dt_vencimento || de;
-    const limiteAntes = addDias(ancora, -JANELA_ANTES);
-    const cand = saidas.filter(
-      (l) => Math.abs(round2(Math.abs(l.valor)) - V) < VALOR_TOL && !usados.has(l.id) && !lancUsado.has(l.id) && l.data >= limiteAntes && l.data <= ate,
-    );
     const scored = cand
       .map((l) => ({ l, ns: nomeScore(t.nm_fornecedor, l.contraparte_nome || l.memo || ''), dv: Math.abs((new Date(l.data) - new Date(ancora)) / 864e5) }))
       .sort((a, b) => b.ns - a.ns || a.dv - b.dv);
     const top = scored[0];
     if (!top || top.ns < NOME_MIN) continue;
-    // ambiguidade: 2+ candidatos empatados em nome em contas/datas diferentes → não decide sozinho
     const bons = scored.filter((x) => x.ns >= NOME_MIN);
     if (bons.length > 1 && bons[1].ns >= top.ns - 0.01 && (bons[0].l.conta_id !== bons[1].l.conta_id || bons[0].l.data !== bons[1].l.data)) continue;
-
     usados.add(top.l.id);
+    pagos1.add(t.id);
     const conta = contaById.get(top.l.conta_id);
-    // banco = onde o dinheiro REALMENTE saiu (conta do extrato), não o que o
-    // aprovador tinha planejado — o pedido é marcar o banco pago (Yago, 28/10).
-    const banco = labelBanco(conta);
-    const item = {
-      id: t.id,
-      fornecedor: t.nm_fornecedor,
-      valor: V,
-      vencimento: t.dt_vencimento,
-      dataPagamento: top.l.data,
-      banco,
-      conta: conta?.apelido,
-      lancamentoId: top.l.id,
-      score: round2(top.ns),
-    };
+    const item = { id: t.id, fornecedor: t.nm_fornecedor, valor: V, vencimento: t.dt_vencimento, dataPagamento: top.l.data, banco: labelBanco(conta), conta: conta?.apelido, lancamentoId: top.l.id, score: round2(top.ns), tipo: 'individual' };
     if (!dryRun) {
-      const agora = new Date().toISOString();
-      const { error: eU } = await supabase
-        .from('pagamentos_liberacao')
-        .update({
-          status: 'PAGO',
-          banco_pagamento: banco,
-          dt_pagamento: top.l.data,
-          vl_real: round2(Math.abs(top.l.valor)),
-          pago_em: agora,
-          pago_por: usuario,
-          aprovado_em: t.aprovado_em || agora,
-          aprovado_por: t.aprovado_por || usuario,
-        })
-        .eq('id', t.id);
-      if (eU) {
-        item.erro = eU.message;
+      const r = await pagarTitulo(t, top.l, conta, round2(Math.abs(top.l.valor)));
+      if (r.error) {
+        item.erro = r.error.message;
         resultados.push(item);
         continue;
       }
-      // concilia a linha do extrato contra este título (liga comprovante → solicitação quando há)
       try {
-        await salvarConciliacao({
-          lancamentoId: top.l.id,
-          origem: 'LIBERACAO',
-          referencia: { id: t.id, nome: t.nm_fornecedor, valor: V, valorDuplicata: V, data: top.l.data, vencimento: t.dt_vencimento, empresa: t.nm_empresa, detalhe: 'aprovado pago', motivos: ['conciliação de aprovados'] },
-          justificativa: `${t.nm_fornecedor} · aprovado pago (conciliação automática)`,
-          usuario,
-          automatico: true,
-        });
+        await salvarConciliacao({ lancamentoId: top.l.id, origem: 'LIBERACAO', referencia: { id: t.id, nome: t.nm_fornecedor, valor: V, valorDuplicata: V, data: top.l.data, vencimento: t.dt_vencimento, empresa: t.nm_empresa, detalhe: 'aprovado pago', motivos: ['conciliação de aprovados'] }, justificativa: `${t.nm_fornecedor} · aprovado pago (conciliação automática)`, usuario, automatico: true });
         item.conciliado = true;
       } catch (e) {
         item.avisoConciliacao = e.message;
@@ -183,13 +162,105 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
     resultados.push(item);
   }
 
+  // ── passo 2: 1 saída = SOMA de 2+ duplicatas do MESMO fornecedor (valor exato) ──
+  const sugestoes = [];
+  const restantes = ordenados.filter((t) => !pagos1.has(t.id));
+  const grupos = new Map(); // chave fornecedor → títulos
+  for (const t of restantes) {
+    const chave = soDig(t.cd_fornecedor) || normNome(t.nm_fornecedor);
+    if (!grupos.has(chave)) grupos.set(chave, []);
+    grupos.get(chave).push(t);
+  }
+  for (const titulos of grupos.values()) {
+    if (titulos.length < 2 || titulos.length > 16) {
+      if (titulos.length > 16) sugestoes.push({ tipo: 'grupo grande', fornecedor: titulos[0].nm_fornecedor, titulos: titulos.length });
+      continue;
+    }
+    // saídas candidatas do fornecedor (nome bate), não usadas, na janela de algum título
+    const vals = titulos.map((t) => round2(Math.abs(t.vl_duplicata)));
+    const somaTudo = round2(vals.reduce((a, v) => a + v, 0));
+    const cand = saidas.filter(
+      (l) => !usados.has(l.id) && !lancUsado.has(l.id) && nomeScore(titulos[0].nm_fornecedor, l.contraparte_nome || l.memo || '') >= NOME_MIN && titulos.some((t) => janelaOk(t, l)) && round2(Math.abs(l.valor)) <= round2(somaTudo * 1.1) + 1,
+    );
+    for (const l of cand) {
+      const alvo = round2(Math.abs(l.valor));
+      // subsets que somam exatamente o valor da saída
+      const achados = [];
+      for (let mask = 1; mask < 1 << titulos.length; mask++) {
+        let soma = 0;
+        for (let i = 0; i < titulos.length; i++) if (mask & (1 << i)) soma += vals[i];
+        if (Math.abs(round2(soma) - alvo) < 0.02) achados.push(mask);
+      }
+      if (achados.length === 1) {
+        // subset único soma EXATA → concilia o grupo
+        const mask = achados[0];
+        const sel = titulos.filter((_, i) => mask & (1 << i));
+        usados.add(l.id);
+        for (const t of sel) pagos1.add(t.id);
+        const conta = contaById.get(l.conta_id);
+        const banco = labelBanco(conta);
+        if (!dryRun) {
+          let okAll = true;
+          for (const t of sel) {
+            const r = await pagarTitulo(t, l, conta, round2(Math.abs(t.vl_duplicata)));
+            if (r.error) okAll = false;
+          }
+          try {
+            await salvarConciliacao({
+              lancamentoId: l.id,
+              origem: 'LIBERACAO',
+              referencia: { itens: sel.map((t) => ({ origem: 'LIBERACAO', id: t.id, nome: t.nm_fornecedor, valor: round2(Math.abs(t.vl_duplicata)), valorDuplicata: round2(Math.abs(t.vl_duplicata)), vencimento: t.dt_vencimento, empresa: t.nm_empresa, detalhe: 'aprovado pago (soma)' })) },
+              justificativa: `${sel[0].nm_fornecedor} · ${sel.length} duplicatas pagas juntas (conciliação automática)`,
+              usuario,
+              automatico: true,
+            });
+          } catch (e) {
+            /* conciliação MULTIPLO opcional */
+          }
+          void okAll;
+        }
+        resultados.push({ tipo: 'grupo', fornecedor: sel[0].nm_fornecedor, valor: round2(Math.abs(l.valor)), dataPagamento: l.data, banco, conta: conta?.apelido, lancamentoId: l.id, titulos: sel.map((t) => ({ id: t.id, valor: round2(Math.abs(t.vl_duplicata)), vencimento: t.dt_vencimento })) });
+      }
+    }
+    // sugestão: saída ≈ soma do grupo + extra (provável juros/multa) — não aplica, só reporta
+    const restaDoGrupo = titulos.filter((t) => !pagos1.has(t.id));
+    if (restaDoGrupo.length >= 1) {
+      const somaResta = round2(restaDoGrupo.reduce((a, t) => a + Math.abs(t.vl_duplicata), 0));
+      const perto = saidas.find(
+        (l) => !usados.has(l.id) && !lancUsado.has(l.id) && nomeScore(restaDoGrupo[0].nm_fornecedor, l.contraparte_nome || l.memo || '') >= NOME_MIN && restaDoGrupo.some((t) => janelaOk(t, l)) && round2(Math.abs(l.valor)) > somaResta + 0.02 && round2(Math.abs(l.valor)) <= round2(somaResta * 1.08) + 1,
+      );
+      if (perto) {
+        const conta = contaById.get(perto.conta_id);
+        sugestoes.push({
+          tipo: 'soma + juros?',
+          fornecedor: restaDoGrupo[0].nm_fornecedor,
+          saida: round2(Math.abs(perto.valor)),
+          somaDuplicatas: somaResta,
+          diferenca: round2(Math.abs(perto.valor) - somaResta),
+          data: perto.data,
+          conta: conta?.apelido,
+          banco: labelBanco(conta),
+          titulos: restaDoGrupo.map((t) => ({ id: t.id, valor: round2(Math.abs(t.vl_duplicata)), vencimento: t.dt_vencimento })),
+        });
+      }
+    }
+  }
+
   const total = round2(resultados.filter((r) => !r.erro).reduce((a, r) => a + r.valor, 0));
-  return { periodo: { de, ate }, aprovadosAnalisados: aprovados.length, pagos: resultados.filter((r) => !r.erro).length, erros: resultados.filter((r) => r.erro).length, total, resultados, dryRun };
+  const pagos = resultados.filter((r) => !r.erro).reduce((n, r) => n + (r.tipo === 'grupo' ? r.titulos.length : 1), 0);
+  return { periodo: { de, ate }, aprovadosAnalisados: aprovados.length, pagos, individuais: resultados.filter((r) => r.tipo === 'individual' && !r.erro).length, grupos: resultados.filter((r) => r.tipo === 'grupo').length, erros: resultados.filter((r) => r.erro).length, total, resultados, sugestoes, dryRun };
 }
 
 export function resumoTexto(r) {
-  const linhas = [`${r.dryRun ? '[simulação] ' : ''}Conciliação de aprovados (${r.periodo.de} a ${r.periodo.ate}): ${r.pagos} de ${r.aprovadosAnalisados} marcado(s) como pago, ${fmt(r.total)}.`];
-  for (const x of r.resultados) linhas.push(`  • ${x.fornecedor} — ${fmt(x.valor)} · ${x.banco} · pago ${x.dataPagamento}${x.erro ? ` · ERRO ${x.erro}` : ''}`);
+  const linhas = [`${r.dryRun ? '[simulação] ' : ''}Conciliação de aprovados (${r.periodo.de} a ${r.periodo.ate}): ${r.pagos} título(s) marcado(s) como pago (${r.individuais} individual(is) + ${r.grupos} por soma), ${fmt(r.total)}.`];
+  for (const x of r.resultados) {
+    if (x.tipo === 'grupo') linhas.push(`  • [soma] ${x.fornecedor} — ${fmt(x.valor)} · ${x.banco} · pago ${x.dataPagamento} · ${x.titulos.length} duplicatas (${x.titulos.map((t) => fmt(t.valor)).join(' + ')})`);
+    else linhas.push(`  • ${x.fornecedor} — ${fmt(x.valor)} · ${x.banco} · pago ${x.dataPagamento}${x.erro ? ` · ERRO ${x.erro}` : ''}`);
+  }
+  if (r.sugestoes?.length) {
+    linhas.push(`\nRevisar manualmente (saída ≈ soma + extra, provável juros):`);
+    for (const sug of r.sugestoes.filter((s) => s.tipo === 'soma + juros?')) linhas.push(`  ? ${sug.fornecedor} — saiu ${fmt(sug.saida)} em ${sug.data} (${sug.conta}); ${sug.titulos.length} duplicatas somam ${fmt(sug.somaDuplicatas)} · diferença ${fmt(sug.diferenca)}`);
+  }
   return linhas.join('\n');
 }
 
