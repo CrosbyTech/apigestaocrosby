@@ -1,4 +1,4 @@
-# Balanço RFID — app Android (coletor Urovo DT50 + pistola RFDT50)
+# Balanço RFID — app Android (Urovo DT50 + RFDT50 · Bluebird RFR900)
 
 App "casca": abre a tela `https://headcoach.crosbytech.com.br/balanco-rfid` numa
 WebView (login normal do HeadCoach, lojas do usuário, INICIAR / PAUSAR /
@@ -49,3 +49,20 @@ Uso: `RFIDSDKManager.init` → `getRfidManager().registerCallback(IRfidCallback)
 → `startInventory()` / `stopInventory()`; `RFIDGripManager.monitorRFDT50Status`
 (bateria e estado da pistola); `GripDeviceManager.setKeyEventListener` (gatilho,
 tecla 523). Se a Urovo fornecer versão mais nova do SDK, trocar os jars.
+
+## Pistolas suportadas (drivers em `Leitor*.java`)
+
+- **Urovo** (`LeitorUrovo`): pistola RFDT50 encaixada no coletor Urovo (ou grip
+  Bluetooth da Urovo). Usada quando o aparelho é um coletor Urovo.
+- **Bluebird** (`LeitorBluebird`): RFR900 / RFR900S / RFR901 por Bluetooth, em
+  qualquer celular Android. Conecta sozinho na última pistola usada ou na
+  primeira pareada com nome "RFR…"; na lista "Bluetooth" o nome decide a marca.
+  SDK oficial "RFID INTEGRATED Android SDK" 5.90.00.09 (Bluebird, out/2026):
+  `app/libs/bluebird-sled-java11.jar` + `bluebird-keymapper.jar`. Uso:
+  `BTReader.getReader(ctx, handler)` → `SD_Open()` → `BT_Connect(mac)`;
+  `RF_PerformInventory(turbo, false, ignorePC=true)` / `RF_StopInventory()`;
+  mensagens no Handler: BTMsg 60 conectado / 61-62 caiu, SDMsg 41-42 gatilho,
+  43 bateria, RFMsg 5 tag ("EPC;rssi:-54.8"). Potência 5–30 dBm.
+
+`RfidBridge` decide o driver: coletor Urovo (fabricante ou classe de sistema
+`android.device.DeviceManager`) → Urovo; senão → Bluebird.

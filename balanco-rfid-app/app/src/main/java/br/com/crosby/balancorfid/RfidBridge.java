@@ -6,20 +6,9 @@ import android.bluetooth.BluetoothDevice;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.Looper;
-import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
-
-import com.ubx.usdk.RFIDSDKManager;
-import com.ubx.usdk.grip.RFID53RStatusCallBack;
-import com.ubx.usdk.io.GripDeviceManager;
-import com.ubx.usdk.io.listener.KeyEventListener;
-import com.ubx.usdk.listener.InitListener;
-import com.ubx.usdk.rfid.RFIDGripManager;
-import com.ubx.usdk.rfid.RfidManager;
-import com.ubx.usdk.rfid.aidl.IRfidCallback;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -29,55 +18,41 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Ponte entre a página /balanco-rfid e o SDK UHF da Urovo (URFIDLibrary).
+ * Ponte entre a página /balanco-rfid e as pistolas RFID.
  * Na página: window.HeadcoachRfid.* (chamadas) e o evento "headcoach-rfid"
- * em window (respostas): { tipo: 'status' | 'tags' | 'gatilho' | 'bluetooth' }.
+ * em window (respostas): { tipo: 'status' | 'tags' | 'gatilho' | 'potencia' | 'bluetooth' }.
+ *
+ * Dois drivers ({@link Leitor}): Urovo (pistola RFDT50 encaixada no coletor
+ * Urovo) e Bluebird (RFR900/RFR901 por Bluetooth, em qualquer celular Android).
+ * Coletor Urovo → Urovo; outro celular → Bluebird. Na escolha manual por
+ * Bluetooth, o nome do aparelho pareado decide (RFR…/BLUEBIRD → Bluebird).
  *
  * As leituras chegam etiqueta por etiqueta (centenas por segundo); juntamos
  * a cada 300 ms e mandamos um lote só, com a contagem de cada EPC.
  */
-public class RfidBridge {
-    private static final String TAG = "BalancoRFID";
+public class RfidBridge implements Leitor.Ouvinte {
     private static final int PERM_BT = 41;
 
     private final MainActivity act;
     private final WebView web;
     private final Updater updater;
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final Handler worker;
+
+    private Leitor atual;
+    private LeitorUrovo urovo;
+    private LeitorBluebird bluebird;
+    private String acaoPendente; // após a permissão do Bluetooth: "listar" | "auto" | "mac:<mac>"
 
     private volatile boolean conectado = false;
     private volatile boolean conectando = false;
     private volatile boolean lendo = false;
     private volatile String erro = null;
     private volatile String modo = null; // "pinos" | "bluetooth"
-    private volatile int moduloStatus = -1; // 0 conectado · 1 separado · 2 ligando · 3 desligado
+    private volatile int moduloStatus = -1;
     private volatile int bateria = -1;
     private volatile boolean carregando = false;
-    private boolean gripMonitorado = false;
 
     private final Map<String, int[]> pendentes = new HashMap<>(); // epc -> {leituras, rssi}
-
-    private final IRfidCallback callback = new IRfidCallback() {
-        @Override
-        public void onInventoryTag(String epc, String data, int rssi) {
-            if (epc == null) return;
-            String e = epc.trim().toUpperCase();
-            if (e.isEmpty()) return;
-            synchronized (pendentes) {
-                int[] v = pendentes.get(e);
-                if (v == null) pendentes.put(e, new int[]{1, rssi});
-                else {
-                    v[0]++;
-                    v[1] = rssi;
-                }
-            }
-        }
-
-        @Override
-        public void onInventoryTagEnd() {
-        }
-    };
 
     private final Runnable descarregar = new Runnable() {
         @Override
@@ -109,13 +84,50 @@ public class RfidBridge {
         this.act = act;
         this.web = web;
         this.updater = updater;
-        HandlerThread t = new HandlerThread("rfid");
-        t.start();
-        worker = new Handler(t.getLooper());
     }
 
     boolean estaLendo() {
         return lendo;
+    }
+
+    private static Boolean coletorUrovo;
+
+    /**
+     * Coletor Urovo? Pelo fabricante e, para não depender do nome, pela classe
+     * de sistema android.device.DeviceManager: num Urovo ela vem do próprio
+     * Android (carregador de boot); nos outros celulares só existe a cópia que
+     * vai dentro do APK (mesmo carregador do app).
+     */
+    static boolean ehColetorUrovo() {
+        if (coletorUrovo != null) return coletorUrovo;
+        String m = (Build.MANUFACTURER + " " + Build.BRAND).toLowerCase();
+        boolean sim = m.contains("urovo");
+        if (!sim) {
+            try {
+                Class<?> c = Class.forName("android.device.DeviceManager");
+                sim = c.getClassLoader() != RfidBridge.class.getClassLoader();
+            } catch (Throwable ignored) {
+            }
+        }
+        coletorUrovo = sim;
+        return sim;
+    }
+
+    private Leitor usar(String marca) {
+        if (atual != null && !atual.marca().equals(marca)) {
+            atual.liberar();
+            atual = null;
+            conectado = false;
+            lendo = false;
+        }
+        if ("urovo".equals(marca)) {
+            if (urovo == null) urovo = new LeitorUrovo(act, this);
+            atual = urovo;
+        } else {
+            if (bluebird == null) bluebird = new LeitorBluebird(act, this);
+            atual = bluebird;
+        }
+        return atual;
     }
 
     // ─── eventos para a página ───────────────────────────────────────────────
@@ -132,6 +144,8 @@ public class RfidBridge {
             o.put("versaoCodigo", BuildConfig.VERSION_CODE);
             o.put("modelo", Build.MANUFACTURER + " " + Build.MODEL);
             o.put("android", Build.VERSION.RELEASE);
+            o.put("coletorUrovo", ehColetorUrovo());
+            o.put("marca", atual == null ? JSONObject.NULL : atual.marca());
             o.put("conectado", conectado);
             o.put("conectando", conectando);
             o.put("lendo", lendo);
@@ -140,10 +154,7 @@ public class RfidBridge {
             o.put("moduloStatus", moduloStatus);
             o.put("bateria", bateria);
             o.put("carregando", carregando);
-            try {
-                o.put("sdk", RFIDSDKManager.getInstance().getSDKVersion());
-            } catch (Throwable ignored) {
-            }
+            o.put("sdk", atual == null ? JSONObject.NULL : atual.versaoSdk());
         } catch (Exception ignored) {
         }
         return o;
@@ -163,12 +174,84 @@ public class RfidBridge {
         }
     }
 
-    private RfidManager leitor() {
-        try {
-            return RFIDSDKManager.getInstance().getRfidManager();
-        } catch (Throwable t) {
-            return null;
+    // ─── Leitor.Ouvinte (respostas dos drivers) ──────────────────────────────
+    @Override
+    public void aoEstado(boolean conectadoAgora, boolean lendoAgora, String erroAgora, String modoAgora) {
+        boolean comecou = lendoAgora && !lendo;
+        conectado = conectadoAgora;
+        conectando = false;
+        lendo = lendoAgora;
+        erro = erroAgora;
+        if (modoAgora != null || !conectadoAgora) modo = modoAgora;
+        act.telaAcesa(lendo);
+        if (comecou) ui.post(descarregar);
+        if (!lendo) ui.postDelayed(descarregar, 150); // último lote
+        emitirStatus();
+    }
+
+    @Override
+    public void aoLerTag(String epc, int rssi) {
+        String e = epc.trim().toUpperCase();
+        if (e.isEmpty()) return;
+        synchronized (pendentes) {
+            int[] v = pendentes.get(e);
+            if (v == null) pendentes.put(e, new int[]{1, rssi});
+            else {
+                v[0]++;
+                v[1] = rssi;
+            }
         }
+    }
+
+    @Override
+    public void aoGatilho(int tecla, boolean apertado) {
+        emitirGatilho(tecla, apertado);
+    }
+
+    @Override
+    public void aoBateria(int nivel, boolean carregandoAgora) {
+        bateria = nivel;
+        carregando = carregandoAgora;
+        emitirStatus();
+    }
+
+    @Override
+    public void aoModulo(int status) {
+        moduloStatus = status;
+        emitirStatus();
+    }
+
+    @Override
+    public void aoPotencia(int atualDbm, int max, int resultado) {
+        try {
+            emitir(estado().put("tipo", "potencia").put("potencia", atualDbm).put("potenciaMax", max).put("resultado", resultado));
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ─── permissão do Bluetooth (Android 12+) ────────────────────────────────
+    private boolean temPermissaoBt() {
+        return Build.VERSION.SDK_INT < 31
+                || act.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void pedirPermissaoBt(String acao) {
+        acaoPendente = acao;
+        act.requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN}, PERM_BT);
+    }
+
+    void aoResponderPermissao(int requestCode) {
+        if (requestCode != PERM_BT) return;
+        String acao = acaoPendente;
+        acaoPendente = null;
+        if (!temPermissaoBt()) {
+            erro = "Sem permissão de Bluetooth não dá para usar a pistola Bluebird.";
+            emitirStatus();
+            return;
+        }
+        if ("listar".equals(acao)) enviarListaBluetooth();
+        else if ("auto".equals(acao)) conectarBluebird(null);
+        else if (acao != null && acao.startsWith("mac:")) conectarBluetooth(acao.substring(4));
     }
 
     // ─── chamadas da página ──────────────────────────────────────────────────
@@ -177,169 +260,103 @@ public class RfidBridge {
         return estado().toString();
     }
 
-    /** Conecta na pistola encaixada (pinos/serial). Resposta: evento status. */
+    /** Automático: coletor Urovo → pistola encaixada; outro celular → Bluebird pareada. */
     @JavascriptInterface
     public void conectar() {
-        iniciarConexao(null);
-    }
-
-    /** Conecta numa pistola pareada por Bluetooth (MAC da lista). */
-    @JavascriptInterface
-    public void conectarBluetooth(String mac) {
-        if (mac == null || mac.trim().isEmpty()) return;
-        iniciarConexao(mac.trim());
-    }
-
-    private void iniciarConexao(final String mac) {
-        if (conectando) return;
-        conectando = true;
-        erro = null;
-        emitirStatus();
-        worker.post(() -> {
-            InitListener aoIniciar = ok -> worker.post(() -> {
-                RfidManager rm = leitor();
-                conectando = false;
-                conectado = ok && rm != null;
-                modo = mac == null ? "pinos" : "bluetooth";
-                if (conectado) {
-                    try {
-                        rm.registerCallback(callback);
-                    } catch (Throwable t) {
-                        Log.e(TAG, "registerCallback", t);
-                    }
-                    monitorarPistola();
-                } else {
-                    erro = "A pistola não respondeu. Confira se está encaixada/ligada e tente de novo.";
-                }
+        ui.post(() -> {
+            if (ehColetorUrovo()) {
+                conectando = true;
+                erro = null;
                 emitirStatus();
-            });
-            try {
-                if (mac == null) RFIDSDKManager.getInstance().init(act, aoIniciar);
-                else RFIDSDKManager.getInstance().initBTtoMac(act, mac, aoIniciar);
-            } catch (Throwable t) {
-                Log.e(TAG, "init", t);
-                conectando = false;
-                conectado = false;
-                erro = "Este aparelho não tem o leitor RFID da Urovo (" + t.getClass().getSimpleName() + ")";
-                emitirStatus();
+                usar("urovo").conectar(null);
+            } else {
+                conectarBluebird(null);
             }
         });
     }
 
-    private void monitorarPistola() {
-        if (gripMonitorado) return;
-        gripMonitorado = true;
-        try {
-            RFIDGripManager.getInstance().monitorRFDT50Status(act, new RFID53RStatusCallBack() {
-                @Override
-                public void onReadBatteryInfo(int nivel, boolean carregandoAgora) {
-                    bateria = nivel;
-                    carregando = carregandoAgora;
-                    emitirStatus();
-                }
+    private void conectarBluebird(String mac) {
+        if (!temPermissaoBt()) {
+            pedirPermissaoBt(mac == null ? "auto" : "mac:" + mac);
+            return;
+        }
+        conectando = true;
+        erro = null;
+        emitirStatus();
+        usar("bluebird").conectar(mac);
+    }
 
-                @Override
-                public void onModuleStatus(int st) {
-                    moduloStatus = st;
-                    emitirStatus();
-                }
-            });
-        } catch (Throwable t) {
-            Log.w(TAG, "monitorRFDT50Status indisponível", t);
-        }
+    /** Conecta numa pistola pareada por Bluetooth (MAC da lista). */
+    @JavascriptInterface
+    public void conectarBluetooth(final String mac) {
+        if (mac == null || mac.trim().isEmpty()) return;
+        ui.post(() -> {
+            if (!temPermissaoBt()) {
+                pedirPermissaoBt("mac:" + mac.trim());
+                return;
+            }
+            String nome = nomeDoPareado(mac.trim());
+            if (LeitorBluebird.pareceBluebird(nome) || !ehColetorUrovo()) {
+                conectarBluebird(mac.trim());
+            } else {
+                conectando = true;
+                erro = null;
+                emitirStatus();
+                usar("urovo").conectar(mac.trim());
+            }
+        });
+    }
+
+    private String nomeDoPareado(String mac) {
         try {
-            GripDeviceManager.getInstance().setKeyEventListener(new KeyEventListener() {
-                @Override
-                public void event(int tecla, boolean apertado) {
-                    emitirGatilho(tecla, apertado);
-                }
-            });
-        } catch (Throwable t) {
-            Log.w(TAG, "setKeyEventListener indisponível", t);
+            BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
+            if (bt == null) return null;
+            for (BluetoothDevice d : bt.getBondedDevices()) {
+                if (mac.equalsIgnoreCase(d.getAddress())) return d.getName();
+            }
+        } catch (SecurityException ignored) {
         }
+        return null;
     }
 
     @JavascriptInterface
     public void iniciar() {
-        worker.post(() -> {
-            RfidManager rm = leitor();
-            if (!conectado || rm == null) {
+        ui.post(() -> {
+            if (atual == null || !conectado) {
                 erro = "Conecte o leitor antes de iniciar.";
                 emitirStatus();
                 return;
             }
-            int r;
-            try {
-                r = rm.startInventory();
-            } catch (Throwable t) {
-                r = -1;
-                Log.e(TAG, "startInventory", t);
-            }
-            lendo = r == 0;
-            erro = lendo ? null : "O leitor recusou iniciar a leitura (código " + r + ").";
-            act.telaAcesa(lendo);
-            if (lendo) ui.post(descarregar);
-            emitirStatus();
+            atual.iniciar();
         });
     }
 
     @JavascriptInterface
     public void pausar() {
-        worker.post(() -> {
-            RfidManager rm = leitor();
-            try {
-                if (rm != null) rm.stopInventory();
-            } catch (Throwable t) {
-                Log.e(TAG, "stopInventory", t);
-            }
-            lendo = false;
-            act.telaAcesa(false);
-            ui.postDelayed(descarregar, 150); // último lote
-            emitirStatus();
+        ui.post(() -> {
+            if (atual != null) atual.pausar();
         });
     }
 
     @JavascriptInterface
     public void desconectar() {
-        worker.post(() -> {
-            liberarSdk();
-            emitirStatus();
+        ui.post(() -> {
+            if (atual != null) atual.desconectar();
         });
     }
 
-    /** Potência em dBm. Resposta: evento status com { potencia, potenciaMax }. */
+    /** Potência em dBm. Resposta: evento "potencia" com { potencia, potenciaMax }. */
     @JavascriptInterface
     public void potencia() {
-        worker.post(() -> {
-            RfidManager rm = leitor();
-            try {
-                JSONObject o = estado().put("tipo", "potencia");
-                if (rm != null) {
-                    o.put("potencia", rm.getOutputPower());
-                    o.put("potenciaMax", rm.getSupportMaxOutputPower());
-                }
-                emitir(o);
-            } catch (Throwable t) {
-                Log.e(TAG, "potencia", t);
-            }
+        ui.post(() -> {
+            if (atual != null) atual.lerPotencia();
         });
     }
 
     @JavascriptInterface
     public void definirPotencia(final int dbm) {
-        worker.post(() -> {
-            RfidManager rm = leitor();
-            try {
-                int r = rm == null ? -1 : rm.setOutputPower(dbm);
-                JSONObject o = estado().put("tipo", "potencia").put("resultado", r);
-                if (rm != null) {
-                    o.put("potencia", rm.getOutputPower());
-                    o.put("potenciaMax", rm.getSupportMaxOutputPower());
-                }
-                emitir(o);
-            } catch (Throwable t) {
-                Log.e(TAG, "setOutputPower", t);
-            }
+        ui.post(() -> {
+            if (atual != null) atual.definirPotencia(dbm);
         });
     }
 
@@ -347,17 +364,12 @@ public class RfidBridge {
     @JavascriptInterface
     public void listarBluetooth() {
         ui.post(() -> {
-            if (Build.VERSION.SDK_INT >= 31
-                    && act.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                act.requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN}, PERM_BT);
+            if (!temPermissaoBt()) {
+                pedirPermissaoBt("listar");
                 return;
             }
             enviarListaBluetooth();
         });
-    }
-
-    void aoResponderPermissao(int requestCode) {
-        if (requestCode == PERM_BT) enviarListaBluetooth();
     }
 
     private void enviarListaBluetooth() {
@@ -366,11 +378,15 @@ public class RfidBridge {
         try {
             BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
             if (bt == null) falha = "Aparelho sem Bluetooth";
-            else if (!bt.isEnabled()) falha = "Ligue o Bluetooth do coletor";
+            else if (!bt.isEnabled()) falha = "Ligue o Bluetooth do celular";
             else {
                 Set<BluetoothDevice> pareados = bt.getBondedDevices();
                 for (BluetoothDevice d : pareados) {
-                    lista.put(new JSONObject().put("nome", d.getName() == null ? "(sem nome)" : d.getName()).put("mac", d.getAddress()));
+                    String nome = d.getName() == null ? "(sem nome)" : d.getName();
+                    lista.put(new JSONObject()
+                            .put("nome", nome)
+                            .put("mac", d.getAddress())
+                            .put("marca", LeitorBluebird.pareceBluebird(nome) ? "bluebird" : JSONObject.NULL));
                 }
             }
         } catch (SecurityException se) {
@@ -403,27 +419,11 @@ public class RfidBridge {
         }
     }
 
-    // ─── encerramento ────────────────────────────────────────────────────────
-    private void liberarSdk() {
-        try {
-            RfidManager rm = leitor();
-            if (rm != null) {
-                if (lendo) rm.stopInventory();
-                rm.unregisterCallback(callback);
-            }
-        } catch (Throwable ignored) {
-        }
-        try {
-            RFIDSDKManager.getInstance().release();
-        } catch (Throwable ignored) {
-        }
+    void liberar() {
+        if (urovo != null) urovo.liberar();
+        if (bluebird != null) bluebird.liberar();
         lendo = false;
         conectado = false;
-        modo = null;
         act.telaAcesa(false);
-    }
-
-    void liberar() {
-        worker.post(this::liberarSdk);
     }
 }
