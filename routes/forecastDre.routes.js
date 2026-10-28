@@ -143,7 +143,7 @@ async function calcularMes(mes) {
     console.warn(`[forecast-dre credev ${mes}] ${e.message}`);
   }
 
-  return {
+  const dados = {
     mes,
     varejo: r2(varejo),
     multimarcas: r2(multimarcas),
@@ -161,6 +161,33 @@ async function calcularMes(mes) {
     fonte: 'new_forecast_sale_panel',
     calculado_em: new Date().toISOString(),
   };
+
+  // Persiste pra servir instantâneo mesmo com o backend recém-reiniciado
+  // (cache em memória vazio) — evita a tela mostrar o número antigo.
+  try {
+    await supabase
+      .from('forecast_dre_cache')
+      .upsert({ mes, dados, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
+  } catch (e) {
+    console.warn(`[forecast-dre cache-save ${mes}] ${e.message}`);
+  }
+
+  return dados;
+}
+
+// Resultado salvo no Supabase (fallback quando o cache em memória está vazio)
+async function lerCachePersistido(mes) {
+  try {
+    const { data, error } = await supabase
+      .from('forecast_dre_cache')
+      .select('dados')
+      .eq('mes', mes)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data.dados || null;
+  } catch {
+    return null;
+  }
 }
 
 router.get(
@@ -174,13 +201,30 @@ router.get(
     }
     const refresh = ['1', 'true'].includes(String(req.query.refresh || ''));
     const agora = Date.now();
+    const fechado = ultimoDia(mes) < hojeIso();
+    const ttl = (fechado ? 24 * 60 : 30) * 60 * 1000;
+
     const hit = CACHE.get(mes);
     if (!refresh && hit && hit.expira > agora) {
       return successResponse(res, { ...hit.dados, cache: true }, 'OK (cache)');
     }
+
+    // Cache em memória vazio (ex.: backend recém-reiniciado): serve o valor
+    // salvo no Supabase na hora e recalcula em background, pra tela nunca
+    // cair pro número antigo enquanto o cálculo pesado roda.
+    if (!refresh) {
+      const salvo = await lerCachePersistido(mes);
+      if (salvo) {
+        CACHE.set(mes, { dados: salvo, expira: agora + ttl });
+        calcularMes(mes)
+          .then((d) => CACHE.set(mes, { dados: d, expira: Date.now() + ttl }))
+          .catch((e) => console.warn(`[forecast-dre bg ${mes}] ${e.message}`));
+        return successResponse(res, { ...salvo, cache: 'supabase' }, 'OK (cache salvo)');
+      }
+    }
+
     const dados = await calcularMes(mes);
-    const fechado = ultimoDia(mes) < hojeIso();
-    CACHE.set(mes, { dados, expira: agora + (fechado ? 24 * 60 : 30) * 60 * 1000 });
+    CACHE.set(mes, { dados, expira: Date.now() + ttl });
     return successResponse(res, dados, 'OK');
   }),
 );
