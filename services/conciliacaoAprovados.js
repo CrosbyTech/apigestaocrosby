@@ -18,6 +18,24 @@
 import supabase from '../config/supabase.js';
 import { salvarConciliacao } from './fluxoCaixaConciliacao.js';
 
+// Puxa TODAS as linhas paginando por .range() — o Supabase devolve no máximo
+// ~1000 por requisição, então um select sem paginação trunca em silêncio e dá
+// falso negativo (saída não encontrada) ou deixa a trava de reuso incompleta.
+// Ordena por `id` para a paginação ser estável entre páginas.
+async function puxarTudo(tabela, colunas, aplicarFiltros) {
+  const PAGE = 1000;
+  const out = [];
+  for (let from = 0; ; from += PAGE) {
+    let q = supabase.from(tabela).select(colunas).order('id', { ascending: true }).range(from, from + PAGE - 1);
+    q = aplicarFiltros(q);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    out.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+  return out;
+}
+
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const soDig = (v) => String(v ?? '').replace(/\D/g, '');
 const semAcento = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -121,20 +139,15 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
   const valorAlvo = (t) => (t.vl_real != null ? round2(Number(t.vl_real)) : round2(Math.abs(t.vl_duplicata)));
   const aprovados = aprovados0.filter((t) => valorAlvo(t) > VALOR_TOL);
 
-  // saídas candidatas no período
-  const { data: saidas, error: eS } = await supabase
-    .from('fluxo_caixa_lancamentos')
-    .select('id,conta_id,data,valor,contraparte_nome,contraparte_doc,memo')
-    .in('conta_id', contaIds)
-    .lt('valor', 0)
-    .is('transferencia_id', null)
-    .gte('data', de)
-    .lte('data', ate);
-  if (eS) throw new Error(eS.message);
+  // saídas candidatas no período (paginado — pode passar de 1000 numa janela larga)
+  const saidas = await puxarTudo('fluxo_caixa_lancamentos', 'id,conta_id,data,valor,contraparte_nome,contraparte_doc,memo', (q) =>
+    q.in('conta_id', contaIds).lt('valor', 0).is('transferencia_id', null).gte('data', de).lte('data', ate),
+  );
 
-  // saídas já conciliadas com título (não reusar)
-  const { data: conc } = await supabase.from('fluxo_caixa_conciliacoes').select('lancamento_id,origem');
-  const lancUsado = new Set((conc || []).filter((c) => ['LIBERACAO', 'MULTIPLO'].includes(c.origem)).map((c) => c.lancamento_id));
+  // saídas já conciliadas com título (não reusar) — filtra a origem no servidor
+  // e pagina: a tabela de conciliações cresce todo dia e passaria de 1000.
+  const conc = await puxarTudo('fluxo_caixa_conciliacoes', 'lancamento_id,origem', (q) => q.in('origem', ['LIBERACAO', 'MULTIPLO']));
+  const lancUsado = new Set((conc || []).map((c) => c.lancamento_id));
 
   const usados = new Set();
   const resultados = [];
