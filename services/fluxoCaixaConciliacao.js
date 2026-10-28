@@ -164,7 +164,7 @@ async function fonteSolicitacoes({ de, ate }) {
   const { data, error } = await supabase
     .from(T.sol)
     .select('id,nm_empresa,supplier_name,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,chave_pix,descricao,tipo_solicitacao,duplicate_code')
-    .in('status', ['enviado_totvs', 'aprovado_financeiro', 'aprovado_gestor', 'nota_fiscal'])
+    .in('status', ['enviado_totvs', 'aprovado_financeiro', 'aprovado_gestor', 'nota_fiscal', 'aguardando_conciliacao'])
     .is('pagamento_liberacao_id', null)
     .gte('dt_vencimento', addDias(de, -3))
     .lte('dt_vencimento', addDias(ate, 10));
@@ -1054,12 +1054,46 @@ async function gravarConciliacaoRow(row) {
         const { data: d2 } = await supabase.from(T.conc).update({ anexos }).eq('id', data.id).select().single();
         if (d2) data.anexos = d2.anexos;
       }
+      await marcarSolicitacoesPatrimonioConciliadas(ids, data);
     }
   } catch (e) {
     console.error('[conciliacao] comprovante → solicitação falhou:', e.message);
     data.avisoComprovante = e.message;
   }
   return data;
+}
+
+/**
+ * Setor PATRIMONIO / PRODUTO (pago no cartão pelo Jesus): a solicitação fica em
+ * `aguardando_conciliacao` até uma saída do extrato ser casada com ela. Qualquer
+ * conciliação gravada que a referencie (automática, pela tela /conciliacao ou
+ * pela tela de Solicitações) a marca como `conciliado` = paga, pronta para o
+ * financeiro lançar no TOTVS. Ver services/conciliacaoPatrimonio.js.
+ */
+async function marcarSolicitacoesPatrimonioConciliadas(ids, conc) {
+  if (!ids?.length) return;
+  const { data: sols, error } = await supabase.from(T.sol).select('id,status,setor,produto_servico,pago_em,pago_por_nome').in('id', ids);
+  lancar(error);
+  const agora = new Date().toISOString();
+  for (const s of sols || []) {
+    if (s.status !== 'aguardando_conciliacao') continue;
+    if (String(s.setor || '').toUpperCase() !== 'PATRIMONIO' || String(s.produto_servico || '').toUpperCase() !== 'PRODUTO') continue;
+    const { data: conta } = await supabase.from('fluxo_caixa_contas').select('apelido,banco').eq('id', conc.conta_id).maybeSingle();
+    const { error: e2 } = await supabase
+      .from(T.sol)
+      .update({
+        status: 'conciliado',
+        conciliado_em: agora,
+        conciliado_por_nome: conc.usuario || null,
+        conciliacao_lancamento_id: conc.lancamento_id,
+        conciliacao_banco: conta?.apelido || conta?.banco || null,
+        conciliacao_data: conc.data,
+        pago_em: s.pago_em || agora,
+        pago_por_nome: s.pago_por_nome || conc.usuario || null,
+      })
+      .eq('id', s.id);
+    lancar(e2);
+  }
 }
 
 export async function atualizarAnexos(id, anexos) {

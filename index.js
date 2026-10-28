@@ -32,6 +32,7 @@ import monitoringRoutes from './routes/monitoring.routes.js';
 import conciliacaoStoneRoutes from './routes/conciliacaoStone.routes.js';
 import extratoStoneRoutes from './routes/extratoStone.routes.js';
 import stoneBotRoutes from './routes/stoneBot.routes.js';
+import solicitacoesPatrimonioRoutes from './routes/solicitacoesPatrimonio.routes.js';
 import { iniciarJobPagarmeSaldo } from './jobs/pagarme-saldo.job.js';
 import { iniciarVevetoBot } from './services/vevetoBot.js';
 import { iniciarRelatorioSaldos } from './services/relatorioSaldosWhatsapp.js';
@@ -220,6 +221,7 @@ app.use('/api/extrato-stone', extratoStoneRoutes); // Extrato Stone: OFX → lei
 app.use('/api/fluxo-caixa-ext', fluxoCaixaExtRoutes); // Fluxo de Caixa Ext: extratos PDF (Stone/Sicredi/Caixa/Mêntore) → entradas, saídas, transferências
 app.use('/api/dr-ygor/extratos-bancarios', drYgorExtratosRoutes); // Financeiro → Dr Ygor → Extratos Bancários: mesmo módulo, contas no escopo 'dr_ygor'
 app.use('/api/stone-bot', stoneBotRoutes); // Bot Stone Extratos: fila/log do agente local (bots/stone-extratos) que baixa os extratos Stone e sobe o saldo
+app.use('/api/solicitacoes-patrimonio', solicitacoesPatrimonioRoutes); // Solicitações Crosby — setor PATRIMONIO: conciliação de PRODUTO (pago no cartão) com o extrato
 app.use('/api/uazapi-sync', uazapiSyncRoutes); // sync diário UAzapi → Postgres
 app.use('/api/automacao', automacaoRoutes); // Automação Financeiro — cobrança de boletos (WhatsApp)
 app.use('/api/sms', smsRoutes); // SMS DisparoPro — Call Center de cobrança

@@ -22,7 +22,7 @@ import { salvarConciliacao } from './fluxoCaixaConciliacao.js';
 // ~1000 por requisição, então um select sem paginação trunca em silêncio e dá
 // falso negativo (saída não encontrada) ou deixa a trava de reuso incompleta.
 // Ordena por `id` para a paginação ser estável entre páginas.
-async function puxarTudo(tabela, colunas, aplicarFiltros) {
+export async function puxarTudo(tabela, colunas, aplicarFiltros) {
   const PAGE = 1000;
   const out = [];
   for (let from = 0; ; from += PAGE) {
@@ -68,7 +68,7 @@ function tokensNome(s) {
   for (const a of APELIDOS) if (a.re.test(norm)) set.add(a.tok);
   return set;
 }
-function nomeScore(a, b) {
+export function nomeScore(a, b) {
   const A = tokensNome(a);
   const B = tokensNome(b);
   if (!A.size || !B.size) return 0;
@@ -146,7 +146,7 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
 
   // saídas já conciliadas com título (não reusar) — filtra a origem no servidor
   // e pagina: a tabela de conciliações cresce todo dia e passaria de 1000.
-  const conc = await puxarTudo('fluxo_caixa_conciliacoes', 'lancamento_id,origem', (q) => q.in('origem', ['LIBERACAO', 'MULTIPLO']));
+  const conc = await puxarTudo('fluxo_caixa_conciliacoes', 'lancamento_id,origem', (q) => q.in('origem', ['LIBERACAO', 'MULTIPLO', 'SOLICITACAO']));
   const lancUsado = new Set((conc || []).map((c) => c.lancamento_id));
 
   const usados = new Set();

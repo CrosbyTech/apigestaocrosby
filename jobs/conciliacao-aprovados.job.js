@@ -13,6 +13,7 @@
  */
 import cron from 'node-cron';
 import { conciliarAprovados, resumoTexto } from '../services/conciliacaoAprovados.js';
+import { conciliarPatrimonio, resumoTexto as resumoPatrimonio } from '../services/conciliacaoPatrimonio.js';
 
 let rodando = false;
 let ultimo = { em: null, pagos: null, total: null, erro: null };
@@ -40,6 +41,15 @@ export async function rodarConciliacaoAprovados({ saidaDe, saidaAte, dataSaida, 
     if (!dryRun) ultimo = { em: new Date().toISOString(), periodo: { de, ate }, pagos: r.pagos, total: r.total, erro: null };
     if (r.pagos) console.log(`[conciliacao-aprovados] ${resumoTexto(r)}`);
     else console.log(`[conciliacao-aprovados] ${de} a ${ate}: nenhum aprovado novo casou com saída.`);
+    // Setor PATRIMONIO (PRODUTO pago no cartão): mesma rodada, depois dos extratos do dia.
+    try {
+      const rp = await conciliarPatrimonio({ dryRun, usuario: 'Conciliação de patrimônio (job diário)' });
+      r.patrimonio = rp;
+      if (rp.analisadas) console.log(`[conciliacao-patrimonio] ${resumoPatrimonio(rp)}`);
+    } catch (e) {
+      console.error('[conciliacao-patrimonio] erro:', e.message);
+      r.patrimonio = { erro: e.message };
+    }
     return r;
   } catch (e) {
     ultimo = { em: new Date().toISOString(), erro: e.message };
