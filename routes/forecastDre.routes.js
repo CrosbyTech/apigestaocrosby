@@ -23,6 +23,7 @@
 import express from 'express';
 import axios from 'axios';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import supabase from '../config/supabase.js';
 
 const router = express.Router();
 
@@ -181,6 +182,42 @@ router.get(
     const fechado = ultimoDia(mes) < hojeIso();
     CACHE.set(mes, { dados, expira: agora + (fechado ? 24 * 60 : 30) * 60 * 1000 });
     return successResponse(res, dados, 'OK');
+  }),
+);
+
+// ─── Config: quais meses são Realizado × Previsão (clicável na tela) ─────────
+// Niziany (28/10/2026): ela mesma marca um mês como realizado sem pedir. Fica
+// salvo em forecast_dre_config e vale para todos. A tela mescla isso por cima
+// do tipo padrão da planilha.
+router.get(
+  '/config',
+  asyncHandler(async (req, res) => {
+    const { data, error } = await supabase
+      .from('forecast_dre_config')
+      .select('mes, tipo');
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    const overrides = {};
+    for (const r of data || []) overrides[r.mes] = r.tipo;
+    return successResponse(res, { overrides }, 'OK');
+  }),
+);
+
+router.post(
+  '/config',
+  asyncHandler(async (req, res) => {
+    const mes = String(req.body?.mes || '');
+    const tipo = String(req.body?.tipo || '');
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    if (!['realizado', 'previsao'].includes(tipo)) {
+      return errorResponse(res, "tipo deve ser 'realizado' ou 'previsao'", 400, 'BAD_TIPO');
+    }
+    const { error } = await supabase
+      .from('forecast_dre_config')
+      .upsert({ mes, tipo, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    return successResponse(res, { mes, tipo }, 'OK');
   }),
 );
 
