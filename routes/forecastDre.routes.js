@@ -365,6 +365,7 @@ async function calcularPessoalFixo(mes) {
           chapa: l.chapa || '',
           funcao: l.funcao || '',
           empresa: l.empresa || '',
+          loja: l.setor || l.loja || l.filial || l.secao || l.departamento || '',
           valor: Math.round(v * 100) / 100,
         });
         if (prov) {
@@ -410,6 +411,7 @@ async function calcularPessoalFixo(mes) {
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
       rubricas, // pró-labore + proventos + descontos, com grupo fixo/variavel
+      _campos_linha: Object.keys(linhas[0] || {}), // debug: campos disponíveis
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
