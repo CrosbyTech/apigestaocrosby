@@ -24,6 +24,7 @@ import express from 'express';
 import axios from 'axios';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import supabase from '../config/supabase.js';
+import { DRYLAND_URL, DRYLAND_KEY } from '../services/drylandBaixas.js';
 
 const router = express.Router();
 
@@ -275,6 +276,106 @@ router.get(
 
     const dados = await calcularMes(mes);
     CACHE.set(mes, { dados, expira: Date.now() + ttl });
+    return successResponse(res, dados, 'OK');
+  }),
+);
+
+// ─── Pessoal Fixo — folha de pagamento do Dryland (RH/DP) ────────────────────
+// Niziany (28/10/2026): a despesa "Pessoal Fixo" da DRE vem da folha do Dryland.
+// Regras: somam os PROVENTOS (eventos tipo 'P'); fica de fora o Salário
+// Maternidade (a empresa paga mas compensa no INSS). Descontos (INSS empregado,
+// IRRF, eConsignado, adiantamento, VT) não entram — são retenções do funcionário.
+const DP_USUARIO = process.env.DRYLAND_DP_USUARIO || '';
+const DP_SENHA = process.env.DRYLAND_DP_SENHA || '';
+
+async function drylandRpcDp(fn, args = {}) {
+  const { data } = await axios.post(`${DRYLAND_URL}/rest/v1/rpc/${fn}`, args, {
+    headers: { 'Content-Type': 'application/json', apikey: DRYLAND_KEY, Authorization: `Bearer ${DRYLAND_KEY}` },
+    timeout: 60000,
+  });
+  return data;
+}
+
+const semAcentoUp = (s) =>
+  String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim();
+// Proventos que NÃO entram na DRE (compensados em outra conta)
+const ehProventoForaDre = (desc) => /MATERNIDADE/.test(semAcentoUp(desc));
+
+// Lê a folha de uma competência e soma os proventos que entram na DRE.
+async function calcularPessoalFixo(mes) {
+  if (!DP_USUARIO || !DP_SENHA) {
+    throw Object.assign(new Error('Acesso ao DP do Dryland não configurado (DRYLAND_DP_USUARIO/SENHA).'), { status: 503 });
+  }
+  const lg = await drylandRpcDp('dp_login', { p_usuario: DP_USUARIO, p_senha: DP_SENHA });
+  if (!lg || lg.ok !== true || !lg.token) {
+    throw Object.assign(new Error(`login no DP do Dryland falhou (${(lg && lg.erro) || 'recusado'})`), { status: 502 });
+  }
+  try {
+    // competência da folha é 'AAAA-MM-01'
+    const comp = `${mes}-01`;
+    const r = await drylandRpcDp('dp_folha_dados', { p_token: lg.token, p_competencia: comp });
+    if (!r || r.ok === false) {
+      throw Object.assign(new Error(`folha ${mes}: ${(r && r.erro) || 'sem resposta'}`), { status: 502 });
+    }
+    const linhas = (r.linhas || []).filter((l) => !l._resumo);
+    const porRubrica = {};
+    let totalProventos = 0;
+    let foraDre = 0;
+    for (const l of linhas) {
+      for (const e of l.eventos || []) {
+        if (e.tipo !== 'P') continue; // só proventos
+        const v = Number(e.valor) || 0;
+        if (ehProventoForaDre(e.desc)) {
+          foraDre += v;
+          continue;
+        }
+        totalProventos += v;
+        const k = semAcentoUp(e.desc) || '(sem descrição)';
+        porRubrica[k] = (porRubrica[k] || 0) + v;
+      }
+    }
+    const rubricas = Object.entries(porRubrica)
+      .map(([desc, valor]) => ({ desc, valor: Math.round(valor * 100) / 100 }))
+      .sort((a, b) => b.valor - a.valor);
+    return {
+      mes,
+      pessoal_fixo: -Math.round(totalProventos * 100) / 100, // despesa → negativo
+      total_proventos: Math.round(totalProventos * 100) / 100,
+      maternidade_fora: Math.round(foraDre * 100) / 100,
+      empregados: linhas.length,
+      rubricas,
+      fonte: 'dryland_dp_folha',
+      calculado_em: new Date().toISOString(),
+    };
+  } finally {
+    drylandRpcDp('dp_logout', { p_token: lg.token }).catch(() => {});
+  }
+}
+
+let CACHE_PF = new Map(); // mes → { dados, expira }
+router.get(
+  '/pessoal-fixo',
+  asyncHandler(async (req, res) => {
+    req.setTimeout(120000);
+    res.setTimeout(120000);
+    const mes = String(req.query.mes || '');
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+      return errorResponse(res, "Informe mes no formato 'YYYY-MM'", 400, 'BAD_MES');
+    }
+    const refresh = ['1', 'true'].includes(String(req.query.refresh || ''));
+    const agora = Date.now();
+    const hit = CACHE_PF.get(mes);
+    if (!refresh && hit && hit.expira > agora) {
+      return successResponse(res, { ...hit.dados, cache: true }, 'OK (cache)');
+    }
+    let dados;
+    try {
+      dados = await calcularPessoalFixo(mes);
+    } catch (e) {
+      return errorResponse(res, e.message, e.status || 502);
+    }
+    const fechado = ultimoDia(mes) < hojeIso();
+    CACHE_PF.set(mes, { dados, expira: agora + (fechado ? 24 * 60 : 30) * 60 * 1000 });
     return successResponse(res, dados, 'OK');
   }),
 );

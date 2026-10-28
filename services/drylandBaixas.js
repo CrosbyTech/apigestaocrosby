@@ -382,3 +382,7 @@ export function iniciarJobDrylandBaixas() {
   setInterval(() => sincronizar().catch(() => {}), INTERVALO_MS);
   console.log(`🟢 [dryland/baixas] job ligado: a cada ${INTERVALO_MS / 60000} min`);
 }
+
+// Reaproveitado por outras rotas (ex.: Forecast DRE / folha do Dryland) para
+// não duplicar a URL/chave do Dryland.
+export { DRYLAND_URL, DRYLAND_KEY };
