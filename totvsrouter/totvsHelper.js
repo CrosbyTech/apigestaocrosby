@@ -29,6 +29,82 @@ export const API_BASE_URL =
   process.env.RENDER_EXTERNAL_URL ||
   'http://localhost:4001';
 
+// Grupo empresarial (razão social dona da filial) pela raiz do CNPJ da filial.
+// Regra do Yago (28/10/2026): separar o contas a receber por
+// CROSBY / FABIO / IRMAOS VAREJO / IRMAOS CROSBY. Filiais de teste, setores
+// internos e Serviços Integrados ficam em OUTROS.
+export const GRUPO_EMPRESA_POR_RAIZ = {
+  17177680: 'CROSBY', // FERREIRA COMERCIO / CROSBY CR VESTUARIO / CROSBY DISTRIBUICAO
+  27728810: 'FABIO', // FA MODA & VAREJO / FABIO FERREIRA DE LIMA AZEVEDO
+  17757554: 'FABIO', // CROSBY FORTALEZA (filial 31) — razão FABIO FERREIRA DE LIMA AZEVEDO
+  53661116: 'IRMAOS VAREJO', // IRMAOS VAREJO COMERCIAL / FLAVIO FERREIRA DE LIMA AZEVEDO
+  33592092: 'IRMAOS CROSBY', // IRMAOS CR VESTUARIO / AZ VESTUARIO
+};
+export const GRUPO_EMPRESA_OUTROS = 'OUTROS';
+// Exceções por código de filial (vence a raiz do CNPJ e a regra dos pares).
+export const GRUPO_EMPRESA_POR_FILIAL = { 101: 'CROSBY' }; // FINANCEIRO CROSBY — regra do Yago
+
+// Regra dos pares (Yago, 28/10/2026): as empresas do TOTVS vêm em pares
+// matriz ↔ filial — a menor é a matriz e a maior a filial (5 ↔ 500, 55 ↔ 550,
+// 75 ↔ 750, 1 ↔ 100, 99 ↔ 990…). A filial fica no MESMO grupo da matriz.
+// Regra geral: tirar os zeros à direita do código da filial dá a matriz.
+// Pares que fogem da regra geral:
+export const MATRIZ_DA_FILIAL = {
+  1000: 10, // CROSBY AGENCIA MARKETING
+  5000: 50, // CROSBY FABRICA
+  111: 11, // CROSBY NATAL
+  311: 31, // CROSBY FORTALEZA
+  411: 41, // CROSBY DEFEITOS
+  890: 90, // CROSBY AYRTON SENNA (razão "TESTE CROSBY AYRTON SENNA")
+  891: 89, // CROSBY SHOPPING TACARUNA
+};
+
+export function matrizDaFilial(branchCode, existe = () => true) {
+  const c = parseInt(branchCode);
+  if (MATRIZ_DA_FILIAL[c]) return MATRIZ_DA_FILIAL[c];
+  if (!(c >= 100)) return null;
+  let m = c;
+  while (m >= 10 && m % 10 === 0) m /= 10;
+  return m !== c && existe(m) ? m : null;
+}
+
+export function grupoEmpresaPorCnpj(cnpj, branchCode) {
+  const porFilial = GRUPO_EMPRESA_POR_FILIAL[parseInt(branchCode)];
+  if (porFilial) return porFilial;
+  const raiz = String(cnpj || '').replace(/\D/g, '').slice(0, 8);
+  return GRUPO_EMPRESA_POR_RAIZ[raiz] || GRUPO_EMPRESA_OUTROS;
+}
+
+// Aplica a regra dos pares: filial em OUTROS herda o grupo da matriz
+// (segue a cadeia 1000 → 10 → …, no máximo 3 saltos).
+function aplicarGrupoDaMatriz(branches) {
+  const porCodigo = new Map(branches.map((b) => [b.code, b]));
+  for (const b of branches) {
+    if (b.grupoEmpresa !== GRUPO_EMPRESA_OUTROS) continue;
+    let code = b.code;
+    for (let i = 0; i < 3; i++) {
+      const m = matrizDaFilial(code, (c) => porCodigo.has(c));
+      if (!m) break;
+      const matriz = porCodigo.get(m);
+      b.matriz = b.matriz ?? m;
+      if (matriz.grupoEmpresa !== GRUPO_EMPRESA_OUTROS) {
+        b.grupoEmpresa = matriz.grupoEmpresa;
+        break;
+      }
+      code = m;
+    }
+  }
+  return branches;
+}
+
+// { branchCode: 'CROSBY' | 'FABIO' | 'IRMAOS VAREJO' | 'IRMAOS CROSBY' | 'OUTROS' }
+export async function getGrupoEmpresaPorBranch(token) {
+  const branches = await getBranchesWithNames(token);
+  return Object.fromEntries(
+    (branches || []).map((b) => [b.code, b.grupoEmpresa || GRUPO_EMPRESA_OUTROS]),
+  );
+}
+
 // Cache de branchCodes em memória (recarrega a cada 30 min)
 let cachedBranchCodes = null;
 let cachedBranchesWithNames = null;
@@ -59,8 +135,11 @@ async function fetchBranchesList(token) {
             b.description ||
             `Filial ${b.code}`,
           groupName: b.branchGroupName || null,
+          cnpj: String(b.cnpj || '').replace(/\D/g, '') || null,
+          grupoEmpresa: grupoEmpresaPorCnpj(b.cnpj, b.code),
         }))
         .filter((b) => !isNaN(b.code) && b.code > 0);
+      aplicarGrupoDaMatriz(cachedBranchesWithNames);
       cachedBranchCodes = cachedBranchesWithNames.map((b) => b.code);
       branchCacheTimestamp = now;
       return cachedBranchesWithNames;

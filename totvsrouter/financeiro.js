@@ -13,6 +13,8 @@ import {
   TOTVS_BASE_URL,
   TOTVS_AUTH_ENDPOINT,
   getBranchCodes,
+  getGrupoEmpresaPorBranch,
+  GRUPO_EMPRESA_OUTROS,
 } from './totvsHelper.js';
 import {
   registrarComando as registrarComandoAP,
@@ -723,8 +725,11 @@ router.get(
       );
 
       // PASSO 4: Mapear para formato frontend
+      // Grupo empresarial da filial (CROSBY / FABIO / IRMAOS VAREJO / IRMAOS CROSBY / OUTROS)
+      const grupoPorBranch = await getGrupoEmpresaPorBranch(token).catch(() => ({}));
       const mappedItems = filteredItems.map((item) => ({
         cd_empresa: item.branchCode,
+        grupo_empresa: grupoPorBranch[item.branchCode] || GRUPO_EMPRESA_OUTROS,
         cd_cliente: item.customerCode,
         nm_cliente: item.customerCpfCnpj || `Cliente ${item.customerCode}`,
         nr_cpfcnpj: item.customerCpfCnpj,
@@ -1532,6 +1537,8 @@ router.post(
       }
 
       // PASSO 4: Mapear para formato frontend (mesmo formato do banco de dados)
+      // Grupo empresarial da filial (CROSBY / FABIO / IRMAOS VAREJO / IRMAOS CROSBY / OUTROS)
+      const grupoPorBranch = await getGrupoEmpresaPorBranch(token).catch(() => ({}));
       const mappedItems = filteredItems.map((item) => {
         // Extrair dados de despesa e centro de custo do array expense
         const firstExpense =
@@ -1602,6 +1609,8 @@ router.post(
 
         return {
           cd_empresa: item.branchCode,
+          grupo_empresa:
+            grupoPorBranch[item.branchCode] || GRUPO_EMPRESA_OUTROS,
           cd_fornecedor: item.supplierCode,
           nr_cpfcnpj_fornecedor: item.supplierCpfCnpj || '',
           nr_duplicata: item.duplicateCode,
