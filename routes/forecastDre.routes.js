@@ -42,6 +42,48 @@ const ehClienteFranquia = (nome) => {
 // Operação do drill de expedição que NÃO é showroom (é o Bazar, contado à parte)
 const OP_BAZAR_EXPEDICAO = 887;
 
+// CREDEV (Niziany, 28/10/2026): vem do Contas a Receber — faturas com forma de
+// pagamento CREDEV (tp_documento 20), por data de emissão, só das FILIAIS
+// (empresas cd < 5999 e fora de 98/980), situação NORMAIS. Soma vl_fatura.
+const TP_DOCUMENTO_CREDEV = '20';
+const FRANQUIA_CODES = ['98', '980'];
+
+let _filiaisCache = null;
+async function getFiliais(base) {
+  if (_filiaisCache) return _filiaisCache;
+  const r = await axios.get(`${base}/api/totvs/branches`, { timeout: 120000 });
+  const lista = r.data?.data?.data || r.data?.data || [];
+  _filiaisCache = lista
+    .filter((e) => {
+      const c = parseInt(e.cd_empresa, 10);
+      return c < 5999 && !FRANQUIA_CODES.includes(String(e.cd_empresa));
+    })
+    .map((e) => e.cd_empresa);
+  return _filiaisCache;
+}
+
+async function calcularCredev(base, mes) {
+  const datemin = `${mes}-01`;
+  const datemax = ultimoDia(mes);
+  const filiais = await getFiliais(base);
+  const params = new URLSearchParams({
+    dt_inicio: datemin,
+    dt_fim: datemax,
+    modo: 'emissao',
+    tp_documento: TP_DOCUMENTO_CREDEV,
+    situacao: '1',
+    branches: filiais.join(','),
+  });
+  const r = await axios.get(
+    `${base}/api/totvs/accounts-receivable/filter?${params.toString()}`,
+    { timeout: 300000 },
+  );
+  const items = r.data?.data?.items || r.data?.items || [];
+  const total = items.reduce((a, x) => a + (Number(x.vl_fatura) || 0), 0);
+  // No DRE o CREDEV é uma redução → valor negativo.
+  return -Math.round(total * 100) / 100;
+}
+
 const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 const somaSemanas = (semanas) =>
   Object.values(semanas || {}).reduce((a, b) => a + (Number(b) || 0), 0);
@@ -92,6 +134,14 @@ async function calcularMes(mes) {
   const franquia = franquiasBase + showroomFranquia;
   const multimarcas = multimarcasBase + showroomMultimarcas;
 
+  // CREDEV do Contas a Receber (não deixa a tela inteira cair se falhar)
+  let credev = null;
+  try {
+    credev = await calcularCredev(base, mes);
+  } catch (e) {
+    console.warn(`[forecast-dre credev ${mes}] ${e.message}`);
+  }
+
   return {
     mes,
     varejo: r2(varejo),
@@ -99,6 +149,7 @@ async function calcularMes(mes) {
     franquia: r2(franquia),
     revenda: r2(revenda),
     bazar: r2(bazar),
+    credev,
     detalhe: {
       franquias_base: r2(franquiasBase),
       multimarcas_base: r2(multimarcasBase),
