@@ -131,7 +131,9 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
 
     usados.add(top.l.id);
     const conta = contaById.get(top.l.conta_id);
-    const banco = t.banco_pagamento || labelBanco(conta);
+    // banco = onde o dinheiro REALMENTE saiu (conta do extrato), não o que o
+    // aprovador tinha planejado — o pedido é marcar o banco pago (Yago, 28/10).
+    const banco = labelBanco(conta);
     const item = {
       id: t.id,
       fornecedor: t.nm_fornecedor,
