@@ -63,6 +63,36 @@ async function getFiliais(base) {
   return _filiaisCache;
 }
 
+// CREDEV por canal — só para visualização (Niziany, 28/10/2026): vem do mesmo
+// caminho do New Forecast (faturamento-por-segmento → credev_por_segmento),
+// mapeado para os canais da DRE. NÃO entra em cálculo nenhum.
+async function calcularCredevPorCanal(base, mes) {
+  const datemin = `${mes}-01`;
+  const datemax = ultimoDia(mes);
+  let seg = {};
+  try {
+    const r = await axios.post(
+      `${base}/api/crm/faturamento-por-segmento`,
+      { datemin, datemax },
+      { timeout: 290000 },
+    );
+    seg = (r.data?.data || r.data)?.credev_por_segmento || {};
+  } catch (e) {
+    console.warn(`[forecast-dre credev-canal ${mes}] ${e.message}`);
+    return null;
+  }
+  const v = (k) => Number(seg[k]) || 0;
+  // Negativo (é redução). Mesma consolidação de canais da receita.
+  const neg = (x) => (x ? -Math.round(x * 100) / 100 : 0);
+  return {
+    varejo: neg(v('varejo')),
+    multimarcas: neg(v('multimarcas') + v('inbound_david') + v('inbound_rafael')),
+    franquia: neg(v('franquia') + v('showroom') + v('novidadesfranquia')),
+    revenda: neg(v('revenda') + v('business') + v('ricardoeletro')),
+    bazar: neg(v('bazar')),
+  };
+}
+
 async function calcularCredev(base, mes) {
   const datemin = `${mes}-01`;
   const datemax = ultimoDia(mes);
@@ -143,6 +173,9 @@ async function calcularMes(mes) {
     console.warn(`[forecast-dre credev ${mes}] ${e.message}`);
   }
 
+  // CREDEV por canal (só visualização, não entra em cálculo)
+  const credevCanais = await calcularCredevPorCanal(base, mes);
+
   const dados = {
     mes,
     varejo: r2(varejo),
@@ -151,6 +184,7 @@ async function calcularMes(mes) {
     revenda: r2(revenda),
     bazar: r2(bazar),
     credev,
+    credev_canais: credevCanais,
     detalhe: {
       franquias_base: r2(franquiasBase),
       multimarcas_base: r2(multimarcasBase),
