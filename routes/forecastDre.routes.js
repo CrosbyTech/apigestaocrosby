@@ -344,14 +344,17 @@ async function calcularPessoalFixo(mes) {
     let maternidade = 0;
     for (const l of linhas) {
       for (const e of l.eventos || []) {
-        const tipo = e.tipo === 'P' ? 'provento' : 'desconto';
+        const prov = e.tipo === 'P';
+        const tipo = prov ? 'provento' : 'desconto';
         const v = Number(e.valor) || 0;
         const desc = semAcentoUp(e.desc) || '(sem descrição)';
+        // Entra na DRE: só provento que não seja salário maternidade.
+        const entra = prov && !ehProventoForaDre(e.desc);
         const k = tipo + '|' + desc;
-        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0 });
+        const a = (agg[k] = agg[k] || { desc, tipo, qtd: 0, valor: 0, entra });
         a.qtd += 1;
         a.valor += v;
-        if (e.tipo === 'P') {
+        if (prov) {
           if (ehProventoForaDre(e.desc)) maternidade += v;
           else totalProventos += v;
         }
@@ -370,6 +373,7 @@ async function calcularPessoalFixo(mes) {
       qtd: null,
       valor: prolabore,
       editavel: true,
+      entra: true,
     });
 
     const totalDespesa = totalProventos + prolabore;
