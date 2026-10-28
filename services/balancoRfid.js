@@ -8,6 +8,7 @@
 //     TOTVS (milhares de etiquetas viram algumas centenas de consultas).
 // ============================================================================
 import axios from 'axios';
+import { createClient } from '@supabase/supabase-js';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
@@ -21,6 +22,11 @@ export class BalancoError extends Error {
 }
 
 const TABELA = 'balanco_rfid_arquivos';
+// Empresas cujo estoque é dividido por setor: o app pede o setor ao finalizar
+export const EMPRESAS_COM_SETOR = [99];
+// Depois disso o CSV só sai com senha de gerente/admin/owner
+export const JANELA_DOWNLOAD_HORAS = 48;
+const ROLES_AUTORIZADORES = ['manager', 'admin', 'owner'];
 const EPC_RE = /^[0-9A-F]{8,64}$/;
 const MAX_EPCS = 200000;
 
@@ -68,11 +74,11 @@ export function decodificarSgtin96(epc) {
 }
 
 // ─── Salvar ──────────────────────────────────────────────────────────────────
-function nomeArquivo(empresa, empresaNome, quando) {
+function nomeArquivo(empresa, empresaNome, quando, setor) {
   const d = new Date(quando);
   const data = d.toLocaleDateString('pt-BR', { timeZone: 'America/Recife' });
   const hora = d.toLocaleTimeString('pt-BR', { timeZone: 'America/Recife', hour: '2-digit', minute: '2-digit' });
-  return `ARQUIVO BALANÇO LOJA ${empresa}${empresaNome ? ` - ${String(empresaNome).toUpperCase()}` : ''} ${data} ${hora}`;
+  return `ARQUIVO BALANÇO LOJA ${empresa}${empresaNome ? ` - ${String(empresaNome).toUpperCase()}` : ''}${setor ? ` - SETOR ${setor}` : ''} ${data} ${hora}`;
 }
 
 export async function salvarArquivo(b) {
@@ -82,6 +88,11 @@ export async function salvarArquivo(b) {
   if (b.epcs.length > MAX_EPCS) throw new BalancoError(`Limite de ${MAX_EPCS} etiquetas por arquivo`, 'TOO_MANY');
   const epcs = [...new Set(b.epcs.map((e) => String(e || '').trim().toUpperCase()).filter((e) => EPC_RE.test(e)))];
   if (!epcs.length) throw new BalancoError('Nenhuma etiqueta lida — nada para salvar', 'EMPTY');
+
+  const setor = b.setor ? String(b.setor).trim().toUpperCase().replace(/\s+/g, ' ').slice(0, 60) : null;
+  if (EMPRESAS_COM_SETOR.includes(empresa) && !setor) {
+    throw new BalancoError(`Na empresa ${empresa} informe o SETOR do estoque antes de finalizar`, 'SETOR_OBRIGATORIO');
+  }
 
   const clientId = b.clientId ? String(b.clientId).slice(0, 80) : null;
   if (clientId) {
@@ -94,8 +105,9 @@ export async function salvarArquivo(b) {
   const iniciadoEm = b.iniciadoEm ? new Date(b.iniciadoEm) : null;
   const registro = {
     client_id: clientId,
-    nome: nomeArquivo(empresa, b.empresaNome, finalizadoEm),
+    nome: nomeArquivo(empresa, b.empresaNome, finalizadoEm, setor),
     empresa,
+    setor,
     empresa_nome: b.empresaNome || null,
     usuario_id: b.usuario?.id || null,
     usuario_nome: b.usuario?.nome || null,
@@ -175,6 +187,52 @@ export async function gerarResumo(id, { forcar = false } = {}) {
   const resumoEm = new Date().toISOString();
   await supabase.from(TABELA).update({ resumo_produtos: itens, resumo_em: resumoEm }).eq('id', id);
   return { itens, resumoEm, cache: false };
+}
+
+// ─── Download: janela de 48 h, histórico e liberação por gerente ─────────────
+export function prazoDownload(criadoEm) {
+  return new Date(new Date(criadoEm).getTime() + JANELA_DOWNLOAD_HORAS * 3600 * 1000);
+}
+
+export function downloadLiberado(criadoEm) {
+  return Date.now() <= prazoDownload(criadoEm).getTime();
+}
+
+export async function registrarDownload(id, { tipo, por = null, liberadoPor = null }) {
+  const { data } = await supabase.from(TABELA).select('downloads').eq('id', id).maybeSingle();
+  const lista = Array.isArray(data?.downloads) ? data.downloads : [];
+  lista.push({ em: new Date().toISOString(), tipo, por: por ? String(por).slice(0, 120) : null, liberadoPor });
+  await supabase.from(TABELA).update({ downloads: lista.slice(-200) }).eq('id', id);
+}
+
+// Confere e-mail + senha de um gerente/admin/owner do HeadCoach (Supabase Auth)
+// num cliente isolado, sem guardar sessão. Limita tentativas por e-mail.
+const tentativas = new Map(); // email -> [timestamps]
+export async function verificarAutorizador(email, senha) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e || !senha) throw new BalancoError('Informe o e-mail e a senha do gerente, admin ou owner', 'CREDENCIAIS_AUSENTES');
+  const agora = Date.now();
+  const recentes = (tentativas.get(e) || []).filter((t) => agora - t < 10 * 60 * 1000);
+  if (recentes.length >= 5) throw new BalancoError('Muitas tentativas. Aguarde 10 minutos.', 'MUITAS_TENTATIVAS', 429);
+  recentes.push(agora);
+  tentativas.set(e, recentes);
+
+  const cli = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+  const { data, error } = await cli.auth.signInWithPassword({ email: e, password: String(senha) });
+  if (error || !data?.user) throw new BalancoError('E-mail ou senha inválidos', 'CREDENCIAIS_INVALIDAS', 401);
+  try {
+    await cli.auth.signOut({ scope: 'local' });
+  } catch {
+    /* sessão só em memória */
+  }
+  const role = data.user.user_metadata?.role;
+  if (!ROLES_AUTORIZADORES.includes(role)) {
+    throw new BalancoError('Esse usuário não é gerente, admin ou owner', 'SEM_PERMISSAO', 403);
+  }
+  tentativas.delete(e);
+  return { email: e, nome: data.user.user_metadata?.name || e, role };
 }
 
 // ─── CSV ─────────────────────────────────────────────────────────────────────
