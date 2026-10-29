@@ -307,6 +307,81 @@ const ehProventoVariavel = (desc) => /COMISSAO/.test(semAcentoUp(desc));
 const ehDiretor = (l) =>
   /diretor/i.test(l.funcao || '') || (l.eventos || []).some((e) => /pro-?labore/.test(nz(e.desc)));
 
+const num = (v) => {
+  const n = Number(v);
+  return isFinite(n) ? n : 0;
+};
+// Classificação de rubricas pra "média" da Previsão de 13º/Férias — mesma régua
+// do dp-provisao.js do Dryland (Anny 13/10). A ordem importa: primeiro o que NÃO
+// entra (senão "Gratificação férias" cairia em média). Remuneração do 13º =
+// salário contratual + média (6 meses) das verbas variáveis.
+const P13_NAO_ENTRA = [
+  /ferias/, /abono/, /maternidade/, /familia/, /ajuda de custo/, /atestado/,
+  /dissidio/, /provisao/, /bolsa/, /pro-?labore/, /salario base/,
+  /verba de representa/, /bonifica/,
+];
+const P13_MEDIA = [
+  /comiss/, /rsr s\/(comiss|remunera)/, /gratifica/, /quebra de caixa/,
+  /horas? extras?/, /banco de horas/, /dsr s\/ ?(horas|comiss|remunera|variav)/,
+];
+const classeMedia = (desc) => {
+  const d = nz(desc);
+  if (P13_NAO_ENTRA.some((r) => r.test(d))) return 'fora';
+  if (P13_MEDIA.some((r) => r.test(d))) return 'media';
+  return 'fora';
+};
+
+// Provisão de 13º do MÊS (remuneração ÷ 12) por colaborador, agrupável por
+// empresa — réplica do modo "Provisão do mês" da aba Previsão 13º/Férias do
+// Dryland (dp-provisao.js). Lê a folha dos 6 meses até a competência pra tirar
+// a média das verbas variáveis. Diretores (pró-labore) ficam fora (sem 13º CLT).
+async function calcularProvisao13(mes, token) {
+  const base = await drylandRpcDp('dp_folha_dados', { p_token: token });
+  const todas = (base?.competencias || []).map((c) => String(c).slice(0, 10));
+  const seis = todas.filter((c) => c.slice(0, 7) <= mes).sort().slice(-6);
+  if (!seis.length) return { total: 0, funcionarios: [] };
+  const meses = {};
+  for (const c of seis) {
+    const r = await drylandRpcDp('dp_folha_dados', { p_token: token, p_competencia: c });
+    meses[c] = (r && r.linhas) || [];
+  }
+  const chave = (f) => `${f.cnpj || f.empresa || ''}|${f.chapa || nz(f.nome)}`;
+  // Média das verbas variáveis por pessoa (dividida pelos meses em que aparece).
+  const varPorPessoa = {};
+  seis.forEach((c) =>
+    (meses[c] || [])
+      .filter((l) => !l._resumo)
+      .forEach((f) => {
+        const v = (varPorPessoa[chave(f)] = varPorPessoa[chave(f)] || { soma: 0, meses: 0 });
+        v.meses++;
+        (f.eventos || [])
+          .filter((e) => e.tipo === 'P' && classeMedia(e.desc) === 'media')
+          .forEach((e) => {
+            v.soma += num(e.valor);
+          });
+      }),
+  );
+  const compAlvo = seis.find((c) => c.slice(0, 7) === mes) || seis[seis.length - 1];
+  const funcionarios = (meses[compAlvo] || [])
+    .filter((l) => !l._resumo && !ehDiretor(l))
+    .map((f) => {
+      const v = varPorPessoa[chave(f)] || { soma: 0, meses: 1 };
+      const rem = num(f.salario) + (v.meses ? v.soma / v.meses : 0);
+      const empresa = f.empresa || '(empresa)';
+      return {
+        nome: f.nome || '(sem nome)',
+        funcao: f.funcao || 'Provisão 13º',
+        empresa,
+        loja: empresa, // drill rubrica → empresa → colaborador
+        valor: Math.round((rem / 12) * 100) / 100,
+      };
+    })
+    .filter((f) => f.valor > 0)
+    .sort((a, b) => b.valor - a.valor);
+  const total = Math.round(funcionarios.reduce((a, f) => a + f.valor, 0) * 100) / 100;
+  return { total, funcionarios };
+}
+
 const PROLABORE_PADRAO = 80000;
 async function lerProlabore(mes) {
   try {
@@ -501,6 +576,31 @@ async function calcularPessoalFixo(mes) {
     }
     // Rescisões entram no Pessoal Fixo (despesa).
     totalFixo += totalRescisoes;
+
+    // ── Provisão de 13º do mês (Niziany 29/10): mais uma rubrica no Pessoal
+    // Fixo, abrindo empresa → colaborador, vinda da aba Previsão 13º/Férias do
+    // Dryland (remuneração ÷ 12, médias de 6 meses). Entra no totalFixo.
+    let totalP13 = 0;
+    try {
+      const p13 = await calcularProvisao13(mes, lg.token);
+      if (p13.total > 0) {
+        totalP13 = p13.total;
+        rubricas.push({
+          desc: 'PROVISÃO 13º',
+          tipo: 'provento',
+          qtd: p13.funcionarios.length,
+          valor: p13.total,
+          entra: true,
+          grupo: 'fixo',
+          encargo: true,
+          provisao13: true,
+          funcionarios: p13.funcionarios,
+        });
+      }
+    } catch (e) {
+      console.warn(`[forecast-dre provisao13 ${mes}] ${e.message}`);
+    }
+    totalFixo += totalP13;
 
     const dados = {
       mes,
