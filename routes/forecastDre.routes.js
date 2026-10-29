@@ -338,6 +338,16 @@ async function calcularPessoalFixo(mes) {
     if (!r || r.ok === false) {
       throw Object.assign(new Error(`folha ${mes}: ${(r && r.erro) || 'sem resposta'}`), { status: 502 });
     }
+    // Resumos por CNPJ (trazem os encargos patronais: INSS empresa/SAT/
+    // terceiros e FGTS).
+    const resumos = (r.linhas || []).filter((l) => l._resumo);
+    const _debugEncargos = {
+      campos: Object.keys(resumos[0] || {}),
+      inss_empresa: resumos.reduce((a, x) => a + (Number(x.inss_empresa) || 0), 0),
+      inss_sat: resumos.reduce((a, x) => a + (Number(x.inss_sat) || 0), 0),
+      inss_terceiro: resumos.reduce((a, x) => a + (Number(x.inss_terceiro) || 0), 0),
+      fgts: resumos.reduce((a, x) => a + (Number(x.fgts) || 0), 0),
+    };
     // Empregados (exclui linhas de resumo por CNPJ e diretores/pró-labore —
     // mesma régua do Dryland, pra bater com a tela de rubricas da folha).
     const linhas = (r.linhas || []).filter((l) => !l._resumo && !ehDiretor(l));
@@ -411,6 +421,7 @@ async function calcularPessoalFixo(mes) {
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
       rubricas, // pró-labore + proventos + descontos, com grupo fixo/variavel
+      _debug_encargos: _debugEncargos,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
