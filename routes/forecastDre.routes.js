@@ -437,6 +437,55 @@ async function calcularProvisao13(mes, token) {
   };
 }
 
+// Vale Transporte e Vale Alimentação (Niziany 29/10): custo da empresa pago no
+// mês, pelo Contas a Pagar do HeadCoach (TOTVS), por natureza de despesa.
+// 3036 = VALE TRANSPORTE · 3003 = VALE ALIMENTACAO E REFEICAO. No VT, abate o
+// que é descontado do funcionário (rubrica "Desc. Vale Transporte" da folha).
+// Essas duas linhas NÃO abrem (só nome e valor) — por isso vão sem funcionarios.
+const EXP_VALE_TRANSPORTE = '3036';
+const EXP_VALE_ALIMENTACAO = '3003';
+async function calcularVales(mes, base, linhasFolha) {
+  const filiais = await getFiliais(base);
+  const resp = await axios.post(
+    `${base}/api/totvs/accounts-payable/search`,
+    {
+      dt_inicio: `${mes}-01`,
+      dt_fim: ultimoDia(mes),
+      modo: 'liquidacao', // pago (liquidado) no mês
+      situacao: 'TODAS',
+      branches: filiais,
+    },
+    { timeout: 480000 },
+  );
+  const items = resp.data?.data?.data || [];
+  const somaExp = (cod) => {
+    let t = 0;
+    for (const it of items) {
+      if ((it.despesas || []).some((e) => String(e.expenseCode) === cod)) {
+        t += Number(it.vl_pago) || 0;
+      }
+    }
+    return Math.round(t * 100) / 100;
+  };
+  const vtPago = somaExp(EXP_VALE_TRANSPORTE);
+  const vaPago = somaExp(EXP_VALE_ALIMENTACAO);
+  // Desconto de VT do funcionário (folha) — abate do custo da empresa.
+  let vtDesc = 0;
+  for (const l of linhasFolha || []) {
+    for (const e of l.eventos || []) {
+      if (e.tipo === 'D' && /vale\s*transporte/.test(nz(e.desc))) vtDesc += num(e.valor);
+    }
+  }
+  vtDesc = Math.round(vtDesc * 100) / 100;
+  return {
+    valeTransporte: Math.round((vtPago - vtDesc) * 100) / 100,
+    valeAlimentacao: vaPago,
+    vtPago,
+    vtDesc,
+    vaPago,
+  };
+}
+
 const PROLABORE_PADRAO = 80000;
 async function lerProlabore(mes) {
   try {
@@ -464,6 +513,7 @@ async function calcularPessoalFixo(mes) {
   }
   try {
     const comp = `${mes}-01`; // competência da folha é 'AAAA-MM-01'
+    const base = `http://localhost:${process.env.PORT || 4100}`;
     const r = await drylandRpcDp('dp_folha_dados', { p_token: lg.token, p_competencia: comp });
     if (!r || r.ok === false) {
       throw Object.assign(new Error(`folha ${mes}: ${(r && r.erro) || 'sem resposta'}`), { status: 502 });
@@ -671,6 +721,41 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre provisao13 ${mes}] ${e.message}`);
     }
     totalFixo += totalP13;
+
+    // ── Vale Transporte + Vale Alimentação (Niziany 29/10): custo da empresa
+    // pago no mês (Contas a Pagar do HeadCoach). Duas linhas SEM drill (só nome
+    // e valor → sem campo funcionarios). VT = pago − descontado do funcionário.
+    let totalVales = 0;
+    try {
+      const vales = await calcularVales(mes, base, linhas);
+      if (vales.valeTransporte > 0) {
+        totalVales += vales.valeTransporte;
+        rubricas.push({
+          desc: 'VALE TRANSPORTE',
+          tipo: 'provento',
+          qtd: null,
+          valor: vales.valeTransporte,
+          entra: true,
+          grupo: 'fixo',
+          encargo: true,
+        });
+      }
+      if (vales.valeAlimentacao > 0) {
+        totalVales += vales.valeAlimentacao;
+        rubricas.push({
+          desc: 'VALE ALIMENTAÇÃO',
+          tipo: 'provento',
+          qtd: null,
+          valor: vales.valeAlimentacao,
+          entra: true,
+          grupo: 'fixo',
+          encargo: true,
+        });
+      }
+    } catch (e) {
+      console.warn(`[forecast-dre vales ${mes}] ${e.message}`);
+    }
+    totalFixo += totalVales;
 
     const dados = {
       mes,
