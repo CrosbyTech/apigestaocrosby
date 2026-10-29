@@ -574,6 +574,12 @@ async function calcularMarketing(mes, base) {
   let total = 0;
   for (const it of items) {
     if (Number(it.cd_ccusto) === 999) continue;
+    const forn =
+      it.nm_fornecedor ||
+      it.nm_razaosocial_fornecedor ||
+      `Fornecedor ${it.cd_fornecedor || '?'}`;
+    // Niziany 29/10: tirar os lançamentos do Facebook do Marketing.
+    if (/FACEBOOK/.test(semAcentoUp(forn))) continue;
     const vlPago = Number(it.vl_pago) || 0;
     const pago =
       it.tp_estagio === 'Liquid' || it.tp_estagio === 'Liquidado' || !!it.dt_liq || vlPago > 0;
@@ -582,10 +588,7 @@ async function calcularMarketing(mes, base) {
     if (!val) continue;
     total += val;
     lanc.push({
-      forn:
-        it.nm_fornecedor ||
-        it.nm_razaosocial_fornecedor ||
-        `Fornecedor ${it.cd_fornecedor || '?'}`,
+      forn,
       venc: brData(it.dt_vencimento),
       valor: Math.round(val * 100) / 100,
     });
