@@ -338,16 +338,12 @@ async function calcularPessoalFixo(mes) {
     if (!r || r.ok === false) {
       throw Object.assign(new Error(`folha ${mes}: ${(r && r.erro) || 'sem resposta'}`), { status: 502 });
     }
-    // Resumos por CNPJ (trazem os encargos patronais: INSS empresa/SAT/
-    // terceiros e FGTS).
+    // Resumos por CNPJ: trazem os encargos patronais. INSS patronal =
+    // inss_empresa (20%) + inss_sat (RAT/SAT) + inss_terceiro (sistema S);
+    // FGTS é separado. (Niziany 29/10: entram no Pessoal Fixo.)
     const resumos = (r.linhas || []).filter((l) => l._resumo);
-    const _debugEncargos = {
-      campos: Object.keys(resumos[0] || {}),
-      inss_empresa: resumos.reduce((a, x) => a + (Number(x.inss_empresa) || 0), 0),
-      inss_sat: resumos.reduce((a, x) => a + (Number(x.inss_sat) || 0), 0),
-      inss_terceiro: resumos.reduce((a, x) => a + (Number(x.inss_terceiro) || 0), 0),
-      fgts: resumos.reduce((a, x) => a + (Number(x.fgts) || 0), 0),
-    };
+    const inssDoResumo = (rz) =>
+      (Number(rz.inss_empresa) || 0) + (Number(rz.inss_sat) || 0) + (Number(rz.inss_terceiro) || 0);
     // Empregados (exclui linhas de resumo por CNPJ e diretores/pró-labore —
     // mesma régua do Dryland, pra bater com a tela de rubricas da folha).
     const linhas = (r.linhas || []).filter((l) => !l._resumo && !ehDiretor(l));
@@ -410,6 +406,48 @@ async function calcularPessoalFixo(mes) {
       grupo: 'fixo',
     });
 
+    // Encargos patronais (INSS patronal + FGTS) — entram no Pessoal Fixo.
+    // Breakdown por empresa (razão), que é o que o resumo traz.
+    const encargoFunc = (campoFn) =>
+      resumos
+        .map((rz) => ({
+          nome: rz.empresa || '(empresa)',
+          loja: rz.empresa || '(empresa)',
+          funcao: '',
+          empresa: rz.empresa || '',
+          valor: Math.round((campoFn(rz) || 0) * 100) / 100,
+        }))
+        .filter((f) => f.valor !== 0)
+        .sort((a, b) => b.valor - a.valor);
+    const inssPatronal = resumos.reduce((a, rz) => a + inssDoResumo(rz), 0);
+    const fgtsTotal = resumos.reduce((a, rz) => a + (Number(rz.fgts) || 0), 0);
+    if (inssPatronal > 0) {
+      rubricas.push({
+        desc: 'INSS PATRONAL (EMPRESA)',
+        tipo: 'provento',
+        qtd: null,
+        valor: Math.round(inssPatronal * 100) / 100,
+        entra: true,
+        grupo: 'fixo',
+        encargo: true,
+        funcionarios: encargoFunc(inssDoResumo),
+      });
+    }
+    if (fgtsTotal > 0) {
+      rubricas.push({
+        desc: 'FGTS',
+        tipo: 'provento',
+        qtd: null,
+        valor: Math.round(fgtsTotal * 100) / 100,
+        entra: true,
+        grupo: 'fixo',
+        encargo: true,
+        funcionarios: encargoFunc((rz) => Number(rz.fgts) || 0),
+      });
+    }
+    // Encargos entram no Pessoal Fixo (despesa).
+    totalFixo += inssPatronal + fgtsTotal;
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -420,8 +458,7 @@ async function calcularPessoalFixo(mes) {
       prolabore: Math.round(prolabore * 100) / 100,
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
-      rubricas, // pró-labore + proventos + descontos, com grupo fixo/variavel
-      _debug_encargos: _debugEncargos,
+      rubricas, // pró-labore + proventos + descontos + encargos, grupo fixo/variavel
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
