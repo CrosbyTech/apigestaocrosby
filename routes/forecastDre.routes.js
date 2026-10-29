@@ -400,7 +400,7 @@ async function calcularPessoalFixo(mes) {
       grupo: 'fixo',
     });
 
-    return {
+    const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
       pessoal_fixo: -Math.round((totalFixo + prolabore) * 100) / 100,
@@ -414,6 +414,17 @@ async function calcularPessoalFixo(mes) {
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
+    // Persiste pra servir instantâneo mesmo com o backend recém-reiniciado
+    // (a folha do Dryland é lenta num cold start) — evita a tela cair pro
+    // número antigo da planilha.
+    try {
+      await supabase
+        .from('forecast_dre_pf_cache')
+        .upsert({ mes, dados, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
+    } catch (e) {
+      console.warn(`[forecast-dre pf cache-save ${mes}] ${e.message}`);
+    }
+    return dados;
   } finally {
     drylandRpcDp('dp_logout', { p_token: lg.token }).catch(() => {});
   }
@@ -431,18 +442,42 @@ router.get(
     }
     const refresh = ['1', 'true'].includes(String(req.query.refresh || ''));
     const agora = Date.now();
+    const fechado = ultimoDia(mes) < hojeIso();
+    const ttl = (fechado ? 24 * 60 : 30) * 60 * 1000;
+
     const hit = CACHE_PF.get(mes);
     if (!refresh && hit && hit.expira > agora) {
       return successResponse(res, { ...hit.dados, cache: true }, 'OK (cache)');
     }
+
+    // Cache em memória vazio (backend recém-reiniciado): serve o valor salvo no
+    // Supabase na hora e recalcula em background — a folha do Dryland é lenta.
+    if (!refresh) {
+      try {
+        const { data } = await supabase
+          .from('forecast_dre_pf_cache')
+          .select('dados')
+          .eq('mes', mes)
+          .maybeSingle();
+        if (data && data.dados) {
+          CACHE_PF.set(mes, { dados: data.dados, expira: agora + ttl });
+          calcularPessoalFixo(mes)
+            .then((d) => CACHE_PF.set(mes, { dados: d, expira: Date.now() + ttl }))
+            .catch((e) => console.warn(`[forecast-dre pf bg ${mes}] ${e.message}`));
+          return successResponse(res, { ...data.dados, cache: 'supabase' }, 'OK (cache salvo)');
+        }
+      } catch (e) {
+        console.warn(`[forecast-dre pf cache-read ${mes}] ${e.message}`);
+      }
+    }
+
     let dados;
     try {
       dados = await calcularPessoalFixo(mes);
     } catch (e) {
       return errorResponse(res, e.message, e.status || 502);
     }
-    const fechado = ultimoDia(mes) < hojeIso();
-    CACHE_PF.set(mes, { dados, expira: agora + (fechado ? 24 * 60 : 30) * 60 * 1000 });
+    CACHE_PF.set(mes, { dados, expira: Date.now() + ttl });
     return successResponse(res, dados, 'OK');
   }),
 );
@@ -474,6 +509,8 @@ router.post(
       .upsert({ mes, valor, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
     if (error) return errorResponse(res, error.message, 500, 'DB');
     CACHE_PF.delete(mes); // força recalcular o Pessoal Fixo com o novo pró-labore
+    // recalcula e regrava o cache persistido com o novo pró-labore (background)
+    calcularPessoalFixo(mes).catch((e) => console.warn(`[forecast-dre pf recalc ${mes}] ${e.message}`));
     return successResponse(res, { mes, valor }, 'OK');
   }),
 );
