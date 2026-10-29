@@ -538,6 +538,62 @@ async function calcularOcupacao(mes, base) {
   return { total: Math.round(total * 100) / 100, filiais };
 }
 
+// Despesa de MARKETING (Niziany 29/10): lançamentos de Propaganda e Anúncios
+// (natureza 6031) do Contas a Pagar do mês. Essa natureza foi TIRADA da DRE
+// Analítica (despesas gerais) e vai pra linha MARKETING. Abre por lançamento.
+// Mesma régua da DRE Analítica: modo emissao, situacao N, EMPRESAS_DRE,
+// cd_ccusto≠999, e (set+) título pago só entra com dt_liq e vl_pago>0.
+const MARKETING_EXP = 6031;
+const MARKETING_FILIAIS = [
+  1, 2, 5, 6, 7, 11, 12, 13, 14, 15, 16, 31, 55, 65, 75, 85, 90, 91, 92, 93, 94,
+  95, 96, 97, 99, 100, 101, 111, 200, 311, 500, 550, 600, 650, 700, 750, 850,
+  890, 910, 920, 930, 940, 950, 960, 970, 990,
+];
+async function calcularMarketing(mes, base) {
+  const resp = await axios.post(
+    `${base}/api/totvs/accounts-payable/search`,
+    {
+      dt_inicio: `${mes}-01`,
+      dt_fim: ultimoDia(mes),
+      modo: 'emissao',
+      situacao: 'N',
+      previsao: 'TODOS',
+      filtroPagamento: 'TODOS',
+      expenseCodeList: [MARKETING_EXP],
+      branches: MARKETING_FILIAIS,
+    },
+    { timeout: 300000 },
+  );
+  const items = resp.data?.data?.data || [];
+  const brData = (iso) => {
+    const s = String(iso || '').slice(0, 10);
+    const p = s.split('-');
+    return p.length === 3 ? `${p[2]}/${p[1]}/${p[0]}` : '';
+  };
+  const lanc = [];
+  let total = 0;
+  for (const it of items) {
+    if (Number(it.cd_ccusto) === 999) continue;
+    const vlPago = Number(it.vl_pago) || 0;
+    const pago =
+      it.tp_estagio === 'Liquid' || it.tp_estagio === 'Liquidado' || !!it.dt_liq || vlPago > 0;
+    if (!(!pago || (it.dt_liq && vlPago > 0))) continue; // regra set+
+    const val = vlPago > 0 ? vlPago : Number(it.vl_duplicata) || 0;
+    if (!val) continue;
+    total += val;
+    lanc.push({
+      forn:
+        it.nm_fornecedor ||
+        it.nm_razaosocial_fornecedor ||
+        `Fornecedor ${it.cd_fornecedor || '?'}`,
+      venc: brData(it.dt_vencimento),
+      valor: Math.round(val * 100) / 100,
+    });
+  }
+  lanc.sort((a, b) => b.valor - a.valor);
+  return { total: Math.round(total * 100) / 100, lanc };
+}
+
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
@@ -853,6 +909,18 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre ocupacao ${mes}] ${e.message}`);
     }
 
+    // Despesa de MARKETING (Propaganda e Anúncios do Contas a Pagar) — linha
+    // própria da DRE, NÃO entra no totalFixo. Abre por lançamento.
+    let mktTotal = 0;
+    let mktLanc = [];
+    try {
+      const mk = await calcularMarketing(mes, base);
+      mktTotal = mk.total;
+      mktLanc = mk.lanc;
+    } catch (e) {
+      console.warn(`[forecast-dre marketing ${mes}] ${e.message}`);
+    }
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -870,6 +938,9 @@ async function calcularPessoalFixo(mes) {
       // Linha OCUPAÇÃO (aluguel das lojas, só aluguel): total e por filial.
       ocupacao_total: -Math.round(ocupTotal * 100) / 100,
       ocupacao_filiais: ocupFiliais,
+      // Linha MARKETING (Propaganda e Anúncios): total e lançamentos.
+      marketing_total: -Math.round(mktTotal * 100) / 100,
+      marketing_lanc: mktLanc,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
