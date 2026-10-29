@@ -448,6 +448,22 @@ async function calcularPessoalFixo(mes) {
     // Encargos entram no Pessoal Fixo (despesa).
     totalFixo += inssPatronal + fgtsTotal;
 
+    // ── Rescisões do mês (debug: ver estrutura) ──
+    let _debugRescisoes = null;
+    try {
+      const rr = await drylandRpcDp('dp_rescisoes', { p_token: lg.token, p_competencia: comp });
+      const lista = Array.isArray(rr) ? rr : rr?.rescisoes || rr?.linhas || rr?.dados || [];
+      _debugRescisoes = {
+        ok: rr?.ok,
+        topKeys: rr && !Array.isArray(rr) ? Object.keys(rr) : 'array',
+        count: lista.length,
+        itemKeys: Object.keys(lista[0] || {}),
+        sample: lista.slice(0, 2),
+      };
+    } catch (e) {
+      _debugRescisoes = { erro: e.message };
+    }
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -459,6 +475,7 @@ async function calcularPessoalFixo(mes) {
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
       rubricas, // pró-labore + proventos + descontos + encargos, grupo fixo/variavel
+      _debug_rescisoes: _debugRescisoes,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
