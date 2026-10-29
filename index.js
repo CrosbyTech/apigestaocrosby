@@ -85,6 +85,7 @@ import pdvCrosbyRoutes from './routes/pdvCrosby.routes.js';
 import bluecredInadimplenciaRouter from './totvsrouter/bluecredInadimplencia.js';
 import remessaBoletosRouter from './totvsrouter/remessaBoletos.js';
 import mixCanaisRouter from './totvsrouter/mixCanais.js';
+import promocaoValoresRouter from './totvsrouter/promocaoValores.js';
 import forecastDreRouter from './routes/forecastDre.routes.js';
 import portalRfidRoutes from './routes/portalRfid.routes.js';
 import { iniciarJobFaturamentoDiario } from './jobs/faturamento-diario.job.js';
@@ -193,6 +194,7 @@ app.use('/api/totvs', pdvRouter); // PDV RFID — produto por código/EPC, condi
 app.use('/api/totvs', bluecredInadimplenciaRouter); // BlueCred — inadimplência (faturas vencidas dos clientes do crediário)
 app.use('/api/totvs', remessaBoletosRouter); // Remessa Boletos (Pagar.me) — faturas a vencer + cadastro do cliente
 app.use('/api/totvs', mixCanaisRouter); // Mix de Canais — participação por canal mês a mês (histórico + New Forecast)
+app.use('/api/totvs', promocaoValoresRouter); // Preço Promocional em lote — SKUs do Excel → promotion-values/update (PRDFM002)
 app.use('/api/forecast-dre', forecastDreRouter); // Forecast DRE — receita bruta por canal do New Forecast (split showroom)
 app.use('/api/portal-rfid', portalRfidRoutes); // Portal RFID Chainway UR4 (bridge TCP)
 
