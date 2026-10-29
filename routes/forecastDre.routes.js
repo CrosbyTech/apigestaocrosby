@@ -486,6 +486,27 @@ async function calcularVales(mes, base, linhasFolha) {
   };
 }
 
+// Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
+// (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
+// "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
+async function calcularPJ(mes, token) {
+  const r = await drylandRpcDp('dp_pj_listar', { p_token: token });
+  const contratos = (r && r.contratos) || [];
+  const nomes = [];
+  let total = 0;
+  for (const c of contratos) {
+    const pago = (c.pagamentos || [])
+      .filter((p) => String(p.competencia || '').slice(0, 7) === mes)
+      .reduce((a, p) => a + (Number(p.valor_pago) || 0), 0);
+    if (pago > 0) {
+      nomes.push({ nome: c.nome || '(sem nome)', valor: Math.round(pago * 100) / 100 });
+      total += pago;
+    }
+  }
+  nomes.sort((a, b) => b.valor - a.valor);
+  return { total: Math.round(total * 100) / 100, nomes };
+}
+
 const PROLABORE_PADRAO = 80000;
 async function lerProlabore(mes) {
   try {
@@ -757,6 +778,17 @@ async function calcularPessoalFixo(mes) {
     }
     totalFixo += totalVales;
 
+    // Despesa de PJ (linha PJ da DRE, separada — NÃO entra no totalFixo).
+    let pjTotal = 0;
+    let pjNomes = [];
+    try {
+      const pj = await calcularPJ(mes, lg.token);
+      pjTotal = pj.total;
+      pjNomes = pj.nomes;
+    } catch (e) {
+      console.warn(`[forecast-dre pj ${mes}] ${e.message}`);
+    }
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -768,6 +800,9 @@ async function calcularPessoalFixo(mes) {
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
       rubricas, // pró-labore + proventos + descontos + encargos + rescisões, grupo fixo/variavel
+      // Linha PJ da DRE (separada do Pessoal Fixo): pago no mês por contratado.
+      pj_total: -Math.round(pjTotal * 100) / 100,
+      pj_nomes: pjNomes,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
