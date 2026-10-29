@@ -331,21 +331,65 @@ const classeMedia = (desc) => {
   return 'fora';
 };
 
-// Provisão de 13º do MÊS (remuneração ÷ 12) por colaborador, agrupável por
-// empresa — réplica do modo "Provisão do mês" da aba Previsão 13º/Férias do
-// Dryland (dp-provisao.js). Lê a folha dos 6 meses até a competência pra tirar
-// a média das verbas variáveis. Diretores (pró-labore) ficam fora (sem 13º CLT).
+// Provisão de 13º do MÊS (remuneração ÷ 12) por colaborador + encargos s/ 13º
+// (INSS + FGTS pela taxa efetiva de cada CNPJ), agrupáveis por empresa —
+// réplica do modo "Provisão do mês" da aba Previsão 13º/Férias do Dryland
+// (dp-provisao.js). Lê a folha dos 6 meses até a competência pra tirar a média
+// das verbas variáveis. Diretores (pró-labore) ficam fora (sem 13º CLT).
 async function calcularProvisao13(mes, token) {
+  const vazio = { total: 0, funcionarios: [], encTotal: 0, encFuncionarios: [] };
   const base = await drylandRpcDp('dp_folha_dados', { p_token: token });
   const todas = (base?.competencias || []).map((c) => String(c).slice(0, 10));
   const seis = todas.filter((c) => c.slice(0, 7) <= mes).sort().slice(-6);
-  if (!seis.length) return { total: 0, funcionarios: [] };
+  if (!seis.length) return vazio;
   const meses = {};
   for (const c of seis) {
     const r = await drylandRpcDp('dp_folha_dados', { p_token: token, p_competencia: c });
     meses[c] = (r && r.linhas) || [];
   }
   const chave = (f) => `${f.cnpj || f.empresa || ''}|${f.chapa || nz(f.nome)}`;
+  const chaveCnpj = (x) => String(x.cnpj || x.empresa || '');
+  const compAlvo = seis.find((c) => c.slice(0, 7) === mes) || seis[seis.length - 1];
+
+  // Taxa efetiva de encargos por CNPJ (INSS e FGTS separados), do TOTAL GERAL
+  // do PDF da folha — igual ao dp-provisao.js. A folha de set/26 às vezes vem
+  // sem o INSS patronal (o campo nem existe no resumo), então, por CNPJ, usa o
+  // mês MAIS RECENTE dos 6 que trouxe INSS; só cai no "só FGTS" se nenhum teve.
+  // O pró-labore dos diretores diluía a taxa → base = só proventos de
+  // empregados, e tira 20% do pró-labore do INSS quando a empresa paga patronal.
+  const taxa = {};
+  const recentes = seis.slice().reverse();
+  const cnpjs = new Set((meses[compAlvo] || []).map(chaveCnpj));
+  cnpjs.forEach((k) => {
+    let escolhido = null;
+    for (const c of recentes) {
+      const rs = (meses[c] || []).find((l) => l._resumo && chaveCnpj(l) === k);
+      if (!rs) continue;
+      if ('inss_empresa' in rs) {
+        escolhido = { c, rs };
+        break;
+      }
+      if (!escolhido) escolhido = { c, rs };
+    }
+    if (!escolhido) return;
+    const { c, rs } = escolhido;
+    const empregados = (meses[c] || []).filter(
+      (l) => !l._resumo && chaveCnpj(l) === k && !ehDiretor(l),
+    );
+    const provEmp = empregados.reduce((a, l) => a + num(l.proventos), 0);
+    const proLabore = Math.max(0, num(rs.proventos) - provEmp);
+    const inss = num(rs.inss_empresa);
+    const sat = num(rs.inss_sat);
+    const terc = num(rs.inss_terceiro);
+    const fgts = num(rs.fgts);
+    const ajustePL = inss > 0 ? 0.2 * proLabore : 0;
+    const encInss = Math.max(0, inss + sat + terc - ajustePL);
+    taxa[k] = {
+      pctInss: provEmp ? encInss / provEmp : 0,
+      pctFgts: provEmp ? fgts / provEmp : 0,
+    };
+  });
+
   // Média das verbas variáveis por pessoa (dividida pelos meses em que aparece).
   const varPorPessoa = {};
   seis.forEach((c) =>
@@ -361,25 +405,36 @@ async function calcularProvisao13(mes, token) {
           });
       }),
   );
-  const compAlvo = seis.find((c) => c.slice(0, 7) === mes) || seis[seis.length - 1];
-  const funcionarios = (meses[compAlvo] || [])
+
+  const r2 = (x) => Math.round(x * 100) / 100;
+  const funcionarios = [];
+  const encFuncionarios = [];
+  (meses[compAlvo] || [])
     .filter((l) => !l._resumo && !ehDiretor(l))
-    .map((f) => {
+    .forEach((f) => {
       const v = varPorPessoa[chave(f)] || { soma: 0, meses: 1 };
       const rem = num(f.salario) + (v.meses ? v.soma / v.meses : 0);
+      const p13 = rem / 12;
+      if (p13 <= 0) return;
       const empresa = f.empresa || '(empresa)';
-      return {
+      const t = taxa[chaveCnpj(f)] || { pctInss: 0, pctFgts: 0 };
+      const enc13 = p13 * t.pctInss + p13 * t.pctFgts;
+      const quem = {
         nome: f.nome || '(sem nome)',
-        funcao: f.funcao || 'Provisão 13º',
         empresa,
         loja: empresa, // drill rubrica → empresa → colaborador
-        valor: Math.round((rem / 12) * 100) / 100,
       };
-    })
-    .filter((f) => f.valor > 0)
-    .sort((a, b) => b.valor - a.valor);
-  const total = Math.round(funcionarios.reduce((a, f) => a + f.valor, 0) * 100) / 100;
-  return { total, funcionarios };
+      funcionarios.push({ ...quem, funcao: f.funcao || 'Provisão 13º', valor: r2(p13) });
+      if (enc13 > 0) encFuncionarios.push({ ...quem, funcao: 'Encargos s/ 13º', valor: r2(enc13) });
+    });
+  funcionarios.sort((a, b) => b.valor - a.valor);
+  encFuncionarios.sort((a, b) => b.valor - a.valor);
+  return {
+    total: r2(funcionarios.reduce((a, f) => a + f.valor, 0)),
+    funcionarios,
+    encTotal: r2(encFuncionarios.reduce((a, f) => a + f.valor, 0)),
+    encFuncionarios,
+  };
 }
 
 const PROLABORE_PADRAO = 80000;
@@ -584,7 +639,7 @@ async function calcularPessoalFixo(mes) {
     try {
       const p13 = await calcularProvisao13(mes, lg.token);
       if (p13.total > 0) {
-        totalP13 = p13.total;
+        totalP13 += p13.total;
         rubricas.push({
           desc: 'PROVISÃO 13º',
           tipo: 'provento',
@@ -595,6 +650,21 @@ async function calcularPessoalFixo(mes) {
           encargo: true,
           provisao13: true,
           funcionarios: p13.funcionarios,
+        });
+      }
+      // Encargos s/ 13º (INSS + FGTS pela taxa de cada CNPJ) — Niziany 29/10.
+      if (p13.encTotal > 0) {
+        totalP13 += p13.encTotal;
+        rubricas.push({
+          desc: 'ENCARGOS S/ 13º',
+          tipo: 'provento',
+          qtd: p13.encFuncionarios.length,
+          valor: p13.encTotal,
+          entra: true,
+          grupo: 'fixo',
+          encargo: true,
+          provisao13: true,
+          funcionarios: p13.encFuncionarios,
         });
       }
     } catch (e) {
