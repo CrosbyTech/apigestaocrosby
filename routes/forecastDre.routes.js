@@ -486,6 +486,58 @@ async function calcularVales(mes, base, linhasFolha) {
   };
 }
 
+// Despesa de OCUPAÇÃO (Niziany 29/10): aluguel das lojas do mês, da página CTO
+// do HeadCoach. Fonte = Contas a Pagar TOTVS, natureza 4001 (ALUGUEL); o centro
+// de custo 999 é ACORDO e é EXCLUÍDO (só aluguel). Abre por FILIAL (centro de
+// custo). Mesma régua da página CTO: exclui c.custo 4/30/35/43 e o fornecedor
+// Soares Ribeiro Advogados; valor = vl_duplicata por dt_vencimento no mês.
+const OCUPACAO_EXP_ALUGUEL = 4001;
+const OCUPACAO_CC_ACORDO = '999';
+const OCUPACAO_CC_EXCLUIDOS = new Set(['4', '30', '35', '43']);
+const OCUPACAO_FILIAIS = [1, 2, 5, 6, 11, 55, 65, 75, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 99];
+const OCUPACAO_CENTROS = {
+  1: 'FILIAL NATAL', 2: 'FILIAL JOAO PESSOA', 3: 'FILIAL MOSSORO', 5: 'FILIAL NOVA CRUZ',
+  6: 'RECIFE', 10: 'MATRIZ', 12: 'SALVADOR', 13: 'FORTALEZA', 14: 'SAO LUIS',
+  15: 'FILIAL CANGUARETAMA', 16: 'FILIAL PARNAMIRIM', 18: 'FILIAL BREJINHO', 19: 'FILIAL MIDWAY',
+  31: 'FILIAL TERESINA', 32: 'FILIAL IMPERATRIZ', 33: 'FILIAL PATOS', 34: 'FILIAL SHOPPING RECIFE',
+  36: 'FILIAL MACEIO', 37: 'FILIAL AYRTON SENNA', 41: 'FILIAL CIDADE JARDIM',
+  42: 'FILIAL SHOPPING GUARARAPES',
+};
+async function calcularOcupacao(mes, base) {
+  const resp = await axios.post(
+    `${base}/api/totvs/accounts-payable/search`,
+    {
+      dt_inicio: `${mes}-01`,
+      dt_fim: ultimoDia(mes),
+      modo: 'vencimento', // competência da ocupação (dia 5), como na página CTO
+      situacao: 'N',
+      previsao: 'TODOS',
+      filtroPagamento: 'TODOS',
+      expenseCodeList: [OCUPACAO_EXP_ALUGUEL],
+      branches: OCUPACAO_FILIAIS,
+    },
+    { timeout: 300000 },
+  );
+  const items = resp.data?.data?.data || [];
+  const porFilial = new Map();
+  let total = 0;
+  for (const it of items) {
+    const cc = String(it.cd_ccusto || '');
+    if (OCUPACAO_CC_EXCLUIDOS.has(cc)) continue;
+    if (/SOARES RIBEIRO ADVOGADOS/.test(semAcentoUp(it.nm_fornecedor))) continue;
+    if (cc === OCUPACAO_CC_ACORDO) continue; // acordo fica de fora (só aluguel)
+    const v = Number(it.vl_duplicata) || 0;
+    if (!v) continue;
+    const nome = OCUPACAO_CENTROS[Number(cc)] || it.ds_ccusto || `CC ${cc || '—'}`;
+    porFilial.set(nome, (porFilial.get(nome) || 0) + v);
+    total += v;
+  }
+  const filiais = [...porFilial.entries()]
+    .map(([nome, valor]) => ({ nome, valor: Math.round(valor * 100) / 100 }))
+    .sort((a, b) => b.valor - a.valor);
+  return { total: Math.round(total * 100) / 100, filiais };
+}
+
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
@@ -789,6 +841,18 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre pj ${mes}] ${e.message}`);
     }
 
+    // Despesa de OCUPAÇÃO (linha OCUPAÇÃO, aluguel das lojas) — NÃO entra no
+    // totalFixo (é linha própria da DRE). Abre por filial.
+    let ocupTotal = 0;
+    let ocupFiliais = [];
+    try {
+      const oc = await calcularOcupacao(mes, base);
+      ocupTotal = oc.total;
+      ocupFiliais = oc.filiais;
+    } catch (e) {
+      console.warn(`[forecast-dre ocupacao ${mes}] ${e.message}`);
+    }
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -803,6 +867,9 @@ async function calcularPessoalFixo(mes) {
       // Linha PJ da DRE (separada do Pessoal Fixo): pago no mês por contratado.
       pj_total: -Math.round(pjTotal * 100) / 100,
       pj_nomes: pjNomes,
+      // Linha OCUPAÇÃO (aluguel das lojas, só aluguel): total e por filial.
+      ocupacao_total: -Math.round(ocupTotal * 100) / 100,
+      ocupacao_filiais: ocupFiliais,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
