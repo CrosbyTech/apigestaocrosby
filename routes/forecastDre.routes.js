@@ -448,21 +448,59 @@ async function calcularPessoalFixo(mes) {
     // Encargos entram no Pessoal Fixo (despesa).
     totalFixo += inssPatronal + fgtsTotal;
 
-    // ── Rescisões do mês (debug: ver estrutura) ──
-    let _debugRescisoes = null;
+    // ── Rescisões do mês (Niziany 29/10): entram no Pessoal Fixo como 3
+    // rubricas — Verbas rescisórias, Aviso prévio indenizado e Multa
+    // rescisória — abrindo por empresa → colaborador, como as demais.
+    // A RPC dp_rescisoes(p_token) devolve TODAS as rescisões ({ok, itens});
+    // o mês vem no campo `competencia` (YYYY-MM-DD do pagamento). NÃO passar
+    // p_competencia: a função só tem a assinatura (p_token) → o overload
+    // com p_competencia não existe e o PostgREST responde 404.
+    let totalRescisoes = 0;
     try {
-      const rr = await drylandRpcDp('dp_rescisoes', { p_token: lg.token, p_competencia: comp });
-      const lista = Array.isArray(rr) ? rr : rr?.rescisoes || rr?.linhas || rr?.dados || [];
-      _debugRescisoes = {
-        ok: rr?.ok,
-        topKeys: rr && !Array.isArray(rr) ? Object.keys(rr) : 'array',
-        count: lista.length,
-        itemKeys: Object.keys(lista[0] || {}),
-        sample: lista.slice(0, 2),
-      };
+      const rr = await drylandRpcDp('dp_rescisoes', { p_token: lg.token });
+      const itens = (rr?.itens || []).filter(
+        (x) => String(x.competencia || '').slice(0, 7) === mes,
+      );
+      // Cada colaborador vira um "funcionário" da rubrica; a loja é a empresa
+      // (ex.: Crosby Recife Mall) pro drill rubrica → loja → colaborador.
+      const rescFunc = (campo) =>
+        itens
+          .map((x) => ({
+            nome: x.colaborador || '(sem nome)',
+            loja: x.empresa || '— sem empresa —',
+            funcao: 'Rescisão',
+            empresa: x.empresa || '',
+            valor: Math.round((Number(x[campo]) || 0) * 100) / 100,
+          }))
+          .filter((f) => f.valor !== 0)
+          .sort((a, b) => b.valor - a.valor);
+      const grupos = [
+        { desc: 'VERBAS RESCISÓRIAS', campo: 'valor_rescisao' },
+        { desc: 'AVISO PRÉVIO INDENIZADO', campo: 'aviso_previo' },
+        { desc: 'MULTA RESCISÓRIA', campo: 'multa' },
+      ];
+      for (const g of grupos) {
+        const func = rescFunc(g.campo);
+        const soma = func.reduce((a, f) => a + f.valor, 0);
+        if (soma <= 0) continue;
+        totalRescisoes += soma;
+        rubricas.push({
+          desc: g.desc,
+          tipo: 'provento',
+          qtd: func.length,
+          valor: Math.round(soma * 100) / 100,
+          entra: true,
+          grupo: 'fixo',
+          encargo: true,
+          rescisao: true,
+          funcionarios: func,
+        });
+      }
     } catch (e) {
-      _debugRescisoes = { erro: e.message };
+      console.warn(`[forecast-dre rescisoes ${mes}] ${e.message}`);
     }
+    // Rescisões entram no Pessoal Fixo (despesa).
+    totalFixo += totalRescisoes;
 
     const dados = {
       mes,
@@ -474,8 +512,7 @@ async function calcularPessoalFixo(mes) {
       prolabore: Math.round(prolabore * 100) / 100,
       maternidade_fora: Math.round(maternidade * 100) / 100,
       empregados: linhas.length,
-      rubricas, // pró-labore + proventos + descontos + encargos, grupo fixo/variavel
-      _debug_rescisoes: _debugRescisoes,
+      rubricas, // pró-labore + proventos + descontos + encargos + rescisões, grupo fixo/variavel
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
