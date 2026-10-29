@@ -156,23 +156,73 @@ function casar(abertos, valorCents) {
  * 569,22 → 2 títulos (567,26) + 1,96. Valor exato de 1 título continua valendo.
  * Sobra acima de 15% do que foi casado = não é isso → null (a conferir).
  */
+// Subconjunto de títulos cuja SOMA de face mais se aproxima do valor do Pix por
+// baixo (menor sobra), empatando pelo menor nº de títulos. Meet-in-the-middle
+// (até ~34 títulos). A sobra é o encargo (tarifa Pix R$ 0,98/título + juros de
+// atraso). João (29/10/2026): o Gerador antes pegava os títulos MAIS ANTIGOS até
+// o valor e errava (Patio Belem: pegou 7 títulos no lugar dos 2 boletos pagos).
+// Agora busca a combinação exata/mais próxima — os 2 boletos somam o Pix.
+function melhorSubconjunto(abertos, alvoCents) {
+  const itens = abertos.filter((t) => t.valorCents > 0 && t.valorCents <= alvoCents);
+  if (!itens.length) return null;
+  if (itens.length > 34) return null; // grande demais pra casar com segurança → a conferir
+  const meio = Math.floor(itens.length / 2);
+  const somasDe = (arr) => {
+    let lista = [{ soma: 0, idx: [] }];
+    arr.forEach((t, i) => {
+      const nv = [];
+      for (const s of lista) {
+        if (s.soma + t.valorCents <= alvoCents) nv.push({ soma: s.soma + t.valorCents, idx: [...s.idx, i] });
+      }
+      lista = lista.concat(nv);
+    });
+    return lista;
+  };
+  const A = somasDe(itens.slice(0, meio));
+  const Braw = somasDe(itens.slice(meio)).map((s) => ({ soma: s.soma, idx: s.idx.map((i) => i + meio) }));
+  // para cada soma de A, acha o melhor complemento em B (<= alvo - somaA)
+  const B = Braw.sort((x, y) => x.soma - y.soma);
+  const somasB = B.map((b) => b.soma);
+  const buscaMaior = (lim) => { // maior soma de B <= lim
+    let lo = 0, hi = somasB.length - 1, r = -1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (somasB[m] <= lim) { r = m; lo = m + 1; } else hi = m - 1; }
+    return r;
+  };
+  let best = null;
+  for (const a of A) {
+    const i = buscaMaior(alvoCents - a.soma);
+    if (i < 0) continue;
+    // desempata entre somas B iguais pela de menor nº de títulos
+    let j = i; const val = somasB[i];
+    for (let k = i; k >= 0 && somasB[k] === val; k--) if (B[k].idx.length < B[j].idx.length) j = k;
+    const soma = a.soma + B[j].soma;
+    const nT = a.idx.length + B[j].idx.length;
+    if (!nT) continue;
+    const sobra = alvoCents - soma;
+    if (!best || sobra < best.sobra || (sobra === best.sobra && nT < best.nT)) {
+      best = { sobra, nT, idx: [...a.idx, ...B[j].idx] };
+    }
+  }
+  if (!best) return null;
+  return { titulos: best.idx.map((i) => itens[i]), sobra: best.sobra };
+}
+
 function casarGerador(abertos, valorCents) {
   if (!abertos.length || valorCents <= 0) return null;
   const exato = abertos.find((t) => t.valorCents === valorCents);
   if (exato) return { titulos: [exato], criterio: 'valor exato', juros: 0 };
-  const ord = abertos.slice().sort((a, b) => String(a.vencimento).localeCompare(String(b.vencimento)) || a.receivableCode - b.receivableCode || a.installmentCode - b.installmentCode);
-  const comb = [];
-  let soma = 0;
-  for (const t of ord) {
-    if (soma + t.valorCents <= valorCents) { comb.push(t); soma += t.valorCents; }
-  }
-  if (!comb.length) return null;
-  const sobra = valorCents - soma;
-  if (sobra > soma * 0.15) return null;
+  const sub = melhorSubconjunto(abertos, valorCents);
+  if (!sub || !sub.titulos.length) return null;
+  const soma = sub.titulos.reduce((a, t) => a + t.valorCents, 0);
+  // A sobra tem que ser plausível como encargo: tarifa Pix R$ 0,98/título + até 15%
+  // de juros sobre o que casou. Acima disso é combinação errada → a conferir.
+  const tarifa = 98 * sub.titulos.length;
+  const limite = Math.max(tarifa + 50, Math.round(soma * 0.15));
+  if (sub.sobra > limite) return null;
   return {
-    titulos: comb,
-    criterio: `${comb.length} título(s) mais antigo(s) do cliente até o valor do Pix`,
-    juros: r2(sobra / 100),
+    titulos: sub.titulos,
+    criterio: `${sub.titulos.length} título(s) que somam o valor do Pix${sub.sobra ? ' (sobra = tarifa/juros)' : ''}`,
+    juros: r2(sub.sobra / 100),
   };
 }
 
