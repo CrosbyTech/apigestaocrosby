@@ -27,7 +27,7 @@
 //     bandeira, loja, saldoApos, pagina }
 // ============================================================
 import { extrairPaginasPdf, interpretarPaginas as interpretarStone } from './extratoStonePdf.js';
-import { classificarLancamento as classificarStone } from './ofxParaCnab240.js';
+import { classificarLancamento as classificarStone, parseOfx, decodificarOfx } from './ofxParaCnab240.js';
 import {
   interpretarBnb,
   interpretarSantander,
@@ -59,6 +59,7 @@ export const BANCOS = {
   PAGARME: { codigo: 'PAGARME', nome: 'Pagar.me' },
   BB: { codigo: '001', nome: 'Banco do Brasil' },
   ITAU: { codigo: '341', nome: 'Itaú' },
+  BRADESCO: { codigo: '237', nome: 'Bradesco' },
 };
 
 // formas de pagamento (gerencial) — valores livres, mas padronizados aqui
@@ -644,7 +645,63 @@ function conferirSaldo(lancamentos, saldoInicial) {
  * @param {Buffer} buffer PDF
  * @param {{nomeArquivo?: string, banco?: string}} opts banco força o parser
  */
+// Banco pelo nome do arquivo/pasta (os extratos vêm em pastas por banco).
+export function bancoPorNome(nome) {
+  const up = semAcento(String(nome || '')).toUpperCase();
+  if (/STONE/.test(up)) return 'STONE';
+  if (/SICREDI/.test(up)) return 'SICREDI';
+  if (/CAIXA/.test(up)) return 'CAIXA';
+  if (/MENTORE/.test(up)) return 'MENTORE';
+  if (/\bBNB\b|BANCO DO NORDESTE|NORDESTE/.test(up)) return 'BNB';
+  if (/SANTANDER/.test(up)) return 'SANTANDER';
+  if (/UNICRED/.test(up)) return 'UNICRED';
+  if (/DAYCOVAL/.test(up)) return 'DAYCOVAL';
+  if (/BRADESCO/.test(up)) return 'BRADESCO';
+  if (/PAGAR.?ME/.test(up)) return 'PAGARME';
+  if (/PAGBANK|PAGSEGURO/.test(up)) return 'PAGBANK';
+  if (/SHOPPING RECIFE|\bITAU\b/.test(up)) return 'ITAU';
+  if (/\bBB\b|BANCO DO BRASIL/.test(up)) return 'BB';
+  return null;
+}
+
+// Detecta se o buffer é um arquivo OFX (SGML 1.x ou XML 2.x).
+export function ehOfx(buffer) {
+  try {
+    const b = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    const head = b.slice(0, 8192).toString('latin1');
+    return /<OFX>/i.test(head) || /OFXHEADER/i.test(head);
+  } catch {
+    return false;
+  }
+}
+
+// OFX → extrato (reaproveita parseOfx + montarExtrato). O banco vem do nome do
+// arquivo/pasta (mais confiável que o BANKID do OFX, que às vezes vem genérico).
+export function lerExtratoOfx(buffer, opts = {}) {
+  const p = parseOfx(decodificarOfx(buffer));
+  const banco = (opts.banco || bancoPorNome(opts.nomeArquivo) || '').toUpperCase();
+  if (!BANCOS[banco]) {
+    throw new Error(`OFX: banco não reconhecido pelo nome "${opts.nomeArquivo || ''}". Esperado Stone/Sicredi/Caixa/Mêntore/BNB/Santander/Unicred/Daycoval/Bradesco/BB/Itaú.`);
+  }
+  const num = p.conta.numero ? String(p.conta.numero) : '';
+  const conta = num ? (p.conta.dv ? `${num}-${p.conta.dv}` : num) : '';
+  const titular = { nome: p.banco.nome || null, agencia: p.conta.agencia || '', conta };
+  // parseOfx já ordena cronologicamente; monta saldoApos corrente para a conferência
+  let saldo = p.saldo.inicial;
+  const lancamentos = p.lancamentos.map((l) => {
+    const row = { data: l.data, hora: l.hora, valor: l.valor, memo: l.memo, documento: l.fitid || l.checknum || null };
+    if (saldo != null) {
+      saldo = round2(saldo + l.valor);
+      row.saldoApos = saldo;
+    }
+    return row;
+  });
+  const r = { titular, periodo: p.periodo, saldoInicial: p.saldo.inicial, saldoFinalInformado: p.saldo.final, lancamentos, avisos: [] };
+  return montarExtrato(banco, r, { nomeArquivo: opts.nomeArquivo });
+}
+
 export async function lerExtratoBancario(buffer, opts = {}) {
+  if (ehOfx(buffer)) return lerExtratoOfx(buffer, opts);
   let banco;
   let r;
   let paginas = [];

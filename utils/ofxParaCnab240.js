@@ -45,6 +45,7 @@ export function parseDataOfx(s) {
 const isoParaDdmmaaaa = (iso) => `${iso.slice(8, 10)}${iso.slice(5, 7)}${iso.slice(0, 4)}`;
 const addDiasIso = (iso, n) => {
   const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso || null; // data inválida (ex.: OFX Bradesco): não quebra
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 };
@@ -101,7 +102,8 @@ export function parseOfx(texto) {
   // OFX da Stone vem do mais recente para o mais antigo; CNAB é cronológico
   lancamentos.sort((a, b) => (a.data + a.hora < b.data + b.hora ? -1 : 1));
 
-  const saldoFinal = ledger ? round2(Number(campo(ledger, 'BALAMT'))) : null;
+  const balAmt = ledger ? Number(String(campo(ledger, 'BALAMT') ?? '').replace(/\s/g, '').replace(',', '.')) : NaN;
+  const saldoFinal = Number.isFinite(balAmt) ? round2(balAmt) : null;
   const dtSaldo = parseDataOfx(campo(ledger, 'DTASOF'));
   const dtStart = parseDataOfx(campo(tranList, 'DTSTART'));
   const dtEnd = parseDataOfx(campo(tranList, 'DTEND'));
