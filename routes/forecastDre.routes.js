@@ -1343,6 +1343,66 @@ router.post(
   }),
 );
 
+// ─── CMV % por mês (Niziany 30/10) ───────────────────────────────────────────
+// Percentual do Custo das Mercadorias Vendidas sobre a Receita Operacional
+// Líquida, editável na tela (linha "CMV %"). Guardado como FRAÇÃO negativa
+// (ex.: -0.335 = -33,5%), igual ao TAX % da planilha. Sem registro = usa o
+// que está na planilha.
+const CMV_TABELA = 'forecast_dre_cmv_pct';
+const CMV_DDL = `create table if not exists ${CMV_TABELA} (
+  mes text primary key,
+  pct numeric(10,6) not null,
+  atualizado_em timestamptz not null default now()
+);`;
+let cmvTabelaOk = false;
+async function garantirTabelaCmv() {
+  if (cmvTabelaOk) return;
+  const { error } = await supabase.from(CMV_TABELA).select('mes').limit(1);
+  if (!error) {
+    cmvTabelaOk = true;
+    return;
+  }
+  if (!/relation .* does not exist|could not find the table|schema cache/i.test(error.message || '')) return;
+  let { error: e1 } = await supabase.rpc('exec_sql', { query: CMV_DDL });
+  if (e1 && /exec_sql\(query\)/.test(e1.message || '')) {
+    ({ error: e1 } = await supabase.rpc('exec_sql', { sql: CMV_DDL }));
+  }
+  if (e1) throw new Error(`não consegui criar ${CMV_TABELA}: ${e1.message}`);
+  cmvTabelaOk = true;
+}
+
+router.get(
+  '/cmv-pct',
+  asyncHandler(async (req, res) => {
+    await garantirTabelaCmv();
+    const { data, error } = await supabase.from(CMV_TABELA).select('mes, pct');
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    const overrides = {};
+    for (const r of data || []) overrides[r.mes] = Number(r.pct);
+    return successResponse(res, { overrides }, 'OK');
+  }),
+);
+
+router.post(
+  '/cmv-pct',
+  asyncHandler(async (req, res) => {
+    const { mes } = req.body || {};
+    const pct = Number(req.body?.pct);
+    if (!/^\d{4}-\d{2}$/.test(String(mes || ''))) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    if (!Number.isFinite(pct) || pct > 0 || pct < -5) {
+      return errorResponse(res, 'pct inválido (fração negativa, ex.: -0.335)', 400, 'BAD_PCT');
+    }
+    await garantirTabelaCmv();
+    const { error } = await supabase
+      .from(CMV_TABELA)
+      .upsert({ mes, pct, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    return successResponse(res, { mes, pct }, 'OK');
+  }),
+);
+
 router.get(
   '/config',
   asyncHandler(async (req, res) => {
