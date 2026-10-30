@@ -1700,6 +1700,10 @@ router.post(
 //   tipo 'edicao' → valor digitado na previsão (chave '')
 //   tipo 'faca'   → valor tirado do cálculo; chave '' = linha inteira do mês,
 //                   senão o item do detalhe (caminho separado por »)
+//   tipo 'detalhe' → diferença digitada num item do drill (valor = delta)
+//   tipo 'linha'  → linha nova (mes '0000', pai = item do drill, se houver)
+//   tipo 'linha_valor' → valor da linha nova no mês
+//   tipo 'mes'    → mês a mais na tela (linha '__mes__')
 // Desfazer só marca ativo = false; nada é apagado.
 const CORTE_TABELA = 'forecast_dre_corte';
 const CORTE_DDL = `create table if not exists ${CORTE_TABELA} (
@@ -1708,11 +1712,13 @@ const CORTE_DDL = `create table if not exists ${CORTE_TABELA} (
   tipo text not null,
   chave text not null default '',
   nome text,
+  pai text,
   valor numeric(18,6),
   ativo boolean not null default true,
   atualizado_em timestamptz not null default now(),
   primary key (mes, linha, tipo, chave)
 );`;
+const CORTE_TIPOS = new Set(['edicao', 'faca', 'detalhe', 'linha', 'linha_valor', 'mes']);
 let corteTabelaOk = false;
 async function garantirTabelaCorte() {
   if (corteTabelaOk) return;
@@ -1736,14 +1742,30 @@ router.get(
     await garantirTabelaCorte();
     const { data, error } = await supabase
       .from(CORTE_TABELA)
-      .select('mes, linha, tipo, chave, nome, valor')
+      .select('mes, linha, tipo, chave, nome, pai, valor')
       .eq('ativo', true);
     if (error) return errorResponse(res, error.message, 500, 'DB');
     const edicoes = {};
     const facas = {};
+    const ajustes = {};
+    const linhas = [];
+    const valores = {};
+    const meses = [];
     for (const r of data || []) {
       if (r.tipo === 'edicao') {
         (edicoes[r.mes] = edicoes[r.mes] || {})[r.linha] = Number(r.valor);
+      } else if (r.tipo === 'detalhe') {
+        (ajustes[r.mes] = ajustes[r.mes] || []).push({
+          linha: r.linha,
+          chave: r.chave,
+          valor: Number(r.valor) || 0,
+        });
+      } else if (r.tipo === 'linha') {
+        linhas.push({ linha: r.linha, chave: r.chave, nome: r.nome, pai: r.pai || '' });
+      } else if (r.tipo === 'linha_valor') {
+        (valores[r.mes] = valores[r.mes] || {})[r.chave] = Number(r.valor) || 0;
+      } else if (r.tipo === 'mes') {
+        meses.push(r.mes);
       } else {
         (facas[r.mes] = facas[r.mes] || []).push({
           linha: r.linha,
@@ -1753,7 +1775,9 @@ router.get(
         });
       }
     }
-    return successResponse(res, { edicoes, facas }, 'OK');
+    linhas.sort((a, b) => a.chave.localeCompare(b.chave));
+    meses.sort();
+    return successResponse(res, { edicoes, facas, ajustes, linhas, valores, meses }, 'OK');
   }),
 );
 
@@ -1772,7 +1796,7 @@ router.post(
       return errorResponse(res, "mes inválido ('YYYY-MM' ou 'YYYY')", 400, 'BAD_MES');
     }
     if (!linha || linha.length > 120) return errorResponse(res, 'linha inválida', 400, 'BAD_LINHA');
-    if (tipo !== 'edicao' && tipo !== 'faca') return errorResponse(res, 'tipo inválido', 400, 'BAD_TIPO');
+    if (!CORTE_TIPOS.has(tipo)) return errorResponse(res, 'tipo inválido', 400, 'BAD_TIPO');
     if (chave.length > 400) return errorResponse(res, 'chave inválida', 400, 'BAD_CHAVE');
     if (ativo && !Number.isFinite(valor)) return errorResponse(res, 'valor inválido', 400, 'BAD_VALOR');
     await garantirTabelaCorte();
@@ -1783,6 +1807,7 @@ router.post(
         tipo,
         chave,
         nome,
+        pai: req.body?.pai ? String(req.body.pai).slice(0, 400) : null,
         valor: Number.isFinite(valor) ? valor : null,
         ativo,
         atualizado_em: new Date().toISOString(),
