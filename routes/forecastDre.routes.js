@@ -1233,6 +1233,116 @@ router.post(
 // Niziany (28/10/2026): ela mesma marca um mês como realizado sem pedir. Fica
 // salvo em forecast_dre_config e vale para todos. A tela mescla isso por cima
 // do tipo padrão da planilha.
+// ─── Importação de planilha de taxas de cartão (Niziany 30/10) ──────────────
+// Planilha mensal "PAINEL DRE — TAXAS DE CARTÃO" (aba "Painel por Empresa"):
+// TAXA DE ANTECIPAÇÃO → linha ANTECIPAÇÃO DE RECEBÍVEIS; TAXA DE CARTÃO →
+// subnível TAXA DE CARTÃO dos SERVIÇOS DE TERCEIROS VARIÁVEIS; ambas por empresa.
+// O front lê o .xlsx e manda só os totais por empresa; aqui só persiste.
+const IMPORT_TABELA = 'forecast_dre_importacoes';
+const IMPORT_LINHAS = ['taxa_antecipacao', 'taxa_cartao'];
+const IMPORT_DDL = `create table if not exists ${IMPORT_TABELA} (
+  id bigint generated always as identity primary key,
+  linha text not null,
+  mes text not null,
+  empresa text not null,
+  valor numeric(15,2) not null default 0,
+  arquivo text,
+  importado_por text,
+  importado_em timestamptz not null default now(),
+  unique (linha, mes, empresa)
+);`;
+let importTabelaOk = false;
+async function garantirTabelaImport() {
+  if (importTabelaOk) return;
+  const { error } = await supabase.from(IMPORT_TABELA).select('id').limit(1);
+  if (!error) {
+    importTabelaOk = true;
+    return;
+  }
+  if (!/relation .* does not exist|could not find the table|schema cache/i.test(error.message || '')) return;
+  let { error: e1 } = await supabase.rpc('exec_sql', { query: IMPORT_DDL });
+  if (e1 && /exec_sql\(query\)/.test(e1.message || '')) {
+    ({ error: e1 } = await supabase.rpc('exec_sql', { sql: IMPORT_DDL }));
+  }
+  if (e1) throw new Error(`não consegui criar ${IMPORT_TABELA}: ${e1.message}`);
+  importTabelaOk = true;
+}
+async function lerImportacao(mes) {
+  await garantirTabelaImport();
+  const { data, error } = await supabase
+    .from(IMPORT_TABELA)
+    .select('linha, empresa, valor, arquivo, importado_em')
+    .eq('mes', mes);
+  if (error) throw new Error(error.message);
+  const out = { mes };
+  for (const l of IMPORT_LINHAS) {
+    const rows = (data || []).filter((r) => r.linha === l);
+    const empresas = rows
+      .map((r) => ({ empresa: r.empresa, valor: Number(r.valor) || 0 }))
+      .sort((a, b) => b.valor - a.valor);
+    out[l] = {
+      total: Math.round(empresas.reduce((a, e) => a + e.valor, 0) * 100) / 100,
+      empresas,
+      arquivo: rows[0]?.arquivo || null,
+      importado_em: rows[0]?.importado_em || null,
+    };
+  }
+  return out;
+}
+
+router.get(
+  '/importacao',
+  asyncHandler(async (req, res) => {
+    const mes = String(req.query.mes || '');
+    if (!/^\d{4}-\d{2}$/.test(mes)) {
+      return errorResponse(res, "Informe mes no formato 'YYYY-MM'", 400, 'BAD_MES');
+    }
+    return successResponse(res, await lerImportacao(mes), 'OK');
+  }),
+);
+
+router.post(
+  '/importacao',
+  asyncHandler(async (req, res) => {
+    const { mes, arquivo, linhas } = req.body || {};
+    if (!/^\d{4}-\d{2}$/.test(String(mes || ''))) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    if (!linhas || typeof linhas !== 'object') {
+      return errorResponse(res, 'linhas inválidas', 400, 'BAD_LINHAS');
+    }
+    await garantirTabelaImport();
+    const agora = new Date().toISOString();
+    const quem = req.user?.email || null;
+    const resumo = {};
+    for (const l of IMPORT_LINHAS) {
+      const itens = Array.isArray(linhas[l]) ? linhas[l] : [];
+      const regs = itens
+        .map((x) => ({
+          linha: l,
+          mes,
+          empresa: String(x.empresa || '').trim(),
+          valor: Math.round((Number(x.valor) || 0) * 100) / 100,
+          arquivo: arquivo ? String(arquivo).slice(0, 200) : null,
+          importado_por: quem,
+          importado_em: agora,
+        }))
+        .filter((x) => x.empresa);
+      // Reimportar o mesmo mês substitui o que foi importado antes para a
+      // mesma linha (dados desta própria importação, não do TOTVS).
+      const del = await supabase.from(IMPORT_TABELA).delete().eq('linha', l).eq('mes', mes);
+      if (del.error) return errorResponse(res, del.error.message, 500, 'DB');
+      if (regs.length) {
+        const ins = await supabase.from(IMPORT_TABELA).insert(regs);
+        if (ins.error) return errorResponse(res, ins.error.message, 500, 'DB');
+      }
+      resumo[l] = { empresas: regs.length, total: Math.round(regs.reduce((a, r) => a + r.valor, 0) * 100) / 100 };
+    }
+    // O pessoal-fixo em cache não muda; o front relê /importacao do mês.
+    return successResponse(res, { mes, ...resumo }, 'OK');
+  }),
+);
+
 router.get(
   '/config',
   asyncHandler(async (req, res) => {
