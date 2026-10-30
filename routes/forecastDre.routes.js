@@ -1677,8 +1677,9 @@ router.post(
     const linha = String(req.body?.linha || '').trim();
     const bruto = req.body?.valor;
     const valor = bruto === null || bruto === undefined ? null : Number(bruto);
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
-      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    // 'YYYY-MM' ou 'YYYY' (colunas anuais da previsão)
+    if (!/^\d{4}(-(0[1-9]|1[0-2]))?$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM' ou 'YYYY')", 400, 'BAD_MES');
     }
     if (!linha || linha.length > 120) return errorResponse(res, 'linha inválida', 400, 'BAD_LINHA');
     if (valor !== null && !Number.isFinite(valor)) {
@@ -1766,8 +1767,9 @@ router.post(
     const nome = req.body?.nome ? String(req.body.nome).slice(0, 300) : null;
     const ativo = req.body?.ativo !== false;
     const valor = Number(req.body?.valor);
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
-      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    // 'YYYY-MM' ou 'YYYY' (colunas anuais da previsão)
+    if (!/^\d{4}(-(0[1-9]|1[0-2]))?$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM' ou 'YYYY')", 400, 'BAD_MES');
     }
     if (!linha || linha.length > 120) return errorResponse(res, 'linha inválida', 400, 'BAD_LINHA');
     if (tipo !== 'edicao' && tipo !== 'faca') return errorResponse(res, 'tipo inválido', 400, 'BAD_TIPO');
