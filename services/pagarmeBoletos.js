@@ -529,32 +529,49 @@ const ddmmaaaa = (iso) => {
   return d ? `${d}${m}${a}` : '';
 };
 
-/** Data em que o dinheiro do boleto caiu (payable 'paid' da cobrança). null = ainda não creditou. */
-async function dataCreditoBoleto(b) {
-  if (!b.charge_id) return null;
+/**
+ * Crédito do boleto na conta (payables da cobrança). Devolve:
+ *   { creditado, dtCredito } onde dtCredito = data em que o dinheiro cai/caiu na
+ *   conta (payment_date do payable — já vem agendada enquanto 'waiting_funds',
+ *   vira real quando 'paid') e creditado = true quando algum payable já está
+ *   'paid'. null = ainda não dá pra saber a data (sem payable).
+ */
+async function creditoBoleto(b) {
+  if (!b.charge_id) return { creditado: false, dtCredito: null };
   const r = await pagarme('GET', `/payables?charge_id=${encodeURIComponent(b.charge_id)}&size=20`, null, b.conta || CONTA_PADRAO);
-  const lista = r?.ok && Array.isArray(r?.data?.data) ? r.data.data : []; const pagos = lista.filter((x) => x.status === 'paid' && x.payment_date);
-  if (!pagos.length) return null;
-  return pagos.map((x) => String(x.payment_date).slice(0, 10)).sort().slice(-1)[0];
+  const lista = r?.ok && Array.isArray(r?.data?.data) ? r.data.data : [];
+  const comData = lista.filter((x) => x.payment_date);
+  if (!comData.length) return { creditado: false, dtCredito: null };
+  const pagos = comData.filter((x) => x.status === 'paid');
+  const base = pagos.length ? pagos : comData; // agendado quando ainda não creditou
+  const dtCredito = base.map((x) => String(x.payment_date).slice(0, 10)).sort().slice(-1)[0];
+  return { creditado: pagos.length > 0, dtCredito };
 }
 
 /**
  * Abre a Solicitação de Baixa de um boleto pago (idempotente por ref_externa
- * `pagarme:boleto:<id>`). Retorna 'inserida' | 'ja_existia' | 'aguardando_credito'.
+ * `pagarme:boleto:<id>`). João (30/10/2026): entra JÁ no pagamento, com a baixa
+ * BLOQUEADA até o dinheiro cair na conta (liberar_em = data de crédito); a tela
+ * libera quando chega o dia. dt_pagamento (data da baixa no TOTVS) = data do
+ * crédito, pra bater com o extrato. Retorna 'inserida' | 'ja_existia' |
+ * 'data_atualizada' | 'aguardando_credito' (quando nem a data agendada existe).
  */
 export async function abrirSolicitacaoBoleto(b) {
-  const dtCredito = await dataCreditoBoleto(b);
-  if (!dtCredito) return 'aguardando_credito';
+  const { creditado, dtCredito } = await creditoBoleto(b);
+  if (!dtCredito) return 'aguardando_credito'; // sem payable ainda — tenta de novo depois
+  const hoje = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
+  const bloqueado = !creditado && dtCredito > hoje; // ainda vai cair na conta
   const pago = Number(b.vl_pago) || 0;
   const fatura = Number(b.vl_fatura) || 0;
   const acrescimo = Math.round((pago - fatura) * 100) / 100;
-  const dtPag = String(b.dt_pagamento || '').slice(0, 10);
+  const recebidoEm = String(b.dt_pagamento || '').slice(0, 10); // quando o cliente pagou
   const ref = `pagarme:boleto:${b.id}`;
   const obs = [
-    `Boleto Pagar.me pago em ${dtPag || '?'}, RECEBIDO (crédito) em ${dtCredito}${b.conta ? ` · conta ${b.conta}` : ''}. Pedido ${b.order_id || '?'} · cobrança ${b.charge_id || '?'}${b.nosso_numero ? ` · nosso nº ${b.nosso_numero}` : ''}.`,
+    `Boleto Pagar.me pago (recebido) em ${recebidoEm || '?'}, ${creditado ? 'CRÉDITO na conta em' : 'crédito previsto para'} ${dtCredito}${b.conta ? ` · conta ${b.conta}` : ''}. Pedido ${b.order_id || '?'} · cobrança ${b.charge_id || '?'}${b.nosso_numero ? ` · nosso nº ${b.nosso_numero}` : ''}.`,
     `Título ${fatura.toFixed(2)}, pago ${pago.toFixed(2)}${acrescimo > 0 ? ` (acréscimo do boleto ${acrescimo.toFixed(2)} fica na Pagar.me, não entra na baixa)` : ''}.`,
     pago + 0.005 < fatura ? '⚠️ PAGO A MENOR — conferir antes de baixar.' : null,
-    `Baixar como Cartão de Débito PAGARME (portador 9901) na data do recebimento; NSU/autorização ${ddmmaaaa(dtCredito)}.`,
+    bloqueado ? `🔒 Baixa BLOQUEADA até ${dtCredito} (o dinheiro ainda não caiu na conta).` : null,
+    `Baixar como Cartão de Débito PAGARME (portador 9901) na data do crédito; NSU/autorização ${ddmmaaaa(dtCredito)}.`,
     `[${ref}]`,
   ]
     .filter(Boolean)
@@ -574,6 +591,8 @@ export async function abrirSolicitacaoBoleto(b) {
     comprovante_url: '',
     comprovante_path: '',
     status: 'pendente',
+    bloqueado,
+    liberar_em: dtCredito,
     user_id: null,
     user_nome: 'Pagar.me · boleto recebido',
     user_email: 'pagarme@crosby.app',
@@ -586,20 +605,21 @@ export async function abrirSolicitacaoBoleto(b) {
   });
   if (!error) return 'inserida';
   if (error.code === '23505') {
-    // Já existe (ex.: aberta antes de o crédito cair, com data nula ou do
-    // pagamento): alinha a data da baixa ao recebimento, se ainda pendente.
+    // Já existe: atualiza a data da baixa (= crédito) e o bloqueio, se pendente.
     const { data: ex } = await supabase
       .from('solicitacoes_baixa')
-      .select('id, dt_pagamento, observacao')
+      .select('id, dt_pagamento, bloqueado, liberar_em, observacao')
       .eq('ref_externa', ref)
       .eq('status', 'pendente')
       .maybeSingle();
-    if (ex && String(ex.dt_pagamento || '').slice(0, 10) !== dtCredito) {
+    if (ex && (String(ex.dt_pagamento || '').slice(0, 10) !== dtCredito || Boolean(ex.bloqueado) !== bloqueado)) {
       await supabase
         .from('solicitacoes_baixa')
         .update({
           dt_pagamento: dtCredito,
-          observacao: `${ex.observacao || ''} [${new Date().toISOString().slice(0, 16)}: data da baixa = RECEBIMENTO (crédito Pagar.me) ${dtCredito}]`.trim(),
+          bloqueado,
+          liberar_em: dtCredito,
+          observacao: `${ex.observacao || ''} [${new Date().toISOString().slice(0, 16)}: ${creditado ? `crédito confirmado ${dtCredito} — liberado` : `crédito previsto ${dtCredito} — bloqueado`}]`.trim(),
           updated_at: new Date().toISOString(),
         })
         .eq('id', ex.id);
@@ -608,6 +628,25 @@ export async function abrirSolicitacaoBoleto(b) {
     return 'ja_existia';
   }
   throw new Error(`solicitacoes_baixa: ${error.message}`);
+}
+
+/**
+ * Libera as Solicitações de boleto bloqueadas cujo crédito já chegou (liberar_em
+ * <= hoje) — pra baixa poder ser feita no dia que o dinheiro caiu na conta.
+ */
+export async function liberarBoletosCreditados() {
+  const hoje = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
+  const { data, error } = await supabase
+    .from('solicitacoes_baixa')
+    .update({ bloqueado: false, updated_at: new Date().toISOString() })
+    .eq('origem', 'pagarme_boleto')
+    .eq('status', 'pendente')
+    .eq('bloqueado', true)
+    .lte('liberar_em', hoje)
+    .select('id');
+  if (error) { console.warn(`⚠️ [retorno-boleto] liberar creditados: ${error.message}`); return 0; }
+  if (data?.length) console.log(`🔓 [retorno-boleto] ${data.length} boleto(s) liberado(s) para baixa (crédito chegou)`);
+  return data?.length || 0;
 }
 
 // eslint-disable-next-line no-unused-vars -- histórico: baixa em conta corrente (desativada em 23/10/2026)
@@ -694,6 +733,9 @@ async function baixarBoletoPago(b) {
  */
 export async function sincronizarRetorno({ retentarErros = false } = {}) {
   const r = { consultados: 0, pagos: 0, cancelados: 0, baixados: 0, errosBaixa: 0, errosConsulta: 0 };
+
+  // Libera as Solicitações de boleto cujo crédito já chegou (João, 30/10/2026).
+  r.liberados = await liberarBoletosCreditados();
 
   // PostgREST corta em 1000 linhas por resposta — pagina até esgotar.
   const pendentes = [];
