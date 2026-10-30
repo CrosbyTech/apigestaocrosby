@@ -685,7 +685,10 @@ export function lerExtratoOfx(buffer, opts = {}) {
   }
   const num = p.conta.numero ? String(p.conta.numero) : '';
   const conta = num ? (p.conta.dv ? `${num}-${p.conta.dv}` : num) : '';
-  const titular = { nome: p.banco.nome || null, agencia: p.conta.agencia || '', conta };
+  // Agência NÃO entra na identidade da conta: alguns OFX (ex.: Caixa) trazem o
+  // BRANCHID em uns arquivos e vazio em outros, o que dividia a mesma conta em
+  // duas. O número da conta (ACCTID) já identifica unicamente.
+  const titular = { nome: p.banco.nome || null, agencia: '', conta };
   // parseOfx já ordena cronologicamente; monta saldoApos corrente para a conferência
   let saldo = p.saldo.inicial;
   const lancamentos = p.lancamentos.map((l) => {
