@@ -241,6 +241,49 @@ async function lerCachePersistido(mes) {
   }
 }
 
+// ─── Travar mês (Niziany 30/10) ──────────────────────────────────────────────
+// Depois de analisar, a Niziany trava o mês: os endpoints passam a servir só o
+// que está salvo (sem recálculo nem refresh) e pró-labore / CMV % / importação
+// ficam bloqueados pra ele. O front manda um `snapshot` das linhas que vêm do
+// localStorage dela (Serviços de Terceiros Fixos, Bonificações marketing).
+let travaColunasOk = false;
+const TRAVA_DDL = `alter table forecast_dre_config
+  add column if not exists travado boolean not null default false,
+  add column if not exists snapshot jsonb,
+  add column if not exists travado_em timestamptz;`;
+async function garantirColunasTrava() {
+  if (travaColunasOk) return;
+  const { error } = await supabase.from('forecast_dre_config').select('travado').limit(1);
+  if (!error) {
+    travaColunasOk = true;
+    return;
+  }
+  if (!/column .* does not exist|schema cache|could not find/i.test(error.message || '')) return;
+  let { error: e1 } = await supabase.rpc('exec_sql', { query: TRAVA_DDL });
+  if (e1 && /exec_sql\(query\)/.test(e1.message || '')) {
+    ({ error: e1 } = await supabase.rpc('exec_sql', { sql: TRAVA_DDL }));
+  }
+  if (e1) throw new Error(`não consegui criar as colunas de trava: ${e1.message}`);
+  travaColunasOk = true;
+}
+async function lerTrava(mes) {
+  try {
+    await garantirColunasTrava();
+    const { data } = await supabase
+      .from('forecast_dre_config')
+      .select('travado, snapshot')
+      .eq('mes', mes)
+      .maybeSingle();
+    return { travado: !!(data && data.travado), snapshot: (data && data.snapshot) || null };
+  } catch (e) {
+    console.warn(`[forecast-dre trava ${mes}] ${e.message}`);
+    return { travado: false, snapshot: null };
+  }
+}
+const MES_TRAVADO_MSG = 'Mês travado — destrave no Forecast (cadeado do mês) pra alterar.';
+// Refresh em andamento por endpoint|mes (não dispara dois recálculos iguais)
+const REFRESH_EM_ANDAMENTO = new Set();
+
 router.get(
   '/receita-canais',
   asyncHandler(async (req, res) => {
@@ -256,6 +299,35 @@ router.get(
     const ttl = (fechado ? 24 * 60 : 30) * 60 * 1000;
 
     const hit = CACHE.get(mes);
+    const trava = await lerTrava(mes);
+
+    // Mês TRAVADO: serve só o que está salvo; nada de recálculo nem refresh.
+    if (trava.travado) {
+      if (hit) return successResponse(res, { ...hit.dados, cache: true, travado: true }, 'OK (travado)');
+      const salvo = await lerCachePersistido(mes);
+      if (salvo) {
+        CACHE.set(mes, { dados: salvo, expira: agora + 365 * 24 * 60 * 60 * 1000 });
+        return successResponse(res, { ...salvo, cache: 'supabase', travado: true }, 'OK (travado)');
+      }
+      // sem nada salvo ainda: calcula uma vez (fica congelado a partir daí)
+    }
+
+    // Refresh pedido pela tela: dispara o recálculo em BACKGROUND (o cálculo
+    // pesado estouraria o gateway) e responde o que há agora com refresh_iniciado.
+    if (refresh && !trava.travado) {
+      const chave = `rec|${mes}`;
+      if (!REFRESH_EM_ANDAMENTO.has(chave)) {
+        REFRESH_EM_ANDAMENTO.add(chave);
+        calcularMes(mes)
+          .then((d) => CACHE.set(mes, { dados: d, expira: Date.now() + ttl }))
+          .catch((e) => console.warn(`[forecast-dre refresh ${mes}] ${e.message}`))
+          .finally(() => REFRESH_EM_ANDAMENTO.delete(chave));
+      }
+      const atual = (hit && hit.dados) || (await lerCachePersistido(mes));
+      if (atual) return successResponse(res, { ...atual, cache: true, refresh_iniciado: true }, 'OK (atualizando)');
+      // sem cache nenhum: calcula inline abaixo
+    }
+
     if (!refresh && hit && hit.expira > agora) {
       return successResponse(res, { ...hit.dados, cache: true }, 'OK (cache)');
     }
@@ -263,7 +335,7 @@ router.get(
     // Cache em memória vazio (ex.: backend recém-reiniciado): serve o valor
     // salvo no Supabase na hora e recalcula em background, pra tela nunca
     // cair pro número antigo enquanto o cálculo pesado roda.
-    if (!refresh) {
+    if (!refresh && !trava.travado) {
       const salvo = await lerCachePersistido(mes);
       if (salvo) {
         CACHE.set(mes, { dados: salvo, expira: agora + ttl });
@@ -1160,13 +1232,58 @@ router.get(
     const ttl = (fechado ? 24 * 60 : 30) * 60 * 1000;
 
     const hit = CACHE_PF.get(mes);
+    const trava = await lerTrava(mes);
+    const lerPfSalvo = async () => {
+      const { data } = await supabase
+        .from('forecast_dre_pf_cache')
+        .select('dados')
+        .eq('mes', mes)
+        .maybeSingle();
+      return data && data.dados ? data.dados : null;
+    };
+
+    // Mês TRAVADO: serve só o que está salvo; nada de recálculo nem refresh.
+    if (trava.travado) {
+      if (hit) return successResponse(res, { ...hit.dados, cache: true, travado: true }, 'OK (travado)');
+      try {
+        const salvo = await lerPfSalvo();
+        if (salvo) {
+          CACHE_PF.set(mes, { dados: salvo, expira: agora + 365 * 24 * 60 * 60 * 1000 });
+          return successResponse(res, { ...salvo, cache: 'supabase', travado: true }, 'OK (travado)');
+        }
+      } catch (e) {
+        console.warn(`[forecast-dre pf travado ${mes}] ${e.message}`);
+      }
+    }
+
+    // Refresh pedido pela tela: recálculo em BACKGROUND + responde o atual.
+    if (refresh && !trava.travado) {
+      const chave = `pf|${mes}`;
+      if (!REFRESH_EM_ANDAMENTO.has(chave)) {
+        REFRESH_EM_ANDAMENTO.add(chave);
+        calcularPessoalFixo(mes)
+          .then((d) => CACHE_PF.set(mes, { dados: d, expira: Date.now() + ttl }))
+          .catch((e) => console.warn(`[forecast-dre pf refresh ${mes}] ${e.message}`))
+          .finally(() => REFRESH_EM_ANDAMENTO.delete(chave));
+      }
+      let atual = hit && hit.dados;
+      if (!atual) {
+        try {
+          atual = await lerPfSalvo();
+        } catch (e) {
+          console.warn(`[forecast-dre pf cache-read ${mes}] ${e.message}`);
+        }
+      }
+      if (atual) return successResponse(res, { ...atual, cache: true, refresh_iniciado: true }, 'OK (atualizando)');
+    }
+
     if (!refresh && hit && hit.expira > agora) {
       return successResponse(res, { ...hit.dados, cache: true }, 'OK (cache)');
     }
 
     // Cache em memória vazio (backend recém-reiniciado): serve o valor salvo no
     // Supabase na hora e recalcula em background — a folha do Dryland é lenta.
-    if (!refresh) {
+    if (!refresh && !trava.travado) {
       try {
         const { data } = await supabase
           .from('forecast_dre_pf_cache')
@@ -1218,6 +1335,7 @@ router.post(
     if (!Number.isFinite(valor) || valor < 0) {
       return errorResponse(res, 'valor inválido', 400, 'BAD_VALOR');
     }
+    if ((await lerTrava(mes)).travado) return errorResponse(res, MES_TRAVADO_MSG, 409, 'MES_TRAVADO');
     const { error } = await supabase
       .from('forecast_dre_prolabore')
       .upsert({ mes, valor, atualizado_em: new Date().toISOString() }, { onConflict: 'mes' });
@@ -1311,6 +1429,7 @@ router.post(
     if (!linhas || typeof linhas !== 'object') {
       return errorResponse(res, 'linhas inválidas', 400, 'BAD_LINHAS');
     }
+    if ((await lerTrava(String(mes))).travado) return errorResponse(res, MES_TRAVADO_MSG, 409, 'MES_TRAVADO');
     await garantirTabelaImport();
     const agora = new Date().toISOString();
     const quem = req.user?.email || null;
@@ -1394,6 +1513,7 @@ router.post(
     if (!Number.isFinite(pct) || pct > 0 || pct < -5) {
       return errorResponse(res, 'pct inválido (fração negativa, ex.: -0.335)', 400, 'BAD_PCT');
     }
+    if ((await lerTrava(mes)).travado) return errorResponse(res, MES_TRAVADO_MSG, 409, 'MES_TRAVADO');
     await garantirTabelaCmv();
     const { error } = await supabase
       .from(CMV_TABELA)
@@ -1406,13 +1526,51 @@ router.post(
 router.get(
   '/config',
   asyncHandler(async (req, res) => {
+    await garantirColunasTrava().catch((e) => console.warn(`[forecast-dre trava] ${e.message}`));
     const { data, error } = await supabase
       .from('forecast_dre_config')
-      .select('mes, tipo');
+      .select('mes, tipo, travado, snapshot');
     if (error) return errorResponse(res, error.message, 500, 'DB');
     const overrides = {};
-    for (const r of data || []) overrides[r.mes] = r.tipo;
-    return successResponse(res, { overrides }, 'OK');
+    const travas = {};
+    for (const r of data || []) {
+      overrides[r.mes] = r.tipo;
+      if (r.travado) travas[r.mes] = { travado: true, snapshot: r.snapshot || null };
+    }
+    return successResponse(res, { overrides, travas }, 'OK');
+  }),
+);
+
+// Trava/destrava um mês (Niziany 30/10). snapshot = linhas que vêm do
+// localStorage da tela (Serviços de Terceiros Fixos, Bonificações marketing).
+router.post(
+  '/travar',
+  asyncHandler(async (req, res) => {
+    const mes = String(req.body?.mes || '');
+    const travado = !!req.body?.travado;
+    const snapshot = req.body?.snapshot && typeof req.body.snapshot === 'object' ? req.body.snapshot : null;
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    await garantirColunasTrava();
+    const agora = new Date().toISOString();
+    const { data: atual } = await supabase
+      .from('forecast_dre_config')
+      .select('mes, tipo, snapshot')
+      .eq('mes', mes)
+      .maybeSingle();
+    const campos = {
+      travado,
+      snapshot: travado ? snapshot || (atual && atual.snapshot) || null : null,
+      travado_em: travado ? agora : null,
+      atualizado_em: agora,
+    };
+    const q = atual
+      ? supabase.from('forecast_dre_config').update(campos).eq('mes', mes)
+      : supabase.from('forecast_dre_config').insert({ mes, tipo: 'realizado', ...campos });
+    const { error } = await q;
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    return successResponse(res, { mes, travado, snapshot: campos.snapshot }, 'OK');
   }),
 );
 
