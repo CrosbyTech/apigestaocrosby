@@ -627,9 +627,13 @@ async function calcularTrafego(mes, token) {
     caixa_todos: somaCx(cx),
     caixa_crosby: somaCx(cxCrosby),
   };
-  // Drill: competência por canal → loja/conta
+  // Regra fixada (Niziany 30/10): COMPETÊNCIA (o que a Meta veiculou no mês)
+  // só do que a Crosby paga e é projeto Crosby — sem franquias e sem Ygor
+  // Dantas. Set/26 = 11.091,84 (as outras variantes: competência todos 17.127,87;
+  // caixa todos 8.454,75; caixa Crosby 1.531,03).
+  // Drill: competência por canal → loja/conta (mesma régua do total)
   const porChave = {};
-  for (const l of comp) {
+  for (const l of compCrosby) {
     const k = `${l.canal || '?'}|${l.loja || l.conta || '—'}`;
     porChave[k] = (porChave[k] || 0) + n(l.valor);
   }
@@ -641,7 +645,7 @@ async function calcularTrafego(mes, token) {
     .filter((x) => x.valor !== 0)
     .sort((a, b) => b.valor - a.valor);
   const meses = [...new Set([...(r.competencia || []), ...(r.caixa || [])].map((l) => String(l.mes || '').slice(0, 7)))].sort();
-  return { total: variantes.comp_todos, variantes, itens, n_comp: comp.length, n_cx: cx.length, meses };
+  return { total: variantes.comp_crosby, variantes, itens, n_comp: comp.length, n_cx: cx.length, meses };
 }
 
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
@@ -974,14 +978,11 @@ async function calcularPessoalFixo(mes) {
     // Tráfego pago (subitem do Marketing) — Forecast de Mídia do Dryland.
     let trafegoTotal = 0;
     let trafegoItens = [];
-    let trafegoDebug = null;
     try {
       const tr = await calcularTrafego(mes, lg.token);
       trafegoTotal = tr.total;
       trafegoItens = tr.itens;
-      trafegoDebug = { variantes: tr.variantes, n_comp: tr.n_comp, n_cx: tr.n_cx, meses: tr.meses };
     } catch (e) {
-      trafegoDebug = { erro: e.message };
       console.warn(`[forecast-dre trafego ${mes}] ${e.message}`);
     }
 
@@ -1008,7 +1009,6 @@ async function calcularPessoalFixo(mes) {
       // Subitem TRÁFEGO do Marketing (Forecast de Mídia do Dryland).
       trafego_total: -Math.round(trafegoTotal * 100) / 100,
       trafego_itens: trafegoItens,
-      _trafego_debug: trafegoDebug,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
