@@ -887,6 +887,34 @@ export async function sincronizarRetorno({ retentarErros = false } = {}) {
   return r;
 }
 
+/**
+ * Só a BAIXA: cria/alinha as Solicitações dos boletos já pagos (status paid)
+ * com baixa pendente/erro/aguardando, sem a parte pesada (checar todos os
+ * pending na Pagar.me e conferir TOTVS) — pra rodar rápido numa rota sem
+ * estourar o timeout do proxy. João (30/10/2026). Também libera os creditados.
+ */
+export async function baixarBoletosPagosPendentes({ incluirErros = true } = {}) {
+  const r = { liberados: await liberarBoletosCreditados(), solicitadas: 0, aguardandoCredito: 0, errosBaixa: 0, total: 0 };
+  if (incluirErros) {
+    await supabase.from(TABELA).update({ baixa_status: 'pendente', baixa_erro: null }).eq('status', 'paid').eq('baixa_status', 'erro');
+  }
+  const { data: aBaixar, error } = await supabase
+    .from(TABELA)
+    .select('*')
+    .eq('status', 'paid')
+    .in('baixa_status', ['pendente', 'aguardando_credito'])
+    .limit(500);
+  if (error) throw new Error(`pagarme_boletos: ${error.message}`);
+  r.total = aBaixar?.length || 0;
+  for (const b of aBaixar || []) {
+    const res = await baixarBoletoPago(b);
+    if (res === 'solicitada') r.solicitadas++;
+    else if (res === 'aguardando_credito') r.aguardandoCredito++;
+    else if (res === 'erro') r.errosBaixa++;
+  }
+  return r;
+}
+
 // ── BAIXA NA PAGAR.ME (cancelamento) ──
 // "Baixar o boleto na Pagar.me" = cancelar a cobrança lá (DELETE /charges/{id}),
 // para o cliente não conseguir mais pagar aquele boleto (ex.: pagou por outro

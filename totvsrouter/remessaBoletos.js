@@ -26,6 +26,7 @@ import {
   emitirBoleto,
   listarBoletos,
   sincronizarRetorno,
+  baixarBoletosPagosPendentes,
   cancelarBoletos,
   contasInfo,
   ACRESCIMO_BOLETO,
@@ -412,6 +413,16 @@ router.get(
       modo: req.query.modo,
     });
     return successResponse(res, { ...dados, contasPagarme: contasInfo() }, 'Boletos Pagar.me');
+  }),
+);
+
+// POST /remessa-boletos/baixar-pendentes — só cria as Solicitações dos boletos
+// já pagos (rápido, sem a parte pesada); libera os creditados. João 30/10/2026.
+router.post(
+  '/remessa-boletos/baixar-pendentes',
+  asyncHandler(async (req, res) => {
+    const r = await baixarBoletosPagosPendentes({ incluirErros: req.body?.incluirErros !== false });
+    return successResponse(res, r, 'Boletos pagos pendentes processados');
   }),
 );
 
