@@ -648,6 +648,109 @@ async function calcularTrafego(mes, token) {
   return { total: variantes.comp_crosby, variantes, itens, n_comp: comp.length, n_cx: cx.length, meses };
 }
 
+// Perdas com inadimplência (Niziany 30/10): mesma conta do Dashboard
+// Inadimplência com "Vencidos desde → mês específico": títulos FATURA (tipo 1)
+// dos clientes dos 4 canais, vencidos no mês (status Vencido = venc < hoje
+// sem pagamento efetivo), saldo = vl_fatura − vl_pago. Canal = 1ª lista que
+// marca (FRQ > MTM > REV > BLC); BlueCard só filial própria; o cliente 29541
+// tem linha própria ("Crosby Shopping Recife"). Set/26 na tela = 73.612,03.
+const PERDAS_CANAIS = [
+  { canal: 'FRQ', nome: 'Franquia', rota: '/api/totvs/franchise-clients' },
+  { canal: 'MTM', nome: 'MTM', rota: '/api/totvs/multibrand-clients' },
+  { canal: 'REV', nome: 'Revenda', rota: '/api/totvs/reseller-clients' },
+  { canal: 'BLC', nome: 'BlueCard', rota: '/api/totvs/bluecred/clientes' },
+];
+const PERDAS_CLIENTE_PROPRIO = { codigo: '29541', nome: 'Crosby Shopping Recife' };
+const PERDAS_BLC_FILIAIS_FORA = new Set([98, 980, 551]);
+const perdasFilialBlueCard = (cd) => {
+  const n = parseInt(cd, 10);
+  return Number.isFinite(n) && n < 5999 && !PERDAS_BLC_FILIAIS_FORA.has(n);
+};
+async function calcularPerdasInadimplencia(mes, base) {
+  // 1) clientes por canal (precedência = ordem)
+  const canalDo = new Map();
+  for (const c of PERDAS_CANAIS) {
+    try {
+      const r = await axios.get(`${base}${c.rota}`, { timeout: 15 * 60 * 1000 });
+      const raw = r.data?.data;
+      const lista = Array.isArray(raw)
+        ? raw
+        : Array.isArray(raw?.data)
+          ? raw.data
+          : (raw?.codes || []).map((code) => ({ code }));
+      for (const it of lista) {
+        const code = String(typeof it === 'object' ? it.code : it).trim();
+        if (code && !canalDo.has(code)) canalDo.set(code, c.canal);
+      }
+    } catch (e) {
+      console.warn(`[forecast-dre perdas ${mes}] lista ${c.nome}: ${e.message}`);
+    }
+  }
+  const codigos = [...canalDo.keys()];
+  if (!codigos.length) return { total: 0, canais: [], titulos: 0, clientes: 0 };
+  // 2) títulos vencidos no mês, em lotes de 500 clientes
+  const hoje = new Date().toISOString().slice(0, 10);
+  const fimMes = ultimoDia(mes);
+  const dt_fim = fimMes < hoje ? fimMes : hoje;
+  const LOTE = 500;
+  const PAR = 5;
+  const lotes = [];
+  for (let i = 0; i < codigos.length; i += LOTE) lotes.push(codigos.slice(i, i + LOTE));
+  const itens = [];
+  for (let i = 0; i < lotes.length; i += PAR) {
+    const grupo = lotes.slice(i, i + PAR);
+    const resps = await Promise.all(
+      grupo.map((lote) =>
+        axios
+          .get(`${base}/api/totvs/accounts-receivable/filter`, {
+            params: {
+              dt_inicio: `${mes}-01`,
+              dt_fim,
+              modo: 'vencimento',
+              situacao: '1',
+              status: 'Vencido',
+              tp_documento: '1',
+              cd_cliente: lote.join(','),
+            },
+            timeout: 10 * 60 * 1000,
+          })
+          .then((r) => r.data?.data?.items || r.data?.items || []),
+      ),
+    );
+    for (const arr of resps) itens.push(...arr);
+  }
+  // 3) filtros e soma por canal
+  const porCanal = new Map();
+  const clientesTot = new Set();
+  let total = 0;
+  let titulos = 0;
+  for (const it of itens) {
+    if (!(it.tp_documento === 1 || it.tp_documento === '1')) continue;
+    const cod = String(it.cd_cliente || '').trim();
+    const canal = canalDo.get(cod);
+    if (canal === 'BLC' && !perdasFilialBlueCard(it.cd_empresa)) continue;
+    const saldo = (Number(it.vl_fatura) || 0) - (Number(it.vl_pago) || 0);
+    const nome =
+      cod === PERDAS_CLIENTE_PROPRIO.codigo
+        ? PERDAS_CLIENTE_PROPRIO.nome
+        : (PERDAS_CANAIS.find((c) => c.canal === canal) || { nome: 'Outro' }).nome;
+    const e = porCanal.get(nome) || { nome, valor: 0, titulos: 0, _cli: new Set() };
+    e.valor += saldo;
+    if (saldo > 0) {
+      e.titulos += 1;
+      titulos += 1;
+    }
+    e._cli.add(cod);
+    clientesTot.add(cod);
+    porCanal.set(nome, e);
+    total += saldo;
+  }
+  const canais = [...porCanal.values()]
+    .map((e) => ({ nome: e.nome, valor: Math.round(e.valor * 100) / 100, titulos: e.titulos, clientes: e._cli.size }))
+    .sort((a, b) => b.valor - a.valor);
+  return { total: Math.round(total * 100) / 100, canais, titulos, clientes: clientesTot.size };
+}
+
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
@@ -986,6 +1089,14 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre trafego ${mes}] ${e.message}`);
     }
 
+    // Perdas com inadimplência (linha própria da DRE; NÃO entra no totalFixo).
+    let perdas = { total: 0, canais: [], titulos: 0, clientes: 0 };
+    try {
+      perdas = await calcularPerdasInadimplencia(mes, base);
+    } catch (e) {
+      console.warn(`[forecast-dre perdas ${mes}] ${e.message}`);
+    }
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -1009,6 +1120,11 @@ async function calcularPessoalFixo(mes) {
       // Subitem TRÁFEGO do Marketing (Forecast de Mídia do Dryland).
       trafego_total: -Math.round(trafegoTotal * 100) / 100,
       trafego_itens: trafegoItens,
+      // Linha PERDAS COM INADIMPLÊNCIA (Dashboard Inadimplência, mês específico).
+      perdas_total: -Math.round(perdas.total * 100) / 100,
+      perdas_canais: perdas.canais,
+      perdas_titulos: perdas.titulos,
+      perdas_clientes: perdas.clientes,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
