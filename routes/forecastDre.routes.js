@@ -873,6 +873,22 @@ async function calcularJuros(mes, base) {
   return { total: Math.round(total * 100) / 100, lanc };
 }
 
+// Fretes (Niziany 30/10): valor de CUSTO da página Financeiro/Frete do Dryland,
+// aba "Despesa por canal" (RPC fin_frete_por_canal, soma igual ao Planilhão).
+async function calcularFrete(mes) {
+  const r = await drylandRpcDp('fin_frete_por_canal', { p_de: `${mes}-01`, p_ate: ultimoDia(mes) });
+  const linhas = (Array.isArray(r) ? r : []).filter((l) => String(l.mes || '').slice(0, 7) === mes);
+  const canais = linhas
+    .map((l) => ({
+      nome: l.canal || '—',
+      valor: Math.round((Number(l.custo) || 0) * 100) / 100,
+      envios: Number(l.envios) || 0,
+    }))
+    .filter((l) => l.valor !== 0)
+    .sort((a, b) => b.valor - a.valor);
+  return { total: Math.round(canais.reduce((a, c) => a + c.valor, 0) * 100) / 100, canais };
+}
+
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
@@ -1211,6 +1227,16 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre trafego ${mes}] ${e.message}`);
     }
 
+    // Fretes (linha própria da DRE; NÃO entra no totalFixo).
+    let frete = { total: 0, canais: [] };
+    let freteOk = false;
+    try {
+      frete = await calcularFrete(mes);
+      freteOk = true;
+    } catch (e) {
+      console.warn(`[forecast-dre frete ${mes}] ${e.message}`);
+    }
+
     // Juros e multa por atraso (linha própria da DRE; NÃO entra no totalFixo).
     let juros = { total: 0, lanc: [] };
     let jurosOk = false;
@@ -1252,6 +1278,8 @@ async function calcularPessoalFixo(mes) {
       // Subitem TRÁFEGO do Marketing (Forecast de Mídia do Dryland).
       trafego_total: -Math.round(trafegoTotal * 100) / 100,
       trafego_itens: trafegoItens,
+      // Linha FRETES (só vem se a consulta funcionou).
+      ...(freteOk ? { frete_total: -frete.total, frete_canais: frete.canais } : {}),
       // Linha JUROS E MULTA POR ATRASO (só vem se a consulta funcionou).
       ...(jurosOk ? { juros_total: -juros.total, juros_lanc: juros.lanc } : {}),
       // Linha PERDAS COM INADIMPLÊNCIA (Dashboard Inadimplência, mês específico).
