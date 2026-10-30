@@ -823,6 +823,49 @@ async function calcularPerdasInadimplencia(mes, base) {
   return { total: Math.round(total * 100) / 100, canais, titulos, clientes: clientesTot.size };
 }
 
+// Juros e multa por atraso (Niziany 30/10): natureza 7005 JUROS FINANCEIROS do
+// Contas a Pagar, pelo que foi PAGO no mês (modo liquidação). O juro vem RATEADO
+// dentro de outras duplicatas (aluguel, imposto, fornecedor), então soma só a
+// parte da natureza (proratedValue), nunca o valor do título.
+const JUROS_EXP = '7005';
+async function calcularJuros(mes, base) {
+  const resp = await axios.post(
+    `${base}/api/totvs/accounts-payable/search`,
+    {
+      dt_inicio: `${mes}-01`,
+      dt_fim: ultimoDia(mes),
+      modo: 'liquidacao',
+      situacao: 'N',
+      previsao: 'TODOS',
+      filtroPagamento: 'TODOS',
+      expenseCodeList: [Number(JUROS_EXP)],
+      branches: MARKETING_FILIAIS,
+    },
+    { timeout: 300000 },
+  );
+  const items = resp.data?.data?.data || [];
+  const brData = (iso) => {
+    const p = String(iso || '').slice(0, 10).split('-');
+    return p.length === 3 ? `${p[2]}/${p[1]}/${p[0]}` : '';
+  };
+  const lanc = [];
+  let total = 0;
+  for (const it of items) {
+    const val = (it.despesas || [])
+      .filter((e) => String(e.expenseCode) === JUROS_EXP)
+      .reduce((a, e) => a + (Number(e.proratedValue) || 0), 0);
+    if (!val) continue;
+    total += val;
+    lanc.push({
+      forn: it.nm_fornecedor || it.nm_razaosocial_fornecedor || `Fornecedor ${it.cd_fornecedor || '?'}`,
+      venc: brData(it.dt_liq),
+      valor: Math.round(val * 100) / 100,
+    });
+  }
+  lanc.sort((a, b) => b.valor - a.valor);
+  return { total: Math.round(total * 100) / 100, lanc };
+}
+
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
@@ -1161,6 +1204,16 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre trafego ${mes}] ${e.message}`);
     }
 
+    // Juros e multa por atraso (linha própria da DRE; NÃO entra no totalFixo).
+    let juros = { total: 0, lanc: [] };
+    let jurosOk = false;
+    try {
+      juros = await calcularJuros(mes, base);
+      jurosOk = true;
+    } catch (e) {
+      console.warn(`[forecast-dre juros ${mes}] ${e.message}`);
+    }
+
     // Perdas com inadimplência (linha própria da DRE; NÃO entra no totalFixo).
     let perdas = { total: 0, canais: [], titulos: 0, clientes: 0 };
     try {
@@ -1192,6 +1245,8 @@ async function calcularPessoalFixo(mes) {
       // Subitem TRÁFEGO do Marketing (Forecast de Mídia do Dryland).
       trafego_total: -Math.round(trafegoTotal * 100) / 100,
       trafego_itens: trafegoItens,
+      // Linha JUROS E MULTA POR ATRASO (só vem se a consulta funcionou).
+      ...(jurosOk ? { juros_total: -juros.total, juros_lanc: juros.lanc } : {}),
       // Linha PERDAS COM INADIMPLÊNCIA (Dashboard Inadimplência, mês específico).
       perdas_total: -Math.round(perdas.total * 100) / 100,
       perdas_canais: perdas.canais,
