@@ -509,6 +509,14 @@ async function calcularProvisao13(mes, token) {
   };
 }
 
+// Parte de um título que é da natureza: uma duplicata pode ratear várias
+// despesas, então soma o proratedValue da natureza. Sem rateio, usa `cheio`.
+const valorDaNatureza = (it, cod, cheio) => {
+  const linhas = (it.despesas || []).filter((e) => String(e.expenseCode) === String(cod));
+  const rateado = linhas.reduce((a, e) => a + (Number(e.proratedValue) || 0), 0);
+  return rateado > 0 ? rateado : linhas.length ? cheio : 0;
+};
+
 // Vale Transporte e Vale Alimentação (Niziany 29/10): custo da empresa pago no
 // mês, pelo Contas a Pagar do HeadCoach (TOTVS), por natureza de despesa.
 // 3036 = VALE TRANSPORTE · 3003 = VALE ALIMENTACAO E REFEICAO. No VT, abate o
@@ -533,9 +541,7 @@ async function calcularVales(mes, base, linhasFolha) {
   const somaExp = (cod) => {
     let t = 0;
     for (const it of items) {
-      if ((it.despesas || []).some((e) => String(e.expenseCode) === cod)) {
-        t += Number(it.vl_pago) || 0;
-      }
+      t += valorDaNatureza(it, cod, Number(it.vl_pago) || 0);
     }
     return Math.round(t * 100) / 100;
   };
@@ -656,7 +662,8 @@ async function calcularMarketing(mes, base) {
     const pago =
       it.tp_estagio === 'Liquid' || it.tp_estagio === 'Liquidado' || !!it.dt_liq || vlPago > 0;
     if (!(!pago || (it.dt_liq && vlPago > 0))) continue; // regra set+
-    const val = vlPago > 0 ? vlPago : Number(it.vl_duplicata) || 0;
+    const cheio = vlPago > 0 ? vlPago : Number(it.vl_duplicata) || 0;
+    const val = valorDaNatureza(it, MARKETING_EXP, cheio);
     if (!val) continue;
     total += val;
     lanc.push({
