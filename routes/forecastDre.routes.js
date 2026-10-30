@@ -1694,6 +1694,104 @@ router.post(
   }),
 );
 
+// ─── Corte de custo (Niziany 30/10) ─────────────────────────────────────────
+// Espelho do Forecast com dados próprios, sem mexer no Forecast:
+//   tipo 'edicao' → valor digitado na previsão (chave '')
+//   tipo 'faca'   → valor tirado do cálculo; chave '' = linha inteira do mês,
+//                   senão o item do detalhe (caminho separado por »)
+// Desfazer só marca ativo = false; nada é apagado.
+const CORTE_TABELA = 'forecast_dre_corte';
+const CORTE_DDL = `create table if not exists ${CORTE_TABELA} (
+  mes text not null,
+  linha text not null,
+  tipo text not null,
+  chave text not null default '',
+  nome text,
+  valor numeric(18,6),
+  ativo boolean not null default true,
+  atualizado_em timestamptz not null default now(),
+  primary key (mes, linha, tipo, chave)
+);`;
+let corteTabelaOk = false;
+async function garantirTabelaCorte() {
+  if (corteTabelaOk) return;
+  const { error } = await supabase.from(CORTE_TABELA).select('mes').limit(1);
+  if (!error) {
+    corteTabelaOk = true;
+    return;
+  }
+  if (!/relation .* does not exist|could not find the table|schema cache/i.test(error.message || '')) return;
+  let { error: e1 } = await supabase.rpc('exec_sql', { query: CORTE_DDL });
+  if (e1 && /exec_sql\(query\)/.test(e1.message || '')) {
+    ({ error: e1 } = await supabase.rpc('exec_sql', { sql: CORTE_DDL }));
+  }
+  if (e1) throw new Error(`não consegui criar ${CORTE_TABELA}: ${e1.message}`);
+  corteTabelaOk = true;
+}
+
+router.get(
+  '/corte',
+  asyncHandler(async (req, res) => {
+    await garantirTabelaCorte();
+    const { data, error } = await supabase
+      .from(CORTE_TABELA)
+      .select('mes, linha, tipo, chave, nome, valor')
+      .eq('ativo', true);
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    const edicoes = {};
+    const facas = {};
+    for (const r of data || []) {
+      if (r.tipo === 'edicao') {
+        (edicoes[r.mes] = edicoes[r.mes] || {})[r.linha] = Number(r.valor);
+      } else {
+        (facas[r.mes] = facas[r.mes] || []).push({
+          linha: r.linha,
+          chave: r.chave,
+          nome: r.nome,
+          valor: Number(r.valor) || 0,
+        });
+      }
+    }
+    return successResponse(res, { edicoes, facas }, 'OK');
+  }),
+);
+
+router.post(
+  '/corte',
+  asyncHandler(async (req, res) => {
+    const mes = String(req.body?.mes || '');
+    const linha = String(req.body?.linha || '').trim();
+    const tipo = String(req.body?.tipo || '');
+    const chave = String(req.body?.chave || '');
+    const nome = req.body?.nome ? String(req.body.nome).slice(0, 300) : null;
+    const ativo = req.body?.ativo !== false;
+    const valor = Number(req.body?.valor);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    if (!linha || linha.length > 120) return errorResponse(res, 'linha inválida', 400, 'BAD_LINHA');
+    if (tipo !== 'edicao' && tipo !== 'faca') return errorResponse(res, 'tipo inválido', 400, 'BAD_TIPO');
+    if (chave.length > 400) return errorResponse(res, 'chave inválida', 400, 'BAD_CHAVE');
+    if (ativo && !Number.isFinite(valor)) return errorResponse(res, 'valor inválido', 400, 'BAD_VALOR');
+    await garantirTabelaCorte();
+    const { error } = await supabase.from(CORTE_TABELA).upsert(
+      {
+        mes,
+        linha,
+        tipo,
+        chave,
+        nome,
+        valor: Number.isFinite(valor) ? valor : null,
+        ativo,
+        atualizado_em: new Date().toISOString(),
+      },
+      { onConflict: 'mes,linha,tipo,chave' },
+    );
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    return successResponse(res, { mes, linha, tipo, chave, ativo }, 'OK');
+  }),
+);
+
 router.get(
   '/config',
   asyncHandler(async (req, res) => {
