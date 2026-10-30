@@ -734,6 +734,9 @@ export async function lerExtratoBancario(buffer, opts = {}) {
       BB: interpretarBb,
       ITAU: interpretarItau,
     };
+    if (!parsers[banco]) {
+      throw new Error(`${BANCOS[banco].nome}: PDF não suportado por aqui (texto sem mapa de caracteres). Exporte o extrato em OFX.`);
+    }
     r = parsers[banco](paginas);
   }
   return montarExtrato(banco, r, { nomeArquivo: opts.nomeArquivo, paginas: paginas.length });
