@@ -597,6 +597,53 @@ async function calcularMarketing(mes, base) {
   return { total: Math.round(total * 100) / 100, lanc };
 }
 
+// Tráfego pago (Niziany 30/10): Forecast de Mídia do Dryland, RPC
+// forecast_midia_painel({p_token}) → {competencia:[{mes,canal,grupo,conta,loja,
+// valor}], caixa:[{mes,data,conta,tipo,forma,valor,confirmado,grupo}]}. A tela
+// mostra "Competência do mês" (o que a Meta veiculou) e "Caixa — saiu no mês"
+// (depósito + cobrança no cartão; estorno negativo). Devolve as variantes pra
+// casar com o número da Niziany (set/26 = 11.091,84) e fixar a regra.
+async function calcularTrafego(mes, token) {
+  const r = await drylandRpcDp('forecast_midia_painel', { p_token: token });
+  if (!r || r.ok === false) {
+    throw new Error(`forecast_midia_painel: ${(r && r.erro) || 'sem resposta'}`);
+  }
+  const n = (v) => Number(v) || 0;
+  const r2 = (x) => Math.round(x * 100) / 100;
+  const doMes = (l) => String(l.mes || '').slice(0, 7) === mes;
+  const comp = (r.competencia || []).filter(doMes);
+  const cx = (r.caixa || []).filter(doMes);
+  const ehCaixa = (l) => l.tipo === 'deposito' || (l.tipo === 'cobranca' && !/^Saldo/.test(l.forma || ''));
+  const sinal = (l) => (l.tipo === 'estorno' ? -1 : 1);
+  const pagador = (g) => (String(g || '').startsWith('franquias') ? 'Franqueado' : 'Crosby');
+  const projeto = (g) => (g === 'dr_ygor' ? 'Ygor Dantas' : 'Crosby');
+  const somaComp = (arr) => r2(arr.reduce((a, l) => a + n(l.valor), 0));
+  const somaCx = (arr) => r2(arr.filter(ehCaixa).reduce((a, l) => a + n(l.valor) * sinal(l), 0));
+  const compCrosby = comp.filter((l) => pagador(l.grupo) === 'Crosby' && projeto(l.grupo) === 'Crosby');
+  const cxCrosby = cx.filter((l) => pagador(l.grupo) === 'Crosby');
+  const variantes = {
+    comp_todos: somaComp(comp),
+    comp_crosby: somaComp(compCrosby),
+    caixa_todos: somaCx(cx),
+    caixa_crosby: somaCx(cxCrosby),
+  };
+  // Drill: competência por canal → loja/conta
+  const porChave = {};
+  for (const l of comp) {
+    const k = `${l.canal || '?'}|${l.loja || l.conta || '—'}`;
+    porChave[k] = (porChave[k] || 0) + n(l.valor);
+  }
+  const itens = Object.entries(porChave)
+    .map(([k, v]) => {
+      const [canal, nome] = k.split('|');
+      return { canal, nome, valor: r2(v) };
+    })
+    .filter((x) => x.valor !== 0)
+    .sort((a, b) => b.valor - a.valor);
+  const meses = [...new Set([...(r.competencia || []), ...(r.caixa || [])].map((l) => String(l.mes || '').slice(0, 7)))].sort();
+  return { total: variantes.comp_todos, variantes, itens, n_comp: comp.length, n_cx: cx.length, meses };
+}
+
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
@@ -924,6 +971,20 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre marketing ${mes}] ${e.message}`);
     }
 
+    // Tráfego pago (subitem do Marketing) — Forecast de Mídia do Dryland.
+    let trafegoTotal = 0;
+    let trafegoItens = [];
+    let trafegoDebug = null;
+    try {
+      const tr = await calcularTrafego(mes, lg.token);
+      trafegoTotal = tr.total;
+      trafegoItens = tr.itens;
+      trafegoDebug = { variantes: tr.variantes, n_comp: tr.n_comp, n_cx: tr.n_cx, meses: tr.meses };
+    } catch (e) {
+      trafegoDebug = { erro: e.message };
+      console.warn(`[forecast-dre trafego ${mes}] ${e.message}`);
+    }
+
     const dados = {
       mes,
       // Pessoal Fixo = proventos fixos + pró-labore; Variável = comissão.
@@ -944,6 +1005,10 @@ async function calcularPessoalFixo(mes) {
       // Linha MARKETING (Propaganda e Anúncios): total e lançamentos.
       marketing_total: -Math.round(mktTotal * 100) / 100,
       marketing_lanc: mktLanc,
+      // Subitem TRÁFEGO do Marketing (Forecast de Mídia do Dryland).
+      trafego_total: -Math.round(trafegoTotal * 100) / 100,
+      trafego_itens: trafegoItens,
+      _trafego_debug: trafegoDebug,
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
