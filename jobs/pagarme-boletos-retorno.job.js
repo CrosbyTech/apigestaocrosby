@@ -17,7 +17,10 @@ async function rodar() {
   if (rodando) return;
   rodando = true;
   try {
-    const r = await sincronizarRetorno();
+    // retentarErros: reprocessa baixas que ficaram em 'erro' (ex.: Pagar.me
+    // instável) — senão ficavam presas sem solicitação e o título em aberto no
+    // TOTVS (João, 30/10/2026).
+    const r = await sincronizarRetorno({ retentarErros: true });
     if (r.tabelaAusente) return;
     if (r.pagos || r.cancelados || r.baixados || r.errosBaixa) {
       console.log(
