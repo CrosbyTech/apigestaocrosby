@@ -23,6 +23,7 @@
 import express from 'express';
 import axios from 'axios';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import { calcularReceitaFinanceira } from './receitaFinanceira.routes.js';
 import supabase from '../config/supabase.js';
 import { DRYLAND_URL, DRYLAND_KEY } from '../services/drylandBaixas.js';
 
@@ -1227,6 +1228,17 @@ async function calcularPessoalFixo(mes) {
       console.warn(`[forecast-dre trafego ${mes}] ${e.message}`);
     }
 
+    // Receita financeira (Niziany 30/10): mesmo número da tela Receita Financeira
+    // do Contas a Receber (pago a mais nas faturas pagas no mês).
+    let receitaFin = null;
+    try {
+      const rf = await calcularReceitaFinanceira({ inicio: `${mes}-01`, fim: ultimoDia(mes) });
+      const v = Number(rf?.resumo?.consideradas?.receita_financeira);
+      if (Number.isFinite(v)) receitaFin = Math.round(v * 100) / 100;
+    } catch (e) {
+      console.warn(`[forecast-dre receita financeira ${mes}] ${e.message}`);
+    }
+
     // Fretes (linha própria da DRE; NÃO entra no totalFixo).
     let frete = { total: 0, canais: [] };
     let freteOk = false;
@@ -1278,6 +1290,8 @@ async function calcularPessoalFixo(mes) {
       // Subitem TRÁFEGO do Marketing (Forecast de Mídia do Dryland).
       trafego_total: -Math.round(trafegoTotal * 100) / 100,
       trafego_itens: trafegoItens,
+      // Linha RECEITA FINANCEIRA COM JUROS (só vem se a consulta funcionou).
+      ...(receitaFin !== null ? { receita_financeira: receitaFin } : {}),
       // Linha FRETES (só vem se a consulta funcionou).
       ...(freteOk ? { frete_total: -frete.total, frete_canais: frete.canais } : {}),
       // Linha JUROS E MULTA POR ATRASO (só vem se a consulta funcionou).
