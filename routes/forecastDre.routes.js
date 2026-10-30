@@ -1627,6 +1627,73 @@ router.post(
   }),
 );
 
+// ─── Valores editados nos meses de previsão (Niziany 30/10) ─────────────────
+// Por mês e linha da DRE. valor null = voltou ao espelho do último realizado
+// (a linha fica guardada, sem apagar nada).
+const PREV_TABELA = 'forecast_dre_previsao_manual';
+const PREV_DDL = `create table if not exists ${PREV_TABELA} (
+  mes text not null,
+  linha text not null,
+  valor numeric(18,6),
+  atualizado_em timestamptz not null default now(),
+  primary key (mes, linha)
+);`;
+let prevTabelaOk = false;
+async function garantirTabelaPrevisao() {
+  if (prevTabelaOk) return;
+  const { error } = await supabase.from(PREV_TABELA).select('mes').limit(1);
+  if (!error) {
+    prevTabelaOk = true;
+    return;
+  }
+  if (!/relation .* does not exist|could not find the table|schema cache/i.test(error.message || '')) return;
+  let { error: e1 } = await supabase.rpc('exec_sql', { query: PREV_DDL });
+  if (e1 && /exec_sql\(query\)/.test(e1.message || '')) {
+    ({ error: e1 } = await supabase.rpc('exec_sql', { sql: PREV_DDL }));
+  }
+  if (e1) throw new Error(`não consegui criar ${PREV_TABELA}: ${e1.message}`);
+  prevTabelaOk = true;
+}
+
+router.get(
+  '/previsao-manual',
+  asyncHandler(async (req, res) => {
+    await garantirTabelaPrevisao();
+    const { data, error } = await supabase.from(PREV_TABELA).select('mes, linha, valor');
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    const edicoes = {};
+    for (const r of data || []) {
+      if (r.valor === null) continue;
+      (edicoes[r.mes] = edicoes[r.mes] || {})[r.linha] = Number(r.valor);
+    }
+    return successResponse(res, { edicoes }, 'OK');
+  }),
+);
+
+router.post(
+  '/previsao-manual',
+  asyncHandler(async (req, res) => {
+    const mes = String(req.body?.mes || '');
+    const linha = String(req.body?.linha || '').trim();
+    const bruto = req.body?.valor;
+    const valor = bruto === null || bruto === undefined ? null : Number(bruto);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) {
+      return errorResponse(res, "mes inválido ('YYYY-MM')", 400, 'BAD_MES');
+    }
+    if (!linha || linha.length > 120) return errorResponse(res, 'linha inválida', 400, 'BAD_LINHA');
+    if (valor !== null && !Number.isFinite(valor)) {
+      return errorResponse(res, 'valor inválido', 400, 'BAD_VALOR');
+    }
+    if ((await lerTrava(mes)).travado) return errorResponse(res, MES_TRAVADO_MSG, 409, 'MES_TRAVADO');
+    await garantirTabelaPrevisao();
+    const { error } = await supabase
+      .from(PREV_TABELA)
+      .upsert({ mes, linha, valor, atualizado_em: new Date().toISOString() }, { onConflict: 'mes,linha' });
+    if (error) return errorResponse(res, error.message, 500, 'DB');
+    return successResponse(res, { mes, linha, valor }, 'OK');
+  }),
+);
+
 router.get(
   '/config',
   asyncHandler(async (req, res) => {
