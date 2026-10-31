@@ -16,7 +16,7 @@
 // O job diário (jobs/conciliacao-aprovados.job.js) roda com dataSaida = ontem.
 // ============================================================
 import supabase from '../config/supabase.js';
-import { salvarConciliacao } from './fluxoCaixaConciliacao.js';
+import { salvarConciliacao, atribuirChaves } from './fluxoCaixaConciliacao.js';
 
 // Puxa TODAS as linhas paginando por .range() — o Supabase devolve no máximo
 // ~1000 por requisição, então um select sem paginação trunca em silêncio e dá
@@ -140,14 +140,39 @@ export async function conciliarAprovados({ dataSaida = null, saidaDe = null, sai
   const aprovados = aprovados0.filter((t) => valorAlvo(t) > VALOR_TOL);
 
   // saídas candidatas no período (paginado — pode passar de 1000 numa janela larga)
-  const saidas = await puxarTudo('fluxo_caixa_lancamentos', 'id,conta_id,data,valor,contraparte_nome,contraparte_doc,memo', (q) =>
-    q.in('conta_id', contaIds).lt('valor', 0).is('transferencia_id', null).gte('data', de).lte('data', ate),
+  // A chave é calculada com TODAS as saídas do dia (inclusive transferências), para
+  // o "n" dos lançamentos idênticos sair igual ao gravado na conciliação.
+  const saidasTodas = await puxarTudo('fluxo_caixa_lancamentos', 'id,conta_id,data,valor,seq,contraparte_nome,contraparte_doc,memo,descricao,transferencia_id', (q) =>
+    q.in('conta_id', contaIds).lt('valor', 0).gte('data', de).lte('data', ate),
   );
+  atribuirChaves(saidasTodas);
+  const saidas = saidasTodas.filter((l) => !l.transferencia_id);
 
-  // saídas já conciliadas com título (não reusar) — filtra a origem no servidor
-  // e pagina: a tabela de conciliações cresce todo dia e passaria de 1000.
-  const conc = await puxarTudo('fluxo_caixa_conciliacoes', 'lancamento_id,origem', (q) => q.in('origem', ['LIBERACAO', 'MULTIPLO', 'SOLICITACAO']));
-  const lancUsado = new Set((conc || []).map((c) => c.lancamento_id));
+  // Saídas já conciliadas com título (não reusar). Compara pela CHAVE: o id do
+  // lançamento muda a cada reimportação (o bot reimporta 3× ao dia), e por id a
+  // trava falhava — a mesma saída pagava dois títulos.
+  const conc = await puxarTudo('fluxo_caixa_conciliacoes', 'chave,conta_id,data,valor,origem', (q) => q.in('origem', ['LIBERACAO', 'MULTIPLO', 'SOLICITACAO']));
+  const chavesUsadas = new Set(conc.map((c) => c.chave));
+  // reforço: se o texto do extrato mudou entre PDF e API, a chave muda; então
+  // cada conciliação sem chave igual ainda consome uma saída de mesma conta+data+valor
+  const chaveValor = (x) => `${x.conta_id}|${x.data}|${round2(x.valor).toFixed(2)}`;
+  const chavesPresentes = new Set(saidasTodas.map((l) => l.chave));
+  const sobrando = new Map();
+  for (const c of conc) {
+    if (chavesPresentes.has(c.chave)) continue;
+    sobrando.set(chaveValor(c), (sobrando.get(chaveValor(c)) || 0) + 1);
+  }
+  const lancUsado = new Set();
+  for (const l of saidas) {
+    if (chavesUsadas.has(l.chave)) lancUsado.add(l.id);
+  }
+  for (const l of saidas) {
+    const k = chaveValor(l);
+    if (!lancUsado.has(l.id) && (sobrando.get(k) || 0) > 0) {
+      lancUsado.add(l.id);
+      sobrando.set(k, sobrando.get(k) - 1);
+    }
+  }
 
   const usados = new Set();
   const resultados = [];
