@@ -10,12 +10,15 @@
 // Rotas (montadas em /api/totvs):
 //   GET  /promocao-valores/promocoes?branch=N&status=Open|Blocked|Closed|all
 //        → promoções da empresa (uma linha por promoção, com qtde de itens)
-//   POST /promocao-valores/preview  { branch, promotionCode, priceCode?, skus[] }
+//   POST /promocao-valores/preview  { branch, promotionCode, priceCode?, skus[], primeiroLote? }
 //        → resolve cada SKU (código interno, EAN ou SKU do TOTVS) e devolve
 //          nome, preço atual e se já está na promoção
-//   POST /promocao-valores/aplicar  { branch, promotionCode, items[], incluirNovos? }
+//   POST /promocao-valores/aplicar  { branch, promotionCode, items[], incluirNovos?, primeiroLote? }
 //        items: [{ productCode, promotionValue }]
 //        → atualiza/insere em lotes e devolve o resultado por item
+//
+// Sem limite de SKUs: a página divide a planilha em lotes e chama estas rotas
+// em loop (primeiroLote: false nos lotes seguintes reaproveita os itens lidos).
 //
 // Pegadinhas da API TOTVS:
 //   - promotion-values/update só aceita produto que JÁ está na promoção; o
@@ -38,14 +41,43 @@ const router = express.Router();
 
 const PRODUCT_BASE = `${TOTVS_BASE_URL}/product/v2`;
 const PAGE_SIZE = 100; // GET /promotion limita PageSize a 100 (apesar do swagger dizer 500)
-const MAX_PAGES = 300; // 30 mil linhas por consulta de promoção
 const CHUNK_PRECOS = 100; // productCodeList por chamada de prices/search
 const CHUNK_GRAVACAO = 50; // itens por POST de update/insert
 const CONCORRENCIA = 4; // lookups simultâneos de SKU/EAN
 
 // ─── HTTP ────────────────────────────────────────────────────────────────────
 
-async function callTotvs(method, url, { data, params, timeout = 60000 } = {}) {
+// Queda de conexão e 429/502/503/504 são passageiros: numa planilha de 50 mil
+// SKUs seriam milhares de chamadas, e uma "socket hang up" não pode derrubar o
+// lote inteiro. Repetir é seguro: update regrava o mesmo valor, e insert que já
+// entrou cai no fallback para update em gravarLote.
+const ESPERAS_RETENTATIVA_MS = [2000, 5000];
+
+export function erroTransitorio(err) {
+  const status = err?.response?.status;
+  if (status) return [429, 502, 503, 504].includes(status);
+  return Boolean(err?.request);
+}
+
+export async function comRetentativa(fn, esperas = ESPERAS_RETENTATIVA_MS) {
+  for (let tentativa = 0; ; tentativa++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (tentativa >= esperas.length || !erroTransitorio(err)) throw err;
+      console.warn(
+        `⚠️ [promocao-valores] TOTVS instável (${err.message}), nova tentativa em ${esperas[tentativa]} ms`,
+      );
+      await new Promise((r) => setTimeout(r, esperas[tentativa]));
+    }
+  }
+}
+
+async function callTotvs(method, url, opts) {
+  return comRetentativa(() => chamarTotvs(method, url, opts));
+}
+
+async function chamarTotvs(method, url, { data, params, timeout = 60000 } = {}) {
   const doCall = async (token) =>
     axios({
       method,
@@ -157,7 +189,7 @@ export function normalizarSku(v) {
 // Lê GET /product/v2/promotion paginado (uma linha por item da promoção).
 async function listarLinhasPromocao({ branch, promotionCode, status }) {
   const linhas = [];
-  for (let page = 1; page <= MAX_PAGES; page++) {
+  for (let page = 1; ; page++) {
     const params = { BranchCode: branch, Page: page, PageSize: PAGE_SIZE };
     if (promotionCode) params.PromotionCode = promotionCode;
     if (status && status !== 'all') params.Status = status;
@@ -169,8 +201,19 @@ async function listarLinhasPromocao({ branch, promotionCode, status }) {
   return linhas;
 }
 
+// A planilha chega em lotes e reler a promoção a cada lote custaria minutos
+// (100 linhas por página). O 1º lote relê do TOTVS (fresco) e os seguintes usam
+// esta cópia; se ela estiver defasada, gravarLote troca update ↔ insert.
+const cacheItensPromocao = new Map(); // `${branch}:${promotionCode}` → { at, mapa }
+const CACHE_ITENS_TTL = 30 * 60 * 1000;
+
 // Mapa productCode → { previousValue, promotionValue } dos itens da promoção.
-async function itensDaPromocao(branch, promotionCode) {
+async function itensDaPromocao(branch, promotionCode, { fresco = true } = {}) {
+  const chave = `${branch}:${promotionCode}`;
+  const cached = cacheItensPromocao.get(chave);
+  if (!fresco && cached && Date.now() - cached.at < CACHE_ITENS_TTL) {
+    return cached.mapa;
+  }
   const linhas = await listarLinhasPromocao({ branch, promotionCode, status: 'all' });
   const mapa = new Map();
   for (const l of linhas) {
@@ -180,6 +223,7 @@ async function itensDaPromocao(branch, promotionCode) {
       promotionValue: l.promotionValue ?? null,
     });
   }
+  cacheItensPromocao.set(chave, { at: Date.now(), mapa });
   return mapa;
 }
 
@@ -317,9 +361,6 @@ router.post(
     if (skusBrutos.length === 0) {
       return errorResponse(res, 'Informe ao menos um SKU', 400, 'MISSING_SKUS');
     }
-    if (skusBrutos.length > 5000) {
-      return errorResponse(res, 'Máximo de 5.000 SKUs por importação', 400, 'TOO_MANY_SKUS');
-    }
 
     // Dedup mantendo a ordem da planilha
     const vistos = new Set();
@@ -371,7 +412,9 @@ router.post(
       }
 
       // 4) Itens já na promoção
-      const naPromocao = await itensDaPromocao(branch, promotionCode);
+      const naPromocao = await itensDaPromocao(branch, promotionCode, {
+        fresco: req.body?.primeiroLote !== false,
+      });
 
       const rows = skus.map((sku) => {
         const productCode = porSku.get(sku);
@@ -506,7 +549,9 @@ router.post(
     }
 
     try {
-      const existentes = await itensDaPromocao(branch, promotionCode);
+      const existentes = await itensDaPromocao(branch, promotionCode, {
+        fresco: req.body?.primeiroLote !== false,
+      });
       const atualizar = itens.filter((i) => existentes.has(i.productCode));
       const inserir = itens.filter((i) => !existentes.has(i.productCode));
 
