@@ -183,12 +183,30 @@ export async function atualizarConta(id, patch) {
   return data;
 }
 
+// O número menor (5+ dígitos) é o final do maior, com ou sem o dígito verificador.
+export function mesmoNumeroConta(a, b) {
+  const x = String(a ?? '').replace(/\D/g, '');
+  const y = String(b ?? '').replace(/\D/g, '');
+  const [menor, maior] = x.length <= y.length ? [x, y] : [y, x];
+  if (menor.length < 5 || menor === maior) return menor.length >= 5;
+  return maior.endsWith(menor) || maior.slice(0, -1).endsWith(menor);
+}
+
 async function garantirConta(extrato, escopo = ESCOPO_PADRAO) {
   const { esc, existe } = await prepararEscopo(escopo);
   const chave = { banco: extrato.banco, agencia: extrato.titular.agencia || '', conta: extrato.titular.conta, ...(existe ? { escopo: esc } : {}) };
   if (!chave.conta) throw new Error('Conta não identificada no extrato.');
-  const { data: existente, error } = await supabase.from(T.contas).select('*').match(chave).maybeSingle();
+  const { data: exata, error } = await supabase.from(T.contas).select('*').match(chave).maybeSingle();
   lancar(error);
+  // PDF e OFX escrevem o mesmo número de formas diferentes (Sicredi "36733" ×
+  // "2207000000036733-8", Caixa sem × com DV). Sem isto a mesma conta vira duas e
+  // as transações contam em dobro. Só aceita quando existe UMA candidata.
+  let existente = exata;
+  if (!existente) {
+    const irmas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('*').eq('banco', extrato.banco), esc, existe).order('id'));
+    const candidatas = irmas.filter((c) => mesmoNumeroConta(c.conta, chave.conta));
+    if (candidatas.length === 1) existente = candidatas[0];
+  }
   const agora = new Date().toISOString();
   if (existente) {
     const patch = {

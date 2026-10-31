@@ -36,8 +36,9 @@ import {
   interpretarPagbank,
   interpretarPagarme,
   ehXlsx,
+  classificarGenerico,
 } from './extratosBancariosExtra.js';
-import { interpretarBb, interpretarItau } from './extratosBancariosBbItau.js';
+import { interpretarBb, interpretarItau, classificarBb, classificarItau } from './extratosBancariosBbItau.js';
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const soDigitos = (v) => String(v ?? '').replace(/\D/g, '');
@@ -675,6 +676,35 @@ export function ehOfx(buffer) {
   }
 }
 
+// Classifica o MEMO do OFX com o classificador de cada banco. Sem isso tudo cai em
+// OUTROS e somem as abas Forma de pagamento/Fornecedores. Alguns bancos trazem o
+// nome da contraparte no memo; o Sicredi não (só o PDF tem).
+export function classificarOfx(banco, memo, valor) {
+  const nomePor = (re) => limpar(String(memo || '').match(re)?.[1] || '') || null;
+  switch (banco) {
+    case 'STONE':
+      return classificarStoneNormalizado({ memo, valor });
+    case 'SICREDI':
+      return classificarSicredi(memo, valor);
+    case 'MENTORE':
+      return classificarMentore(memo, valor);
+    case 'CAIXA':
+      return classificarCaixa([memo], valor);
+    case 'ITAU':
+      return classificarItau(memo, valor);
+    case 'BB':
+      return { ...classificarBb(memo, valor), contraparteNome: nomePor(/^PIX - \S+ - \d{2}\/\d{2} \d{2}:\d{2} (.+)$/i) || nomePor(/^PAGAMENTO DE BOLETO - (.+)$/i) };
+    case 'UNICRED':
+      return { ...classificarGenerico(memo, valor), contraparteNome: nomePor(/DOC\.:\s*\w+ PIX\s*\/\s*(.+?)\s*\)/i) };
+    case 'BNB':
+      return { ...classificarGenerico(memo, valor), contraparteNome: nomePor(/VIA PIX\s*-\s*(.+?)\s*::/i) };
+    case 'BRADESCO':
+      return { ...classificarGenerico(memo, valor), contraparteNome: nomePor(/(?:REM|DES):\s*(.+?)\s+\d{2}\/\d{2}$/i) };
+    default:
+      return classificarGenerico(memo, valor);
+  }
+}
+
 // OFX → extrato (reaproveita parseOfx + montarExtrato). O banco vem do nome do
 // arquivo/pasta (mais confiável que o BANKID do OFX, que às vezes vem genérico).
 export function lerExtratoOfx(buffer, opts = {}) {
@@ -692,14 +722,23 @@ export function lerExtratoOfx(buffer, opts = {}) {
   // parseOfx já ordena cronologicamente; monta saldoApos corrente para a conferência
   let saldo = p.saldo.inicial;
   const lancamentos = p.lancamentos.map((l) => {
-    const row = { data: l.data, hora: l.hora, valor: l.valor, memo: l.memo, documento: l.fitid || l.checknum || null };
+    const c = classificarOfx(banco, l.memo, l.valor);
+    const row = { ...c, data: l.data, hora: l.hora, valor: l.valor, memo: l.memo, documento: c.documento || l.fitid || l.checknum || null };
     if (saldo != null) {
       saldo = round2(saldo + l.valor);
       row.saldoApos = saldo;
     }
     return row;
   });
-  const r = { titular, periodo: p.periodo, saldoInicial: p.saldo.inicial, saldoFinalInformado: p.saldo.final, lancamentos, avisos: [] };
+  // O período precisa cobrir todos os lançamentos: a reimportação apaga por esta
+  // faixa. O DTEND−1 do parseOfx é regra da Stone e, nos outros bancos, deixava o
+  // último dia de fora, duplicando-o a cada reimportação.
+  const datas = lancamentos.map((l) => l.data).filter(Boolean).sort();
+  const periodo = {
+    inicio: [p.periodo.inicio, datas[0]].filter(Boolean).sort()[0] || null,
+    fim: [p.periodo.fim, datas.at(-1)].filter(Boolean).sort().at(-1) || null,
+  };
+  const r = { titular, periodo, saldoInicial: p.saldo.inicial, saldoFinalInformado: p.saldo.final, lancamentos, avisos: [] };
   return montarExtrato(banco, r, { nomeArquivo: opts.nomeArquivo });
 }
 

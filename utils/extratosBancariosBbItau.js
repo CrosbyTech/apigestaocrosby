@@ -79,7 +79,7 @@ const RE_BB_PREFIXO = /^(\d{2}\/\d{2}\/\d{4})\s+(?:(\d{2}\/\d{2}\/\d{4})\s+)?(\d
 const RE_BB_ROW = /^(\d{2}\/\d{2}\/\d{4})\s+(?:(\d{2}\/\d{2}\/\d{4})\s+)?(\d{4})\s+(\d{5})\s+(?:(\d{3})\s+)?(.*?)\s+(?:([\d.]{3,})\s+)?(-?[\d.]*\d,\d{2})\s*([CD])(?:\s+(-?[\d.]*\d,\d{2})\s*([CD]))?$/i;
 const RE_BB_SALDO = /^(\d{2}\/\d{2}\/\d{4})\s+(?:(\d{2}\/\d{2}\/\d{4})\s+)?(\d{4})\s+(\d{5})\s+(?:(\d{3})\s+)?(Saldo Anterior|S A L D O)\s+(-?[\d.]*\d,\d{2})\s*([CD])(?:\s+(-?[\d.]*\d,\d{2})\s*([CD]))?$/i;
 
-function classificarBb(desc, valor) {
+export function classificarBb(desc, valor) {
   const up = semAcento(desc).toUpperCase();
   if (/BB GIRO|PRONAMPE|BB CREDITO|CAPITAL DE GIRO|EMPRESTIMO|FINANCIAMENTO|PARC\.? OPER|ESTORNO DE DEBITO/.test(up)) return { forma: F.EMPRESTIMO, categoria: 'emprestimo', descricao: up };
   if (/SEGURO/.test(up)) return { forma: F.OUTROS, categoria: 'outros', descricao: up };
@@ -191,7 +191,7 @@ const RE_ITAU_DATA = /^(\d{2})\s*\/\s*([a-z]{3})$/i;
 const RE_DATA4 = /^\d{2}\/\d{2}\/\d{4}$/;
 const BANDEIRA = { ELO: 'ELO', MAST: 'MASTERCARD', MASTER: 'MASTERCARD', VISA: 'VISA', AMEX: 'AMEX', HIPER: 'HIPERCARD' };
 
-function classificarItau(desc, valor) {
+export function classificarItau(desc, valor) {
   const up = semAcento(desc).toUpperCase().replace(/#/g, '');
   const deb = valor < 0;
   const base = { contraparteNome: null, contraparteDoc: null, bandeira: null };
