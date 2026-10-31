@@ -25,7 +25,7 @@ import * as wa from './whatsappContasPagar.js';
 const env = (k, d) => process.env[k] ?? d;
 const ENABLED = String(env('RELATORIO_SALDOS_ENABLED', 'true')).toLowerCase() !== 'false';
 const GRUPO_NOME = env('RELATORIO_SALDOS_GRUPO_NOME', 'CONTAS A PAGAR CROSBY OFC');
-const MENCIONAR = String(env('RELATORIO_SALDOS_MENCIONAR', '558487820986')).replace(/\D/g, '');
+export const MENCIONAR = String(env('RELATORIO_SALDOS_MENCIONAR', '558487820986')).replace(/\D/g, '');
 const NOME_MENCIONADO = env('RELATORIO_SALDOS_NOME_MENCIONADO', 'Fábio');
 const TRACK_ID = 'veveto';
 const ASSINATURA = '— Veveto';

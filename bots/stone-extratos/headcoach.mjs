@@ -51,6 +51,14 @@ export class HeadCoach {
     return this.req('GET', `/proxima?host=${encodeURIComponent(this.host)}`, { timeoutMs: 30000 });
   }
 
+  proximaInclusao() {
+    return this.req('GET', `/inclusoes/proxima?host=${encodeURIComponent(this.host)}`, { timeoutMs: 30000 });
+  }
+
+  resultadoInclusao(id, resultado) {
+    return this.req('POST', `/inclusoes/${id}/resultado`, { json: resultado, timeoutMs: 60000 });
+  }
+
   criarExecucao({ origem = 'manual', de, ate } = {}) {
     return this.req('POST', '/execucoes', { json: { origem, host: this.host, de, ate }, timeoutMs: 30000 });
   }

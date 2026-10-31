@@ -6,7 +6,9 @@
 //    `login.bat` (janela visível, com token/biometria do próprio Yago); o
 //    Chrome guarda a sessão em perfil-chrome/ e as execuções seguintes
 //    reaproveitam. Sessão expirou → o bot avisa no log e pede novo login.
-//  - Só LÊ: lista contas, saldo, extrato e exporta PDF. Nada de transferência.
+//  - Lê contas, saldo, extrato e exporta PDF. A única escrita é a inclusão de Pix
+//    (inclusoes.mjs), que fica aguardando a aprovação do Fábio. O bot não aprova
+//    e não resolve o desafio da Stone (senha, PIN, código).
 //  - Dados vêm da mesma API que o portal consome (api.openbank.stone.com.br,
 //    contrato público em docs.openbank.stone.com.br): o bot captura o
 //    Authorization que o próprio portal manda e faz os GETs de dentro da página.
@@ -281,6 +283,51 @@ export class Stone {
       }
     }
     throw ultimoErro || new Error('extrato indisponível');
+  }
+
+  /**
+   * POST com o token do portal, em uma tentativa só (repete apenas em 401, com a
+   * mesma chave de idempotência). Quem chama decide o que fazer com o status.
+   */
+  async apiPost(rota, corpo, { idempotencia }, tentativa = 0) {
+    await this.garantirApi();
+    const resp = await fetch(`${this.api.base}${rota}`, {
+      method: 'POST',
+      headers: {
+        ...this.api.headers,
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-stone-idempotency-key': idempotencia,
+        'user-agent': this.ua || 'Mozilla/5.0',
+        origin: this.url,
+        referer: `${this.url}/`,
+      },
+      body: JSON.stringify(corpo),
+    });
+    const texto = await resp.text();
+    if (resp.status === 401 && tentativa < 1) {
+      this.api = null;
+      await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+      await this.garantirApi({ timeoutMs: 30000 });
+      return this.apiPost(rota, corpo, { idempotencia }, tentativa + 1);
+    }
+    let json = null;
+    try {
+      json = texto ? JSON.parse(texto) : null;
+    } catch {
+      json = null;
+    }
+    return { status: resp.status, texto, json };
+  }
+
+  /** Cria o Pix pendente pela chave; a resposta traz o recebedor para conferir. */
+  criarPix({ accountId, chave, valorCentavos, descricao, idempotencia }) {
+    return this.apiPost('/api/v1/pix/outbound_pix_payments', { account_id: accountId, key: chave, amount: valorCentavos, description: descricao }, { idempotencia });
+  }
+
+  /** Confirma: para quem não é aprovador, o Pix vai para a aprovação no app. */
+  confirmarPix({ id, valorCentavos, descricao, idempotencia }) {
+    return this.apiPost(`/api/v1/pix/outbound_pix_payments/${id}/actions/confirm`, { amount: valorCentavos, description: descricao, add_target_to_contacts: false }, { idempotencia });
   }
 
   /** GET genérico em outros serviços do portal (customer-api, prepayment) com o mesmo token. */

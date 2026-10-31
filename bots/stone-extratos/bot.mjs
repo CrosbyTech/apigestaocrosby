@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HeadCoach } from './headcoach.mjs';
 import { Stone, helpers, manterSessao } from './stone.mjs';
+import { incluirPix } from './inclusoes.mjs';
 
 const VERSAO = '1.0.0';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -309,6 +310,43 @@ async function executar(exec, { visivel = false } = {}) {
   return { status, resumo, erro: erroGeral };
 }
 
+// ─── inclusão de pagamentos (botão APROVAR da Liberação) ────────────────────
+async function rodarInclusoes(primeiro) {
+  const stone = new Stone(cfg, dirs, (m) => console.log(`${hora()}    ${m}`));
+  let item = primeiro;
+  let contas = null;
+  let falhaGeral = null;
+  try {
+    await stone.abrir({ visivel: false });
+    await stone.irParaInicio();
+    if (await stone.sessaoOk()) {
+      await stone.garantirApi();
+      contas = await stone.listarContas();
+    } else {
+      falhaGeral = 'Sessão da Stone expirada: rode login.bat e clique em tentar de novo.';
+    }
+  } catch (e) {
+    falhaGeral = e.message;
+  }
+  try {
+    while (item) {
+      let r;
+      try {
+        r = falhaGeral ? { status: 'erro', erro: falhaGeral } : await incluirPix(stone, item, contas);
+      } catch (e) {
+        // falhou antes do confirm: nada foi para o Fábio e a mesma chave de idempotência protege a repetição
+        r = { status: 'erro', erro: e.message };
+      }
+      console.log(`${hora()} ${r.status === 'incluido' ? '✅' : '⚠️ '} inclusão #${item.id} conta ${item.conta_final} R$ ${(item.valor_centavos / 100).toFixed(2)}: ${r.status}${r.erro ? ` — ${r.erro}` : ''}`);
+      const volta = await hc.resultadoInclusao(item.id, r);
+      if (volta?.aviso) console.log(`${hora()}    aviso no grupo: ${volta.aviso.enviado ? `enviado (${volta.aviso.contas.join(', ')})` : `FALHOU — ${volta.aviso.erro}`}`);
+      item = await hc.proximaInclusao();
+    }
+  } finally {
+    await stone.fechar();
+  }
+}
+
 // ─── modos ───────────────────────────────────────────────────────────────────
 async function modoLogin() {
   const stone = new Stone(cfg, dirs, (m) => console.log(`${hora()}    ${m}`));
@@ -441,6 +479,18 @@ async function modoAgente() {
           } finally {
             ocupado = false;
             ultimoKeepAlive = Date.now(); // a execução já renovou a sessão
+          }
+        }
+      }
+      if (!ocupado) {
+        const inclusao = await hc.proximaInclusao();
+        if (inclusao) {
+          ocupado = true;
+          try {
+            await rodarInclusoes(inclusao);
+          } finally {
+            ocupado = false;
+            ultimoKeepAlive = Date.now();
           }
         }
       }

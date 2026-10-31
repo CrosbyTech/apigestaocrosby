@@ -82,8 +82,12 @@ desliga o PDF de vez (só JSON).
 
 ## Segurança
 
-- O bot só lê (contas, saldo, extrato, exportação). Não há código de
-  transferência/pagamento.
+- A única escrita do bot é a inclusão de Pix (`inclusoes.mjs`), disparada pelo
+  APROVAR da Liberação para títulos com banco `STONE 0000`. Ele não aprova: o
+  pagamento fica aguardando o Fábio no app da Stone. Se a Stone pedir senha, PIN
+  ou código, o bot para e marca `bloqueado`; sem resposta depois do confirm, marca
+  `verificar` e não repete.
+- Para desligar a inclusão: `STONE_INCLUSAO_ENABLED=false` no Render.
 - `config.json` (token) e `perfil-chrome/` (sessão) estão no `.gitignore` —
   não versione e não copie para outro PC.
 - O token do agente (`STONE_BOT_TOKEN`) só autoriza as rotas

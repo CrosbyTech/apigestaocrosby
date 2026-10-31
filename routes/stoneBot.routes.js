@@ -8,6 +8,7 @@
 //   POST   /execucoes {de?, ate?}  → enfileira (botão "Baixar extratos agora")
 //   DELETE /execucoes/:id          → cancela uma pendente
 //   GET    /saldos                 → saldos da última captura
+//   POST   /inclusoes {ids}        → fila de inclusão na Stone (botão APROVAR da Liberação)
 //
 // Agente local (bots/stone-extratos, header x-bot-token = STONE_BOT_TOKEN):
 //   POST   /agente/ping                         { host, versao, sessaoOk, proximaAgendada }
@@ -20,6 +21,8 @@
 //   POST   /agente/execucoes/:id/pagarme        { de?, ate? } → saldo + extrato Pagar.me (servidor)
 //   Tela: GET /pagarme/saldos · POST /pagarme/executar {de?, ate?}
 //   POST   /agente/execucoes/:id/finalizar      { status, resumo, erro }
+//   GET    /agente/inclusoes/proxima?host       → próximo título a incluir (marca processando) ou null
+//   POST   /agente/inclusoes/:id/resultado      { status, stonePagamentoId, recebedorNome, recebedorDoc, erro }
 // ============================================================
 import crypto from 'node:crypto';
 import express from 'express';
@@ -31,6 +34,7 @@ import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { salvarComprovante } from '../services/comprovantesStone.js';
 import { enviarRelatorio, statusRelatorio, testarImagem } from '../services/relatorioSaldosWhatsapp.js';
 import { conciliarAprovados } from '../services/conciliacaoAprovados.js';
+import { enfileirar, proximaInclusao, registrarResultado } from '../services/stoneInclusoes.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
@@ -194,6 +198,18 @@ tela.post(
   }),
 );
 
+// Botão APROVAR da Liberação: títulos "STONE 0000" vão para a fila de inclusão do agente
+tela.post(
+  '/inclusoes',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await enfileirar({ ids: req.body?.ids, usuario: req.user?.email }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Pagar.me (roda no servidor, não depende do PC do bot)
 tela.get(
   '/pagarme/saldos',
@@ -240,6 +256,28 @@ agente.get(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await bot.proximaExecucao({ host: req.query.host }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+agente.get(
+  '/inclusoes/proxima',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await proximaInclusao({ host: req.query.host }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+agente.post(
+  '/inclusoes/:id/resultado',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await registrarResultado(Number(req.params.id), req.body || {}));
     } catch (e) {
       return tratar(res, e);
     }
