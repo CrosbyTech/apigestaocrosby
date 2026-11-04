@@ -111,10 +111,12 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
   const gravadas = await listarConciliacoes({ de: addDias(de, -1), ate: addDias(ate, 1), contaIds: [...porConta.keys()] });
   const porChave = new Map(gravadas.map((c) => [c.chave, c]));
 
+  const situacoes = await situacaoDasOrigens(gravadas).catch(() => new Map());
+
   for (const l of lancamentos) {
     const g = porChave.get(l.chave);
     if (g) {
-      l.conciliacao = { id: g.id, origem: g.origem, referencia: g.referencia, justificativa: g.justificativa, automatico: g.automatico, pontuacao: g.pontuacao, usuario: g.usuario, em: g.criado_em, anexos: g.anexos || [] };
+      l.conciliacao = { id: g.id, origem: g.origem, referencia: g.referencia, justificativa: g.justificativa, automatico: g.automatico, pontuacao: g.pontuacao, usuario: g.usuario, em: g.criado_em, anexos: g.anexos || [], situacao: situacoes.get(g.id) || null };
     } else if (l.transferencia_id && l.transferencia) {
       l.conciliacao = {
         id: null,
@@ -129,6 +131,63 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
     l.pendente = !l.conciliacao;
   }
   return lancamentos;
+}
+
+// ─── situação viva de Solicitação / Liberação ────────────────
+// Uma saída conciliada com uma Solicitação Crosby (ex.: duplicata criada na
+// própria conciliação) fica PENDENTE até a solicitação virar PAGO na Liberação
+// de Pagamento ou a duplicata aparecer liquidada no TOTVS.
+const ETAPAS_SOL = {
+  pendente: 'aguardando gestor',
+  aprovado_gestor: 'aguardando financeiro',
+  aprovado_financeiro: 'a enviar ao TOTVS',
+  enviado_totvs: 'no TOTVS, aguardando pagamento',
+  nota_fiscal: 'com NF, aguardando',
+  aguardando_conciliacao: 'aguardando conciliação',
+  erro_envio: 'erro no envio ao TOTVS',
+  rejeitado: 'REJEITADA',
+  cancelado: 'CANCELADA',
+};
+function liquidadaNoTotvsCache(duplicata, cdEmpresa) {
+  if (!duplicata) return null;
+  for (const hit of cacheTotvs.values()) {
+    for (const it of hit?.itens || []) {
+      if (String(it.duplicata || '').split('|')[0] === String(duplicata) && (!cdEmpresa || it.empresa === `Empresa ${cdEmpresa}`)) return it;
+    }
+  }
+  return null;
+}
+async function situacaoDasOrigens(gravadas) {
+  const out = new Map();
+  const sols = gravadas.filter((g) => g.origem === 'SOLICITACAO' && g.referencia?.id);
+  const libs = gravadas.filter((g) => g.origem === 'LIBERACAO' && g.referencia?.id);
+  if (!sols.length && !libs.length) return out;
+  const solRows = sols.length ? (await supabase.from(T.sol).select('id,status,pagamento_liberacao_id,pago_em,duplicate_code,cd_empresa,totvs_erro').in('id', sols.map((g) => g.referencia.id))).data || [] : [];
+  const libIds = [...new Set([...libs.map((g) => g.referencia.id), ...solRows.map((r) => r.pagamento_liberacao_id).filter(Boolean)])];
+  const libRows = libIds.length ? (await supabase.from(T.lib).select('id,status,dt_pagamento,pago_em,nr_duplicata,cd_empresa').in('id', libIds)).data || [] : [];
+  const libDe = new Map(libRows.map((r) => [r.id, r]));
+  for (const g of libs) {
+    const r = libDe.get(g.referencia.id);
+    if (!r) continue;
+    out.set(g.id, r.status === 'PAGO' ? { pago: true, via: 'Liberação', detalhe: r.dt_pagamento ? `pago em ${r.dt_pagamento}` : null } : { pago: false, etapa: r.status === 'APROVADO' ? 'aprovado, aguardando pagamento' : String(r.status || '').toLowerCase(), detalhe: `Liberação ${r.status}` });
+  }
+  const solDe = new Map(solRows.map((r) => [r.id, r]));
+  for (const g of sols) {
+    const r = solDe.get(g.referencia.id);
+    if (!r) continue;
+    const lib = r.pagamento_liberacao_id ? libDe.get(r.pagamento_liberacao_id) : null;
+    if (lib?.status === 'PAGO' || r.pago_em) {
+      out.set(g.id, { pago: true, via: 'Liberação', detalhe: lib?.dt_pagamento ? `pago em ${lib.dt_pagamento}` : r.pago_em ? `pago em ${String(r.pago_em).slice(0, 10)}` : null });
+      continue;
+    }
+    const totvs = liquidadaNoTotvsCache(r.duplicate_code, r.cd_empresa);
+    if (totvs) {
+      out.set(g.id, { pago: true, via: 'TOTVS', detalhe: `duplicata ${r.duplicate_code} liquidada em ${totvs.data}` });
+      continue;
+    }
+    out.set(g.id, { pago: false, etapa: ETAPAS_SOL[r.status] || r.status, detalhe: [`Solicitação ${r.status}`, lib ? `Liberação ${lib.status}` : null, r.duplicate_code ? `dup ${r.duplicate_code}` : null].filter(Boolean).join(' · ') });
+  }
+  return out;
 }
 
 // ─── fontes de pagamento (saídas) ─────────────────────────────
