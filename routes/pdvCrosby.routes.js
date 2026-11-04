@@ -19,6 +19,11 @@
 //   GET  /admin/empresas             empresas do TOTVS + config fiscal + certificado
 //   PUT  /config-lote                aplica a mesma configuração a várias empresas
 //   GET  /epcs                       movimentação das etiquetas RFID vendidas
+//   POST /autorizar-desconto         senha de owner/admin libera desconto acima de 15%
+//   GET  /promocoes?ativas=1         promoções do PDV (criadas na tela Preço Promocional)
+//   POST /promocoes                  cria promoção do PDV (nome, empresas, início, fim)
+//   POST /promocoes/:id/itens        grava itens { productCode, precoPromocional, … }
+//   PUT  /promocoes/:id              encerra/reativa, muda nome ou fim
 // ============================================================================
 import express from 'express';
 import QRCode from 'qrcode';
@@ -40,6 +45,14 @@ import {
   ICMS_ALIQ_UF,
 } from '../services/pdvFiscal.js';
 import { espelharVendaNoTotvs, EspelhoError } from '../services/pdvEspelhoTotvs.js';
+import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
+import {
+  PromocaoPdvError,
+  listarPromocoes,
+  criarPromocao,
+  salvarItens,
+  alterarPromocao,
+} from '../services/pdvPromocoes.js';
 
 const router = express.Router();
 
@@ -135,6 +148,82 @@ function mascarar(cfg) {
   const m = (t) => (t ? `••••${String(t).slice(-4)}` : null);
   return { ...cfg, csc_token_hom: m(cfg.csc_token_hom), csc_token_prod: m(cfg.csc_token_prod), csc_token_hom_set: !!cfg.csc_token_hom, csc_token_prod_set: !!cfg.csc_token_prod };
 }
+
+// ─── Desconto acima do limite: liberação com senha de owner/admin ────────────
+router.post(
+  '/autorizar-desconto',
+  asyncHandler(async (req, res) => {
+    const { email, senha, pct, empresa, por } = req.body || {};
+    try {
+      const autorizador = await verificarSenhaAutorizador(email, senha, ['admin', 'owner']);
+      console.log(
+        `🔓 [PDV Crosby] desconto de ${pct ?? '?'}% liberado por ${autorizador.email} (${autorizador.role}) para ${por || '?'} na empresa ${empresa ?? '?'}`,
+      );
+      return successResponse(res, autorizador, 'Desconto liberado');
+    } catch (err) {
+      if (err instanceof AutorizacaoError) return errorResponse(res, err.message, err.status, err.code);
+      throw err;
+    }
+  }),
+);
+
+// ─── Promoções do PDV (não mexem no TOTVS) ───────────────────────────────────
+function respostaPromocao(res, err) {
+  if (err instanceof PromocaoPdvError) return errorResponse(res, err.message, err.status, err.code);
+  if (/pdv_promoc/.test(err?.message || '') && /does not exist|schema cache/i.test(err.message)) {
+    return errorResponse(res, 'Tabelas de promoção do PDV não existem — rode migrations/pdv_promocoes.sql', 503, 'MIGRATION_PENDING');
+  }
+  return errorResponse(res, err?.message || 'Erro nas promoções do PDV', 500, 'DB_ERROR');
+}
+
+router.get(
+  '/promocoes',
+  asyncHandler(async (req, res) => {
+    try {
+      const items = await listarPromocoes({ somenteAtivas: req.query.ativas === '1' });
+      return successResponse(res, { items }, `${items.length} promoções`);
+    } catch (err) {
+      return respostaPromocao(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/promocoes',
+  asyncHandler(async (req, res) => {
+    try {
+      const promo = await criarPromocao(req.body);
+      console.log(`🏷️ [PDV Crosby] promoção ${promo.id} "${promo.nome}" criada por ${promo.criado_por || '?'}`);
+      return successResponse(res, promo, 'Promoção criada');
+    } catch (err) {
+      return respostaPromocao(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/promocoes/:id/itens',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await salvarItens(parseInt(req.params.id, 10), req.body?.items);
+      return successResponse(res, r, `${r.gravados.length} itens gravados`);
+    } catch (err) {
+      return respostaPromocao(res, err);
+    }
+  }),
+);
+
+router.put(
+  '/promocoes/:id',
+  asyncHandler(async (req, res) => {
+    try {
+      const promo = await alterarPromocao(parseInt(req.params.id, 10), req.body);
+      return successResponse(res, promo, 'Promoção atualizada');
+    } catch (err) {
+      return respostaPromocao(res, err);
+    }
+  }),
+);
 
 // ─── Configuração fiscal ─────────────────────────────────────────────────────
 router.get(

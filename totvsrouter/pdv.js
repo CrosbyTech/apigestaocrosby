@@ -19,6 +19,7 @@ import QRCode from 'qrcode';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
 import { comandoVendasDoUrl, espelharEscritaVendas } from '../services/erp/vendas.js';
+import { promocaoVigente } from '../services/pdvPromocoes.js';
 
 const router = express.Router();
 
@@ -265,9 +266,17 @@ router.get(
       );
     }
 
+    // Promoção própria do PDV Crosby (tela Preço Promocional → GERAR NO PDV)
+    let promoPdv = null;
+    try {
+      promoPdv = await promocaoVigente(item.productCode, branch);
+    } catch (err) {
+      console.log(`⚠️ [PDV] Promoção do PDV indisponível p/ produto ${item.productCode}: ${err.message}`);
+    }
+
     return successResponse(
       res,
-      { product: item, prices, tablePrice },
+      { product: item, prices, tablePrice, promoPdv },
       'Produto encontrado',
     );
   }),

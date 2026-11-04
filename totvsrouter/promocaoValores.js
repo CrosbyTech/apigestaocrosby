@@ -10,7 +10,7 @@
 // Rotas (montadas em /api/totvs):
 //   GET  /promocao-valores/promocoes?branch=N&status=Open|Blocked|Closed|all
 //        → promoções da empresa (uma linha por promoção, com qtde de itens)
-//   POST /promocao-valores/preview  { branch, promotionCode, priceCode?, skus[], primeiroLote? }
+//   POST /promocao-valores/preview  { branch, promotionCode?, priceCode?, skus[], primeiroLote? } (sem promoção = só preços)
 //        → resolve cada SKU (código interno, EAN ou SKU do TOTVS) e devolve
 //          nome, preço atual e se já está na promoção
 //   POST /promocao-valores/aplicar  { branch, promotionCode, items[], incluirNovos?, primeiroLote? }
@@ -355,9 +355,7 @@ router.post(
     const priceCode = parseInt(req.body?.priceCode, 10) || 1;
     const skusBrutos = Array.isArray(req.body?.skus) ? req.body.skus : [];
     if (!branch) return errorResponse(res, 'branch obrigatório', 400, 'MISSING_BRANCH');
-    if (!promotionCode) {
-      return errorResponse(res, 'promotionCode obrigatório', 400, 'MISSING_PROMOTION');
-    }
+    // Sem promotionCode: prévia só de preços (promoção do PDV Crosby)
     if (skusBrutos.length === 0) {
       return errorResponse(res, 'Informe ao menos um SKU', 400, 'MISSING_SKUS');
     }
@@ -412,9 +410,9 @@ router.post(
       }
 
       // 4) Itens já na promoção
-      const naPromocao = await itensDaPromocao(branch, promotionCode, {
-        fresco: req.body?.primeiroLote !== false,
-      });
+      const naPromocao = promotionCode
+        ? await itensDaPromocao(branch, promotionCode, { fresco: req.body?.primeiroLote !== false })
+        : new Map();
 
       const rows = skus.map((sku) => {
         const productCode = porSku.get(sku);

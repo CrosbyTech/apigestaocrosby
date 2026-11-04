@@ -8,8 +8,8 @@
 //     TOTVS (milhares de etiquetas viram algumas centenas de consultas).
 // ============================================================================
 import axios from 'axios';
-import { createClient } from '@supabase/supabase-js';
 import supabase from '../config/supabase.js';
+import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 
@@ -205,34 +205,14 @@ export async function registrarDownload(id, { tipo, por = null, liberadoPor = nu
   await supabase.from(TABELA).update({ downloads: lista.slice(-200) }).eq('id', id);
 }
 
-// Confere e-mail + senha de um gerente/admin/owner do HeadCoach (Supabase Auth)
-// num cliente isolado, sem guardar sessão. Limita tentativas por e-mail.
-const tentativas = new Map(); // email -> [timestamps]
+// Confere e-mail + senha de um gerente/admin/owner do HeadCoach
 export async function verificarAutorizador(email, senha) {
-  const e = String(email || '').trim().toLowerCase();
-  if (!e || !senha) throw new BalancoError('Informe o e-mail e a senha do gerente, admin ou owner', 'CREDENCIAIS_AUSENTES');
-  const agora = Date.now();
-  const recentes = (tentativas.get(e) || []).filter((t) => agora - t < 10 * 60 * 1000);
-  if (recentes.length >= 5) throw new BalancoError('Muitas tentativas. Aguarde 10 minutos.', 'MUITAS_TENTATIVAS', 429);
-  recentes.push(agora);
-  tentativas.set(e, recentes);
-
-  const cli = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-  });
-  const { data, error } = await cli.auth.signInWithPassword({ email: e, password: String(senha) });
-  if (error || !data?.user) throw new BalancoError('E-mail ou senha inválidos', 'CREDENCIAIS_INVALIDAS', 401);
   try {
-    await cli.auth.signOut({ scope: 'local' });
-  } catch {
-    /* sessão só em memória */
+    return await verificarSenhaAutorizador(email, senha, ROLES_AUTORIZADORES);
+  } catch (err) {
+    if (err instanceof AutorizacaoError) throw new BalancoError(err.message, err.code, err.status);
+    throw err;
   }
-  const role = data.user.user_metadata?.role;
-  if (!ROLES_AUTORIZADORES.includes(role)) {
-    throw new BalancoError('Esse usuário não é gerente, admin ou owner', 'SEM_PERMISSAO', 403);
-  }
-  tentativas.delete(e);
-  return { email: e, nome: data.user.user_metadata?.name || e, role };
 }
 
 // ─── CSV ─────────────────────────────────────────────────────────────────────
