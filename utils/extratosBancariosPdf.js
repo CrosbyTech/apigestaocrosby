@@ -26,6 +26,7 @@
 //     contraparteNome, contraparteDoc (CNPJ/CPF só dígitos), contraparteBanco,
 //     bandeira, loja, saldoApos, pagina }
 // ============================================================
+import { ehCsvStone, lerExtratoStoneCsv } from './extratoStoneCsv.js';
 import { extrairPaginasPdf, interpretarPaginas as interpretarStone } from './extratoStonePdf.js';
 import { classificarLancamento as classificarStone, parseOfx, decodificarOfx } from './ofxParaCnab240.js';
 import {
@@ -744,6 +745,8 @@ export function lerExtratoOfx(buffer, opts = {}) {
 
 export async function lerExtratoBancario(buffer, opts = {}) {
   if (ehOfx(buffer)) return lerExtratoOfx(buffer, opts);
+  // CSV de extrato do app/portal Stone (João, 04/11/2026)
+  if (ehCsvStone(buffer)) return lerExtratoStoneCsv(buffer, opts);
   let banco;
   let r;
   let paginas = [];
