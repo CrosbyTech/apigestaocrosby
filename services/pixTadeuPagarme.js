@@ -109,6 +109,9 @@ function lerPedido({ conta, order: o, charge: c }) {
     valor: r2((c.paid_amount ?? c.amount ?? o.amount ?? 0) / 100),
     pago_em: c.paid_at || o.updated_at || o.created_at,
     dia: dataBR(c.paid_at || o.updated_at || o.created_at),
+    // ID real da transação na Pagar.me (NSU que bate no extrato/conciliação) —
+    // vira o NSU da baixa por cartão no TOTVS, em vez da data (João, 04/11/2026).
+    nsu: String(c.last_transaction?.gateway_id || c.gateway_id || c.last_transaction?.acquirer_nsu || '').replace(/\D/g, '') || null,
     origem: md.origem || 'outro',
     titulos,
     loja: md.loja || null,
@@ -361,7 +364,9 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
         p.origem === 'tadeu_gerador'
           ? `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ' (sem código na referência)'} — nome na referência do Gerador: ${p.nome || '?'}; quem pagou o QR: ${p.pagador || '?'}${p.cpf ? ` (${p.cpf})` : ''}.${achado?.juros ? ' A sobra sobre os títulos (inclui a tarifa Pix de R$ 0,98/título) entra como juros.' : ''}`
           : `Cliente: ${cliente?.name || p.nome || '?'}${p.cd_cliente ? ` cód. ${p.cd_cliente}` : ''}${p.cpf ? ` CPF/CNPJ ${p.cpf}` : ''}.`,
-      ];
+        // NSU real da transação: a baixa por cartão usa esse ID (não a data).
+        p.nsu ? `[nsu-pagarme:${p.nsu}]` : null,
+      ].filter(Boolean);
       const filialFallback = titulos.slice().sort((x, y) => String(y.emissao).localeCompare(String(x.emissao)))[0]?.branchCode ?? 0;
       const base = {
         // documents/search não devolve o nome do cliente → vale o nome da referência do Gerador

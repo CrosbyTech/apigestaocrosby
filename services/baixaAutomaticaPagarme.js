@@ -37,6 +37,12 @@ const ddmmaaaa = (iso) => {
   return d ? `${d}${m}${a}` : '';
 };
 const agoraBR = () => new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }).slice(0, 16);
+// NSU real da transação Pagar.me (tag [nsu-pagarme:<id>] na observação) — a baixa
+// usa esse ID como NSU/autorização, em vez da data (João, 04/11/2026).
+const nsuExternoDe = (s) => {
+  const m = /\[nsu-pagarme:(\d+)\]/.exec(String(s?.observacao || ''));
+  return m ? m[1].slice(0, 20) : '';
+};
 
 // (abrirSolicitacaoBoleto vive em services/pagarmeBoletos.js — usa a data do CRÉDITO.)
 
@@ -75,12 +81,12 @@ export async function previa() {
       titulo: `${s.cd_empresa}-${s.nr_fat}/${s.nr_parcela}`,
       valor: r2(s.vl_fatura),
       dt_pagamento: s.dt_pagamento,
-      nsu: ddmmaaaa(s.dt_pagamento),
+      nsu: nsuExternoDe(s) || ddmmaaaa(s.dt_pagamento),
     })),
   };
 }
 
-async function settle(item, nsu) {
+async function settle(item, nsu, autoriz) {
   const dt = dataISO(item.dt_pagamento) || new Date().toISOString().slice(0, 10);
   const body = {
     items: [
@@ -91,7 +97,7 @@ async function settle(item, nsu) {
         installmentCode: item.nr_parcela || 1,
         paidValue: Number(item.vl_fatura) || 0,
         settlementDate: dt,
-        card: { nsu, autorizacao: ddmmaaaa(dt), bandeira: '', operadora: '', parcelas: 1, portador: PORTADOR_PAGARME_DEBITO },
+        card: { nsu, autorizacao: autoriz || ddmmaaaa(dt), bandeira: '', operadora: '', parcelas: 1, portador: PORTADOR_PAGARME_DEBITO },
       },
     ],
     paidType: 2,
@@ -110,11 +116,13 @@ const pareceDuplicado = (msgs) => msgs.some((m) => /already|exist|duplic|já exi
 
 async function processarUma(s) {
   const dt = dataISO(s.dt_pagamento) || new Date().toISOString().slice(0, 10);
-  let nsu = ddmmaaaa(dt);
-  let r = await settle(s, nsu);
+  const nsuExt = nsuExternoDe(s); // ID real da transação, quando a Solicitação trouxe
+  const autoriz = nsuExt || ddmmaaaa(dt);
+  let nsu = nsuExt || ddmmaaaa(dt);
+  let r = await settle(s, nsu, autoriz);
   if (!r.ok && pareceDuplicado(r.mensagens)) {
-    nsu = `${ddmmaaaa(dt)}${s.nr_parcela || 1}`;
-    r = await settle(s, nsu);
+    nsu = `${nsu}${s.nr_parcela || 1}`;
+    r = await settle(s, nsu, autoriz);
   }
   const agora = new Date().toISOString();
   if (r.ok) {
@@ -125,7 +133,7 @@ async function processarUma(s) {
         processado_por: AUTOR,
         processado_em: agora,
         forma_pagamento: 'cartao_debito',
-        dados_cartao: { portador: PORTADOR_PAGARME_DEBITO, nsu, autorizacao: ddmmaaaa(dt), parcelas: 1, empresa_liquidacao: EMPRESA_LIQUIDACAO, automatico: true },
+        dados_cartao: { portador: PORTADOR_PAGARME_DEBITO, nsu, autorizacao: autoriz, parcelas: 1, empresa_liquidacao: EMPRESA_LIQUIDACAO, automatico: true },
         observacao: `${s.observacao || ''} [auto ${agoraBR()}: baixada no TOTVS como cartão débito PAGARME, NSU ${nsu}]`.trim(),
         updated_at: agora,
       })

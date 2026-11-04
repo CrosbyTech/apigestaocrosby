@@ -571,12 +571,22 @@ export async function abrirSolicitacaoBoleto(b) {
   const acrescimo = Math.round((pago - fatura) * 100) / 100;
   const recebidoEm = String(b.dt_pagamento || '').slice(0, 10); // quando o cliente pagou
   const ref = `pagarme:boleto:${b.id}`;
+  // ID real da transação na Pagar.me (NSU que bate na conciliação) — a baixa por
+  // cartão no TOTVS usa esse ID como NSU, em vez da data (João, 04/11/2026).
+  let nsuExterno = null;
+  if (b.charge_id) {
+    try {
+      const ch = await pagarme('GET', `/charges/${encodeURIComponent(b.charge_id)}`, null, b.conta || CONTA_PADRAO);
+      nsuExterno = String(ch?.last_transaction?.gateway_id || ch?.gateway_id || ch?.last_transaction?.acquirer_nsu || '').replace(/\D/g, '') || null;
+    } catch { /* sem ID: baixa cai no fallback de data */ }
+  }
   const obs = [
     `Boleto Pagar.me pago (recebido) em ${recebidoEm || '?'}, ${creditado ? 'CRÉDITO na conta em' : 'crédito previsto para'} ${dtCredito}${b.conta ? ` · conta ${b.conta}` : ''}. Pedido ${b.order_id || '?'} · cobrança ${b.charge_id || '?'}${b.nosso_numero ? ` · nosso nº ${b.nosso_numero}` : ''}.`,
     `Título ${fatura.toFixed(2)}, pago ${pago.toFixed(2)}${acrescimo > 0 ? ` (acréscimo do boleto ${acrescimo.toFixed(2)} fica na Pagar.me, não entra na baixa)` : ''}.`,
     pago + 0.005 < fatura ? '⚠️ PAGO A MENOR — conferir antes de baixar.' : null,
     bloqueado ? `🔒 Baixa BLOQUEADA até ${dtCredito} (o dinheiro ainda não caiu na conta).` : null,
-    `Baixar como Cartão de Débito PAGARME (portador 9901) na data do crédito; NSU/autorização ${ddmmaaaa(dtCredito)}.`,
+    `Baixar como Cartão de Débito PAGARME (portador 9901) na data do crédito; NSU ${nsuExterno || ddmmaaaa(dtCredito)}.`,
+    nsuExterno ? `[nsu-pagarme:${nsuExterno}]` : null,
     `[${ref}]`,
   ]
     .filter(Boolean)
