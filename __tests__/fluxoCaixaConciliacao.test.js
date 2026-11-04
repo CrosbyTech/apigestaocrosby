@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -227,5 +227,23 @@ describe('nome genérico e parcial × exato', () => {
   test('contraparte igual ao titular da conta não pontua nome', () => {
     const c = candidatosPara(pix(), { totvs: [{ ...exato, nome: 'CROSBY CR VESTUARIO LTDA' }] });
     expect(c[0].motivos).not.toContain('nome parecido');
+  });
+});
+
+describe('tarifa de boleto × depósito por boleto (Stone)', () => {
+  const dep = (id, seq, valor, saldo) => ({ id, conta_id: 14, data: '2026-10-23', seq, valor, saldo_apos: saldo, descricao: 'DEPOSITO POR BOLETO' });
+  const tar = (id, seq, saldo) => ({ id, conta_id: 14, data: '2026-10-23', seq, valor: -1.99, saldo_apos: saldo, descricao: 'TARIFA BOLETO STONE' });
+  test('cada tarifa casa com o depósito logo antes (mesmo saldo após); tarifa sem depósito fica de fora', () => {
+    const ls = [dep(1, 103, 400, 398.01), tar(2, 104, 398.01), { id: 99, conta_id: 14, data: '2026-10-23', seq: 105, valor: 2400.83, descricao: 'RECEBIMENTO PIX' }, tar(3, 106, 2796.85), dep(4, 107, 750, 3544.86), tar(5, 108, 3544.86)];
+    const p = parearTarifasBoleto(ls);
+    expect(p.get(2)).toMatchObject({ papel: 'TARIFA', parId: 1, parValor: 400 });
+    expect(p.get(1)).toMatchObject({ papel: 'DEPOSITO', parId: 2, parValor: -1.99 });
+    expect(p.get(5)).toMatchObject({ papel: 'TARIFA', parId: 4 });
+    expect(p.has(3)).toBe(false); // sem depósito antes dela no dia
+    expect(p.has(99)).toBe(false);
+  });
+  test('dias e contas diferentes não se misturam', () => {
+    const p = parearTarifasBoleto([dep(1, 1, 300, 298.01), { ...tar(2, 2, 298.01), data: '2026-10-27' }, { ...tar(3, 3, 298.01), conta_id: 7 }]);
+    expect(p.size).toBe(0);
   });
 });

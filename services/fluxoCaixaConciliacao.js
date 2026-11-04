@@ -81,6 +81,54 @@ export function atribuirChaves(lancamentos) {
   return lancamentos;
 }
 
+// ─── tarifa de boleto × depósito por boleto (Stone) ──────────
+// A Stone cobra R$ 1,99 por boleto depositado e lança a tarifa logo depois do
+// depósito, no mesmo dia e com o mesmo saldo após. Cada tarifa é pareada com
+// o depósito imediatamente anterior ainda sem par (preferindo saldo igual);
+// tarifa ou depósito sem par ficam pendentes. Derivado na leitura, nada gravado.
+const ehTarifaBoleto = (l) => Number(l.valor) < 0 && /^TARIFA (DO )?BOLETO/i.test(String(l.descricao || ''));
+const ehDepositoBoleto = (l) => Number(l.valor) > 0 && /^DEPOSITO POR BOLETO/i.test(semAcento(String(l.descricao || '')));
+export function parearTarifasBoleto(lancamentos) {
+  const pares = new Map(); // id → { papel, parId, parValor, parData, parSeq }
+  const grupos = new Map();
+  for (const l of lancamentos) {
+    if (!ehTarifaBoleto(l) && !ehDepositoBoleto(l)) continue;
+    const k = `${l.conta_id}|${l.data}`;
+    if (!grupos.has(k)) grupos.set(k, []);
+    grupos.get(k).push(l);
+  }
+  const num = (v) => (v == null ? null : round2(v));
+  for (const lista of grupos.values()) {
+    lista.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    const livres = [];
+    for (const l of lista) {
+      if (ehDepositoBoleto(l)) {
+        livres.push(l);
+        continue;
+      }
+      // tarifa: depósito anterior sem par, de preferência com o mesmo saldo após
+      let i = -1;
+      for (let j = livres.length - 1; j >= 0; j--) if (num(livres[j].saldo_apos) != null && num(livres[j].saldo_apos) === num(l.saldo_apos)) { i = j; break; }
+      if (i < 0 && livres.length) i = livres.length - 1;
+      if (i < 0) continue;
+      const d = livres.splice(i, 1)[0];
+      pares.set(l.id, { papel: 'TARIFA', parId: d.id, parValor: round2(d.valor), parData: d.data, parSeq: d.seq ?? null });
+      pares.set(d.id, { papel: 'DEPOSITO', parId: l.id, parValor: round2(l.valor), parData: l.data, parSeq: l.seq ?? null });
+    }
+  }
+  return pares;
+}
+const conciliacaoParBoleto = (par) => ({
+  id: null,
+  origem: 'BOLETO_TARIFA',
+  referencia: par,
+  justificativa:
+    par.papel === 'TARIFA'
+      ? `Tarifa do depósito por boleto de R$ ${Math.abs(par.parValor).toFixed(2).replace('.', ',')} (mesmo dia)`
+      : `Depósito por boleto · tarifa de R$ ${Math.abs(par.parValor).toFixed(2).replace('.', ',')} cobrada em seguida`,
+  automatico: true,
+});
+
 // ─── leitura das conciliações gravadas ────────────────────────
 export async function listarConciliacoes({ de, ate, contaIds } = {}) {
   let q = supabase.from(T.conc).select('*');
@@ -112,11 +160,14 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
   const porChave = new Map(gravadas.map((c) => [c.chave, c]));
 
   const situacoes = await situacaoDasOrigens(gravadas).catch(() => new Map());
+  const paresBoleto = parearTarifasBoleto(lancamentos);
 
   for (const l of lancamentos) {
     const g = porChave.get(l.chave);
     if (g) {
       l.conciliacao = { id: g.id, origem: g.origem, referencia: g.referencia, justificativa: g.justificativa, automatico: g.automatico, pontuacao: g.pontuacao, usuario: g.usuario, em: g.criado_em, anexos: g.anexos || [], situacao: situacoes.get(g.id) || null };
+    } else if (paresBoleto.has(l.id)) {
+      l.conciliacao = conciliacaoParBoleto(paresBoleto.get(l.id));
     } else if (l.transferencia_id && l.transferencia) {
       l.conciliacao = {
         id: null,
@@ -1478,8 +1529,10 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
     const c = contaDe.get(l.conta_id);
     return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome, conta_cnpj: c?.titular_cnpj };
   };
+  // tarifa de boleto × depósito por boleto já se resolvem entre si
+  const paresBoleto = parearTarifasBoleto(lancs || []);
   // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
-  const alvo = (lancs || []).map(enriquecer).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
+  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
   const porConta = new Map();
   for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
@@ -1570,4 +1623,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, decidir };
