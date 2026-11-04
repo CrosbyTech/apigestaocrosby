@@ -14,7 +14,7 @@ router.get('/status', (_req, res) => res.json(status()));
 
 router.get('/previa', async (req, res) => {
   try {
-    res.json(await listar({ dias: Number(req.query.dias) || undefined, bruto: req.query.bruto === '1' }));
+    res.json(await listar({ dias: Number(req.query.dias) || undefined, bruto: req.query.bruto === '1', todas: req.query.todas === '1', q: req.query.q || '' }));
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }

@@ -246,7 +246,7 @@ async function orderIdsBlueCard(dias) {
 }
 
 /** Pix pagos na Pagar.me fora do HeadCoach/BlueCard, já lidos e interpretados (não grava). */
-export async function listar({ dias = DIAS_PADRAO, bruto = false } = {}) {
+export async function listar({ dias = DIAS_PADRAO, bruto = false, todas = false, q = '' } = {}) {
   const contas = contasInfo().contas.filter((c) => c.configurada).map((c) => c.id);
   const avisos = [];
   const todos = [];
@@ -255,6 +255,13 @@ export async function listar({ dias = DIAS_PADRAO, bruto = false } = {}) {
   }
   const bc = await orderIdsBlueCard(dias + 5);
   const ignoradosLoja = todos.filter(({ order }) => ORIGENS_IGNORADAS.includes(order.metadata?.origem || '')).length;
+  // diagnóstico (todas=1): TODAS as origens, com datas, pra investigar o que não subiu
+  if (todas) {
+    const termo = String(q || '').toLowerCase();
+    const diag = todos.map((x) => ({ ...lerPedido(x), criado: x.order.created_at, bluecard: bc.has(x.order.id) }))
+      .filter((p) => !termo || `${p.nome || ''} ${p.cd_cliente || ''} ${p.ref || ''} ${p.pagador || ''}`.toLowerCase().includes(termo));
+    return { contas, dias, total_todos: todos.length, ignorados_loja: ignoradosLoja, avisos, itens: diag };
+  }
   const lidos = todos
     .filter(({ order }) => ORIGENS_TADEU.includes(order.metadata?.origem || ''))
     .filter(({ order }) => !bc.has(order.id))
