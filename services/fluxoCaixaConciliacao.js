@@ -266,30 +266,36 @@ async function fonteLiberacao({ de, ate }) {
       bancoPagamento: p.banco_pagamento || null,
       duplicata: p.nr_duplicata ? `${p.nr_duplicata}|${p.nr_parcela ?? ''}` : null,
       vencimento: p.dt_vencimento || null,
+      solicitacaoId: p.dados_completos?.solicitacao_id || null,
     };
   });
 }
 
-async function fonteSolicitacoes({ de, ate }) {
+// TODAS as solicitações ainda não pagas (pendente, aprovada, com NF, enviada ao
+// TOTVS…), sem janela de data: o Pix pode sair muito antes ou depois do
+// vencimento; a distância só pesa na pontuação. Fica de fora só o que já foi
+// pago (pago_em ou Liberação PAGO), rejeitado ou cancelado.
+async function fonteSolicitacoes() {
   const { data, error } = await supabase
     .from(T.sol)
-    .select('id,nm_empresa,supplier_name,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,chave_pix,descricao,tipo_solicitacao,duplicate_code')
-    .in('status', ['enviado_totvs', 'aprovado_financeiro', 'aprovado_gestor', 'nota_fiscal', 'aguardando_conciliacao'])
-    .is('pagamento_liberacao_id', null)
-    .gte('dt_vencimento', addDias(de, -3))
-    .lte('dt_vencimento', addDias(ate, 10));
+    .select('id,nm_empresa,supplier_name,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,data_solicitacao,status,forma_pagamento,pagamento_liberacao_id,chave_pix,descricao,tipo_solicitacao,duplicate_code,pago_em')
+    .not('status', 'in', '("rejeitado","cancelado")')
+    .is('pago_em', null)
+    .limit(5000);
   if (error) throw new Error(`solicitacoes_crosby: ${error.message}`);
   return (data || []).map((s) => ({
     origem: 'SOLICITACAO',
     id: s.id,
     valor: round2(s.valor_total),
-    data: s.dt_vencimento || s.dt_emissao || null,
+    data: String(s.dt_vencimento || s.dt_emissao || s.data_solicitacao || '').slice(0, 10) || null,
     nome: s.supplier_name || null,
     doc: soDigitos(s.supplier_cpf_cnpj) || (soDigitos(s.chave_pix).length === 14 ? soDigitos(s.chave_pix) : null),
     empresa: s.nm_empresa || null,
     detalhe: [s.tipo_solicitacao, s.descricao ? String(s.descricao).slice(0, 60) : null, s.forma_pagamento, s.status].filter(Boolean).join(' · '),
     duplicata: s.duplicate_code ? `${s.duplicate_code}|` : null,
     vencimento: s.dt_vencimento || null,
+    status: s.status,
+    liberacaoId: s.pagamento_liberacao_id || null,
     semDataPagamento: true,
   }));
 }
@@ -953,6 +959,12 @@ function pontuar(l, c, usado = 0) {
       } else if (d <= 7) {
         score += 5;
         motivos.push(`vencimento a ${d} dia(s)`);
+      } else if (d <= 45) {
+        // longe do vencimento continua candidata (o Pix pode sair antes/depois)
+        motivos.push(`vencimento a ${d} dias`);
+      } else if (d <= 180) {
+        score -= 10;
+        motivos.push(`vencimento a ${d} dias`);
       } else return null;
     } else if (d === 0) {
       score += 30;
@@ -1052,11 +1064,19 @@ const janelaMensal = ({ de, ate }) => {
 export async function carregarFontes({ de, ate }) {
   const janela = janelaMensal({ de, ate });
   const avisos = [];
-  const [liberacao, solicitacoes, totvs] = await Promise.all([
+  const [liberacao, todasSol, totvs] = await Promise.all([
     fonteLiberacao(janela).catch((e) => (avisos.push(`Liberação de Pagamento: ${e.message}`), [])),
-    fonteSolicitacoes(janela).catch((e) => (avisos.push(`Solicitações Crosby: ${e.message}`), [])),
+    fonteSolicitacoes().catch((e) => (avisos.push(`Solicitações Crosby: ${e.message}`), [])),
     fonteTotvs(janela).catch((e) => (avisos.push(`Contas a Pagar TOTVS: ${e.message}`), [])),
   ]);
+  // solicitação já paga pela Liberação (em qualquer data) não concorre com ela
+  const pagasPorSol = new Set(liberacao.map((l) => l.solicitacaoId).filter(Boolean));
+  const libIds = [...new Set(todasSol.map((x) => x.liberacaoId).filter(Boolean))];
+  for (let i = 0; i < libIds.length; i += 200) {
+    const { data } = await supabase.from(T.lib).select('id,status,dados_completos').in('id', libIds.slice(i, i + 200)).eq('status', 'PAGO');
+    for (const r of data || []) if (r.dados_completos?.solicitacao_id) pagasPorSol.add(r.dados_completos.solicitacao_id);
+  }
+  const solicitacoes = todasSol.filter((x) => !pagasPorSol.has(x.id));
   return { liberacao, solicitacoes, totvs, avisos, janela };
 }
 

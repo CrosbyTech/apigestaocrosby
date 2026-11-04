@@ -265,3 +265,19 @@ describe('saída óbvia: solicitação aprovada, mesmo valor e mesmo fornecedor'
     expect(decidir(c).automatico).toBe(false);
   });
 });
+
+describe('solicitação longe do vencimento continua candidata', () => {
+  test('JJI 23.862,19 pago 24 dias depois do vencimento, com NF, mesmo fornecedor → automático', () => {
+    const l = saida({ valor: -23862.19, data: '2026-10-26', contraparte_nome: 'JJI DISTRIBUIDORA LTDA', contraparte_doc: null });
+    const sol = { origem: 'SOLICITACAO', id: 'S1', valor: 23862.19, data: '2026-10-02', nome: 'JJI DISTRIBUIDORA LTDA', doc: '07071009000132', status: 'nota_fiscal', detalhe: 'pagamento · pix · nota_fiscal', semDataPagamento: true };
+    const c = candidatosPara(l, { liberacao: [], totvs: [], solicitacoes: [sol] });
+    expect(c).toHaveLength(1);
+    expect(c[0].motivos).toEqual(expect.arrayContaining(['valor igual', 'vencimento a 24 dias', 'mesmo fornecedor', 'único candidato com este valor']));
+    expect(decidir(c).automatico).toBe(true);
+  });
+  test('mais de 180 dias do vencimento não entra', () => {
+    const l = saida({ valor: -100, data: '2026-10-26' });
+    const sol = { origem: 'SOLICITACAO', id: 'S2', valor: 100, data: '2026-03-01', nome: 'CLARO', semDataPagamento: true };
+    expect(candidatosPara(l, { liberacao: [], totvs: [], solicitacoes: [sol] })).toHaveLength(0);
+  });
+});
