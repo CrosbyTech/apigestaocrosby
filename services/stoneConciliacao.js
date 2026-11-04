@@ -258,8 +258,40 @@ function parseTransacao(t, dataArquivo) {
   };
 }
 
+// A Stone passou a devolver o arquivo em JSON (camelCase, listas como arrays)
+// em vez de XML — visto em 04/11/2026 (layoutVersion 2.2). Converte para o
+// mesmo formato que o XMLParser produz (PascalCase, listas embrulhadas no
+// elemento singular: FinancialTransactions.Transaction, Payments.Payment...).
+const SINGULAR_JSON = {
+  FinancialTransactions: 'Transaction',
+  FinancialTransactionsAccounts: 'Transaction',
+  FinancialEvents: 'Event',
+  FinancialEventAccounts: 'Event',
+  Payments: 'Payment',
+  Installments: 'Installment',
+  Cancellations: 'Cancellation',
+  Chargebacks: 'Chargeback',
+};
+const pascal = (k) => (k ? k[0].toUpperCase() + k.slice(1) : k);
+function jsonParaFormatoXml(v) {
+  if (Array.isArray(v)) return v.map(jsonParaFormatoXml);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) {
+      const K = pascal(k);
+      const conv = jsonParaFormatoXml(val);
+      out[K] = Array.isArray(conv) ? { [SINGULAR_JSON[K] || K.replace(/s$/, '')]: conv } : conv;
+    }
+    return out;
+  }
+  return v == null ? v : String(v); // XMLParser entrega tudo como string
+}
+
 export function parseArquivoStone(xml, dataStone) {
-  const parsed = xmlParser.parse(xml);
+  const txt = String(xml || '').trimStart();
+  const parsed = txt.startsWith('{')
+    ? { Conciliation: jsonParaFormatoXml(JSON.parse(txt)) }
+    : xmlParser.parse(xml);
   const conc = parsed?.Conciliation || {};
   const header = conc.Header || {};
   const trailer = conc.Trailer || {};
