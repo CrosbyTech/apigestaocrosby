@@ -40,7 +40,7 @@ import {
   resolverFiliaisLoja,
 } from '../services/totvsCartoesStone.js';
 import { bater } from '../services/stoneBatimento.js';
-import { lancarVendaStone } from '../services/stoneLancarTotvs.js';
+import { lancarVendaStone, clientePadraoDaLoja } from '../services/stoneLancarTotvs.js';
 
 const router = express.Router();
 
@@ -376,6 +376,18 @@ router.get(
       };
     });
 
+    // cliente padrão p/ lançar "Só na Stone" no TOTVS = a própria loja (trocável na tela)
+    await Promise.all(
+      resultado.map(async (r, i) => {
+        if (!r.stoneSemTotvs.length) return;
+        try {
+          r.loja.clientePadrao = await clientePadraoDaLoja(stonePorLoja[i].loja.cnpj);
+        } catch (e) {
+          console.warn(`[stone] cliente padrão ${r.loja.nome}: ${e.message}`);
+        }
+      }),
+    );
+
     const agg = (f) => +resultado.reduce((s, r) => s + (Number(f(r.resumo)) || 0), 0).toFixed(2);
     const geral = {
       lojas: resultado.length,
@@ -571,14 +583,16 @@ router.post(
     for (const it of itens) {
       const base = { nsu: String(it?.nsu || ''), stonecode: String(it?.stonecode || ''), cliente: it?.cliente ?? null };
       try {
-        const cliente = Number(String(it?.cliente ?? '').replace(/\D/g, ''));
-        if (!cliente) {
-          resultados.push({ ...base, ok: false, erro: 'Informe o código do cliente.' });
-          continue;
-        }
         const cfg = getLojaByStonecode(base.stonecode);
         if (!cfg) {
           resultados.push({ ...base, ok: false, erro: 'StoneCode não configurado no servidor.' });
+          continue;
+        }
+        // sem cliente informado → a própria loja (padrão combinado com o João)
+        let cliente = Number(String(it?.cliente ?? '').replace(/\D/g, ''));
+        if (!cliente) cliente = (await clientePadraoDaLoja(cfg.cnpj))?.code || 0;
+        if (!cliente) {
+          resultados.push({ ...base, ok: false, erro: 'Informe o código do cliente (a loja não tem cadastro de cliente no TOTVS).' });
           continue;
         }
         if (!ISO_RE.test(String(it?.dataArquivo || ''))) {

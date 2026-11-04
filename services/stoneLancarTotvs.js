@@ -154,6 +154,21 @@ export async function buscarClientePorCodigo(code) {
   return null;
 }
 
+// Cliente padrão da fatura = a pessoa da própria loja no TOTVS (pelo CNPJ da
+// filial; Brejinho = 82254). João, 04/11/2026: padrão, mas trocável na tela.
+const cacheClienteLoja = new Map();
+export async function clientePadraoDaLoja(cnpj) {
+  const c = soDigitos(cnpj);
+  if (!c) return null;
+  const hit = cacheClienteLoja.get(c);
+  if (hit && Date.now() - hit.em < 6 * 3600 * 1000) return hit.v;
+  const r = await postTotvs('/person/v2/legal-entities/search', { filter: { cnpjList: [c] }, page: 1, pageSize: 1 });
+  const it = r.data?.items?.[0];
+  const v = it ? { code: Number(it.code), nome: it.name || it.fantasyName || null } : null;
+  cacheClienteLoja.set(c, { v, em: Date.now() });
+  return v;
+}
+
 // ─── títulos ────────────────────────────────────────────────
 async function buscarFatura({ customerCode, receivableCode }) {
   const r = await postTotvs('/accounts-receivable/v2/documents/search', {
