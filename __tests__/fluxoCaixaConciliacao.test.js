@@ -291,8 +291,8 @@ describe('Pix enviado × devolução recebida', () => {
     expect(p.get(24190)).toMatchObject({ papel: 'SAIDA', parId: 24181 });
     expect(p.has(24179)).toBe(false);
   });
-  test('sem saída livre antes, a devolução fica sem par; contraparte diferente não casa', () => {
+  test('contraparte diferente ou saída depois da devolução não casa', () => {
     expect(parearDevolucoesPix([sd(1, 1, { contraparte_nome: 'OUTRA EMPRESA' }), dev(2, 2)]).size).toBe(0);
-    expect(parearDevolucoesPix([dev(2, 2), sd(1, 3)]).size).toBe(0);
+    expect(parearDevolucoesPix([dev(2, 2), sd(1, 3, { data: '2026-10-27' })]).size).toBe(0);
   });
 });

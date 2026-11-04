@@ -155,7 +155,9 @@ export function parearDevolucoesPix(lancamentos, idsComConciliacao = new Set()) 
           !pares.has(sd.id) &&
           !idsComConciliacao.has(sd.id) &&
           Math.abs(Math.abs(Number(sd.valor)) - Number(dev.valor)) <= VALOR_TOL &&
-          (sd.data < dev.data || (sd.data === dev.data && (sd.seq ?? 0) < (dev.seq ?? Infinity))) &&
+          // no mesmo dia a ordem das linhas do extrato não é confiável (Stone pagina
+          // do fim para o começo), então só a data conta
+          sd.data <= dev.data &&
           diffDias(dev.data, sd.data) <= 7 &&
           (!cp || chaveCp(sd) === cp || normNome(sd.contraparte_nome || '').startsWith(cp.slice(0, 10))),
       );
