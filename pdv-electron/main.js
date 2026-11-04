@@ -18,6 +18,8 @@ const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
+const { pathToFileURL } = require('node:url');
 const updater = require('./updater');
 
 const WEB_DIR = path.join(__dirname, 'web');
@@ -31,6 +33,11 @@ const ROTA_INICIAL = '/home';
 const VID_CP210X = '10c4';
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'pdv-config.json');
+// Portal RFID (Chainway UR4) da matriz. Cada caixa troca em "Configurações dos
+// Aparelhos". 192.168.99.202 é o IP de FÁBRICA do UR4 (versões antigas do app
+// gravavam esse padrão) — tratado como "não configurado".
+const PORTAL_IP_PADRAO = '192.168.0.202';
+const PORTAL_IP_FABRICA = '192.168.99.202';
 
 function loadConfig() {
   try {
@@ -38,7 +45,7 @@ function loadConfig() {
   } catch {
     return {
       impressora: '',
-      rfid: { host: '192.168.99.202', porta: 8888, modelo: 'Chainway UR4', portaSerial: '' },
+      rfid: { host: PORTAL_IP_PADRAO, porta: 8888, modelo: 'Chainway UR4', portaSerial: '' },
       tef: { provedor: 'Stone', serie: '', conectado: false },
     };
   }
@@ -274,19 +281,106 @@ ipcMain.handle('perifericos:imprimirCupom', async (_e, { impressora, html }) => 
   });
 });
 
-// RFID de rede (portal UR4) e TEF continuam SIMULADOS no protótipo.
-// No app real: socket TCP para o UR4; SDK Stone / SiTef via DLL (koffi) ou socket.
+// ------------------------ portal RFID (Chainway UR4) -----------------------
+// O app roda o MESMO agente do kit portal-agent (../portal-agent/agent.mjs)
+// dentro do processo principal: abre http://127.0.0.1:7070 (ou 7171/27070),
+// que é onde as telas RFID do HeadCoach procuram o portal (utils/portalApi.js).
+// Assim o portal funciona no app — e também no navegador deste computador
+// enquanto o app estiver aberto — sem instalar Node.js nem o kit.
+let agentePortal = null;
+const PORTAS_AGENTE = [7070, 7171, 27070];
+const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+function caminhoAgente() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'portal-agent', 'agent.mjs')
+    : path.join(__dirname, '..', 'portal-agent', 'agent.mjs');
+}
+
+// Algum agente já responde nesta máquina? (kit instalado ou outra instância)
+function agenteJaRodando() {
+  return Promise.all(
+    PORTAS_AGENTE.map(
+      (porta) =>
+        new Promise((resolve) => {
+          const req = http.get({ host: '127.0.0.1', port: porta, path: '/health', timeout: 800 }, (res) => {
+            res.resume();
+            resolve(res.statusCode === 200 ? porta : null);
+          });
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => {
+            req.destroy();
+            resolve(null);
+          });
+        }),
+    ),
+  ).then((l) => l.find(Boolean) || null);
+}
+
+function ipConfigurado(rfid) {
+  const ip = String(rfid?.host || '').trim();
+  return IP_RE.test(ip) && ip !== PORTAL_IP_FABRICA ? ip : null;
+}
+
+async function iniciarAgentePortal() {
+  const ja = await agenteJaRodando();
+  if (ja) {
+    console.log(`[portal] agente já rodando nesta máquina (porta ${ja}) — o app usa esse`);
+    return;
+  }
+  try {
+    process.env.PORTAL_AGENT_EMBUTIDO = '1';
+    process.env.PORTAL_AGENT_CONFIG = path.join(app.getPath('userData'), 'portal-rfid.json');
+    agentePortal = await import(pathToFileURL(caminhoAgente()).href);
+    const rfid = loadConfig().rfid;
+    const ip = ipConfigurado(rfid);
+    if (ip) agentePortal.definirPortal(ip, rfid.porta);
+    console.log('[portal] agente embutido iniciado:', agentePortal.situacaoAgente());
+  } catch (e) {
+    agentePortal = null;
+    console.error('[portal] agente embutido não subiu:', e);
+  }
+}
+
+// O UR4 aceita UMA conexão TCP por vez: o teste só abre e fecha o socket.
+function testarTcp(host, porta, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host, port: porta });
+    const fim = (ok, motivo) => {
+      s.removeAllListeners();
+      s.destroy();
+      resolve({ ok, motivo });
+    };
+    s.setTimeout(timeoutMs, () => fim(false, 'sem resposta (tempo esgotado)'));
+    s.once('connect', () => fim(true));
+    s.once('error', (e) => fim(false, e.code || e.message));
+  });
+}
+
 ipcMain.handle('perifericos:rfidConectar', async (_e, cfg) => {
-  await new Promise((r) => setTimeout(r, 700));
-  const ok = !!(cfg && cfg.host);
+  const host = String(cfg?.host || '').trim();
+  const porta = parseInt(cfg?.porta, 10) || 8888;
+  if (!IP_RE.test(host)) return { ok: false, mensagem: 'Informe o IP do portal (ex.: 192.168.0.202)', leituras: [] };
+  // portal já lendo por este agente → não abre outra conexão (ele aceita uma só)
+  const sit = agentePortal?.situacaoAgente?.();
+  if (sit && sit.host === host && sit.status === 'lendo') {
+    return { ok: true, mensagem: `Portal ${host}:${porta} lendo agora (${sit.tagsDistintas} etiqueta(s)).`, leituras: [] };
+  }
+  const t = await testarTcp(host, porta);
+  if (!t.ok) {
+    return {
+      ok: false,
+      mensagem: `O portal não respondeu em ${host}:${porta} (${t.motivo}). Confira se ele está ligado, no mesmo Wi-Fi/rede deste computador e com este IP.`,
+      leituras: [],
+    };
+  }
+  if (agentePortal) agentePortal.definirPortal(host, porta);
   return {
-    ok,
-    mensagem: ok
-      ? `Conectado ao portal ${cfg.modelo || 'RFID'} em ${cfg.host}:${cfg.porta}`
-      : 'Informe o host do portal RFID',
-    leituras: ok
-      ? ['E2004700' + Math.floor(Math.random() * 1e8), 'E2004701' + Math.floor(Math.random() * 1e8)]
-      : [],
+    ok: true,
+    mensagem: agentePortal
+      ? `Portal respondeu em ${host}:${porta}. Pronto: use LIGAR PORTAL nas telas Orçamento RFID e Devolução RFID.`
+      : `Portal respondeu em ${host}:${porta}. Atenção: o agente do kit já roda neste PC — troque o IP no config.json dele.`,
+    leituras: [],
   };
 });
 
@@ -311,11 +405,23 @@ ipcMain.handle('perifericos:tefPagar', async (_e, { valor }) => {
 });
 
 ipcMain.handle('config:ler', async () => loadConfig());
-ipcMain.handle('config:salvar', async (_e, cfg) => ({ ok: saveConfig(cfg) }));
+ipcMain.handle('config:salvar', async (_e, cfg) => {
+  const ok = saveConfig(cfg);
+  const ip = ipConfigurado(cfg?.rfid);
+  if (ok && ip && agentePortal) {
+    try {
+      agentePortal.definirPortal(ip, cfg.rfid.porta);
+    } catch (e) {
+      console.error('[portal] IP não aplicado:', e.message);
+    }
+  }
+  return { ok };
+});
 
 // ----------------------------- ciclo de vida -------------------------------
 app.whenReady().then(async () => {
   configurarSerial(session.defaultSession);
+  await iniciarAgentePortal();
   await createWindow();
   // verifica/baixa versão nova em segundo plano (só no app instalado)
   updater.iniciar(mainWindow);

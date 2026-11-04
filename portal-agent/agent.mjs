@@ -15,6 +15,11 @@
 //   POST /power {potencia} | {antenas:[{ant,potencia}]} → grava a potência
 //   GET  /beep                → { ligado } buzzer do portal
 //   POST /beep {ligado}       → liga/desliga o apito do portal a cada leitura
+//   POST /config {host, port} → troca e GRAVA o IP do portal (sem editar arquivo)
+//
+// Também roda EMBUTIDO no app PDV Crosby (pdv-electron): o app importa este
+// arquivo com PORTAL_AGENT_EMBUTIDO=1 e PORTAL_AGENT_CONFIG=<arquivo de config>,
+// e troca o IP pela tela "Configurações dos Aparelhos" (definirPortal).
 // =============================================================================
 import http from 'http';
 import net from 'net';
@@ -25,15 +30,18 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─── Config ──────────────────────────────────────────────────────────────────
+const CONFIG_PATH = process.env.PORTAL_AGENT_CONFIG || path.join(__dirname, 'config.json');
+const EMBUTIDO = process.env.PORTAL_AGENT_EMBUTIDO === '1';
 let config = { portalHost: '192.168.0.202', portalPort: 8888, listenPort: 7070 };
 try {
   config = {
     ...config,
-    ...JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')),
+    ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')),
   };
 } catch {
   console.log('config.json não encontrado — usando padrões');
 }
+const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
 
 // ─── Protocolo Chainway UR4 (A5 5A) ─────────────────────────────────────────
 const REARM_INTERVAL_MS = 20000;
@@ -50,6 +58,7 @@ const STOP_FRAME = buildFrame(0x8c);
 
 let socket = null;
 let desired = false;
+let portaEscutando = null;
 let hostCfg = config.portalHost;
 let portCfg = config.portalPort;
 let status = 'desconectado';
@@ -382,7 +391,7 @@ const server = http.createServer(async (req, res) => {
   const url = req.url.split('?')[0];
 
   if (req.method === 'GET' && url === '/health') {
-    return ok(res, { ok: true, portalHost: hostCfg, version: 3, recursos: ['power', 'beep'] });
+    return ok(res, { ok: true, portalHost: hostCfg, portalPort: portCfg, version: 4, embutido: EMBUTIDO, recursos: ['power', 'beep', 'config'] });
   }
   if (req.method === 'GET' && url === '/status') {
     return ok(res, getStatus());
@@ -393,6 +402,23 @@ const server = http.createServer(async (req, res) => {
       tags: [...tags.values()].sort((a, b) => b.lastSeen - a.lastSeen),
     });
   }
+  if (req.method === 'POST' && url === '/config') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', () => {
+      try {
+        const j = body ? JSON.parse(body) : {};
+        if (!j.host || !IP_RE.test(String(j.host).trim())) return falha(res, 'informe o IP do portal (ex.: 192.168.0.202)', 400);
+        definirPortal(String(j.host).trim(), j.port);
+        return ok(res, getStatus(), `Portal configurado: ${hostCfg}:${portCfg}`);
+      } catch (e) {
+        return falha(res, e.message, 400);
+      }
+    });
+    return undefined;
+  }
   if (req.method === 'POST' && url === '/connect') {
     let body = '';
     req.on('data', (c) => {
@@ -401,7 +427,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const j = body ? JSON.parse(body) : {};
-        if (j.host && /^\d{1,3}(\.\d{1,3}){3}$/.test(j.host)) hostCfg = j.host;
+        if (j.host && IP_RE.test(j.host)) hostCfg = j.host;
         if (j.port) portCfg = parseInt(j.port, 10);
       } catch {
         /* body vazio */
@@ -514,18 +540,22 @@ const PORT_CANDIDATES = [
 function tryListen(idx = 0) {
   if (idx >= PORT_CANDIDATES.length) {
     console.error('ERRO: nenhuma porta disponível', PORT_CANDIDATES);
-    process.exit(1);
+    if (!EMBUTIDO) process.exit(1); // embutido no app: só não liga o portal
+    return;
   }
   const porta = PORT_CANDIDATES[idx];
   server.once('error', (e) => {
     if (e.code === 'EACCES' || e.code === 'EADDRINUSE') {
       console.log(`porta ${porta} indisponível (${e.code}) — tentando a próxima...`);
       tryListen(idx + 1);
+    } else if (EMBUTIDO) {
+      console.error('agente do portal não subiu:', e.message);
     } else {
       throw e;
     }
   });
   server.listen(porta, '127.0.0.1', () => {
+    portaEscutando = porta;
     console.log('==============================================');
     console.log(' AGENTE DO PORTAL RFID — Crosby');
     console.log(` Escutando em http://127.0.0.1:${porta}`);
@@ -534,4 +564,41 @@ function tryListen(idx = 0) {
     console.log('==============================================');
   });
 }
+// ─── Uso embutido (app PDV) ──────────────────────────────────────────────────
+/** Troca o IP/porta do portal e grava no arquivo de config. Se estava lendo, religa no portal novo. */
+export function definirPortal(host, port) {
+  const novoHost = String(host || '').trim();
+  if (!IP_RE.test(novoHost)) throw new Error(`IP do portal inválido: ${host}`);
+  const novaPorta = parseInt(port, 10) || portCfg || 8888;
+  const mudou = novoHost !== hostCfg || novaPorta !== portCfg;
+  hostCfg = novoHost;
+  portCfg = novaPorta;
+  try {
+    let atual = {};
+    try {
+      atual = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    } catch {
+      /* arquivo novo */
+    }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ ...config, ...atual, portalHost: hostCfg, portalPort: portCfg }, null, 2));
+  } catch (e) {
+    console.error('não consegui gravar o config do portal:', e.message);
+  }
+  if (mudou && desired) {
+    if (socket) {
+      socket.removeAllListeners();
+      socket.destroy();
+      socket = null;
+    }
+    connect();
+  }
+  console.log(`[UR4] Portal configurado: ${hostCfg}:${portCfg}`);
+  return getStatus();
+}
+
+/** Situação do agente (porta local em que escuta + conexão com o portal). */
+export function situacaoAgente() {
+  return { ...getStatus(), porta: portaEscutando };
+}
+
 tryListen();
