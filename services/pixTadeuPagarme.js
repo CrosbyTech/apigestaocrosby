@@ -36,23 +36,33 @@ const dataBR = (iso) => (iso ? new Date(iso).toLocaleDateString('sv-SE', { timeZ
 
 // ── Pagar.me ───────────────────────────────────────────────────────────────
 const PIX_MAX_PAGINAS = Number(process.env.PIX_TADEU_MAX_PAGINAS || 60);
+// João (04/11/2026): o sync lia os pagamentos pela lista de PEDIDOS 'paid', e isso
+// PERDE pix cujo pedido não ficou marcado 'paid' na Pagar.me (achado: 60 cobranças
+// pix pagas × 45 pedidos lidos). Agora lemos pela lista de COBRANÇAS (charges) pix
+// PAGAS — não perde nenhuma — e buscamos o pedido de cada uma pela metadata.
 async function pedidosPagosPix({ conta, dias }) {
   const desde = new Date(Date.now() - dias * 86400000).toISOString();
-  const lista = [];
-  // Pagina por TODAS as páginas de pedidos pagos da janela (não só a 1ª). O
-  // break antigo (`!r.data?.paging?.next`) parava sempre na página 1 porque a
-  // API nem sempre devolve paging.next, então pix pagos fora dos ~100 pedidos
-  // mais recentes nunca eram lidos e não subiam pra Solicitação (João, 04/11/2026).
-  for (let page = 1; page <= PIX_MAX_PAGINAS; page++) {
-    const r = await pagarme('GET', `/orders?status=paid&created_since=${encodeURIComponent(desde)}&size=100&page=${page}`, null, conta);
-    if (!r?.ok) throw new Error(`Pagar.me ${conta}: HTTP ${r?.status} ${r?.data?.message || ''}`.trim());
-    const itens = Array.isArray(r.data?.data) ? r.data.data : [];
-    for (const o of itens) {
-      const charges = Array.isArray(o.charges) ? o.charges : [];
-      const pix = charges.find((c) => c.payment_method === 'pix' && ['paid', 'overpaid', 'underpaid'].includes(c.status));
-      if (pix) lista.push({ conta, order: o, charge: pix });
+  // 1) todas as cobranças pix pagas da janela
+  const porOrder = new Map();
+  for (const status of ['paid', 'overpaid', 'underpaid']) {
+    for (let page = 1; page <= PIX_MAX_PAGINAS; page++) {
+      const r = await pagarme('GET', `/charges?status=${status}&payment_method=pix&created_since=${encodeURIComponent(desde)}&size=100&page=${page}`, null, conta);
+      if (!r?.ok) throw new Error(`Pagar.me ${conta}: HTTP ${r?.status} ${r?.data?.message || ''}`.trim());
+      const itens = Array.isArray(r.data?.data) ? r.data.data : [];
+      for (const c of itens) {
+        const orderId = c.order_id || c.order?.id;
+        if (orderId && !porOrder.has(orderId)) porOrder.set(orderId, c);
+      }
+      if (itens.length < 100) break;
     }
-    if (itens.length < 100) break; // página incompleta = acabou
+  }
+  // 2) o pedido de cada cobrança (traz metadata origem/titulos/cliente)
+  const lista = [];
+  for (const [orderId, charge] of porOrder) {
+    try {
+      const ro = await pagarme('GET', `/orders/${orderId}`, null, conta);
+      if (ro?.ok && ro.data) lista.push({ conta, order: ro.data, charge });
+    } catch { /* ignora pedido que não carrega */ }
   }
   return lista;
 }
