@@ -21,7 +21,7 @@
  * Nada é apagado; idempotente pela ref_externa.
  */
 import supabase from '../config/supabase.js';
-import { pagarme, contasInfo, CONTA_PADRAO } from './pagarmeBoletos.js';
+import { pagarme, contasInfo, CONTA_PADRAO, CONTAS, gatewayIdDaCobranca } from './pagarmeBoletos.js';
 import { postTotvs } from './bluecardLimite.js';
 
 export const ORIGEM = 'pix_pagarme_tadeu';
@@ -459,4 +459,75 @@ export function iniciarJobPixTadeu() {
   setTimeout(() => rodar().catch(() => {}), 4 * 60 * 1000);
   setInterval(() => rodar().catch(() => {}), INTERVALO_MS);
   console.log(`💠 [pix-tadeu] job ligado: a cada ${INTERVALO_MS / 60000} min (${DIAS_PADRAO} dias)`);
+}
+
+// ── Backfill do NSU nas solicitações pendentes (João, 04/11/2026) ────────────
+// Preenche a tag [nsu-pagarme:<id>] nas Solicitações de Baixa PENDENTES de
+// origem Pagar.me que ainda não têm o ID — pra que a baixa já saia com a NSU =
+// ID da transação. Só LÊ a Pagar.me (GET) e ATUALIZA a observação no Supabase;
+// não baixa nada no TOTVS, não apaga nada.
+const TAG_NSU_RE = /\[nsu-pagarme:(\d+)\]/;
+const ORIGENS_BACKFILL = ['pix_pagarme_tadeu', 'pagarme_boleto', 'bluecard_pagarme'];
+
+async function gatewayPorPedido(orderId, contaHint) {
+  if (!orderId || !/^or_/.test(orderId)) return null;
+  const ordem = [...new Set([contaHint, ...Object.keys(CONTAS)].filter(Boolean))];
+  for (const conta of ordem) {
+    if (!CONTAS[conta]?.sk) continue;
+    try {
+      const r = await pagarme('GET', `/orders/${encodeURIComponent(orderId)}`, null, conta);
+      for (const ch of r?.data?.charges || []) {
+        const id = String(ch.last_transaction?.gateway_id || ch.gateway_id || '').replace(/\D/g, '');
+        if (id) return id;
+      }
+    } catch { /* tenta a próxima conta */ }
+  }
+  return null;
+}
+
+export async function backfillNsu({ limite = 1000 } = {}) {
+  const { data, error } = await supabase
+    .from('solicitacoes_baixa')
+    .select('id, origem, ref_externa, observacao')
+    .eq('status', 'pendente')
+    .in('origem', ORIGENS_BACKFILL)
+    .limit(limite);
+  if (error) throw new Error(`solicitacoes_baixa: ${error.message}`);
+  const res = { total: (data || []).length, ja_tinha: 0, preenchidos: 0, sem_id: 0, erros: [], por_origem: {} };
+  for (const s of data || []) {
+    const po = (res.por_origem[s.origem] ||= { total: 0, preenchidos: 0, ja_tinha: 0, sem_id: 0 });
+    po.total++;
+    const obs = s.observacao || '';
+    if (TAG_NSU_RE.test(obs)) { res.ja_tinha++; po.ja_tinha++; continue; }
+    try {
+      const contaHint = /FA MODA/i.test(obs) ? 'fabio' : 'crosby';
+      let nsu = null;
+      if (s.origem === 'pagarme_boleto') {
+        const mb = /pagarme:boleto:(\d+)/.exec(s.ref_externa || '');
+        if (mb) {
+          const { data: b } = await supabase.from('pagarme_boletos').select('charge_id, conta').eq('id', Number(mb[1])).maybeSingle();
+          if (b?.charge_id) nsu = await gatewayIdDaCobranca(b.charge_id, b.conta);
+        }
+      } else {
+        const mCh = /cobran[çc]a\s+(ch_[A-Za-z0-9]+)/.exec(obs);
+        if (mCh) nsu = await gatewayIdDaCobranca(mCh[1], contaHint);
+      }
+      if (!nsu) {
+        const mOrd = /(or_[A-Za-z0-9]+)/.exec(obs) || /pagarme:pix:(or_[A-Za-z0-9]+)/.exec(s.ref_externa || '');
+        if (mOrd) nsu = await gatewayPorPedido(mOrd[1], contaHint);
+      }
+      if (!nsu) { res.sem_id++; po.sem_id++; continue; }
+      const nova = `${obs} [nsu-pagarme:${nsu}]`.trim();
+      const { error: e2 } = await supabase
+        .from('solicitacoes_baixa')
+        .update({ observacao: nova, updated_at: new Date().toISOString() })
+        .eq('id', s.id)
+        .eq('status', 'pendente');
+      if (e2) { res.erros.push({ id: s.id, erro: e2.message }); continue; }
+      res.preenchidos++; po.preenchidos++;
+    } catch (e) {
+      res.erros.push({ id: s.id, erro: e.message });
+    }
+  }
+  return res;
 }

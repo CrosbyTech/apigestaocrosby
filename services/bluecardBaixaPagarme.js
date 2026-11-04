@@ -29,6 +29,7 @@
  */
 import supabase from '../config/supabase.js';
 import { postTotvs, buscarClientePorCpf, TOTVS_STATUS_NORMAL } from './bluecardLimite.js';
+import { gatewayIdDaCobranca } from './pagarmeBoletos.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { getBranchesWithNames } from '../totvsrouter/totvsHelper.js';
 
@@ -166,6 +167,11 @@ export async function abrirSolicitacoesBaixaPix(body) {
   // Data do Pix em Brasília (26/10/2026): pago_em vem em UTC — 07/10 23:32 BRT é 08/10 02:32Z e a data saía errada.
     const dtPagamento = new Date(pg.pago_em || Date.now()).toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' });
 
+  // ID real da transação na Pagar.me (NSU que bate na conciliação) — a baixa por
+  // cartão no TOTVS usa esse ID como NSU em vez da data (João, 04/11/2026). O
+  // aviso do BlueCard traz só charge_id; busco o gateway_id na Pagar.me.
+  const nsuExterno = await gatewayIdDaCobranca(pg.charge_id, 'crosby').catch(() => null);
+
   const usados = new Set();
   const resultado = { inseridas: 0, ja_existiam: 0, sem_titulo: 0, detalhes: [] };
 
@@ -205,8 +211,9 @@ export async function abrirSolicitacoesBaixaPix(body) {
         : `⚠️ TÍTULO NÃO LOCALIZADO NO TOTVS${ref ? ` (app informou ${ref.receivableCode}-${ref.installmentCode})` : ''}${
             cliente ? '' : ' — CPF sem cadastro no TOTVS'
           }. Conferir manualmente.`,
+      nsuExterno ? `[nsu-pagarme:${nsuExterno}]` : null,
       `[${refExterna}]`,
-    ].join(' ');
+    ].filter(Boolean).join(' ');
 
     // cd_empresa é NOT NULL na tabela: sem título localizado, usa a filial do
     // título mais recente do cliente (onde ele compra) ou 0 — a observação já

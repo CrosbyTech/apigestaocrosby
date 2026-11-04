@@ -264,6 +264,24 @@ function erroTotvs(err) {
   return d?.message || d?.detailedMessage || d?.title || err.message;
 }
 
+// ID real da transação de uma cobrança Pagar.me (gateway_id) — o NSU que bate na
+// conciliação. Tenta a conta preferida e depois as demais configuradas. Só
+// dígitos; null se não achar (a baixa cai no fallback de data). João, 04/11/2026.
+export async function gatewayIdDaCobranca(chargeId, contaPreferida) {
+  if (!chargeId) return null;
+  const ordem = [...new Set([contaPreferida, ...Object.keys(CONTAS)].filter(Boolean))];
+  for (const conta of ordem) {
+    if (!CONTAS[conta]?.sk) continue;
+    try {
+      const r = await pagarme('GET', `/charges/${encodeURIComponent(chargeId)}`, null, conta);
+      const ch = r?.data || {};
+      const id = String(ch.last_transaction?.gateway_id || ch.gateway_id || ch.last_transaction?.acquirer_nsu || '').replace(/\D/g, '');
+      if (id) return id;
+    } catch { /* tenta a próxima conta */ }
+  }
+  return null;
+}
+
 /** Boletos "vivos" (não falhos/cancelados) das faturas informadas, por chave empresa-fatura-parcela. */
 export async function boletosAtivosPorTitulo(nrFaturas) {
   const mapa = {};
@@ -573,13 +591,7 @@ export async function abrirSolicitacaoBoleto(b) {
   const ref = `pagarme:boleto:${b.id}`;
   // ID real da transação na Pagar.me (NSU que bate na conciliação) — a baixa por
   // cartão no TOTVS usa esse ID como NSU, em vez da data (João, 04/11/2026).
-  let nsuExterno = null;
-  if (b.charge_id) {
-    try {
-      const ch = await pagarme('GET', `/charges/${encodeURIComponent(b.charge_id)}`, null, b.conta || CONTA_PADRAO);
-      nsuExterno = String(ch?.last_transaction?.gateway_id || ch?.gateway_id || ch?.last_transaction?.acquirer_nsu || '').replace(/\D/g, '') || null;
-    } catch { /* sem ID: baixa cai no fallback de data */ }
-  }
+  const nsuExterno = await gatewayIdDaCobranca(b.charge_id, b.conta);
   const obs = [
     `Boleto Pagar.me pago (recebido) em ${recebidoEm || '?'}, ${creditado ? 'CRÉDITO na conta em' : 'crédito previsto para'} ${dtCredito}${b.conta ? ` · conta ${b.conta}` : ''}. Pedido ${b.order_id || '?'} · cobrança ${b.charge_id || '?'}${b.nosso_numero ? ` · nosso nº ${b.nosso_numero}` : ''}.`,
     `Título ${fatura.toFixed(2)}, pago ${pago.toFixed(2)}${acrescimo > 0 ? ` (acréscimo do boleto ${acrescimo.toFixed(2)} fica na Pagar.me, não entra na baixa)` : ''}.`,

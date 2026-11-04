@@ -6,7 +6,7 @@
  * Ver services/pixTadeuPagarme.js.
  */
 import express from 'express';
-import { status, listar, rodar, listarChargesPix } from '../services/pixTadeuPagarme.js';
+import { status, listar, rodar, listarChargesPix, backfillNsu } from '../services/pixTadeuPagarme.js';
 
 const router = express.Router();
 
@@ -32,6 +32,13 @@ router.post('/sincronizar', async (req, res) => {
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
+});
+
+// Preenche a NSU (ID da transação Pagar.me) nas solicitações pendentes que ainda
+// não têm — pra baixar com a NSU certa. Só lê a Pagar.me e atualiza a observação.
+router.post('/backfill-nsu', async (req, res) => {
+  try { res.json(await backfillNsu({ limite: Number(req.body?.limite) || undefined })); }
+  catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
 export default router;
