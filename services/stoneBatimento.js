@@ -58,7 +58,10 @@ function divergencias(s, t) {
   if (Number(s.parcelas) !== Number(t.parcelas)) out.push(`parcelas Stone ${s.parcelas}x × TOTVS ${t.parcelas}x`);
   if (normBandeira(s.bandeira) !== normBandeira(t.bandeira))
     out.push(`bandeira Stone ${s.bandeira} × TOTVS ${t.bandeira}`);
-  if (normTipo(s.tipoConta) !== normTipo(t.tipoConta))
+  // pré-pago: as lojas lançam como débito, mas o lançamento pelo HeadCoach
+  // baixa como crédito (João, 04/11/2026) → aceita os dois
+  const prePago = /^pr[eé]-?pago|voucher/i.test(String(s.tipoConta || ''));
+  if (!prePago && normTipo(s.tipoConta) !== normTipo(t.tipoConta))
     out.push(`tipo Stone ${s.tipoConta} × TOTVS ${t.tipoConta}`);
   if (!t.portadorStone) out.push(`portador no TOTVS: ${t.portador || '—'} (não é Stone)`);
   if (s.cancelada !== t.cancelado)

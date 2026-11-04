@@ -244,7 +244,20 @@ export async function lancarVendaStone({ venda, loja, cliente, simular = false, 
   const daLoja = existentes.filter((x) => !filiais.length || filiais.includes(Number(x.branchCode)));
   const jaBaixada = daLoja.find((x) => Number(x.installmentCode) === 1 && (Number(x.paidValue) > 0 || x.settlementDate));
   if (jaBaixada) {
+    let tituloCartao = null;
+    try {
+      tituloCartao = await acharTituloCartao({
+        customerCode: cli.code,
+        branchCode: Number(jaBaixada.branchCode),
+        dataVenda,
+        valor,
+        settlementNumber: Number(jaBaixada.settlementSequence) || null,
+      });
+    } catch {
+      /* sem vínculo automático */
+    }
     return {
+      tituloCartao,
       ok: true,
       jaExistia: true,
       mensagem: `Fatura ${jaBaixada.branchCode}/${receivableCode} já existe e está baixada.`,
@@ -301,9 +314,27 @@ export async function lancarVendaStone({ venda, loja, cliente, simular = false, 
   // 2) baixa no cartão
   const branchCode = Number(aberta.branchCode);
   const payloadBaixa = montarBaixa(branchCode);
+  let tituloCartao = null;
   try {
-    await postTotvs('/accounts-receivable/v2/invoices-payment', payloadBaixa);
+    const resp = await postTotvs('/accounts-receivable/v2/invoices-payment', payloadBaixa);
     passos.push(`baixada no cartão ${cartao.modalidade}`);
+    // O título do cartão nasce SEM NSU (não tem NF), então a conciliação não o
+    // casaria sozinha. Achamos o título gerado pela baixa (sequência de
+    // liquidação = settlementNumber + 1, no cliente da fatura) para gravar o
+    // vínculo NSU ↔ título. Provado em 04/11/2026: baixa 1183060 → título
+    // 99/196217 com settlementSequence 1183061 (depois transferido p/ o
+    // cliente da operadora, mesmo nº de título).
+    try {
+      tituloCartao = await acharTituloCartao({
+        customerCode: cli.code,
+        branchCode,
+        dataVenda,
+        valor,
+        settlementNumber: Number(resp.data?.settlementNumber) || null,
+      });
+    } catch (e) {
+      console.warn(`[stone-lancar] título do cartão da NSU ${venda.nsu}: ${e.message}`);
+    }
   } catch (e) {
     return {
       ok: false,
@@ -318,8 +349,28 @@ export async function lancarVendaStone({ venda, loja, cliente, simular = false, 
     ok: true,
     mensagem: `Fatura ${branchCode}/${receivableCode} criada e baixada no cartão de ${cartao.modalidade === 'credito' ? 'crédito' : 'débito'}.`,
     fatura: { filial: branchCode, numero: receivableCode, cliente: cli.code },
+    tituloCartao,
     cliente: cli,
     cartao: { modalidade: cartao.modalidade, portador: cartao.portador, cadastro: cartao.cadastro },
     passos,
   };
+}
+
+/** Título de cartão (doc 4/5) gerado pela baixa, no cliente da fatura. */
+export async function acharTituloCartao({ customerCode, branchCode, dataVenda, valor, settlementNumber }) {
+  const r = await postTotvs('/accounts-receivable/v2/documents/search', {
+    filter: {
+      customerCodeList: [Number(customerCode)],
+      branchCodeList: [Number(branchCode)],
+      documentTypeList: [4, 5],
+      startIssueDate: `${dataVenda}T00:00:00`,
+      endIssueDate: `${dataVenda}T23:59:59`,
+    },
+    page: 1,
+    pageSize: 100,
+  });
+  const itens = (r.data?.items || []).filter((x) => round2(x.installmentValue) === round2(valor));
+  const porSeq = settlementNumber ? itens.find((x) => Number(x.settlementSequence) === settlementNumber + 1) : null;
+  const t = porSeq || (itens.length === 1 ? itens[0] : null);
+  return t ? { filial: Number(t.branchCode), titulo: Number(t.receivableCode), parcela: Number(t.installmentCode) } : null;
 }

@@ -95,6 +95,37 @@ async function listarVinculos(stonecodes) {
   }
 }
 
+// Vínculo automático NSU ↔ título do cartão criado pelo "lançar no TOTVS"
+// (idempotente: se a NSU já tem vínculo, não duplica).
+async function vincularLancamento({ stonecode, nsu, filial, titulo, usuario }) {
+  try {
+    const { data: ja } = await supabase
+      .from(TABELA_VINCULOS)
+      .select('id, filial, titulo')
+      .eq('stonecode', String(stonecode))
+      .eq('nsu', String(nsu))
+      .limit(1);
+    if (ja?.length) return { id: ja[0].id, filial: ja[0].filial, titulo: ja[0].titulo, existente: true };
+    const { data, error } = await supabase
+      .from(TABELA_VINCULOS)
+      .insert({
+        stonecode: String(stonecode),
+        nsu: String(nsu),
+        filial: Number(filial),
+        titulo: Number(titulo),
+        observacao: 'Lançado pelo HeadCoach (fatura + baixa no cartão)',
+        usuario: usuario ? String(usuario).slice(0, 120) : 'HeadCoach',
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return { id: data.id, filial: Number(filial), titulo: Number(titulo) };
+  } catch (e) {
+    console.warn(`[stone] vínculo automático NSU ${nsu}: ${e.message}`);
+    return { erro: e.message };
+  }
+}
+
 // Mapa CNPJ → empresas do TOTVS; se o TOTVS falhar, usa o config
 async function mapaFiliaisSeguro() {
   try {
@@ -607,6 +638,17 @@ router.post(
         }
         const loja = comFiliaisTotvs(cfg, mapa);
         const r = await lancarVendaStone({ venda, loja, cliente, simular: !!simular, usuario });
+        // O título do cartão gerado pela baixa não tem NSU → grava o vínculo
+        // NSU ↔ título para a venda sair de "Só na Stone" e ir para Conciliadas.
+        if (r.ok && !simular && r.tituloCartao) {
+          r.vinculo = await vincularLancamento({
+            stonecode: cfg.stonecode,
+            nsu: base.nsu,
+            filial: r.tituloCartao.filial,
+            titulo: r.tituloCartao.titulo,
+            usuario,
+          });
+        }
         resultados.push({ ...base, ...r });
       } catch (e) {
         resultados.push({ ...base, ok: false, erro: e.message || String(e) });
