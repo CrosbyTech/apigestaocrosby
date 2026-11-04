@@ -275,26 +275,32 @@ async function fonteTotvs({ de, ate }) {
   }
 
   const vistos = new Set();
-  itens = itens
-    .filter((it) => {
-      const k = `${it.branchCode}|${it.duplicateCode}|${it.installmentCode}|${it.supplierCode}`;
-      if (vistos.has(k)) return false;
-      vistos.add(k);
-      return (it.paidValue || 0) > 0 || it.settlementDate;
-    })
-    .map((it) => ({
+  itens = itens.filter((it) => {
+    const k = `${it.branchCode}|${it.duplicateCode}|${it.installmentCode}|${it.supplierCode}`;
+    if (vistos.has(k)) return false;
+    vistos.add(k);
+    return (it.paidValue || 0) > 0 || it.settlementDate;
+  });
+  // nome do fornecedor (pessoa jurídica) em lotes, com cache — a despesa vai à parte
+  await nomesFornecedores(itens.map((it) => it.supplierCode), token).catch(() => {});
+  itens = itens.map((it) => {
+    const despesa = it.expense?.[0]?.expenseName || null;
+    return {
       origem: 'TOTVS_CP',
       id: `${it.branchCode}|${it.duplicateCode}|${it.installmentCode}|${it.supplierCode}`,
       valor: round2(it.paidValue || it.duplicateValue),
       data: it.settlementDate ? String(it.settlementDate).slice(0, 10) : null,
-      nome: it.expense?.[0]?.expenseName ? `${it.expense[0].expenseName}` : null,
+      nome: cacheNomes.get(it.supplierCode) || despesa,
       doc: soDigitos(it.supplierCpfCnpj) || null,
       empresa: `Empresa ${it.branchCode}`,
-      detalhe: [`dup ${it.duplicateCode}/${it.installmentCode}`, `fornecedor ${it.supplierCode}`, it.expense?.[0]?.expenseName].filter(Boolean).join(' · '),
+      detalhe: [`dup ${it.duplicateCode}/${it.installmentCode}`, despesa].filter(Boolean).join(' · '),
+      despesa,
       duplicata: `${it.duplicateCode}|${it.installmentCode}`,
       vencimento: it.dueDate ? String(it.dueDate).slice(0, 10) : null,
+      emissao: it.issueDate ? String(it.issueDate).slice(0, 10) : null,
       supplierCode: it.supplierCode,
-    }));
+    };
+  });
   return itens;
   })();
   cacheTotvs.set(key, { em: Date.now(), promessa });
@@ -1269,12 +1275,59 @@ export async function detalheConciliacao(id) {
       doc: ref.doc,
       duplicata: dup,
       parcela: parc,
+      emissao: ref.emissao || null,
       vencimento: ref.vencimento,
       dataPagamento: ref.data,
       valor: ref.valorDuplicata ?? ref.valor,
       valorPago: ref.valor,
-      despesa: ref.detalhe,
+      despesa: ref.despesa || ref.detalhe,
     };
+    // dados completos da duplicata, ao vivo no TOTVS (fornecedor, empresa, despesas, portador…)
+    try {
+      const tokenData = await getToken();
+      const token = tokenData?.access_token;
+      if (token && branch && dup) {
+        const h = { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 };
+        const filter = { branchCodeList: [Number(branch)], duplicateCodeList: [Number(dup)] };
+        if (forn) filter.supplierCodeList = [Number(forn)];
+        const r = await axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter, page: 1, pageSize: 20 }, h);
+        const it = (r.data?.items || []).find((x) => String(x.installmentCode) === String(parc)) || (r.data?.items || [])[0];
+        if (it) {
+          await nomesFornecedores([it.supplierCode], token).catch(() => {});
+          let empresaNome = null;
+          try {
+            const mapa = await mapearFiliaisTotvsPorCnpj();
+            for (const lista of mapa.values()) for (const f of lista) if (f.code === Number(it.branchCode)) empresaNome = f.nome;
+          } catch {
+            /* fica só o código */
+          }
+          const d = (v) => (v ? String(v).slice(0, 10) : null);
+          Object.assign(origem, {
+            empresa: empresaNome ? `${it.branchCode} · ${empresaNome}` : origem.empresa,
+            fornecedor: cacheNomes.get(it.supplierCode) || origem.fornecedor,
+            fornecedorCodigo: it.supplierCode,
+            doc: soDigitos(it.supplierCpfCnpj) || origem.doc,
+            emissao: d(it.issueDate),
+            vencimento: d(it.dueDate),
+            chegada: d(it.arrivalDate),
+            entrada: d(it.entryDate),
+            dataPagamento: d(it.settlementDate) || origem.dataPagamento,
+            valor: round2(it.duplicateValue),
+            valorPago: round2(it.paidValue || 0) || origem.valorPago,
+            juros: round2(it.feesValue || 0) || null,
+            desconto: round2(it.discountValue || 0) || null,
+            portadorCodigo: it.bearerCode ?? null,
+            banco: null,
+            status: it.status === 'N' ? 'Normal' : it.status,
+            incluidoPor: it.userInclusionName || null,
+            despesas: (it.expense || []).map((e) => ({ codigo: e.expenseCode, nome: e.expenseName, centroCusto: e.costCenterCode, percentual: e.proratedPercentage, valor: round2(e.proratedValue) })),
+            despesa: (it.expense || []).map((e) => e.expenseName).filter(Boolean).join(' · ') || origem.despesa,
+          });
+        }
+      }
+    } catch (e) {
+      origem.aviso = `Não foi possível consultar a duplicata no TOTVS agora (${e.message}).`;
+    }
   }
   else if (c.origem === 'TOTVS_CR') {
     const [branch, tit, parc] = String(ref.id || '').split('|');
