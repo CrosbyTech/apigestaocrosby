@@ -5,8 +5,10 @@ contas Stone, importa no **Extrato Bancário** (`/fluxo-caixa-ext`) e sobe o
 saldo do dia na **Liberação de Pagamento** (`saldo_bancario`, banco `STONE`).
 
 Roda no PC do financeiro, não no servidor: a Stone exige login com token /
-reCAPTCHA / biometria, então o bot **nunca digita senha** — você loga uma vez
-na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
+reCAPTCHA / biometria, então o bot **nunca digita a senha de login** — você loga
+uma vez na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
+A única senha que o bot usa é o **PIN de 6 dígitos** do app, e só quando a Stone
+pede esse desafio ao confirmar um Pix (`config.json → stone.senha`).
 
 ## Instalação (PC do financeiro)
 
@@ -22,6 +24,9 @@ na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
 6. Rode `iniciar.bat` (ou reinicie o PC). Pronto: o agente aparece **Online**
    em Financeiro → Extrato Bancário → aba **Bot Stone**.
 
+> Atualizou o bot? Rode `instalar.bat` de novo (ou `npm install`) para instalar
+> o `node-jose`, usado para responder ao desafio da senha.
+
 ## Uso
 
 | Ação | Como |
@@ -30,7 +35,9 @@ na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
 | Todo dia de manhã | `config.json` → `horarioDiario` (padrão `07:30`), `diasSemana` (0 = domingo). O agente precisa estar ligado. |
 | Quantos dias para trás | `diasRetroativos` (padrão 3). Reimportar o mesmo período substitui os lançamentos — não duplica. |
 | Testar com o Chrome visível | `agora.bat` (aceita `--de=2026-10-01 --ate=2026-10-10`) |
+| Testar a inclusão com a senha | Rode `testar-senha.bat`: ele reaplica a alteração se ela tiver sido removida por `git stash`, confere o `node-jose` e sobe o agente. Depois clique em **tentar de novo** no título de teste no HeadCoach. O `agora.bat` só baixa extratos, não processa inclusões. |
 | Sessão da Stone expirou | Normalmente não expira: o agente abre o portal escondido a cada 20 min (`config.json → sessao.keepAliveMin`) e o token é renovado. Se mesmo assim cair, a aba Bot Stone mostra “sessão expirada” e o log pede: rode `login.bat` de novo. |
+| A Stone pediu a senha de 6 dígitos ao confirmar | Coloque a senha do app em `config.json → stone.senha` (só os 6 números). O bot responde ao desafio **uma vez**; se a senha estiver errada ele marca `bloqueado` e não insiste, para não bloquear a conta. Sem `stone.senha`, ele também marca `bloqueado` e avisa no log. |
 | Parar o agente | `parar.bat` (mata o agente, inclusive o escondido, e fecha o Chrome do bot). Nunca rode dois agentes ao mesmo tempo: os dois disputam o mesmo perfil do Chrome. |
 | Portal mudou e o PDF parou | `mapear.bat` grava em `mapa/` os botões/links e as chamadas de API que o portal faz; ajuste `config.json → pdf.passos` (ver abaixo). |
 
@@ -84,9 +91,19 @@ desliga o PDF de vez (só JSON).
 
 - A única escrita do bot é a inclusão de Pix (`inclusoes.mjs`), disparada pelo
   APROVAR da Liberação para títulos com banco `STONE 0000`. Ele não aprova: o
-  pagamento fica aguardando o Fábio no app da Stone. Se a Stone pedir senha, PIN
-  ou código, o bot para e marca `bloqueado`; sem resposta depois do confirm, marca
-  `verificar` e não repete.
+  pagamento fica aguardando o Fábio no app da Stone. Se a Stone pedir o PIN de
+  6 dígitos no confirmar, o bot monta o `X-Stone-Challenge-Solution` (JWE
+  RSA-OAEP-256/A256GCM, igual ao portal) com `stone.senha` e tenta **uma vez**.
+  Senha errada ou desafio diferente (OTP/código por e-mail) → `bloqueado`, sem
+  repetir; sem resposta depois do confirm, marca `verificar` e não repete.
+- `stone.senha` fica em texto no `config.json` (que é gitignored). É a senha de
+  6 dígitos do app; não é a senha de login. Coloque entre aspas, por exemplo
+  `"senha": "012345"` (sem aspas um PIN começando com 0 perde o zero). Se errar,
+  a Stone pode bloquear a conta — teste primeiro com um título marcado como
+  teste (R$ 1,00).
+- Também dá para usar `STONE_SENHA` (variável de ambiente) em vez do config;
+  `stone.senhaLogin` e `stone.otp` só são necessários se o desafio pedir a senha
+  de acesso ou o código do autenticador em vez do PIN.
 - Para desligar a inclusão: `STONE_INCLUSAO_ENABLED=false` no Render.
 - `config.json` (token) e `perfil-chrome/` (sessão) estão no `.gitignore` —
   não versione e não copie para outro PC.

@@ -26,7 +26,13 @@
   "stone": {
     "url": "https://conta.stone.com.br",
     "apiRegex": "/api/v1/accounts|openbank\\.stone\\.com\\.br",
-    "limitePagina": 100
+    "limitePagina": 100,
+    "senha": "",
+    "senhaLogin": "",
+    "otp": "",
+    "_comentario_senha": "senha de 6 dígitos (PIN) do app Stone. Só é usada se a Stone pedir desafio ao confirmar o Pix. senhaLogin/otp são alternativas (normalmente não precisa). Vazio = o bot marca 'bloqueado' em vez de tentar. CUIDADO: errar a senha pode bloquear a conta.",
+    "_comentario_senhaLogin": "senha de acesso ao app (texto), só se o desafio pedir 'password' em vez do PIN de 6 dígitos",
+    "_comentario_otp": "código de 6 dígitos do autenticador (Google Authenticator), só se o desafio pedir 'otp'"
   },
   "pagarme": {
     "ativo": true,

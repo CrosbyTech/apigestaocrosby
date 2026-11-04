@@ -2,13 +2,15 @@
 // Automação do portal Stone (conta.stone.com.br) com Puppeteer.
 //
 // Princípios:
-//  - O bot NUNCA digita usuário/senha. O login é feito à mão UMA vez com
-//    `login.bat` (janela visível, com token/biometria do próprio Yago); o
-//    Chrome guarda a sessão em perfil-chrome/ e as execuções seguintes
-//    reaproveitam. Sessão expirou → o bot avisa no log e pede novo login.
+//  - O login é feito à mão UMA vez com `login.bat` (janela visível, com
+//    token/biometria do próprio Yago); o Chrome guarda a sessão em
+//    perfil-chrome/ e as execuções seguintes reaproveitam. Sessão expirou → o
+//    bot avisa no log e pede novo login.
 //  - Lê contas, saldo, extrato e exporta PDF. A única escrita é a inclusão de Pix
-//    (inclusoes.mjs), que fica aguardando a aprovação do Fábio. O bot não aprova
-//    e não resolve o desafio da Stone (senha, PIN, código).
+//    (inclusoes.mjs), que fica aguardando a aprovação do Fábio. O bot não aprova.
+//  - Se a Stone pedir a senha de 6 dígitos (PIN) para confirmar o Pix, o bot
+//    monta o X-Stone-Challenge-Solution com a senha de `config.json → stone.senha`
+//    (JWE RSA-OAEP-256/A256GCM, a mesma criptografia que o portal usa).
 //  - Dados vêm da mesma API que o portal consome (api.openbank.stone.com.br,
 //    contrato público em docs.openbank.stone.com.br): o bot captura o
 //    Authorization que o próprio portal manda e faz os GETs de dentro da página.
@@ -18,6 +20,7 @@
 // =============================================================================
 import fs from 'node:fs';
 import path from 'node:path';
+import jose from 'node-jose';
 import puppeteer from 'puppeteer';
 
 const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -39,6 +42,12 @@ export class Stone {
     this.api = null; // { base, headers } capturado do próprio portal
     this.requisicoes = []; // só no --mapear
     this.mapear = false;
+    // senha de 6 dígitos (PIN) do portal, usada SÓ se a Stone pedir desafio no
+    // confirmar do Pix. Fica no config.json (gitignored); nunca vai para o log.
+    this.senha = String(cfg.stone?.senha || cfg.senha || process.env.STONE_SENHA || '').trim();
+    this.senhaLogin = String(cfg.stone?.senhaLogin || process.env.STONE_SENHA_LOGIN || '').trim();
+    this.otp = String(cfg.stone?.otp || process.env.STONE_OTP || '').trim();
+    this.jwksCache = null; // { em, chave } da chave pública do desafio
   }
 
   // ─── navegador ─────────────────────────────────────────────────────────────
@@ -289,7 +298,7 @@ export class Stone {
    * POST com o token do portal, em uma tentativa só (repete apenas em 401, com a
    * mesma chave de idempotência). Quem chama decide o que fazer com o status.
    */
-  async apiPost(rota, corpo, { idempotencia }, tentativa = 0) {
+  async apiPost(rota, corpo, { idempotencia, headers: extras }, tentativa = 0) {
     await this.garantirApi();
     const resp = await fetch(`${this.api.base}${rota}`, {
       method: 'POST',
@@ -301,6 +310,7 @@ export class Stone {
         'user-agent': this.ua || 'Mozilla/5.0',
         origin: this.url,
         referer: `${this.url}/`,
+        ...(extras || {}),
       },
       body: JSON.stringify(corpo),
     });
@@ -309,7 +319,7 @@ export class Stone {
       this.api = null;
       await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
       await this.garantirApi({ timeoutMs: 30000 });
-      return this.apiPost(rota, corpo, { idempotencia }, tentativa + 1);
+      return this.apiPost(rota, corpo, { idempotencia, headers: extras }, tentativa + 1);
     }
     let json = null;
     try {
@@ -326,8 +336,89 @@ export class Stone {
   }
 
   /** Confirma: para quem não é aprovador, o Pix vai para a aprovação no app. */
-  confirmarPix({ id, valorCentavos, descricao, idempotencia }) {
-    return this.apiPost(`/api/v1/pix/outbound_pix_payments/${id}/actions/confirm`, { amount: valorCentavos, description: descricao, add_target_to_contacts: false }, { idempotencia });
+  confirmarPix({ id, valorCentavos, descricao, idempotencia, desafio }) {
+    return this.apiPost(
+      `/api/v1/pix/outbound_pix_payments/${id}/actions/confirm`,
+      { amount: valorCentavos, description: descricao, add_target_to_contacts: false },
+      { idempotencia, headers: desafio ? { 'X-Stone-Challenge-Solution': desafio } : undefined },
+    );
+  }
+
+  /**
+   * Monta o valor de `X-Stone-Challenge-Solution` para um desafio da Stone
+   * (`srn:error:challenge_required`). É a mesma criptografia do portal:
+   * JWE compacto (RSA-OAEP-256 + A256GCM) com a chave pública do JWKS.
+   * O payload leva a senha no campo certo: pin, totp ou login_password.
+   * Nunca logue o retorno (ele contém a senha cifrada).
+   */
+  async resolverDesafio(challenge) {
+    const id = challenge?.id || challenge?.challenge_id || challenge?.challengeId;
+    if (!id) throw new Error('a Stone não devolveu o id do desafio');
+
+    const tipos = challenge?.requiredTypes || challenge?.required_types || challenge?.requiredType;
+    const tipo = String((Array.isArray(tipos) ? tipos[0] : tipos) || 'pin')
+      .trim()
+      .toLowerCase()
+      .replace(/^login_/, '');
+    const senha = this.senhaDoDesafio(tipo);
+    if (!senha) throw new Error(tipo === 'password' ? 'config.json não tem stone.senhaLogin' : tipo === 'otp' ? 'config.json não tem stone.otp' : 'config.json não tem stone.senha');
+    const valor = tipo === 'pin' || tipo === 'otp' ? String(senha).replace(/\D/g, '') : String(senha).trim();
+    if ((tipo === 'pin' || tipo === 'otp') && !/^\d{6}$/.test(valor)) {
+      throw new Error(tipo === 'otp' ? 'stone.otp deve ter 6 dígitos numéricos' : 'stone.senha deve ter 6 dígitos numéricos');
+    }
+    const payload = {
+      challenge_id: id,
+      totp: tipo === 'otp' ? valor : null,
+      pin: tipo === 'pin' ? valor : null,
+      login_password: tipo === 'password' ? valor : null,
+    };
+
+    const chave = await this.#chaveDesafio();
+    // O `alg` do JWKS pode vir "RSA-OAEP" e o node-jose recusaria usá-la com
+    // RSA-OAEP-256; o algoritmo correto vai nos `fields` do JWE, então tira o
+    // `alg` da chave antes de importar.
+    const chaveSemAlg = { ...chave };
+    delete chaveSemAlg.alg;
+    const key = await jose.JWK.asKey(chaveSemAlg);
+    return jose.JWE.createEncrypt({ format: 'compact', fields: { alg: 'RSA-OAEP-256', enc: 'A256GCM' } }, key)
+      .update(JSON.stringify(payload), 'utf8')
+      .final();
+  }
+
+  /** Qual senha usar conforme o tipo que a Stone pediu. */
+  senhaDoDesafio(tipo) {
+    const t = String(tipo || '').trim().toLowerCase();
+    if (t === 'password') return this.senhaLogin;
+    if (t === 'otp') return this.otp;
+    return this.senha;
+  }
+
+  /** Chave pública do desafio (JWKS do identity), com cache curto. */
+  async #chaveDesafio() {
+    const agora = Date.now();
+    if (this.jwksCache && agora - this.jwksCache.em < 10 * 60 * 1000) return this.jwksCache.chave;
+
+    const base = this.api?.base || 'https://api.openbank.stone.com.br';
+    const resp = await fetch(`${base}/api/v2/identity/.well-known/jwks`, {
+      headers: { ...(this.api?.headers || {}), accept: 'application/json', 'user-agent': this.ua || 'Mozilla/5.0' },
+    });
+    const texto = await resp.text();
+    if (resp.status >= 400) throw new Error(`JWKS ${resp.status}: ${texto.slice(0, 120)}`);
+    let json;
+    try {
+      json = JSON.parse(texto);
+    } catch {
+      throw new Error('JWKS não é JSON');
+    }
+    const chaves = Array.isArray(json) ? json : json?.keys || json?.data?.keys || [];
+    const chave =
+      chaves.find((k) => k.use === 'enc' && /rsa-oaep/i.test(k.alg || '')) ||
+      chaves.find((k) => k.use === 'enc') ||
+      chaves.find((k) => /rsa-oaep/i.test(k.alg || '')) ||
+      chaves[0];
+    if (!chave) throw new Error('JWKS veio sem chave pública');
+    this.jwksCache = { em: agora, chave };
+    return chave;
   }
 
   /** GET genérico em outros serviços do portal (customer-api, prepayment) com o mesmo token. */

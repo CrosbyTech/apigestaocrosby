@@ -420,7 +420,8 @@ async function modoAgora() {
 async function modoAgente() {
   console.log(`Bot Stone Extratos v${VERSAO} — agente em ${host} → ${cfg.headcoachUrl}`);
   const listaHorarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : [cfg.horarioDiario]).filter(Boolean).join(', ');
-  console.log(`Horários: ${listaHorarios || '(desligado)'} · keep-alive a cada ${cfg.sessao?.keepAliveMin ?? 20} min · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar\n`);
+  console.log(`Horários: ${listaHorarios || '(desligado)'} · keep-alive a cada ${cfg.sessao?.keepAliveMin ?? 20} min · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar`);
+  console.log(`Desafio de senha: ${(cfg.stone?.senha || process.env.STONE_SENHA) ? 'senha configurada' : 'NÃO configurada (se a Stone pedir, marca bloqueado)'}\n`);
   let ultimoPing = 0;
   let ultimoAgendado = null; // AAAA-MM-DD do último disparo automático
   let sessaoOk = null;

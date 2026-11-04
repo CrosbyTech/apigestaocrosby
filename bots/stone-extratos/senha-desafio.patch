@@ -1,0 +1,364 @@
+diff --git a/bots/stone-extratos/README.md b/bots/stone-extratos/README.md
+index 2eb134fc..6e381c1a 100644
+--- a/bots/stone-extratos/README.md
++++ b/bots/stone-extratos/README.md
+@@ -5,8 +5,10 @@ contas Stone, importa no **Extrato Bancário** (`/fluxo-caixa-ext`) e sobe o
+ saldo do dia na **Liberação de Pagamento** (`saldo_bancario`, banco `STONE`).
+ 
+ Roda no PC do financeiro, não no servidor: a Stone exige login com token /
+-reCAPTCHA / biometria, então o bot **nunca digita senha** — você loga uma vez
+-na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
++reCAPTCHA / biometria, então o bot **nunca digita a senha de login** — você loga
++uma vez na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
++A única senha que o bot usa é o **PIN de 6 dígitos** do app, e só quando a Stone
++pede esse desafio ao confirmar um Pix (`config.json → stone.senha`).
+ 
+ ## Instalação (PC do financeiro)
+ 
+@@ -22,6 +24,9 @@ na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
+ 6. Rode `iniciar.bat` (ou reinicie o PC). Pronto: o agente aparece **Online**
+    em Financeiro → Extrato Bancário → aba **Bot Stone**.
+ 
++> Atualizou o bot? Rode `instalar.bat` de novo (ou `npm install`) para instalar
++> o `node-jose`, usado para responder ao desafio da senha.
++
+ ## Uso
+ 
+ | Ação | Como |
+@@ -30,7 +35,9 @@ na janela do Chrome dele e a sessão fica guardada em `perfil-chrome/`.
+ | Todo dia de manhã | `config.json` → `horarioDiario` (padrão `07:30`), `diasSemana` (0 = domingo). O agente precisa estar ligado. |
+ | Quantos dias para trás | `diasRetroativos` (padrão 3). Reimportar o mesmo período substitui os lançamentos — não duplica. |
+ | Testar com o Chrome visível | `agora.bat` (aceita `--de=2026-10-01 --ate=2026-10-10`) |
++| Testar a inclusão com a senha | Rode `testar-senha.bat`: ele reaplica a alteração se ela tiver sido removida por `git stash`, confere o `node-jose` e sobe o agente. Depois clique em **tentar de novo** no título de teste no HeadCoach. O `agora.bat` só baixa extratos, não processa inclusões. |
+ | Sessão da Stone expirou | Normalmente não expira: o agente abre o portal escondido a cada 20 min (`config.json → sessao.keepAliveMin`) e o token é renovado. Se mesmo assim cair, a aba Bot Stone mostra “sessão expirada” e o log pede: rode `login.bat` de novo. |
++| A Stone pediu a senha de 6 dígitos ao confirmar | Coloque a senha do app em `config.json → stone.senha` (só os 6 números). O bot responde ao desafio **uma vez**; se a senha estiver errada ele marca `bloqueado` e não insiste, para não bloquear a conta. Sem `stone.senha`, ele também marca `bloqueado` e avisa no log. |
+ | Parar o agente | `parar.bat` (mata o agente, inclusive o escondido, e fecha o Chrome do bot). Nunca rode dois agentes ao mesmo tempo: os dois disputam o mesmo perfil do Chrome. |
+ | Portal mudou e o PDF parou | `mapear.bat` grava em `mapa/` os botões/links e as chamadas de API que o portal faz; ajuste `config.json → pdf.passos` (ver abaixo). |
+ 
+@@ -84,9 +91,19 @@ desliga o PDF de vez (só JSON).
+ 
+ - A única escrita do bot é a inclusão de Pix (`inclusoes.mjs`), disparada pelo
+   APROVAR da Liberação para títulos com banco `STONE 0000`. Ele não aprova: o
+-  pagamento fica aguardando o Fábio no app da Stone. Se a Stone pedir senha, PIN
+-  ou código, o bot para e marca `bloqueado`; sem resposta depois do confirm, marca
+-  `verificar` e não repete.
++  pagamento fica aguardando o Fábio no app da Stone. Se a Stone pedir o PIN de
++  6 dígitos no confirmar, o bot monta o `X-Stone-Challenge-Solution` (JWE
++  RSA-OAEP-256/A256GCM, igual ao portal) com `stone.senha` e tenta **uma vez**.
++  Senha errada ou desafio diferente (OTP/código por e-mail) → `bloqueado`, sem
++  repetir; sem resposta depois do confirm, marca `verificar` e não repete.
++- `stone.senha` fica em texto no `config.json` (que é gitignored). É a senha de
++  6 dígitos do app; não é a senha de login. Coloque entre aspas, por exemplo
++  `"senha": "012345"` (sem aspas um PIN começando com 0 perde o zero). Se errar,
++  a Stone pode bloquear a conta — teste primeiro com um título marcado como
++  teste (R$ 1,00).
++- Também dá para usar `STONE_SENHA` (variável de ambiente) em vez do config;
++  `stone.senhaLogin` e `stone.otp` só são necessários se o desafio pedir a senha
++  de acesso ou o código do autenticador em vez do PIN.
+ - Para desligar a inclusão: `STONE_INCLUSAO_ENABLED=false` no Render.
+ - `config.json` (token) e `perfil-chrome/` (sessão) estão no `.gitignore` —
+   não versione e não copie para outro PC.
+diff --git a/bots/stone-extratos/bot.mjs b/bots/stone-extratos/bot.mjs
+index 86758ee7..b8da3ce4 100644
+--- a/bots/stone-extratos/bot.mjs
++++ b/bots/stone-extratos/bot.mjs
+@@ -420,7 +420,8 @@ async function modoAgora() {
+ async function modoAgente() {
+   console.log(`Bot Stone Extratos v${VERSAO} — agente em ${host} → ${cfg.headcoachUrl}`);
+   const listaHorarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : [cfg.horarioDiario]).filter(Boolean).join(', ');
+-  console.log(`Horários: ${listaHorarios || '(desligado)'} · keep-alive a cada ${cfg.sessao?.keepAliveMin ?? 20} min · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar\n`);
++  console.log(`Horários: ${listaHorarios || '(desligado)'} · keep-alive a cada ${cfg.sessao?.keepAliveMin ?? 20} min · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar`);
++  console.log(`Desafio de senha: ${(cfg.stone?.senha || process.env.STONE_SENHA) ? 'senha configurada' : 'NÃO configurada (se a Stone pedir, marca bloqueado)'}\n`);
+   let ultimoPing = 0;
+   let ultimoAgendado = null; // AAAA-MM-DD do último disparo automático
+   let sessaoOk = null;
+diff --git a/bots/stone-extratos/config.example.json b/bots/stone-extratos/config.example.json
+index a7f6b888..49886aa0 100644
+--- a/bots/stone-extratos/config.example.json
++++ b/bots/stone-extratos/config.example.json
+@@ -26,7 +26,13 @@
+   "stone": {
+     "url": "https://conta.stone.com.br",
+     "apiRegex": "/api/v1/accounts|openbank\\.stone\\.com\\.br",
+-    "limitePagina": 100
++    "limitePagina": 100,
++    "senha": "",
++    "senhaLogin": "",
++    "otp": "",
++    "_comentario_senha": "senha de 6 dígitos (PIN) do app Stone. Só é usada se a Stone pedir desafio ao confirmar o Pix. senhaLogin/otp são alternativas (normalmente não precisa). Vazio = o bot marca 'bloqueado' em vez de tentar. CUIDADO: errar a senha pode bloquear a conta.",
++    "_comentario_senhaLogin": "senha de acesso ao app (texto), só se o desafio pedir 'password' em vez do PIN de 6 dígitos",
++    "_comentario_otp": "código de 6 dígitos do autenticador (Google Authenticator), só se o desafio pedir 'otp'"
+   },
+   "pagarme": {
+     "ativo": true,
+diff --git a/bots/stone-extratos/inclusoes.mjs b/bots/stone-extratos/inclusoes.mjs
+index 4e7a42d9..8c521cbd 100644
+--- a/bots/stone-extratos/inclusoes.mjs
++++ b/bots/stone-extratos/inclusoes.mjs
+@@ -5,9 +5,12 @@
+ // o que a Stone devolveu (valor e documento do recebedor) e confirma. Quem não é
+ // aprovador cai em "foi pra aprovação"; o dinheiro só sai quando o Fábio aprova.
+ //
+-// O bot NUNCA resolve o desafio da Stone (senha, PIN, código): se ela pedir, para
+-// e marca "bloqueado". Depois do confirm enviado sem resposta clara, marca
+-// "verificar" e não repete, para não correr o risco de pagar em dobro.
++// Se a Stone pedir a senha de 6 dígitos (PIN) no confirmar, o bot tenta UMA vez
++// com `config.json → stone.senha` (ou STONE_SENHA). Senha errada marca
++// "bloqueado" e NÃO repete, para não bloquear a conta. Sem senha configurada,
++// também marca "bloqueado" e explica o que fazer.
++// Depois do confirm enviado sem resposta clara, marca "verificar" e não repete,
++// para não correr o risco de pagar em dobro.
+ // =============================================================================
+ import crypto from 'node:crypto';
+ 
+@@ -15,7 +18,13 @@ const chaveIdem = ({ liberacao_id, valor_centavos, chave_pix }, etapa) =>
+   crypto.createHash('sha256').update(`${liberacao_id}|${valor_centavos}|${chave_pix}|${etapa}`).digest('hex').slice(0, 40);
+ 
+ const curto = (r) => String(r?.texto || '').replace(/\s+/g, ' ').slice(0, 200);
+-const pediuDesafio = (r) => /challenge|verification/i.test(`${r?.texto || ''}`);
++const desafioDe = (r) => r?.json?.challenge || r?.json?.data?.challenge || null;
++const pediuDesafio = (r) => /challenge_required/i.test(`${r?.json?.type || ''} ${r?.texto || ''}`);
++const precisaVerificacao = (r) => /needs_verification|verification_required/i.test(`${r?.json?.type || ''} ${r?.texto || ''}`);
++const tentativasRestantes = (r) => {
++  const n = r?.json?.details?.remainingAttempts ?? r?.json?.details?.remaining_attempts;
++  return n == null || !Number.isFinite(Number(n)) ? null : Number(n);
++};
+ 
+ /** Dígitos visíveis do documento (a Stone mascara CPF) têm que estar no documento esperado. */
+ export function documentoConfere(esperado, recebido) {
+@@ -24,7 +33,7 @@ export function documentoConfere(esperado, recebido) {
+ }
+ 
+ /**
+- * @param stone instância logada (criarPix / confirmarPix)
++ * @param stone instância logada (criarPix / confirmarPix / resolverDesafio)
+  * @param item linha de stone_inclusoes
+  * @param contas lista do portal (id, owner_document)
+  * @returns { status, stonePagamentoId?, recebedorNome?, recebedorDoc?, erro? }
+@@ -58,7 +67,48 @@ export async function incluirPix(stone, item, contas) {
+     return { ...resultado, status: 'verificar', erro: `Sem resposta da Stone ao confirmar (${e.message}): confira no portal antes de repetir.` };
+   }
+   if (confirmado.status < 300) return { ...resultado, status: 'incluido' };
+-  if (pediuDesafio(confirmado)) return { ...resultado, status: 'bloqueado', erro: 'A Stone pediu senha ou código para confirmar: o bot não resolve isso.' };
++
++  if (pediuDesafio(confirmado)) {
++    const challenge = desafioDe(confirmado);
++    if (!challenge?.id) {
++      return { ...resultado, status: 'bloqueado', erro: 'A Stone pediu senha para confirmar, mas não devolveu o id do desafio. Confirme este Pix no portal.' };
++    }
++    const tipos = challenge.requiredTypes || challenge.required_types || challenge.requiredType;
++    const tipo = String((Array.isArray(tipos) ? tipos[0] : tipos) || 'pin').toLowerCase();
++    if (typeof stone.log === 'function') stone.log(`desafio da Stone: tipo "${tipo}"`, 'info');
++
++    let solucao;
++    try {
++      solucao = await stone.resolverDesafio(challenge);
++    } catch (e) {
++      return { ...resultado, status: 'bloqueado', erro: `A Stone pediu senha para confirmar e não consegui responder (${e.message}). Configure stone.senha no config.json (senha de 6 dígitos do app) e tente de novo.` };
++    }
++
++    // Mesma chave de idempotência do primeiro confirm: é assim que o portal faz.
++    let tentativa;
++    try {
++      tentativa = await stone.confirmarPix({ id: pix.id, valorCentavos: item.valor_centavos, descricao: item.descricao, idempotencia: chaveIdem(item, 'confirmar'), desafio: solucao });
++    } catch (e) {
++      return { ...resultado, status: 'verificar', erro: `Sem resposta da Stone ao enviar a senha (${e.message}): confira no portal antes de repetir.` };
++    }
++    if (tentativa.status < 300) return { ...resultado, status: 'incluido' };
++    if (/bad_challenge_solution/i.test(`${tentativa.json?.type || ''} ${tentativa.texto || ''}`)) {
++      const restam = tentativasRestantes(tentativa);
++      return {
++        ...resultado,
++        status: 'bloqueado',
++        erro: `A Stone recusou a senha${restam != null ? ` (restam ${restam} tentativa(s))` : ''}. Corrija stone.senha no config.json; o bot não repete sozinho para não bloquear a conta.`,
++      };
++    }
++    if (pediuDesafio(tentativa) || precisaVerificacao(tentativa)) {
++      return { ...resultado, status: 'bloqueado', erro: `A Stone pediu outra verificação além da senha (${curto(tentativa)}). Confirme este Pix no portal.` };
++    }
++    if (tentativa.status === 401 || tentativa.status === 403) return { ...resultado, status: 'bloqueado', erro: `Stone recusou a senha (${tentativa.status}): ${curto(tentativa)}` };
++    if (tentativa.status >= 500) return { ...resultado, status: 'verificar', erro: `Stone ${tentativa.status} ao enviar a senha: confira no portal antes de repetir.` };
++    return { ...resultado, status: 'erro', erro: `Stone recusou confirmar (${tentativa.status}): ${curto(tentativa)}` };
++  }
++
++  if (precisaVerificacao(confirmado)) return { ...resultado, status: 'bloqueado', erro: `A Stone pediu código de verificação para confirmar (${curto(confirmado)}). O bot não tem esse código; confirme este Pix no portal.` };
+   if (confirmado.status === 401 || confirmado.status === 403) return { ...resultado, status: 'bloqueado', erro: `Stone recusou confirmar (${confirmado.status}): ${curto(confirmado)}` };
+   if (confirmado.status >= 500) return { ...resultado, status: 'verificar', erro: `Stone ${confirmado.status} ao confirmar: confira no portal antes de repetir.` };
+   return { ...resultado, status: 'erro', erro: `Stone recusou confirmar (${confirmado.status}): ${curto(confirmado)}` };
+diff --git a/bots/stone-extratos/package.json b/bots/stone-extratos/package.json
+index f341b8f3..8290e430 100644
+--- a/bots/stone-extratos/package.json
++++ b/bots/stone-extratos/package.json
+@@ -15,6 +15,7 @@
+     "mapear": "node bot.mjs --mapear"
+   },
+   "dependencies": {
++    "node-jose": "^2.2.0",
+     "puppeteer": "^24.40.0"
+   }
+ }
+diff --git a/bots/stone-extratos/stone.mjs b/bots/stone-extratos/stone.mjs
+index 0cf876f6..bdb196c9 100644
+--- a/bots/stone-extratos/stone.mjs
++++ b/bots/stone-extratos/stone.mjs
+@@ -2,13 +2,15 @@
+ // Automação do portal Stone (conta.stone.com.br) com Puppeteer.
+ //
+ // Princípios:
+-//  - O bot NUNCA digita usuário/senha. O login é feito à mão UMA vez com
+-//    `login.bat` (janela visível, com token/biometria do próprio Yago); o
+-//    Chrome guarda a sessão em perfil-chrome/ e as execuções seguintes
+-//    reaproveitam. Sessão expirou → o bot avisa no log e pede novo login.
++//  - O login é feito à mão UMA vez com `login.bat` (janela visível, com
++//    token/biometria do próprio Yago); o Chrome guarda a sessão em
++//    perfil-chrome/ e as execuções seguintes reaproveitam. Sessão expirou → o
++//    bot avisa no log e pede novo login.
+ //  - Lê contas, saldo, extrato e exporta PDF. A única escrita é a inclusão de Pix
+-//    (inclusoes.mjs), que fica aguardando a aprovação do Fábio. O bot não aprova
+-//    e não resolve o desafio da Stone (senha, PIN, código).
++//    (inclusoes.mjs), que fica aguardando a aprovação do Fábio. O bot não aprova.
++//  - Se a Stone pedir a senha de 6 dígitos (PIN) para confirmar o Pix, o bot
++//    monta o X-Stone-Challenge-Solution com a senha de `config.json → stone.senha`
++//    (JWE RSA-OAEP-256/A256GCM, a mesma criptografia que o portal usa).
+ //  - Dados vêm da mesma API que o portal consome (api.openbank.stone.com.br,
+ //    contrato público em docs.openbank.stone.com.br): o bot captura o
+ //    Authorization que o próprio portal manda e faz os GETs de dentro da página.
+@@ -18,6 +20,7 @@
+ // =============================================================================
+ import fs from 'node:fs';
+ import path from 'node:path';
++import jose from 'node-jose';
+ import puppeteer from 'puppeteer';
+ 
+ const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
+@@ -39,6 +42,12 @@ export class Stone {
+     this.api = null; // { base, headers } capturado do próprio portal
+     this.requisicoes = []; // só no --mapear
+     this.mapear = false;
++    // senha de 6 dígitos (PIN) do portal, usada SÓ se a Stone pedir desafio no
++    // confirmar do Pix. Fica no config.json (gitignored); nunca vai para o log.
++    this.senha = String(cfg.stone?.senha || cfg.senha || process.env.STONE_SENHA || '').trim();
++    this.senhaLogin = String(cfg.stone?.senhaLogin || process.env.STONE_SENHA_LOGIN || '').trim();
++    this.otp = String(cfg.stone?.otp || process.env.STONE_OTP || '').trim();
++    this.jwksCache = null; // { em, chave } da chave pública do desafio
+   }
+ 
+   // ─── navegador ─────────────────────────────────────────────────────────────
+@@ -289,7 +298,7 @@ export class Stone {
+    * POST com o token do portal, em uma tentativa só (repete apenas em 401, com a
+    * mesma chave de idempotência). Quem chama decide o que fazer com o status.
+    */
+-  async apiPost(rota, corpo, { idempotencia }, tentativa = 0) {
++  async apiPost(rota, corpo, { idempotencia, headers: extras }, tentativa = 0) {
+     await this.garantirApi();
+     const resp = await fetch(`${this.api.base}${rota}`, {
+       method: 'POST',
+@@ -301,6 +310,7 @@ export class Stone {
+         'user-agent': this.ua || 'Mozilla/5.0',
+         origin: this.url,
+         referer: `${this.url}/`,
++        ...(extras || {}),
+       },
+       body: JSON.stringify(corpo),
+     });
+@@ -309,7 +319,7 @@ export class Stone {
+       this.api = null;
+       await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+       await this.garantirApi({ timeoutMs: 30000 });
+-      return this.apiPost(rota, corpo, { idempotencia }, tentativa + 1);
++      return this.apiPost(rota, corpo, { idempotencia, headers: extras }, tentativa + 1);
+     }
+     let json = null;
+     try {
+@@ -326,8 +336,89 @@ export class Stone {
+   }
+ 
+   /** Confirma: para quem não é aprovador, o Pix vai para a aprovação no app. */
+-  confirmarPix({ id, valorCentavos, descricao, idempotencia }) {
+-    return this.apiPost(`/api/v1/pix/outbound_pix_payments/${id}/actions/confirm`, { amount: valorCentavos, description: descricao, add_target_to_contacts: false }, { idempotencia });
++  confirmarPix({ id, valorCentavos, descricao, idempotencia, desafio }) {
++    return this.apiPost(
++      `/api/v1/pix/outbound_pix_payments/${id}/actions/confirm`,
++      { amount: valorCentavos, description: descricao, add_target_to_contacts: false },
++      { idempotencia, headers: desafio ? { 'X-Stone-Challenge-Solution': desafio } : undefined },
++    );
++  }
++
++  /**
++   * Monta o valor de `X-Stone-Challenge-Solution` para um desafio da Stone
++   * (`srn:error:challenge_required`). É a mesma criptografia do portal:
++   * JWE compacto (RSA-OAEP-256 + A256GCM) com a chave pública do JWKS.
++   * O payload leva a senha no campo certo: pin, totp ou login_password.
++   * Nunca logue o retorno (ele contém a senha cifrada).
++   */
++  async resolverDesafio(challenge) {
++    const id = challenge?.id || challenge?.challenge_id || challenge?.challengeId;
++    if (!id) throw new Error('a Stone não devolveu o id do desafio');
++
++    const tipos = challenge?.requiredTypes || challenge?.required_types || challenge?.requiredType;
++    const tipo = String((Array.isArray(tipos) ? tipos[0] : tipos) || 'pin')
++      .trim()
++      .toLowerCase()
++      .replace(/^login_/, '');
++    const senha = this.senhaDoDesafio(tipo);
++    if (!senha) throw new Error(tipo === 'password' ? 'config.json não tem stone.senhaLogin' : tipo === 'otp' ? 'config.json não tem stone.otp' : 'config.json não tem stone.senha');
++    const valor = tipo === 'pin' || tipo === 'otp' ? String(senha).replace(/\D/g, '') : String(senha).trim();
++    if ((tipo === 'pin' || tipo === 'otp') && !/^\d{6}$/.test(valor)) {
++      throw new Error(tipo === 'otp' ? 'stone.otp deve ter 6 dígitos numéricos' : 'stone.senha deve ter 6 dígitos numéricos');
++    }
++    const payload = {
++      challenge_id: id,
++      totp: tipo === 'otp' ? valor : null,
++      pin: tipo === 'pin' ? valor : null,
++      login_password: tipo === 'password' ? valor : null,
++    };
++
++    const chave = await this.#chaveDesafio();
++    // O `alg` do JWKS pode vir "RSA-OAEP" e o node-jose recusaria usá-la com
++    // RSA-OAEP-256; o algoritmo correto vai nos `fields` do JWE, então tira o
++    // `alg` da chave antes de importar.
++    const chaveSemAlg = { ...chave };
++    delete chaveSemAlg.alg;
++    const key = await jose.JWK.asKey(chaveSemAlg);
++    return jose.JWE.createEncrypt({ format: 'compact', fields: { alg: 'RSA-OAEP-256', enc: 'A256GCM' } }, key)
++      .update(JSON.stringify(payload), 'utf8')
++      .final();
++  }
++
++  /** Qual senha usar conforme o tipo que a Stone pediu. */
++  senhaDoDesafio(tipo) {
++    const t = String(tipo || '').trim().toLowerCase();
++    if (t === 'password') return this.senhaLogin;
++    if (t === 'otp') return this.otp;
++    return this.senha;
++  }
++
++  /** Chave pública do desafio (JWKS do identity), com cache curto. */
++  async #chaveDesafio() {
++    const agora = Date.now();
++    if (this.jwksCache && agora - this.jwksCache.em < 10 * 60 * 1000) return this.jwksCache.chave;
++
++    const base = this.api?.base || 'https://api.openbank.stone.com.br';
++    const resp = await fetch(`${base}/api/v2/identity/.well-known/jwks`, {
++      headers: { ...(this.api?.headers || {}), accept: 'application/json', 'user-agent': this.ua || 'Mozilla/5.0' },
++    });
++    const texto = await resp.text();
++    if (resp.status >= 400) throw new Error(`JWKS ${resp.status}: ${texto.slice(0, 120)}`);
++    let json;
++    try {
++      json = JSON.parse(texto);
++    } catch {
++      throw new Error('JWKS não é JSON');
++    }
++    const chaves = Array.isArray(json) ? json : json?.keys || json?.data?.keys || [];
++    const chave =
++      chaves.find((k) => k.use === 'enc' && /rsa-oaep/i.test(k.alg || '')) ||
++      chaves.find((k) => k.use === 'enc') ||
++      chaves.find((k) => /rsa-oaep/i.test(k.alg || '')) ||
++      chaves[0];
++    if (!chave) throw new Error('JWKS veio sem chave pública');
++    this.jwksCache = { em: agora, chave };
++    return chave;
+   }
+ 
+   /** GET genérico em outros serviços do portal (customer-api, prepayment) com o mesmo token. */
