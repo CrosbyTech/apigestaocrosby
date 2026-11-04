@@ -264,12 +264,13 @@ async function orderIdsBlueCard(dias) {
 // DIAGNÓSTICO (fonte=charges): lista cobranças Pix PAGAS direto do endpoint de
 // charges — pega pagamento mesmo quando o PEDIDO não está com status 'paid'
 // (que é o filtro do fluxo normal). Usado pra investigar pix que não subiram.
-export async function listarChargesPix({ dias = DIAS_PADRAO, q = '' } = {}) {
+export async function listarChargesPix({ dias = DIAS_PADRAO, q = '', cru = false } = {}) {
   const contas = contasInfo().contas.filter((c) => c.configurada).map((c) => c.id);
   const desde = new Date(Date.now() - dias * 86400000).toISOString();
   const termo = String(q || '').toLowerCase();
   const out = [];
   const avisos = [];
+  const crus = [];
   let total = 0;
   for (const conta of contas) {
     for (let page = 1; page <= 60; page++) {
@@ -280,13 +281,18 @@ export async function listarChargesPix({ dias = DIAS_PADRAO, q = '' } = {}) {
       const itens = Array.isArray(r.data?.data) ? r.data.data : [];
       total += itens.length;
       for (const c of itens) {
-        const reg = { conta, charge_id: c.id, order_id: c.order_id || c.order?.id || null, status: c.status, valor: (c.paid_amount ?? c.amount ?? 0) / 100, pago_em: c.paid_at || c.updated_at, cliente: c.customer?.name || c.order?.customer?.name || '', doc: soDigitos(c.customer?.document || c.order?.customer?.document) };
-        if (!termo || `${reg.cliente} ${reg.doc} ${reg.valor} ${reg.order_id}`.toLowerCase().includes(termo)) out.push(reg);
+        const lt = c.last_transaction || {};
+        // números-NSU possíveis da transação pix
+        const nsus = [lt.acquirer_nsu, lt.acquirer_tid, lt.gateway_id, lt.id, c.gateway_id, lt.end_to_end_id].filter(Boolean).map(String);
+        const reg = { conta, charge_id: c.id, order_id: c.order_id || c.order?.id || null, status: c.status, valor: (c.paid_amount ?? c.amount ?? 0) / 100, pago_em: c.paid_at || c.updated_at, cliente: c.customer?.name || c.order?.customer?.name || '', doc: soDigitos(c.customer?.document || c.order?.customer?.document), nsus };
+        if (cru && crus.length < 2) crus.push(c);
+        const hay = `${reg.cliente} ${reg.doc} ${reg.valor} ${reg.order_id} ${reg.charge_id} ${nsus.join(' ')}`.toLowerCase();
+        if (!termo || hay.includes(termo)) out.push(reg);
       }
       if (itens.length < 100) break;
     }
   }
-  return { contas, dias, total_charges: total, encontrados: out.length, avisos, itens: out };
+  return { contas, dias, total_charges: total, encontrados: out.length, avisos, itens: out, ...(cru ? { crus } : {}) };
 }
 
 export async function listar({ dias = DIAS_PADRAO, bruto = false, todas = false, q = '' } = {}) {

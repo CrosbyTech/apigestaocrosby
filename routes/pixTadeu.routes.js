@@ -13,7 +13,7 @@ const router = express.Router();
 router.get('/status', (_req, res) => res.json(status()));
 
 router.get('/diag-charges', async (req, res) => {
-  try { res.json(await listarChargesPix({ dias: Number(req.query.dias) || undefined, q: req.query.q || '' })); }
+  try { res.json(await listarChargesPix({ dias: Number(req.query.dias) || undefined, q: req.query.q || '', cru: req.query.cru === '1' })); }
   catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
