@@ -41,6 +41,7 @@ import fluxoCaixaExtRoutes, { routerDrYgor as drYgorExtratosRoutes } from './rou
 import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
+import transferenciasRoutes from './routes/transferencias.routes.js';
 import balancoRfidRoutes from './routes/balancoRfid.routes.js';
 import erpRoutes from './routes/erp.routes.js';
 import { iniciarJobErpSync } from './jobs/erp-sync.job.js';
@@ -136,6 +137,8 @@ import { iniciarJobPrevisao } from './services/previsaoRecebimento.js';
 import portalBoletosRoutes from './routes/portalBoletos.routes.js';
 import baixaLotesRoutes from './routes/baixaLotes.routes.js';
 import { iniciarJobPixTadeu } from './services/pixTadeuPagarme.js';
+import metasInadimplenciaRoutes from './routes/metasInadimplencia.routes.js';
+import { iniciarJobMetasSnapshot } from './services/metasInadimplenciaSnapshot.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -233,6 +236,7 @@ app.use('/api/cobranca', cobrancaRoutes); // Cobrança — devedores consolidado
 app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscrições, LP /vagas/:slug)
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
+app.use('/api/transferencias', transferenciasRoutes); // Transferências de mercadoria entre empresas — regra do POP (7272/7273/7280), página /transferencias-mercadoria
 app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos de contagem do app Android (Urovo)
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
@@ -243,6 +247,7 @@ app.use('/api/dryland-baixas', drylandBaixasRoutes); // Solicitações de Baixa 
 app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automática Pagar.me (cartão débito PAGARME) — status/prévia/executar; liga com PAGARME_BAIXA_AUTO=on
 app.use('/api/conferencia-baixas', conferenciaBaixasRoutes); // Solicitações de Baixa × TOTVS: baixadas na mão viram processadas, desfeitas voltam a pendentes
 app.use('/api/pix-tadeu', pixTadeuRoutes); // Pix recebidos na Pagar.me fora do HeadCoach (links/Gerador do Dryland) → Solicitações de Baixa
+app.use('/api/metas-inadimplencia', metasInadimplenciaRoutes); // snapshot da aba Metas Inadimplência no banco do HeadCoach (lê rápido; /gerar reprocessa do TOTVS)
 app.use('/api/previsao-recebimento', previsaoRecebimentoRoutes); // Fluxo de Recebíveis / Previsão de Recebimento (João, 27/10/2026)
 app.use('/api/portal-boletos', portalBoletosRoutes); // boletos/Pix da Pagar.me no Portal de Títulos (João, 27/10/2026)
 app.use('/api/baixa-lotes', baixaLotesRoutes); // histórico dos lotes de baixa (Solicitações de Baixa → TOTVS)
@@ -318,6 +323,7 @@ app.listen(PORT, async () => {
   iniciarJobBaixaAutomaticaPagarme(); // baixa automática Pagar.me — só com PAGARME_BAIXA_AUTO=on (OK do Yago)
   iniciarJobConferenciaBaixas(); // conferência bidirecional das Solicitações de Baixa com o TOTVS (30 min)
   iniciarJobPixTadeu(); // só com PIX_TADEU_JOB=on (parser do pedido a confirmar em produção)
+  iniciarJobMetasSnapshot(); // snapshot da aba Metas Inadimplência (gera na subida se vazio + a cada 6h)
   iniciarJobPrevisao(); // snapshot semanal fixo da Previsão de Recebimento (João, 27/10/2026)
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
