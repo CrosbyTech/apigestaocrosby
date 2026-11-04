@@ -76,8 +76,10 @@ describe('candidatosPara + decidir', () => {
     const sol = { origem: 'SOLICITACAO', id: 'S1', valor: 43.41, data: '2026-09-03', nome: 'CLARO', doc: '40432544000147', semDataPagamento: true };
     const c = candidatosPara(saida(), { liberacao: [], totvs: [], solicitacoes: [sol] });
     expect(c).toHaveLength(1);
-    expect(c[0].score).toBeLessThan(80);
     expect(c[0].motivos.join(' ')).toMatch(/vencimento a 2 dia/);
+    // mesma solicitação com pagamento registrado na data pontuaria mais
+    const pago = candidatosPara(saida(), { liberacao: [lib({ nome: 'CLARO' })], totvs: [], solicitacoes: [] });
+    expect(c[0].score).toBeLessThan(pago[0].score);
   });
 });
 
@@ -196,7 +198,7 @@ describe('Pix de cliente revenda/franquia na conta central', () => {
   test('fatura antiga paga com juros casa pelo VALOR PAGO na data do pagamento', () => {
     const c = candidatosPara(pix(), { totvs: [fat()] });
     expect(c).toHaveLength(1);
-    expect(c[0].motivos).toEqual(expect.arrayContaining(['valor pago igual (título 1000.00)', 'mesma data', 'mesmo CNPJ/CPF', 'nome parecido']));
+    expect(c[0].motivos).toEqual(expect.arrayContaining(['valor pago igual (título 1000.00)', 'mesma data', 'mesmo CNPJ/CPF', 'mesmo fornecedor']));
     expect(decidir(c).automatico).toBe(true);
   });
 
@@ -245,5 +247,21 @@ describe('tarifa de boleto × depósito por boleto (Stone)', () => {
   test('dias e contas diferentes não se misturam', () => {
     const p = parearTarifasBoleto([dep(1, 1, 300, 298.01), { ...tar(2, 2, 298.01), data: '2026-10-27' }, { ...tar(3, 3, 298.01), conta_id: 7 }]);
     expect(p.size).toBe(0);
+  });
+});
+
+describe('saída óbvia: solicitação aprovada, mesmo valor e mesmo fornecedor', () => {
+  test('iFood 208,00 pago por Pix 3 dias antes do vencimento da solicitação → automático', () => {
+    const l = saida({ valor: -208, data: '2026-10-17', contraparte_nome: 'IFOOD.COM AGENCIA DE RESTAURANTES ONLINE S.A.', contraparte_doc: null, memo: 'IFOOD.COM AGENCIA DE RESTAURANTES ONLINE S.A. - Transferência | Pix' });
+    const sol = { origem: 'SOLICITACAO', id: 'S9', valor: 208, data: '2026-10-20', nome: 'IFOOD.COM AGENCIA DE RESTAURANTES ONLINE S.A.', doc: '14380200000121', empresa: 'CROSBY SHOPPING PATOS', detalhe: 'pagamento · pix · aprovado_gestor', semDataPagamento: true };
+    const c = candidatosPara(l, { liberacao: [], totvs: [], solicitacoes: [sol] });
+    expect(c[0].motivos).toEqual(expect.arrayContaining(['valor igual', 'vencimento a 3 dia(s)', 'mesmo fornecedor', 'único candidato com este valor']));
+    expect(decidir(c)).toMatchObject({ automatico: true });
+  });
+  test('nome só vagamente parecido continua pedindo escolha', () => {
+    const l = saida({ valor: -208, data: '2026-10-17', contraparte_nome: 'AGENCIA CENTRAL LTDA', contraparte_doc: null });
+    const sol = { origem: 'SOLICITACAO', id: 'S9', valor: 208, data: '2026-10-20', nome: 'IFOOD.COM AGENCIA DE RESTAURANTES ONLINE S.A.', doc: '14380200000121', semDataPagamento: true };
+    const c = candidatosPara(l, { liberacao: [], totvs: [], solicitacoes: [sol] });
+    expect(decidir(c).automatico).toBe(false);
   });
 });

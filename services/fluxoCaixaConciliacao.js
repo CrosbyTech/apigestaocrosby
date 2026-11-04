@@ -922,7 +922,7 @@ function pontuar(l, c, usado = 0) {
   if (c.valor == null) return null;
   const restante = round2(c.valor - usado);
   const motivos = [];
-  let score = c.origem === 'SOLICITACAO' ? 25 : 40;
+  let score = 40;
   let parcial = false;
   const valorExtrato = Math.abs(round2(l.valor));
   let viaPago = false;
@@ -943,7 +943,14 @@ function pontuar(l, c, usado = 0) {
   if (c.data) {
     const d = Math.abs(diffDias(c.data, l.data));
     if (c.semDataPagamento) {
-      if (d <= 7) {
+      // solicitação ainda sem pagamento registrado: compara com o vencimento
+      if (d === 0) {
+        score += 20;
+        motivos.push('vencimento no dia');
+      } else if (d <= 3) {
+        score += 12;
+        motivos.push(`vencimento a ${d} dia(s)`);
+      } else if (d <= 7) {
         score += 5;
         motivos.push(`vencimento a ${d} dia(s)`);
       } else return null;
@@ -978,7 +985,13 @@ function pontuar(l, c, usado = 0) {
     const b = new Set(nomeC.split(' ').filter((w) => w.length > 2 && !GENERICOS.has(w)));
     const inter = [...a].filter((w) => b.has(w)).length;
     const ratio = a.size && b.size ? inter / Math.min(a.size, b.size) : 0;
-    if (inter > 0 && ratio >= 0.5) {
+    const sa = [...a].join(' ');
+    const sb = [...b].join(' ');
+    const mesmo = sa && sb && (sa === sb || sa.startsWith(sb) || sb.startsWith(sa) || ratio >= 0.8);
+    if (mesmo) {
+      score += 25;
+      motivos.push('mesmo fornecedor');
+    } else if (inter > 0 && ratio >= 0.5) {
       score += 15;
       motivos.push('nome parecido');
     }
@@ -1018,6 +1031,11 @@ export function candidatosPara(l, fontes, usados = new Map()) {
   // uma duplicata liquidada no TOTVS que também está na Liberação: fica só a da Liberação
   const dupsLib = new Set(lista.filter((c) => c.origem === 'LIBERACAO' && c.duplicata).map((c) => c.duplicata));
   const semRepetidos = lista.filter((c) => !(c.origem === 'TOTVS_CP' && dupsLib.has(c.duplicata)));
+  // um único candidato com este valor e com o fornecedor batendo: é ele
+  if (semRepetidos.length === 1 && !semRepetidos[0].parcial && semRepetidos[0].motivos.some((m) => /mesmo fornecedor|mesmo CNPJ/.test(m))) {
+    semRepetidos[0].score += 10;
+    semRepetidos[0].motivos.push('único candidato com este valor');
+  }
   semRepetidos.sort((a, b) => b.score - a.score || Number(!!a.parcial) - Number(!!b.parcial));
   return semRepetidos.slice(0, 8);
 }
