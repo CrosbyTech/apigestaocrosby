@@ -129,6 +129,55 @@ const conciliacaoParBoleto = (par) => ({
   automatico: true,
 });
 
+// ─── Pix enviado × devolução recebida ─────────────────────────
+// Pix que voltou (favorecido devolveu / chave errada): a saída e a entrada
+// "DEVOLUÇÃO PIX RECEBIDA" da mesma contraparte e mesmo valor se anulam.
+// A devolução casa com a saída mais próxima ANTES dela (até 7 dias) que ainda
+// não tenha conciliação gravada nem par. Derivado na leitura, nada gravado.
+const ehDevolucaoPix = (l) => Number(l.valor) > 0 && /DEVOLU/i.test(String(l.descricao || '')) && /PIX/i.test(`${l.descricao || ''} ${l.memo || ''}`);
+const ehSaidaPix = (l) => Number(l.valor) < 0 && String(l.categoria || '') === 'pix';
+export function parearDevolucoesPix(lancamentos, idsComConciliacao = new Set()) {
+  const pares = new Map();
+  const porConta = new Map();
+  for (const l of lancamentos) {
+    if (!ehDevolucaoPix(l) && !ehSaidaPix(l)) continue;
+    if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
+    porConta.get(l.conta_id).push(l);
+  }
+  const chaveCp = (l) => soDigitos(l.contraparte_doc) || normNome(l.contraparte_nome || '');
+  for (const lista of porConta.values()) {
+    lista.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : (a.seq ?? 0) - (b.seq ?? 0)));
+    const saidas = lista.filter(ehSaidaPix);
+    for (const dev of lista.filter(ehDevolucaoPix)) {
+      const cp = chaveCp(dev);
+      const cands = saidas.filter(
+        (sd) =>
+          !pares.has(sd.id) &&
+          !idsComConciliacao.has(sd.id) &&
+          Math.abs(Math.abs(Number(sd.valor)) - Number(dev.valor)) <= VALOR_TOL &&
+          (sd.data < dev.data || (sd.data === dev.data && (sd.seq ?? 0) < (dev.seq ?? Infinity))) &&
+          diffDias(dev.data, sd.data) <= 7 &&
+          (!cp || chaveCp(sd) === cp || normNome(sd.contraparte_nome || '').startsWith(cp.slice(0, 10))),
+      );
+      if (!cands.length) continue;
+      const sd = cands[cands.length - 1]; // a mais próxima antes da devolução
+      pares.set(dev.id, { papel: 'DEVOLUCAO', parId: sd.id, parValor: round2(sd.valor), parData: sd.data, parSeq: sd.seq ?? null, contraparte: dev.contraparte_nome || sd.contraparte_nome || null });
+      pares.set(sd.id, { papel: 'SAIDA', parId: dev.id, parValor: round2(dev.valor), parData: dev.data, parSeq: dev.seq ?? null, contraparte: sd.contraparte_nome || dev.contraparte_nome || null });
+    }
+  }
+  return pares;
+}
+const conciliacaoPixDevolvido = (par) => ({
+  id: null,
+  origem: 'PIX_DEVOLVIDO',
+  referencia: par,
+  justificativa:
+    par.papel === 'SAIDA'
+      ? `Pix devolvido por ${par.contraparte || 'favorecido'} em ${String(par.parData).split('-').reverse().join('/')} (estorno integral)`
+      : `Devolução do Pix enviado em ${String(par.parData).split('-').reverse().join('/')} para ${par.contraparte || 'favorecido'}`,
+  automatico: true,
+});
+
 // ─── leitura das conciliações gravadas ────────────────────────
 export async function listarConciliacoes({ de, ate, contaIds } = {}) {
   let q = supabase.from(T.conc).select('*');
@@ -161,6 +210,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
 
   const situacoes = await situacaoDasOrigens(gravadas).catch(() => new Map());
   const paresBoleto = parearTarifasBoleto(lancamentos);
+  const comGravada = new Set(lancamentos.filter((l) => porChave.has(l.chave)).map((l) => l.id));
+  const paresDevolucao = parearDevolucoesPix(lancamentos, comGravada);
 
   for (const l of lancamentos) {
     const g = porChave.get(l.chave);
@@ -168,6 +219,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = { id: g.id, origem: g.origem, referencia: g.referencia, justificativa: g.justificativa, automatico: g.automatico, pontuacao: g.pontuacao, usuario: g.usuario, em: g.criado_em, anexos: g.anexos || [], situacao: situacoes.get(g.id) || null };
     } else if (paresBoleto.has(l.id)) {
       l.conciliacao = conciliacaoParBoleto(paresBoleto.get(l.id));
+    } else if (paresDevolucao.has(l.id)) {
+      l.conciliacao = conciliacaoPixDevolvido(paresDevolucao.get(l.id));
     } else if (l.transferencia_id && l.transferencia) {
       l.conciliacao = {
         id: null,
@@ -1567,10 +1620,11 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
     const c = contaDe.get(l.conta_id);
     return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_titular: c?.titular_nome, conta_cnpj: c?.titular_cnpj };
   };
-  // tarifa de boleto × depósito por boleto já se resolvem entre si
+  // tarifa de boleto × depósito por boleto e Pix enviado × devolução já se resolvem entre si
   const paresBoleto = parearTarifasBoleto(lancs || []);
+  const paresDevolucao = parearDevolucoesPix(lancs || []);
   // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
-  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
+  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
   const porConta = new Map();
   for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
@@ -1661,4 +1715,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, decidir };

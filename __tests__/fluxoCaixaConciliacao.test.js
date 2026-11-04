@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -279,5 +279,20 @@ describe('solicitação longe do vencimento continua candidata', () => {
     const l = saida({ valor: -100, data: '2026-10-26' });
     const sol = { origem: 'SOLICITACAO', id: 'S2', valor: 100, data: '2026-03-01', nome: 'CLARO', semDataPagamento: true };
     expect(candidatosPara(l, { liberacao: [], totvs: [], solicitacoes: [sol] })).toHaveLength(0);
+  });
+});
+
+describe('Pix enviado × devolução recebida', () => {
+  const sd = (id, seq, over = {}) => ({ id, conta_id: 10, data: '2026-10-26', seq, valor: -23862.19, categoria: 'pix', descricao: 'PAGAMENTO PIX', contraparte_nome: 'JJI DISTRIBUIDORA LTDA', ...over });
+  const dev = (id, seq, over = {}) => ({ id, conta_id: 10, data: '2026-10-26', seq, valor: 23862.19, categoria: 'pix', descricao: 'DEVOLUCAO PIX RECEBIDA', memo: 'JJI DISTRIBUIDORA LTDA - Devolução | Pix', contraparte_nome: 'JJI DISTRIBUIDORA LTDA', ...over });
+  test('devolução casa com a saída livre mais próxima; a saída já conciliada com a Liberação fica de fora', () => {
+    const p = parearDevolucoesPix([sd(24179, 8), dev(24181, 10), sd(24190, 19)], new Set([24179]));
+    expect(p.get(24181)).toMatchObject({ papel: 'DEVOLUCAO', parId: 24190 });
+    expect(p.get(24190)).toMatchObject({ papel: 'SAIDA', parId: 24181 });
+    expect(p.has(24179)).toBe(false);
+  });
+  test('sem saída livre antes, a devolução fica sem par; contraparte diferente não casa', () => {
+    expect(parearDevolucoesPix([sd(1, 1, { contraparte_nome: 'OUTRA EMPRESA' }), dev(2, 2)]).size).toBe(0);
+    expect(parearDevolucoesPix([dev(2, 2), sd(1, 3)]).size).toBe(0);
   });
 });
