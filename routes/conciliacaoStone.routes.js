@@ -40,6 +40,7 @@ import {
   resolverFiliaisLoja,
 } from '../services/totvsCartoesStone.js';
 import { bater } from '../services/stoneBatimento.js';
+import { lancarVendaStone } from '../services/stoneLancarTotvs.js';
 
 const router = express.Router();
 
@@ -493,6 +494,58 @@ router.delete(
       throw error;
     }
     return successResponse(res, { id }, 'Vínculo removido.');
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
+// POST /lancar-totvs — vendas "Só na Stone" → fatura no TOTVS + baixa no cartão
+// body: { itens: [{ stonecode, nsu, dataArquivo, cliente }], simular?, usuario? }
+// Valor/NSU/AUT/bandeira/parcelas vêm do arquivo da Stone (cache), não da tela.
+// Sequencial: uma venda por vez (o TOTVS não gosta de rajada de escrita).
+// ──────────────────────────────────────────────────────────────
+router.post(
+  '/lancar-totvs',
+  asyncHandler(async (req, res) => {
+    const { itens, simular = false, usuario = null } = req.body || {};
+    if (!Array.isArray(itens) || !itens.length) return errorResponse(res, 'Envie "itens".', 400);
+    const mapa = await mapaFiliaisSeguro();
+    const resultados = [];
+    for (const it of itens) {
+      const base = { nsu: String(it?.nsu || ''), stonecode: String(it?.stonecode || ''), cliente: it?.cliente ?? null };
+      try {
+        const cliente = Number(String(it?.cliente ?? '').replace(/\D/g, ''));
+        if (!cliente) {
+          resultados.push({ ...base, ok: false, erro: 'Informe o código do cliente.' });
+          continue;
+        }
+        const cfg = getLojaByStonecode(base.stonecode);
+        if (!cfg) {
+          resultados.push({ ...base, ok: false, erro: 'StoneCode não configurado no servidor.' });
+          continue;
+        }
+        if (!ISO_RE.test(String(it?.dataArquivo || ''))) {
+          resultados.push({ ...base, ok: false, erro: 'Venda sem data do arquivo Stone.' });
+          continue;
+        }
+        const dia = await obterDiaStone({ ...cfg, stonecode: base.stonecode }, String(it.dataArquivo));
+        const venda = (dia.transacoes || []).find((t) => String(t.nsu) === base.nsu);
+        if (!venda) {
+          resultados.push({ ...base, ok: false, erro: `NSU ${base.nsu} não está no arquivo da Stone de ${it.dataArquivo}.` });
+          continue;
+        }
+        const loja = comFiliaisTotvs(cfg, mapa);
+        const r = await lancarVendaStone({ venda, loja, cliente, simular: !!simular, usuario });
+        resultados.push({ ...base, ...r });
+      } catch (e) {
+        resultados.push({ ...base, ok: false, erro: e.message || String(e) });
+      }
+    }
+    const okQtd = resultados.filter((r) => r.ok).length;
+    return successResponse(
+      res,
+      { resultados, ok: okQtd, falhas: resultados.length - okQtd, simulado: !!simular },
+      `${okQtd} de ${resultados.length} venda(s) ${simular ? 'validadas' : 'lançadas'}.`,
+    );
   }),
 );
 
