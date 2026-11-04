@@ -251,6 +251,34 @@ async function orderIdsBlueCard(dias) {
 }
 
 /** Pix pagos na Pagar.me fora do HeadCoach/BlueCard, já lidos e interpretados (não grava). */
+// DIAGNÓSTICO (fonte=charges): lista cobranças Pix PAGAS direto do endpoint de
+// charges — pega pagamento mesmo quando o PEDIDO não está com status 'paid'
+// (que é o filtro do fluxo normal). Usado pra investigar pix que não subiram.
+export async function listarChargesPix({ dias = DIAS_PADRAO, q = '' } = {}) {
+  const contas = contasInfo().contas.filter((c) => c.configurada).map((c) => c.id);
+  const desde = new Date(Date.now() - dias * 86400000).toISOString();
+  const termo = String(q || '').toLowerCase();
+  const out = [];
+  const avisos = [];
+  let total = 0;
+  for (const conta of contas) {
+    for (let page = 1; page <= 60; page++) {
+      let r;
+      try { r = await pagarme('GET', `/charges?status=paid&payment_method=pix&created_since=${encodeURIComponent(desde)}&size=100&page=${page}`, null, conta); }
+      catch (e) { avisos.push(`${conta}: ${e.message}`); break; }
+      if (!r?.ok) { avisos.push(`${conta}: HTTP ${r?.status}`); break; }
+      const itens = Array.isArray(r.data?.data) ? r.data.data : [];
+      total += itens.length;
+      for (const c of itens) {
+        const reg = { conta, charge_id: c.id, order_id: c.order_id || c.order?.id || null, status: c.status, valor: (c.paid_amount ?? c.amount ?? 0) / 100, pago_em: c.paid_at || c.updated_at, cliente: c.customer?.name || c.order?.customer?.name || '', doc: soDigitos(c.customer?.document || c.order?.customer?.document) };
+        if (!termo || `${reg.cliente} ${reg.doc} ${reg.valor} ${reg.order_id}`.toLowerCase().includes(termo)) out.push(reg);
+      }
+      if (itens.length < 100) break;
+    }
+  }
+  return { contas, dias, total_charges: total, encontrados: out.length, avisos, itens: out };
+}
+
 export async function listar({ dias = DIAS_PADRAO, bruto = false, todas = false, q = '' } = {}) {
   const contas = contasInfo().contas.filter((c) => c.configurada).map((c) => c.id);
   const avisos = [];

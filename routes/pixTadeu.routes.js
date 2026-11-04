@@ -6,11 +6,16 @@
  * Ver services/pixTadeuPagarme.js.
  */
 import express from 'express';
-import { status, listar, rodar } from '../services/pixTadeuPagarme.js';
+import { status, listar, rodar, listarChargesPix } from '../services/pixTadeuPagarme.js';
 
 const router = express.Router();
 
 router.get('/status', (_req, res) => res.json(status()));
+
+router.get('/diag-charges', async (req, res) => {
+  try { res.json(await listarChargesPix({ dias: Number(req.query.dias) || undefined, q: req.query.q || '' })); }
+  catch (e) { res.status(500).json({ erro: e.message }); }
+});
 
 router.get('/previa', async (req, res) => {
   try {
