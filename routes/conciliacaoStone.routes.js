@@ -271,6 +271,32 @@ router.get(
 
     const resultado = stonePorLoja.map(({ loja, dias, erros }) => {
       const transacoes = dias.flatMap((d) => d.transacoes);
+      // Depósito ↔ vendas (João, 04/11/2026): cada depósito (Payment) junta
+      // parcelas liquidadas no dia (FinancialTransactionsAccounts, PaymentId).
+      // O WalletTypeId do depósito NÃO é bandeira/carteira (um "Mastercard
+      // Débito" vinha cheio de Visa crédito antecipado) — o tipo real sai das
+      // parcelas: antecipada ou liquidação normal.
+      const vendaPorNsu = new Map(transacoes.map((t) => [String(t.nsu), t]));
+      const liqPorPagamento = new Map();
+      const depositosPorNsu = new Map();
+      for (const d of dias) {
+        for (const l of d.liquidacoes || []) {
+          const pid = String(l.paymentId || '');
+          if (!pid) continue;
+          if (!liqPorPagamento.has(pid)) liqPorPagamento.set(pid, []);
+          liqPorPagamento.get(pid).push(l);
+          const k = String(l.nsu);
+          if (!depositosPorNsu.has(k)) depositosPorNsu.set(k, []);
+          depositosPorNsu.get(k).push({
+            id: pid,
+            data: l.dataPagamento ? String(l.dataPagamento).slice(0, 10) : d.data,
+            parcela: l.numero,
+            liquido: l.liquido,
+            antecipada: !!l.antecipada,
+          });
+        }
+      }
+      for (const t of transacoes) t.depositos = depositosPorNsu.get(String(t.nsu)) || [];
       // títulos das filiais desta maquininha; fora do período estrito só
       // entram os que casarem por data ±1 (o resto é descartado abaixo)
       const titulos = titulosTodos.filter((t) => loja.filiais.includes(t.filial));
@@ -295,7 +321,39 @@ router.get(
       b.resumo.diferenca = +(b.resumo.stone.bruto - b.resumo.totvs.valor).toFixed(2);
 
       const pagamentos = dias.flatMap((d) =>
-        d.pagamentos.map((p) => ({ ...p, data: d.data, stonecode: d.stonecode })),
+        d.pagamentos.map((p) => {
+          const liq = liqPorPagamento.get(String(p.id)) || [];
+          const antecipadas = liq.filter((l) => l.antecipada).length;
+          const bandeiras = {};
+          for (const l of liq) {
+            const v = vendaPorNsu.get(String(l.nsu));
+            const k = v ? `${v.bandeira} ${v.tipoConta}` : 'venda fora do período';
+            bandeiras[k] = (bandeiras[k] || 0) + 1;
+          }
+          const tipo = !liq.length
+            ? 'Sem venda (outro lançamento Stone)'
+            : antecipadas === liq.length
+              ? 'Antecipação'
+              : antecipadas === 0
+                ? 'Liquidação normal'
+                : 'Liquidação + antecipação';
+          return {
+            ...p,
+            carteiraStone: p.carteira, // código bruto da Stone (WalletTypeId), só referência
+            carteira: tipo,
+            composicao: {
+              qtd: liq.length,
+              antecipadas,
+              normais: liq.length - antecipadas,
+              bruto: +liq.reduce((s, l) => s + (Number(l.bruto) || 0), 0).toFixed(2),
+              liquido: +liq.reduce((s, l) => s + (Number(l.liquido) || 0), 0).toFixed(2),
+              bandeiras,
+              nsus: liq.map((l) => String(l.nsu)),
+            },
+            data: d.data,
+            stonecode: d.stonecode,
+          };
+        }),
       );
       return {
         loja: lojaPublica(loja),
