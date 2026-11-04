@@ -35,10 +35,15 @@ const soDigitos = (v) => String(v || '').replace(/\D/g, '');
 const dataBR = (iso) => (iso ? new Date(iso).toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' }) : null);
 
 // ── Pagar.me ───────────────────────────────────────────────────────────────
+const PIX_MAX_PAGINAS = Number(process.env.PIX_TADEU_MAX_PAGINAS || 60);
 async function pedidosPagosPix({ conta, dias }) {
   const desde = new Date(Date.now() - dias * 86400000).toISOString();
   const lista = [];
-  for (let page = 1; page <= 20; page++) {
+  // Pagina por TODAS as páginas de pedidos pagos da janela (não só a 1ª). O
+  // break antigo (`!r.data?.paging?.next`) parava sempre na página 1 porque a
+  // API nem sempre devolve paging.next, então pix pagos fora dos ~100 pedidos
+  // mais recentes nunca eram lidos e não subiam pra Solicitação (João, 04/11/2026).
+  for (let page = 1; page <= PIX_MAX_PAGINAS; page++) {
     const r = await pagarme('GET', `/orders?status=paid&created_since=${encodeURIComponent(desde)}&size=100&page=${page}`, null, conta);
     if (!r?.ok) throw new Error(`Pagar.me ${conta}: HTTP ${r?.status} ${r?.data?.message || ''}`.trim());
     const itens = Array.isArray(r.data?.data) ? r.data.data : [];
@@ -47,7 +52,7 @@ async function pedidosPagosPix({ conta, dias }) {
       const pix = charges.find((c) => c.payment_method === 'pix' && ['paid', 'overpaid', 'underpaid'].includes(c.status));
       if (pix) lista.push({ conta, order: o, charge: pix });
     }
-    if (itens.length < 100 || !r.data?.paging?.next) break;
+    if (itens.length < 100) break; // página incompleta = acabou
   }
   return lista;
 }
