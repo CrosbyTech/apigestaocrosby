@@ -40,9 +40,14 @@ const CARTEIRA_SIMPLES = 1; // ReceivableChargeType.Simple
 // Cada boleto guarda em pagarme_boletos.conta onde foi emitido; retorno e
 // cancelamento usam a chave daquela conta. Emissão nova sai por
 // PAGARME_CONTA_EMISSAO (default: 'fabio' se a chave existir, senão 'crosby').
+// 'crosbycr' = CROSBY CR VESTUARIO LTDA — 3ª conta Pagar.me usada pelo gerador de
+// Pix do Tadeu (João, 04/11/2026). Pix caíam aqui e não subiam porque o HeadCoach
+// só lia FERREIRA e FA MODA. Fica inerte até o Yago cadastrar PAGARME_SECRET_KEY_CROSBYCR
+// no servidor; com a chave, o sync do Pix do Tadeu passa a ler esta conta também.
 export const CONTAS = {
   crosby: { id: 'crosby', nome: 'Crosby (FERREIRA)', sk: process.env.PAGARME_SECRET_KEY || '', baixaBanco: process.env.PAGARME_BAIXA_BANCO || '748,2207,367338' },
   fabio: { id: 'fabio', nome: 'FA MODA (Fábio)', sk: process.env.PAGARME_SECRET_KEY_FABIO || '', baixaBanco: process.env.PAGARME_BAIXA_BANCO_FABIO || process.env.PAGARME_BAIXA_BANCO || '748,2207,367338' },
+  crosbycr: { id: 'crosbycr', nome: 'CROSBY CR VESTUARIO', sk: process.env.PAGARME_SECRET_KEY_CROSBYCR || '', baixaBanco: process.env.PAGARME_BAIXA_BANCO_CROSBYCR || process.env.PAGARME_BAIXA_BANCO || '748,2207,367338' },
 };
 export const CONTA_PADRAO = 'crosby';
 export function contaDe(id) {
