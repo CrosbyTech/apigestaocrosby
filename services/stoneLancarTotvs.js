@@ -102,6 +102,8 @@ export async function escolherCartao(venda) {
         'A API só acha o cartão com operadora e bandeira preenchidas.',
     };
   }
+  // prefere o cadastro com operadora STONE (único por bandeira depois do ajuste do FCXFL002)
+  util.sort((a, b) => (/^STONE$/i.test(b.operatorName) ? 1 : 0) - (/^STONE$/i.test(a.operatorName) ? 1 : 0));
   const reg = util[0];
   // A API procura por tipo + operadora + bandeira + parcelas: a combinação não
   // pode apontar para outro portador, senão o título nasce no portador errado.
