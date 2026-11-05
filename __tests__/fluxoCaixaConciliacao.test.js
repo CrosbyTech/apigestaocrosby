@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -345,5 +345,20 @@ describe('caixinha Stone: Dinheiro Guardado × Dinheiro Resgatado', () => {
     expect(p.has(2)).toBe(false);
     expect(p.get(1)).toMatchObject({ papel: 'APLICACAO_ABERTA' });
     expect(parearAplicacoesStone([apl(1, '2026-10-14', 3, -100), res(2, '2026-10-16', 10)]).has(2)).toBe(false);
+  });
+});
+
+describe('pró-labore (saídas para os sócios, pessoa física)', () => {
+  test('pelo CPF (Sicredi) ou pelo nome completo sem LTDA (Stone → C6)', () => {
+    expect(pessoaProLabore({ valor: -5000, contraparte_nome: 'FABIO FERREIRA DE LIMA', contraparte_doc: '06704197451' })?.id).toBe('fabio');
+    expect(pessoaProLabore({ valor: -2000, contraparte_nome: 'FELIPE FERREIRA DE LIMA AZEVEDO', contraparte_doc: null, contraparte_banco: 'Banco C6 S.A.' })?.id).toBe('felipe');
+    expect(pessoaProLabore({ valor: -200, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO', contraparte_doc: null, contraparte_banco: null })?.id).toBe('fabio');
+  });
+  test('empresa do sócio, CNPJ, conta Stone/Mêntore do grupo, entrada ou transferência já casada não são pró-labore', () => {
+    expect(pessoaProLabore({ valor: -1000, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO LTDA', contraparte_banco: 'MÊNTORE INSTITUIÇÃO DE PAGAMENTO' })).toBeNull();
+    expect(pessoaProLabore({ valor: -1000, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO', contraparte_doc: '27728810000549' })).toBeNull();
+    expect(pessoaProLabore({ valor: -1000, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO', contraparte_banco: 'STONE INSTITUIÇÃO DE PAGAMENTO S.A.' })).toBeNull();
+    expect(pessoaProLabore({ valor: 1000, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO' })).toBeNull();
+    expect(pessoaProLabore({ valor: -1000, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO', transferencia_id: 9 })).toBeNull();
   });
 });

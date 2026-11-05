@@ -327,6 +327,17 @@ router.get(
 );
 
 router.patch(
+  '/conciliacao/:id/justificativa',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await conciliacao.atualizarJustificativa(Number(req.params.id), req.body?.justificativa, usuarioDe(req)), 'Justificativa atualizada');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.patch(
   '/conciliacao/:id/anexos',
   asyncHandler(async (req, res) => {
     try {

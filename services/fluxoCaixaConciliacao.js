@@ -284,6 +284,35 @@ const conciliacaoAplicacaoStone = (par) => ({
   automatico: true,
 });
 
+// ─── pró-labore (transferências para os sócios, pessoa física) ─
+// Saída para o CPF de um sócio = pró-labore. Reconhecida pelo CPF da contraparte
+// (Sicredi traz o documento) ou pelo nome completo da pessoa física quando o
+// extrato não traz o documento (Stone/Caixa) — nunca "…LTDA" (empresa do
+// sócio), nunca com CNPJ, e nunca transferência para conta Stone/Mêntore do
+// grupo (essas já casam como transferência entre contas).
+export const PESSOAS_PRO_LABORE = [
+  { id: 'fabio', pessoa: 'FABIO FERREIRA DE LIMA AZEVEDO', cpf: '06704197451' },
+  { id: 'felipe', pessoa: 'FELIPE FERREIRA DE LIMA AZEVEDO', cpf: '06451367435' },
+];
+export function pessoaProLabore(l) {
+  if (Number(l.valor) >= 0 || l.transferencia_id) return null;
+  const doc = soDigitos(l.contraparte_doc);
+  const porCpf = PESSOAS_PRO_LABORE.find((p) => doc && doc === p.cpf);
+  if (porCpf) return porCpf;
+  if (doc.length === 14) return null;
+  const nome = normNome(l.contraparte_nome || '');
+  if (!nome || /\bLTDA\b|\bME\b|\bEPP\b/.test(semAcento(String(l.contraparte_nome || '')).toUpperCase())) return null;
+  if (/STONE|MENTORE/i.test(semAcento(String(l.contraparte_banco || '')))) return null;
+  return PESSOAS_PRO_LABORE.find((p) => normNome(p.pessoa) === nome) || null;
+}
+const conciliacaoProLabore = (pessoa) => ({
+  id: null,
+  origem: 'PRO_LABORE',
+  referencia: { pessoaId: pessoa.id, pessoa: pessoa.pessoa, cpf: pessoa.cpf, auto: true },
+  justificativa: `Pró-labore · ${pessoa.pessoa}`,
+  automatico: true,
+});
+
 // ─── saque automático da Pagar.me → conta Stone ───────────────
 // A Pagar.me (grupo Stone) transfere o saldo disponível todo dia para a conta
 // Stone da mesma empresa. No extrato Stone isso aparece como entrada
@@ -365,6 +394,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = conciliacaoEstornoCartao(paresEstorno.get(l.id));
     } else if (paresAplicacao.has(l.id)) {
       l.conciliacao = conciliacaoAplicacaoStone(paresAplicacao.get(l.id));
+    } else if (pessoaProLabore(l)) {
+      l.conciliacao = conciliacaoProLabore(pessoaProLabore(l));
     } else if (ehSaquePagarme(l, cnpjsPagarme)) {
       l.conciliacao = conciliacaoSaquePagarme(l, pagarme.get(cnpjSaquePagarme(l, cnpjsPagarme)));
     } else if (l.transferencia_id && l.transferencia) {
@@ -379,6 +410,9 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = null;
     }
     l.pendente = !l.conciliacao;
+    // marca toda saída aos sócios (qualquer que seja a conciliação) para a aba Pró-labore
+    const pp = pessoaProLabore(l);
+    if (pp) l.proLabore = { pessoaId: pp.id, pessoa: pp.pessoa, cpf: pp.cpf };
   }
   return lancamentos;
 }
@@ -1381,8 +1415,14 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'MANUAL', 'MULTIPLO'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'MANUAL', 'MULTIPLO', 'PRO_LABORE'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
+  if (origem === 'PRO_LABORE') {
+    const pessoa = PESSOAS_PRO_LABORE.find((p) => p.id === referencia?.pessoaId) || PESSOAS_PRO_LABORE.find((p) => p.cpf === soDigitos(referencia?.cpf));
+    if (!pessoa) throw new Error('Informe o sócio do pró-labore (fabio ou felipe).');
+    referencia = { pessoaId: pessoa.id, pessoa: pessoa.pessoa, cpf: pessoa.cpf, auto: false };
+    justificativa = justificativa || `Pró-labore · ${pessoa.pessoa}`;
+  }
   const l = await lancamentoComChave(lancamentoId);
   if (!l.chave) throw new Error('Não foi possível calcular a chave do lançamento.');
   // várias duplicatas somando a saída (ex.: 2.000 + 2.000 = 4.000)
@@ -1764,6 +1804,14 @@ export async function detalheConciliacao(id) {
   };
 }
 
+export async function atualizarJustificativa(id, justificativa, usuario) {
+  const texto = String(justificativa || '').trim();
+  if (!texto) throw new Error('Informe a justificativa.');
+  const { data, error } = await supabase.from(T.conc).update({ justificativa: texto, ...(usuario ? { usuario } : {}) }).eq('id', id).select().single();
+  lancar(error);
+  return data;
+}
+
 export async function excluirConciliacao(id) {
   const { error } = await supabase.from(T.conc).delete().eq('id', id);
   lancar(error);
@@ -1848,7 +1896,7 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   const paresEstorno = parearEstornosCartao(lancs || []);
   const paresAplicacao = parearAplicacoesStone(lancs || []);
   // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
-  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id) && !paresEstorno.has(l.id) && !paresAplicacao.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
+  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id) && !paresEstorno.has(l.id) && !paresAplicacao.has(l.id) && !pessoaProLabore(l)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
   const porConta = new Map();
   for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
@@ -1939,4 +1987,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
