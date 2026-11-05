@@ -119,8 +119,9 @@ const texto = (itens) => limpar(itens.map((i) => i.s).join(' '));
 export async function lerExtratoBb(buffer) {
   const paginas = await extrairPaginas(buffer);
   const todoTexto = paginas.map((p) => texto(p.itens)).join('\n');
-  if (!/Extrato de conta corrente/i.test(todoTexto) || !/Dt\.\s*balancete/i.test(todoTexto)) {
-    throw new Error('Este PDF não parece ser o "Extrato de conta corrente" do Banco do Brasil.');
+  // título varia ("Consultas - Extrato de conta corrente", "Extrato de conta corrente - Autorizável", ou nenhum)
+  if (!/Dt\.\s*balancete/i.test(todoTexto) || !/Conta corrente/i.test(todoTexto) || !/Per[íi]odo do extrato/i.test(todoTexto)) {
+    throw new Error('Este PDF não parece ser o extrato de conta corrente do Banco do Brasil (sem a tabela "Dt. balancete … Saldo").');
   }
 
   // ── cabeçalho: agência, conta + titular, período ──
@@ -129,8 +130,17 @@ export async function lerExtratoBb(buffer) {
   const conta = mConta ? mConta[1] : null;
   const contaDv = mConta ? mConta[2] : null;
   const titular = mConta ? limpar(mConta[3]) : null;
-  const mPer = todoTexto.match(/Per[íi]odo do extrato\s+(\d{2})\s*\/\s*(\d{4})/i);
-  const mesRef = mPer ? `${mPer[2]}-${mPer[1]}` : null;
+  // "Período do extrato 01 / 2024" ou "Período do extrato de 01 / 08 / 2025 até 31 / 08 / 2025"
+  let mesRef = null;
+  let periodoInformado = null;
+  const mPerRange = todoTexto.match(/Per[íi]odo do extrato\s+de\s+(\d{2})\s*\/\s*(\d{2})\s*\/\s*(\d{4})\s+at[ée]\s+(\d{2})\s*\/\s*(\d{2})\s*\/\s*(\d{4})/i);
+  const mPerMes = todoTexto.match(/Per[íi]odo do extrato\s+(\d{2})\s*\/\s*(\d{4})/i);
+  if (mPerRange) {
+    // o BB às vezes imprime "de 00 / 06 / 2025 até 01 / 07 / 2025": dia 00 vira 01
+    const dia = (d) => (Number(d) >= 1 ? d : '01');
+    mesRef = `${mPerRange[3]}-${mPerRange[2]}`;
+    periodoInformado = { inicio: `${mPerRange[3]}-${mPerRange[2]}-${dia(mPerRange[1])}`, fim: `${mPerRange[6]}-${mPerRange[5]}-${dia(mPerRange[4])}` };
+  } else if (mPerMes) mesRef = `${mPerMes[2]}-${mPerMes[1]}`;
 
   // ── colunas pelo cabeçalho da tabela (1ª página) ──
   let cols = null;
@@ -192,20 +202,23 @@ export async function lerExtratoBb(buffer) {
       // tudo entre a data de movimento e a coluna Documento: "[ag. origem] [lote] código histórico…"
       const histItens = its.filter((i) => i.x >= cols.xMov + 50 && i.x < cols.xDoc - 60 && !RE_DATA.test(i.s));
       const histBruto = texto(histItens);
-      const mHist = histBruto.match(/^(?:(\d{4})\s+)?(?:(\d{5})\s+)?(\d{3})\s+(.*)$/);
+      // 2024: "0000 13105 109 Pagamento de Boleto"; 2025+: "0000 14020 Cobrança" (sem o código de 3 dígitos)
+      const mHist = histBruto.match(/^(?:(\d{4})\s+)?(?:(\d{5})\s+)?(?:(\d{3})\s+)?(.*)$/);
       const histTxt = mHist ? limpar(mHist[4]) : histBruto;
       const up = semAcento(histTxt).toUpperCase();
 
       // "Saldo Anterior": só saldo, sem valor
-      if (/SALDO ANTERIOR/.test(semAcento(histBruto).toUpperCase()) && saldoIt && !valorIt) {
-        const sinal = sinalDe(saldoIt);
-        saldoAnterior = numBr(saldoIt.s) * (sinal === 'D' ? -1 : 1);
+      // "Saldo Anterior": o saldo pode vir na coluna Saldo, na coluna Valor, ou nas duas (2025+)
+      const numSaldoLinha = saldoIt || valorIt;
+      if (/SALDO ANTERIOR/.test(semAcento(histBruto).toUpperCase()) && numSaldoLinha) {
+        const sinal = sinalDe(numSaldoLinha);
+        saldoAnterior = numBr(numSaldoLinha.s) * (sinal === 'D' ? -1 : 1);
         continue;
       }
       // "S A L D O" final
-      if (/(^|\s)S\s*A\s*L\s*D\s*O$/.test(semAcento(histBruto).toUpperCase()) && saldoIt && !valorIt) {
-        const sinal = sinalDe(saldoIt);
-        saldoFinal = numBr(saldoIt.s) * (sinal === 'D' ? -1 : 1);
+      if (/(^|\s)S\s*A\s*L\s*D\s*O$/.test(semAcento(histBruto).toUpperCase()) && numSaldoLinha) {
+        const sinal = sinalDe(numSaldoLinha);
+        saldoFinal = numBr(numSaldoLinha.s) * (sinal === 'D' ? -1 : 1);
         continue;
       }
       if (!valorIt || !dtBalancete) {
@@ -269,7 +282,7 @@ export async function lerExtratoBb(buffer) {
     const [a, mm] = m.split('-').map(Number);
     return `${m}-${String(new Date(Date.UTC(a, mm, 0)).getUTCDate()).padStart(2, '0')}`;
   };
-  const periodo = {
+  const periodo = periodoInformado || {
     inicio: mesRef ? `${mesRef}-01` : datas[0] || null,
     // o extrato é do mês inteiro: fim = último dia do mês (mesmo sem lançamento no fim)
     fim: mesRef ? ultimoDiaMes(mesRef) : datas.at(-1) || null,
