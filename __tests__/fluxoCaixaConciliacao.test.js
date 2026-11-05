@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -328,5 +328,22 @@ describe('compra no cartão × estorno', () => {
     expect(parearEstornosCartao([{ ...compra(1, '2026-10-16', 1), contraparte_nome: 'OUTRA LOJA' }, estorno(2, '2026-10-16', 2)]).size).toBe(0);
     expect(parearEstornosCartao([{ ...compra(1, '2026-10-16', 1), valor: -300 }, estorno(2, '2026-10-16', 2)]).size).toBe(0);
     expect(parearEstornosCartao([compra(1, '2026-10-16', 1), estorno(2, '2026-10-16', 2)], new Set([1])).size).toBe(0);
+  });
+});
+
+describe('caixinha Stone: Dinheiro Guardado × Dinheiro Resgatado', () => {
+  const apl = (id, data, seq, valor = -5160.51) => ({ id, conta_id: 7, data, seq, valor, categoria: 'emprestimo', descricao: 'PAGAMENTO LIMITE/EMPRÉSTIMO STONE', memo: 'Dinheiro Guardado - Cartão Mais Limite' });
+  const res = (id, data, seq, valor = 5160.51) => ({ id, conta_id: 7, data, seq, valor, categoria: 'emprestimo', descricao: 'RESGATE LIMITE/EMPRÉSTIMO STONE', memo: 'Dinheiro Resgatado - Cartão Mais Limite' });
+  test('aplicação e resgate de mesmo valor se casam; aplicação sem resgate fica conciliada como aplicação aberta', () => {
+    const p = parearAplicacoesStone([apl(1, '2026-10-14', 3), res(2, '2026-10-16', 10), apl(3, '2026-10-20', 1, -2000)]);
+    expect(p.get(1)).toMatchObject({ papel: 'APLICACAO', parId: 2, parData: '2026-10-16' });
+    expect(p.get(2)).toMatchObject({ papel: 'RESGATE', parId: 1, parData: '2026-10-14' });
+    expect(p.get(3)).toMatchObject({ papel: 'APLICACAO_ABERTA' });
+  });
+  test('resgate sem aplicação antes dele fica pendente; valor diferente não casa', () => {
+    const p = parearAplicacoesStone([res(2, '2026-10-16', 10), apl(1, '2026-10-20', 3)]);
+    expect(p.has(2)).toBe(false);
+    expect(p.get(1)).toMatchObject({ papel: 'APLICACAO_ABERTA' });
+    expect(parearAplicacoesStone([apl(1, '2026-10-14', 3, -100), res(2, '2026-10-16', 10)]).has(2)).toBe(false);
   });
 });

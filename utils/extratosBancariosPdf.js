@@ -274,7 +274,10 @@ export function classificarStoneNormalizado(l) {
       forma = FORMAS.TARIFA; categoria = 'tarifa'; descricao = `TARIFA STONE${(m = up.match(/TARIFA\s*\|\s*(.+)$/)) ? ` ${m[1].trim()}` : ''}`; nome = 'STONE';
     } else if (/^MENSALIDADE/.test(up)) {
       forma = FORMAS.TARIFA; categoria = 'tarifa'; descricao = 'MENSALIDADE MAQUININHA STONE'; nome = 'STONE';
-    } else if (/DINHEIRO RESGATADO|MAIS LIMITE|EMPRESTIMO|CAPITAL DE GIRO/.test(up)) {
+    } else if (/DINHEIRO GUARDADO|DINHEIRO RESGATADO/.test(up)) {
+      // caixinha da Stone (aplicação que carrega o cartão pré-pago "Mais Limite")
+      forma = FORMAS.APLICACAO; categoria = 'aplicacao'; descricao = l.valor < 0 ? 'APLICAÇÃO CAIXINHA STONE' : 'RESGATE CAIXINHA STONE'; nome = 'STONE';
+    } else if (/MAIS LIMITE|EMPRESTIMO|CAPITAL DE GIRO/.test(up)) {
       forma = FORMAS.EMPRESTIMO; categoria = 'emprestimo'; descricao = l.valor < 0 ? 'PAGAMENTO LIMITE/EMPRÉSTIMO STONE' : 'RESGATE LIMITE/EMPRÉSTIMO STONE'; nome = 'STONE';
     } else if (/RENDIMENTO|APLICACAO|RESGATE/.test(up)) {
       forma = FORMAS.APLICACAO; categoria = 'aplicacao';

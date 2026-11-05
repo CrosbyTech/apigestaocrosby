@@ -232,6 +232,58 @@ const conciliacaoEstornoCartao = (par) => ({
   automatico: true,
 });
 
+// ─── caixinha Stone (Dinheiro Guardado × Dinheiro Resgatado) ──
+// Aplicação financeira da Stone usada para carregar o cartão pré-pago: a
+// saída "Dinheiro Guardado" volta depois como entrada "Dinheiro Resgatado" de
+// mesmo valor, na mesma conta. As duas viram "Aplicação Stone"; uma aplicação
+// ainda sem resgate também fica conciliada (o dinheiro está aplicado, não
+// pendente). Derivado na leitura, nada gravado.
+const ehAplicacaoStone = (l) => Number(l.valor) < 0 && /DINHEIRO GUARDADO|PAGAMENTO LIMITE\/EMPR/i.test(semAcento(`${l.memo || ''} ${l.descricao || ''}`));
+const ehResgateStone = (l) => Number(l.valor) > 0 && /DINHEIRO RESGATADO|RESGATE LIMITE\/EMPR/i.test(semAcento(`${l.memo || ''} ${l.descricao || ''}`));
+export function parearAplicacoesStone(lancamentos, idsComConciliacao = new Set()) {
+  const pares = new Map();
+  const porConta = new Map();
+  for (const l of lancamentos) {
+    if (!ehAplicacaoStone(l) && !ehResgateStone(l)) continue;
+    if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
+    porConta.get(l.conta_id).push(l);
+  }
+  for (const lista of porConta.values()) {
+    lista.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : (a.seq ?? 0) - (b.seq ?? 0)));
+    const aplicacoes = lista.filter(ehAplicacaoStone);
+    for (const res of lista.filter(ehResgateStone)) {
+      const cands = aplicacoes.filter(
+        (a) =>
+          !pares.has(a.id) &&
+          !idsComConciliacao.has(a.id) &&
+          Math.abs(Math.abs(Number(a.valor)) - Number(res.valor)) <= VALOR_TOL &&
+          a.data <= res.data &&
+          diffDias(res.data, a.data) <= 180 &&
+          (a.data < res.data || (a.seq ?? 0) < (res.seq ?? Infinity)),
+      );
+      if (!cands.length) continue;
+      const a = cands[cands.length - 1];
+      pares.set(res.id, { papel: 'RESGATE', parId: a.id, parValor: round2(a.valor), parData: a.data, parSeq: a.seq ?? null });
+      pares.set(a.id, { papel: 'APLICACAO', parId: res.id, parValor: round2(res.valor), parData: res.data, parSeq: res.seq ?? null });
+    }
+    // aplicação sem resgate (ainda): continua conciliada como aplicação
+    for (const a of aplicacoes) if (!pares.has(a.id) && !idsComConciliacao.has(a.id)) pares.set(a.id, { papel: 'APLICACAO_ABERTA', parId: null, parValor: null, parData: null, parSeq: null });
+  }
+  return pares;
+}
+const conciliacaoAplicacaoStone = (par) => ({
+  id: null,
+  origem: 'APLICACAO_STONE',
+  referencia: par,
+  justificativa:
+    par.papel === 'APLICACAO'
+      ? `Aplicação na caixinha Stone (Dinheiro Guardado), resgatada em ${fmtDataBr(par.parData)}`
+      : par.papel === 'RESGATE'
+        ? `Resgate da aplicação na caixinha Stone de ${fmtDataBr(par.parData)}`
+        : 'Aplicação na caixinha Stone (Dinheiro Guardado), ainda sem resgate',
+  automatico: true,
+});
+
 // ─── saque automático da Pagar.me → conta Stone ───────────────
 // A Pagar.me (grupo Stone) transfere o saldo disponível todo dia para a conta
 // Stone da mesma empresa. No extrato Stone isso aparece como entrada
@@ -297,6 +349,7 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
   const comGravada = new Set(lancamentos.filter((l) => porChave.has(l.chave)).map((l) => l.id));
   const paresDevolucao = parearDevolucoesPix(lancamentos, comGravada);
   const paresEstorno = parearEstornosCartao(lancamentos, comGravada);
+  const paresAplicacao = parearAplicacoesStone(lancamentos, comGravada);
   const pagarme = lancamentos.some((l) => /ENTRE CONTAS STONE|TED RECEBIDA/i.test(semAcento(String(l.descricao || '')))) ? await contasPagarmePorCnpj().catch(() => new Map()) : new Map();
   const cnpjsPagarme = new Set(pagarme.keys());
 
@@ -310,6 +363,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = conciliacaoPixDevolvido(paresDevolucao.get(l.id));
     } else if (paresEstorno.has(l.id)) {
       l.conciliacao = conciliacaoEstornoCartao(paresEstorno.get(l.id));
+    } else if (paresAplicacao.has(l.id)) {
+      l.conciliacao = conciliacaoAplicacaoStone(paresAplicacao.get(l.id));
     } else if (ehSaquePagarme(l, cnpjsPagarme)) {
       l.conciliacao = conciliacaoSaquePagarme(l, pagarme.get(cnpjSaquePagarme(l, cnpjsPagarme)));
     } else if (l.transferencia_id && l.transferencia) {
@@ -1791,8 +1846,9 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   const paresBoleto = parearTarifasBoleto(lancs || []);
   const paresDevolucao = parearDevolucoesPix(lancs || []);
   const paresEstorno = parearEstornosCartao(lancs || []);
+  const paresAplicacao = parearAplicacoesStone(lancs || []);
   // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
-  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id) && !paresEstorno.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
+  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id) && !paresEstorno.has(l.id) && !paresAplicacao.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
   const porConta = new Map();
   for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
@@ -1883,4 +1939,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
