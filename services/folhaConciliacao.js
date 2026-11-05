@@ -334,7 +334,9 @@ export async function candidatosFolha(l, usados = new Map(), { avisos = [] } = {
         const bate = esperado != null && Math.abs(esperado - valorLinha) <= VALOR_TOL;
         const prioridade = competenciasPara(tipo, l.data)[0] === mesF;
         let score;
-        if (bate) score = sim >= 0.95 ? (prioridade ? 100 : 92) : 80;
+        // mesmo líquido em duas competências é comum (salário fixo): a
+        // competência esperada tem que vencer com folga para o aceite automático
+        if (bate) score = sim >= 0.95 ? (prioridade ? 100 : 78) : prioridade ? 85 : 65;
         else if (esperado != null) score = sim >= 0.95 ? 50 : 35;
         else score = sim >= 0.95 ? 40 : 25;
         const motivos = [sim >= 0.95 ? 'mesmo funcionário' : 'nome parecido', bate ? 'valor igual' : esperado != null ? `valor diferente (folha ${esperado.toFixed(2)})` : 'folha sem o evento', prioridade ? 'competência esperada' : 'outra competência'];
