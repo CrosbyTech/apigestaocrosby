@@ -20,6 +20,9 @@ describe('contas Mêntore × folha do Dryland', () => {
     expect(semelhancaNome('JULIANA CRISTINA MOREIRA LOPES', 'JULIANA CRISTINA MOREIRA LOPES DOS SANTOS')).toBeGreaterThanOrEqual(0.8);
     expect(semelhancaNome('ANA PAULA', 'ANA CAROLINA FREITAS NUNES')).toBeLessThan(0.6);
     expect(semelhancaNome('CARLA REGINA DA SILVA', 'BRUNO SILVA DE OLIVEIRA')).toBe(0);
+    // grafia com 1 letra diferente no 1º nome + nome truncado no extrato
+    expect(semelhancaNome('GABRIELY FERNANDA MACHADO DOS SA...', 'GABRIELE FERNANDA MACHADO DOS SANTOS')).toBeGreaterThanOrEqual(0.95);
+    expect(semelhancaNome('ANA PAULA', 'ANA CLARA')).toBeLessThan(0.6);
   });
   test('férias, adiantamento e 13º saem dos eventos da folha', () => {
     const f = {

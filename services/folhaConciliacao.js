@@ -62,6 +62,20 @@ export function lerLinhaFolha(l) {
 }
 
 /** 1 = mesmo nome; 0.8+ = muito parecido (nome truncado ou abreviado); 0 = outro */
+// distância de edição (grafias com 1 letra diferente entre extrato e folha)
+const lev = (a, b) => {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+};
+const tokenIgual = (x, y, { prefixo = false } = {}) => x === y || (x.length >= 5 && y.length >= 5 && lev(x, y) <= 1) || (prefixo && x.length >= 2 && (y.startsWith(x) || x.startsWith(y)));
 export function semelhancaNome(a, b) {
   const na = normNome(a);
   const nb = normNome(b);
@@ -71,10 +85,21 @@ export function semelhancaNome(a, b) {
   const ta = tokensNome(a);
   const tb = tokensNome(b);
   if (!ta.length || !tb.length) return 0;
-  if (ta[0] !== tb[0]) return 0;
-  const sb = new Set(tb);
-  const comuns = ta.filter((t) => sb.has(t)).length;
-  return comuns / Math.max(ta.length, tb.length);
+  if (!tokenIgual(ta[0], tb[0])) return 0;
+  // nome do extrato truncado ("… DOS SA...") → o último token pode ser prefixo
+  const truncado = /\.{3}|…/.test(String(a)) || /\.{3}|…/.test(String(b));
+  let comuns = 0;
+  const restantes = [...tb];
+  ta.forEach((t, i) => {
+    const k = restantes.findIndex((u) => tokenIgual(t, u, { prefixo: truncado && i === ta.length - 1 }));
+    if (k >= 0) {
+      comuns++;
+      restantes.splice(k, 1);
+    }
+  });
+  if (comuns < 2) return 0;
+  const base = truncado ? Math.min(ta.length, tb.length) : Math.max(ta.length, tb.length);
+  return Math.min(1, comuns / base);
 }
 
 // ─── Dryland ──────────────────────────────────────────────────
