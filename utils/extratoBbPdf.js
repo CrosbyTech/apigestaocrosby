@@ -265,9 +265,14 @@ export async function lerExtratoBb(buffer) {
   const totalDebitos = round2(lanc.filter((l) => l.valor < 0).reduce((s, l) => s - l.valor, 0));
   const bate = divergencias.length === 0 && Math.abs(saldoCalculado - saldoFinal) <= 0.005;
   const datas = lanc.map((l) => l.data).filter(Boolean).sort();
+  const ultimoDiaMes = (m) => {
+    const [a, mm] = m.split('-').map(Number);
+    return `${m}-${String(new Date(Date.UTC(a, mm, 0)).getUTCDate()).padStart(2, '0')}`;
+  };
   const periodo = {
     inicio: mesRef ? `${mesRef}-01` : datas[0] || null,
-    fim: datas.at(-1) || (mesRef ? `${mesRef}-31` : null),
+    // o extrato é do mês inteiro: fim = último dia do mês (mesmo sem lançamento no fim)
+    fim: mesRef ? ultimoDiaMes(mesRef) : datas.at(-1) || null,
   };
 
   return {
