@@ -38,6 +38,7 @@ import { STONE_LOJAS, stonecodesDaLoja } from '../config/stoneConciliacao.js';
 import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
 import { mapearFiliaisTotvsPorCnpj, resolverFiliaisLoja, buscarTitulosCartaoStone } from './totvsCartoesStone.js';
 import { bater } from './stoneBatimento.js';
+import { ehLinhaFolha, candidatosFolha } from './folhaConciliacao.js';
 import { vincularComprovanteASolicitacao, solicitacoesDaConciliacao, comprovantePorChave, urlComprovante } from './comprovantesStone.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
@@ -1512,7 +1513,7 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
     const pessoa = PESSOAS_PRO_LABORE.find((p) => p.id === referencia?.pessoaId) || PESSOAS_PRO_LABORE.find((p) => p.cpf === soDigitos(referencia?.cpf));
@@ -1898,6 +1899,7 @@ export async function detalheConciliacao(id) {
     origem,
     solicitacao,
     comprovante,
+    folha: c.origem === 'FOLHA' ? ref.folha || null : null,
     usos,
     parcial: { totalUsado, valorDuplicata, restante: valorDuplicata != null ? round2(valorDuplicata - totalUsado) : null },
   };
@@ -1956,13 +1958,20 @@ export async function buscarCandidatos(lancamentoId) {
     const candidatos = candidatosEntradaStone(l, f.itens, usados);
     return { lancamento: l, candidatos, avisos: f.avisos, decisao: decidir(candidatos) };
   }
+  if (ehLinhaFolha(l)) {
+    // conta Mêntore: só verbas trabalhistas → folha/rescisões do Dryland
+    const usados = await usadosNaJanela({ de: l.data, ate: l.data });
+    const avisos = [];
+    const candidatos = await candidatosFolha(l, usados, { avisos });
+    return { lancamento: l, candidatos, avisos, decisao: decidir(candidatos) };
+  }
   const fontes = await carregarFontes({ de: l.data, ate: l.data });
   const usados = await usadosNaJanela({ de: l.data, ate: l.data });
   const candidatos = candidatosPara(l, fontes, usados);
   return { lancamento: l, candidatos, avisos: fontes.avisos, decisao: decidir(candidatos) };
 }
 
-export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.emissao ? { emissao: c.emissao } : {}), ...(c.stone ? { stone: c.stone } : {}), ...(c.cr ? { cr: c.cr } : {}), ...(c.taxaFixa ? { taxaFixa: c.taxaFixa } : {}) });
+export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.emissao ? { emissao: c.emissao } : {}), ...(c.stone ? { stone: c.stone } : {}), ...(c.cr ? { cr: c.cr } : {}), ...(c.taxaFixa ? { taxaFixa: c.taxaFixa } : {}), ...(c.folha ? { folha: c.folha } : {}) });
 
 // regra de aceite automático: melhor ≥ 70 e com folga ≥ 15 pontos para o 2º.
 // Candidatos "gêmeos" (mesma origem, nome, data e valor — ex.: 3 pagamentos
@@ -2011,7 +2020,7 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   const jaTem = new Set(gravadas.map((g) => g.chave));
   const pendentes = alvo.filter((l) => !jaTem.has(l.chave));
 
-  const temSaida = pendentes.some((l) => l.valor < 0);
+  const temSaida = pendentes.some((l) => l.valor < 0 && !ehLinhaFolha(l));
   const fontes = temSaida ? await carregarFontes({ de, ate }) : { avisos: [] };
   const usados = await usadosNaJanela({ de, ate });
   const resultado = { pendentes: pendentes.length, conciliadas: [], ambiguas: [], semCandidato: 0, avisos: [...fontes.avisos] };
@@ -2021,7 +2030,7 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   for (const l of pendentes) {
     let candidatos;
     if (l.valor < 0) {
-      candidatos = candidatosPara(l, fontes, usados);
+      candidatos = ehLinhaFolha(l) ? await candidatosFolha(l, usados, { avisos: resultado.avisos }) : candidatosPara(l, fontes, usados);
     } else if (ehEntradaPixCliente(l)) {
       if (ehEntradaPixTotvs(l)) l.taxaFixa = TAXA_PIX_FISERV;
       l.semParcial = ehEntradaPixTotvs(l) || ehEntradaPixMaquininha(l);
