@@ -12,7 +12,7 @@
  */
 import express from 'express';
 import {
-  LOJAS, calcularSangria, saldos, listarPartida, setPartida,
+  LOJAS, calcularSangria, saldos, dinheiroDoDia, listarPartida, setPartida,
   listarSangrias, criarSangria, atualizarSangriaStatus,
 } from '../services/fluxoSaldos.js';
 
@@ -20,9 +20,21 @@ const router = express.Router();
 
 router.get('/lojas', (_req, res) => res.json({ lojas: LOJAS }));
 
+// vendas=1 puxa o dinheiro do dia das NFC-e (lento na 1ª vez; cacheado por nota).
+// Sem vendas=1, carrega rápido (só saldo contado), com dinheiro do dia "pendente".
 router.get('/', async (req, res) => {
-  try { res.json(await saldos({ dia: req.query.dia })); }
+  try { res.json(await saldos({ dia: req.query.dia, comVendas: req.query.vendas === '1' })); }
   catch (e) { res.status(500).json({ erro: e.message }); }
+});
+
+// Drill-down: as vendas em dinheiro de uma loja no dia.
+router.get('/dia-detalhe', async (req, res) => {
+  try {
+    const loja = Number(req.query.loja);
+    const dia = req.query.dia;
+    if (!loja || !dia) return res.status(400).json({ erro: 'loja e dia são obrigatórios' });
+    res.json(await dinheiroDoDia(loja, dia));
+  } catch (e) { res.status(500).json({ erro: e.message }); }
 });
 
 router.get('/partida', async (_req, res) => {

@@ -2,18 +2,28 @@
  * Fluxo de Saldos (João/BRUCE, 05/11/2026) — PARTE INDEPENDENTE.
  *
  * Saldo em dinheiro por loja/dia + cálculo de sangria + pedido de retirada.
- * O cálculo do "dinheiro do dia" vem das NFC-e (invoices/search + xml-contents)
- * e ainda está PENDENTE (falta acertar o filtro de data e o de/para das lojas
- * com o João/Tadeu — ver memory fluxo-saldos.md). Enquanto isso, este serviço
- * já entrega: saldo de partida (contado) por loja, o cálculo da sangria e o
- * registro dos pedidos de retirada. dinheiroDia fica null (= pendente).
+ * O "dinheiro do dia" vem das NFC-e: self-call no wrapper /api/totvs/invoices/
+ * search (startDate/endDate; pagina sozinho; filtra por change ±3 dias) e, no
+ * código, filtra issueDate==dia + Issued + documentType 55/65 + Output; para
+ * cada nota lê o XML (/fiscal/v2/xml-contents/{accessKey}) e soma os <detPag>
+ * tPag 01 (dinheiro) menos o <vTroco>. Cada nota é cacheada por accessKey
+ * (fluxo_saldos_notas) — XML de nota não muda. Caminho e de/para das lojas
+ * confirmados com o Tadeu (05/11; códigos SEM o zero). Saldo em caixa =
+ * saldo contado (partida) + dinheiro do dia (sangrias/despesas à parte).
  *
  * Tabelas (criadas server-side via exec_sql, idempotente):
  *   fluxo_saldos_partida  — saldo contado de partida por loja (cd_empresa)
  *   fluxo_saldos_sangrias — pedidos de retirada (registro no HeadCoach; NÃO
  *                           mexe em TOTVS/banco)
+ *   fluxo_saldos_notas    — cache do dinheiro por nota (accessKey)
  */
+import axios from 'axios';
 import supabase from '../config/supabase.js';
+import { getToken } from '../utils/totvsTokenManager.js';
+import { TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
+
+const INTERNAL = process.env.INTERNAL_API_BASE || `http://127.0.0.1:${process.env.PORT || 4100}`;
+const DOCTYPES_VENDA = new Set(['55', '65']);
 
 // De/para loja -> branchCode (Tadeu, 05/11/2026). ATENÇÃO: o código da VENDA vem
 // SEM o zero final (x10 = filial de teste). Ex.: Cidade Jardim é 87, não 870.
@@ -81,11 +91,90 @@ async function garantirTabelas() {
       criado_em timestamptz DEFAULT now(),
       updated_at timestamptz DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS fluxo_saldos_notas (
+      access_key text PRIMARY KEY,
+      cd_empresa integer,
+      dia date,
+      invoice_code text,
+      dinheiro numeric DEFAULT 0,
+      troco numeric DEFAULT 0,
+      total numeric DEFAULT 0,
+      pags jsonb,
+      updated_at timestamptz DEFAULT now()
+    );
     NOTIFY pgrst, 'reload schema';`;
   let r = await supabase.rpc('exec_sql', { query: ddl });
   if (r.error && /exec_sql\(query\)/.test(r.error.message || '')) r = await supabase.rpc('exec_sql', { sql: ddl });
   if (r.error) throw new Error(`criar tabelas fluxo_saldos: ${r.error.message}`);
   tabelasOk = true;
+}
+
+// ── Dinheiro do dia pelas NFC-e ──────────────────────────────────────────────
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Lista as notas de VENDA de uma loja num dia (via wrapper; filtra no código).
+async function invoicesDoDia(loja, dia) {
+  let resp;
+  for (let t = 1; t <= 4; t++) {
+    try {
+      const r = await axios.post(`${INTERNAL}/api/totvs/invoices/search`,
+        { startDate: dia, endDate: dia, branchCodeList: [Number(loja)] },
+        { timeout: 180000, validateStatus: (s) => s < 500 });
+      if (r.status >= 400) throw new Error('HTTP ' + r.status);
+      resp = r.data; break;
+    } catch (e) { if (t === 4) throw e; await sleep(4000 * t); }
+  }
+  const items = resp?.data?.items || resp?.items || [];
+  return items.filter((it) =>
+    String(it.issueDate || it.invoiceDate || '').slice(0, 10) === dia &&
+    it.invoiceStatus === 'Issued' &&
+    DOCTYPES_VENDA.has(String(it.documentType)) &&
+    it.operationType === 'Output' &&
+    it.eletronic?.accessKey,
+  ).map((it) => ({ accessKey: it.eletronic.accessKey, invoiceCode: it.invoiceCode }));
+}
+
+// Dinheiro de uma nota (tPag 01 − vTroco), com cache por accessKey.
+async function dinheiroDaNota(accessKey, cd_empresa, dia, invoiceCode) {
+  const { data: cache } = await supabase.from('fluxo_saldos_notas').select('dinheiro,troco,total').eq('access_key', accessKey).maybeSingle();
+  if (cache) return cache;
+  if (!TOTVS_BASE_URL) throw new Error('TOTVS_BASE_URL não configurado');
+  const t = await getToken();
+  const tok = typeof t === 'string' ? t : t?.access_token;
+  const xr = await axios.get(`${TOTVS_BASE_URL}/fiscal/v2/xml-contents/${encodeURIComponent(accessKey)}`,
+    { headers: { Accept: 'application/json', Authorization: `Bearer ${tok}` }, timeout: 30000 });
+  const xml = Buffer.from(xr.data?.mainInvoiceXml || '', 'base64').toString('utf8');
+  const pags = [...xml.matchAll(/<detPag>([\s\S]*?)<\/detPag>/g)].map((m) => ({
+    tPag: (/<tPag>(\d+)<\/tPag>/.exec(m[1]) || [])[1] || null,
+    vPag: Number((/<vPag>([\d.]+)<\/vPag>/.exec(m[1]) || [])[1] || 0),
+  }));
+  const troco = Number((/<vTroco>([\d.]+)<\/vTroco>/.exec(xml) || [])[1] || 0);
+  const emDinheiro = pags.filter((p) => p.tPag === '01').reduce((a, p) => a + p.vPag, 0);
+  const total = pags.reduce((a, p) => a + p.vPag, 0);
+  const row = { dinheiro: r2(Math.max(0, emDinheiro - troco)), troco: r2(troco), total: r2(total) };
+  await supabase.from('fluxo_saldos_notas').upsert(
+    { access_key: accessKey, cd_empresa: Number(cd_empresa), dia, invoice_code: String(invoiceCode ?? ''), pags, ...row, updated_at: new Date().toISOString() },
+    { onConflict: 'access_key' },
+  );
+  return row;
+}
+
+// Dinheiro em dinheiro (vendas) de uma loja no dia + detalhe por nota.
+export async function dinheiroDoDia(loja, dia) {
+  await garantirTabelas();
+  const notas = await invoicesDoDia(loja, dia);
+  const detalhe = [];
+  let dinheiro = 0;
+  const CONC = 5;
+  for (let i = 0; i < notas.length; i += CONC) {
+    const grupo = notas.slice(i, i + CONC);
+    const res = await Promise.all(grupo.map(async (n) => {
+      try { const d = await dinheiroDaNota(n.accessKey, loja, dia, n.invoiceCode); return { ...n, ...d }; }
+      catch (e) { return { ...n, erro: e.message, dinheiro: 0 }; }
+    }));
+    for (const x of res) { dinheiro += Number(x.dinheiro) || 0; detalhe.push(x); }
+  }
+  return { dinheiro: r2(dinheiro), qtd_notas: notas.length, detalhe };
 }
 
 // ── Saldo de partida (contado) ───────────────────────────────────────────────
@@ -114,31 +203,45 @@ export async function setPartida({ cd_empresa, saldo, contado_em, user_nome }) {
   return row;
 }
 
-// ── Saldos por loja (modo parcial: dinheiroDia pendente) ─────────────────────
-export async function saldos({ dia } = {}) {
+// ── Saldos por loja (saldo contado + dinheiro do dia das NFC-e) ──────────────
+export async function saldos({ dia, comVendas = true } = {}) {
   await garantirTabelas();
+  const oDia = dia || new Date().toISOString().slice(0, 10);
   const partida = await listarPartida();
+  let fonteVendasErro = null;
+
+  // dinheiro do dia por loja (NFC-e). comVendas=false pula (carregamento rápido).
+  const dinheiroPorLoja = {};
+  if (comVendas) {
+    for (const l of LOJAS) {
+      try { dinheiroPorLoja[l.code] = (await dinheiroDoDia(l.code, oDia)).dinheiro; }
+      catch (e) { dinheiroPorLoja[l.code] = null; fonteVendasErro = e.message; }
+    }
+  }
+
   const linhas = LOJAS.map((l) => {
     const p = partida[l.code];
     const saldoPartida = p ? r2(p.saldo) : null;
-    // dinheiroDia: PENDENTE até ligar as NFC-e (invoices/search + xml-contents).
-    const dinheiroDia = null;
-    const saldoEmCaixa = saldoPartida; // por enquanto = contado; depois += dinheiroDia - sangrias
+    const dinheiroDia = comVendas ? (dinheiroPorLoja[l.code] ?? null) : null;
+    // Saldo em caixa = contado (partida) + dinheiro do dia. Sangrias/despesas à parte.
+    const saldoEmCaixa =
+      saldoPartida == null && dinheiroDia == null ? null : r2((saldoPartida || 0) + (dinheiroDia || 0));
     const sangria = saldoEmCaixa != null ? calcularSangria(saldoEmCaixa) : null;
     return {
       cd_empresa: l.code,
       loja: l.nome,
       saldo_partida: saldoPartida,
       contado_em: p?.contado_em || null,
-      dinheiro_dia: dinheiroDia, // null = fonte de vendas pendente
+      dinheiro_dia: dinheiroDia,
       saldo_em_caixa: saldoEmCaixa,
       sangria_disponivel: sangria ? sangria.sangria : null,
       fica_na_loja: sangria ? sangria.fica : null,
     };
   });
   return {
-    dia: dia || new Date().toISOString().slice(0, 10),
-    fonte_vendas_pendente: true, // dinheiro do dia ainda não ligado (filtro/lojas)
+    dia: oDia,
+    fonte_vendas_pendente: !comVendas,
+    fonte_vendas_erro: fonteVendasErro,
     lojas: linhas,
   };
 }
