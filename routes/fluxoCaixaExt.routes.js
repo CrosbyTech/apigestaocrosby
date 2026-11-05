@@ -11,7 +11,7 @@
 //   POST   /ler        (multipart: arquivo) → só lê o PDF (conferência), não grava
 //   POST   /importar   (multipart: arquivos[]) → grava e recasa transferências
 //   GET    /painel?de&ate[&contas&bancos&tipo&formas&categoria&contraparte&busca]
-//   POST   /transferencias/recasar?de&ate  → refaz o casamento automático (antes completa a contraparte escondida no texto)
+//   POST   /transferencias/recasar?de&ate  → refaz o casamento automático (antes completa a contraparte escondida no texto; depois marca entre contas de um lado só)
 //   POST   /lancamentos/enriquecer-contrapartes?de&ate → completa contraparte_doc/nome/banco pelo histórico (dados antigos)
 //   PATCH  /lancamentos/:id                 → fornecedor / observação / forma / tipo
 //   GET    /formas                          → formas de pagamento padronizadas
@@ -233,7 +233,9 @@ router.post(
     if (!de || !ate) return errorResponse(res, 'Informe de e ate.', 400);
     try {
       await fluxo.enriquecerContrapartes({ de: String(de), ate: String(ate), escopo }).catch(() => {});
-      return successResponse(res, await fluxo.casarTransferencias({ de: String(de), ate: String(ate), escopo }), 'Transferências recasadas');
+      const pares = await fluxo.casarTransferencias({ de: String(de), ate: String(ate), escopo });
+      const umLado = await fluxo.marcarEntreContasSemPar({ de: String(de), ate: String(ate), escopo }).catch((e) => ({ erro: e.message }));
+      return successResponse(res, { ...pares, semPar: umLado }, 'Transferências recasadas');
     } catch (e) {
       return tratar(res, e);
     }

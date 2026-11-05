@@ -430,6 +430,15 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
         justificativa: l.transferencia.outraConta ? `Transferência ${l.transferencia.sentido === 'SAIDA' ? 'para' : 'de'} ${l.transferencia.outraConta.apelido}` : 'Transferência entre contas do grupo',
         automatico: true,
       };
+    } else if (l.tipo === 'TRANSFERENCIA') {
+      // entre contas de um lado só (outra ponta não importada) ou marcada à mão no extrato
+      l.conciliacao = {
+        id: null,
+        origem: 'TRANSFERENCIA',
+        referencia: { transferenciaId: null, sentido: Number(l.valor) < 0 ? 'SAIDA' : 'ENTRADA', outraConta: null, confianca: 'sem par', contraparte: l.contraparte_nome || null },
+        justificativa: `Entre contas do grupo${l.contraparte_nome ? ` · ${l.contraparte_nome}` : ''} (outra ponta não importada)`,
+        automatico: true,
+      };
     } else {
       l.conciliacao = null;
     }
@@ -2084,7 +2093,7 @@ export function decidir(candidatos) {
  * "ambíguas" (com candidatos) ou "sem candidato".
  */
 export async function conciliarAutomatico({ contaId, de, ate, usuario, simular = false, apenas = null }) {
-  let q = supabase.from(T.lanc).select('*').gte('data', de).lte('data', ate).is('transferencia_id', null).order('data').order('seq');
+  let q = supabase.from(T.lanc).select('*').gte('data', de).lte('data', ate).is('transferencia_id', null).neq('tipo', 'TRANSFERENCIA').order('data').order('seq');
   if (contaId) q = q.eq('conta_id', contaId);
   const { data: lancs, error } = await q;
   lancar(error);

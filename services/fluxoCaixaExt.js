@@ -579,6 +579,72 @@ export async function enriquecerContrapartes({ de, ate, escopo } = {}) {
   return { lidos: rows.length, atualizados };
 }
 
+/**
+ * Entre contas de um lado só: entrada/saída cuja contraparte é uma EMPRESA do
+ * grupo (CNPJ de raiz igual à de alguma conta do escopo, ou nome/razão social
+ * das empresas), que não achou a outra ponta (extrato da outra conta não
+ * importado, valor com tarifa, etc.). Pedido do Yago (05/11/2026): "todo
+ * dinheiro que vem dessas empresas é entre contas". Marca tipo TRANSFERENCIA
+ * (sem par) e anota na observação; fica fora de Recebido/Pago. Não entra:
+ * linha já conciliada, Pix do próprio CNPJ da conta (QR Code TOTVS/Fiserv),
+ * contraparte igual ao próprio titular (saque Pagar.me na Stone), e pessoa
+ * física (sócio = pró-labore, não entre contas).
+ */
+export const MARCA_UM_LADO = 'Entre contas (outra ponta não importada)';
+export async function marcarEntreContasSemPar({ de, ate, escopo }) {
+  const { esc, existe } = await prepararEscopo(escopo);
+  const contas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('*'), esc, existe));
+  const porId = new Map(contas.map((c) => [c.id, c]));
+  const ids = contas.map((c) => c.id);
+  if (!ids.length) return { desmarcadas: 0, marcadas: 0 };
+  const raizes = new Set(contas.map((c) => String(c.titular_cnpj || '').replace(/\D/g, '').slice(0, 8)).filter((r) => r.length === 8));
+  const nomesGrupo = [...new Set([...contas.map((c) => c.titular_nome).filter(Boolean), ...Object.values(APELIDOS_EMPRESA).flat()])];
+  const ehEmpresaDoGrupo = (nome, doc) => {
+    const d = String(doc || '').replace(/\D/g, '');
+    if (d.length === 14) return raizes.has(d.slice(0, 8));
+    if (d.length === 11) return false; // pessoa física não é entre contas
+    return !!nome && nomesGrupo.some((n) => nomesBatem(nome, n) || nomeTruncadoBate(nome, n));
+  };
+  // desfaz as marcas anteriores do período (a cada rodada, parte do zero)
+  const marcadas = await buscarTodos(() => supabase.from(T.lanc).select('id,valor').in('conta_id', ids).gte('data', de).lte('data', ate).is('transferencia_id', null).eq('tipo', 'TRANSFERENCIA').eq('observacao', MARCA_UM_LADO));
+  for (let i = 0; i < marcadas.length; i += 200) {
+    const fatia = marcadas.slice(i, i + 200);
+    const ent = fatia.filter((l) => Number(l.valor) > 0).map((l) => l.id);
+    const sai = fatia.filter((l) => Number(l.valor) <= 0).map((l) => l.id);
+    if (ent.length) lancar((await supabase.from(T.lanc).update({ tipo: 'ENTRADA', observacao: null }).in('id', ent)).error);
+    if (sai.length) lancar((await supabase.from(T.lanc).update({ tipo: 'SAIDA', observacao: null }).in('id', sai)).error);
+  }
+  const rows = await buscarTodos(() =>
+    supabase.from(T.lanc).select('id,conta_id,valor,categoria,memo,contraparte_nome,contraparte_doc,contraparte_banco,observacao,tipo').in('conta_id', ids).gte('data', de).lte('data', ate).is('transferencia_id', null).in('categoria', ['pix', 'transferencia']).order('id'),
+  );
+  const conciliadas = new Set();
+  for (let i = 0; i < rows.length; i += 300) {
+    const { data } = await supabase.from('fluxo_caixa_conciliacoes').select('lancamento_id').in('lancamento_id', rows.slice(i, i + 300).map((r) => r.id));
+    for (const c of data || []) conciliadas.add(c.lancamento_id);
+  }
+  const alvo = rows.filter((r) => {
+    if (conciliadas.has(r.id)) return false;
+    if (r.tipo === 'TRANSFERENCIA') return false; // marcada manualmente
+    const conta = porId.get(r.conta_id);
+    const pista = extrairContraparte(r, conta?.banco || null);
+    const doc = String(r.contraparte_doc || pista.doc || '').replace(/\D/g, '');
+    const nome = r.contraparte_nome || pista.nome || null;
+    const proprio = String(conta?.titular_cnpj || '').replace(/\D/g, '');
+    if (doc && doc === proprio) return false; // Pix do QR Code TOTVS (Fiserv) parece a própria empresa
+    if (/FISERV/i.test(r.contraparte_banco || '')) return false;
+    if (!doc && nome && conta?.titular_nome && nomesBatem(nome, conta.titular_nome)) return false; // saque Pagar.me / mesma titularidade
+    return ehEmpresaDoGrupo(nome, doc);
+  });
+  for (let i = 0; i < alvo.length; i += 200) {
+    const fatia = alvo.slice(i, i + 200);
+    const semObs = fatia.filter((l) => !l.observacao).map((l) => l.id);
+    const comObs = fatia.filter((l) => l.observacao).map((l) => l.id);
+    if (semObs.length) lancar((await supabase.from(T.lanc).update({ tipo: 'TRANSFERENCIA', observacao: MARCA_UM_LADO }).in('id', semObs)).error);
+    if (comObs.length) lancar((await supabase.from(T.lanc).update({ tipo: 'TRANSFERENCIA' }).in('id', comObs)).error);
+  }
+  return { desmarcadas: marcadas.length, marcadas: alvo.length, valor: round2(alvo.reduce((s, l) => s + Math.abs(Number(l.valor)), 0)) };
+}
+
 export async function casarTransferencias({ de, ate, escopo }) {
   const deM = addDias(de, -1);
   const ateM = addDias(ate, 1);
@@ -613,7 +679,14 @@ export async function casarTransferencias({ de, ate, escopo }) {
       .order('data'),
   );
   // "outros" só entra quando o histórico é claramente TED/transferência (Sicredi 2024 classificou a TED recebida como outros)
-  const rows = brutos.filter((r) => r.categoria !== 'outros' || /^(TED|DOC|TRANSF)/i.test(semAcento(`${r.descricao || ''} ${r.memo || ''}`).trim()));
+  // linha já conciliada com contas a pagar/Liberação/Solicitação/CR não é transferência (a conciliação é prova)
+  const conciliadas = new Set();
+  for (let i = 0; i < brutos.length; i += 300) {
+    const ids = brutos.slice(i, i + 300).map((r) => r.id);
+    const { data } = await supabase.from('fluxo_caixa_conciliacoes').select('lancamento_id').in('lancamento_id', ids);
+    for (const c of data || []) conciliadas.add(c.lancamento_id);
+  }
+  const rows = brutos.filter((r) => !conciliadas.has(r.id) && (r.categoria !== 'outros' || /^(TED|DOC|TRANSF)/i.test(semAcento(`${r.descricao || ''} ${r.memo || ''}`).trim())));
   const pistaDe = new Map();
   for (const r of rows) pistaDe.set(r.id, extrairContraparte(r, porId.get(r.conta_id)?.banco || null));
   const cents = (v) => Math.round(Math.abs(Number(v)) * 100);

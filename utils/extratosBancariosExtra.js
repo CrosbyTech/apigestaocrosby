@@ -104,6 +104,10 @@ export function classificarGenerico(desc, valor) {
   if (/IOF|JUROS|TARIFA|TAR\b|CESTA|ENCARGO|MULTA|ANUIDADE|MANUTEN|CUSTAS|TAXA/.test(up))
     return { ...base, forma: F.TARIFA, categoria: 'tarifa', descricao: up };
   if (/\bPIX\b/.test(up)) return { ...base, forma: F.PIX, categoria: 'pix', descricao: deb ? 'PAGAMENTO PIX' : 'RECEBIMENTO PIX' };
+  // Santander: "CR COB DINHEIRO CONF RECEBIMENTO 1575/…" e "CR COB BLOQ COMP CONF RECEBIMENTO …"
+  // = crédito da carteira de cobrança (boletos emitidos liquidados; BLOQ COMP = pago
+  // em cheque, bloqueado até compensar). É recebimento de boleto, não saldo.
+  if (/^CR COB\b/.test(up) && !deb) return { ...base, forma: F.BOLETO, categoria: 'boleto', descricao: 'LIQUIDAÇÃO COBRANÇA (BOLETO EMITIDO)', documento: (up.match(/\d{4}\/\d{6,}/) || [])[0] || null };
   if (/BOLETO|TITULO|COBRANCA|CONVENIO|PAGAMENTO DE CONTA/.test(up))
     return { ...base, forma: F.BOLETO, categoria: 'boleto', descricao: deb ? 'PAGAMENTO BOLETO' : 'RECEBIMENTO BOLETO' };
   if (/\bTED\b|\bDOC\b|TRANSF/.test(up)) return { ...base, forma: F.TED, categoria: 'transferencia', descricao: deb ? 'TRANSFERÊNCIA ENVIADA' : 'TRANSFERÊNCIA RECEBIDA' };
