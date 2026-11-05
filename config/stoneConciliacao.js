@@ -90,6 +90,9 @@ export const STONE_LOJAS = [
     affiliationKey: 'def024d1b1ac4273b1974cfe187278d5',
     filiais: [87],
     apiKey: envKey('593907947') || 'sk_482e767925b243b09fc7216bcb39ed38',
+    // 2º StoneCode da loja (informado pelo Yago em 05/11/2026): é nele que caem
+    // as liquidações por bandeira que não apareciam no 593907947
+    stonecodesExtras: ['949688301'],
   },
   {
     cnpj: '27728810001006',
@@ -145,6 +148,8 @@ export const STONE_LOJAS = [
     affiliationKey: '517e82ab22c44469a6f1e8b7a5c6710d',
     filiais: [95],
     apiKey: envKey('192477589') || 'sk_d7479d172bf245998eaf0c183b254243',
+    // outros StoneCodes da loja (informados pelo Yago em 05/11/2026)
+    stonecodesExtras: ['191484606', '116670753'],
   },
   {
     cnpj: '17177680000973',
