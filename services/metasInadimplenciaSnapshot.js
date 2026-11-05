@@ -69,7 +69,10 @@ async function nomesClientes(cods) {
     try {
       const r = await axios.post(`${INTERNAL}/api/totvs/persons/batch-lookup`, { personCodes: chunk }, { timeout: 120000 });
       const data = r.data?.data || {};
-      for (const [k, v] of Object.entries(data)) nome[k] = v?.name || v?.fantasyName || '';
+      // Guarda objeto {name, fantasyName} — o front (nomeCliente) lê
+      // pessoasMap[cd].name/.fantasyName; gravar string deixava o nome como
+      // CNPJ/CPF (fallback nm_cliente). João, 05/11/2026.
+      for (const [k, v] of Object.entries(data)) nome[k] = { name: v?.name || '', fantasyName: v?.fantasyName || '' };
     } catch { /* segue sem nome desse lote */ }
   }
   return nome;
