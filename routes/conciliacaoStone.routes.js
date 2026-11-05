@@ -402,6 +402,7 @@ router.get(
         pares: b.pares,
         stoneSemTotvs: b.stoneSemTotvs,
         totvsSemStone: b.totvsSemStone,
+        totvsCanceladosSemStone: b.totvsCanceladosSemStone || [],
         pagamentos,
         erros,
       };

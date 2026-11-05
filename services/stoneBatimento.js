@@ -44,6 +44,7 @@ const NIVEIS = {
   nsu_diverge: { nivel: 3, rotulo: 'Valor e AUT batem · NSU diverge' },
   aut_diverge: { nivel: 4, rotulo: 'Valor e NSU batem · AUT diverge' },
   agrupado: { nivel: 1, rotulo: 'Exato · títulos somados (mesmo NSU)' },
+  digitado_errado: { nivel: 5, rotulo: 'Data, valor e bandeira batem · NSU/AUT digitados errado' },
 };
 
 function divergencias(s, t) {
@@ -178,9 +179,52 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
     });
   }
 
+  // NSU/AUT digitados errados no caixa (João, 05/11/2026): o caixa põe o
+  // StoneCode no lugar do NSU, deixa em branco, troca NSU↔AUT ou erra um
+  // dígito da AUT. Outubro/2026: ~19 títulos assim em "só no TOTVS" com a
+  // venda da Stone em "só na Stone". Casa quando, entre os que sobraram, há
+  // UM único candidato de cada lado com mesma data, mesmo valor (±0,05),
+  // mesmas parcelas e mesma bandeira (ou bandeira da Stone desconhecida).
+  // Concilia, mas fica em "Com divergência" mostrando o que foi digitado.
+  const bandeiraOk = (s, t) =>
+    normBandeira(s.bandeira) === normBandeira(t.bandeira) || /^cod/.test(normBandeira(s.bandeira)) || !s.bandeira;
+  const compativel = (s, t) =>
+    s.dataVenda === t.dataEmissao &&
+    Math.abs(round2(s.valorBruto) - round2(t.valor)) <= 0.05 &&
+    Number(s.parcelas) === Number(t.parcelas) &&
+    bandeiraOk(s, t) &&
+    !s.cancelada &&
+    !t.cancelado;
+  for (const s of [...stoneLivres.values()]) {
+    const cands = [...totvsLivres.values()].filter((t) => t.portadorStone !== false && compativel(s, t));
+    if (cands.length !== 1) continue;
+    const t = cands[0];
+    const rivais = [...stoneLivres.values()].filter((x) => x !== s && compativel(x, t));
+    if (rivais.length) continue;
+    const trocados = normNsu(t.autorizacao) === normNsu(s.nsu) && normAut(t.nsu) === normAut(s.codAutorizacao);
+    fechar(s, t, 'digitado_errado');
+    const p = pares[pares.length - 1];
+    p.divergencias.unshift(
+      trocados
+        ? 'NSU e AUT trocados no caixa'
+        : `NSU/AUT digitados no caixa: NSU ${t.nsu ?? '(vazio)'} · AUT ${t.autorizacao ?? '(vazio)'}`,
+    );
+  }
+
   const stoneSemTotvs = [...stoneLivres.values()];
-  // Sobra do TOTVS: só título de portador Stone é problema desta conciliação
-  const totvsSemStone = [...totvsLivres.values()].filter((t) => t.portadorStone !== false);
+  // Sobra do TOTVS: só título de portador Stone é problema desta conciliação.
+  // Título CANCELADO no TOTVS sem venda na Stone não é pendência (vai à parte).
+  const sobraTotvs = [...totvsLivres.values()].filter((t) => t.portadorStone !== false);
+  const totvsCanceladosSemStone = sobraTotvs.filter((t) => t.cancelado);
+  const totvsSemStone = sobraTotvs
+    .filter((t) => !t.cancelado)
+    .map((t) => {
+      // Baixa da Pagar.me/link de pagamento que caiu num portador STONE:
+      // nº do título = NSU de 10 dígitos começando com 46 (ID da Pagar.me).
+      const nsu = normNsu(t.nsu);
+      const pagarme = !!nsu && nsu.length === 10 && nsu.startsWith('46') && String(t.titulo) === nsu;
+      return pagarme ? { ...t, origemProvavel: 'pagarme' } : t;
+    });
   const titulosStone = titulosTotvs.filter((t) => t.portadorStone !== false);
 
   const soma = (arr, f) => round2(arr.reduce((acc, x) => acc + (Number(f(x)) || 0), 0));
@@ -215,7 +259,7 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
   pares.sort((a, b) => ((a.stone.dataCaptura || '') < (b.stone.dataCaptura || '') ? -1 : 1));
   stoneSemTotvs.sort((a, b) => ((a.dataCaptura || '') < (b.dataCaptura || '') ? -1 : 1));
 
-  return { pares, stoneSemTotvs, totvsSemStone, resumo };
+  return { pares, stoneSemTotvs, totvsSemStone, totvsCanceladosSemStone, resumo };
 }
 
 export const NIVEIS_BATIMENTO = NIVEIS;
