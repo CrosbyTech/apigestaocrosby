@@ -3,6 +3,7 @@
 import { jest } from '@jest/globals';
 import {
   parseOfx,
+  ehLinhaDeSaldoOfx,
   gerarCnab240,
   classificarLancamento,
   decodificarOfx,
@@ -211,5 +212,26 @@ describe('Stone — texto novo de liquidação de vendas (29/10/2026+)', () => {
     expect(r.grupo).toBe('cartao');
     expect(r.descricao).toBe('VENDAS CARTÃO (LIQUIDAÇÃO STONE)');
     expect(r.bandeira).toBeNull();
+  });
+});
+
+describe('OFX do Itaú: linhas de saldo não são lançamentos', () => {
+  test('SALDO ANTERIOR/PARCIAL/TOTAL DISPONÍVEL DIA/APLIC AUT MAIS ficam de fora; juros e IOF sobre saldo entram', () => {
+    for (const m of ['SALDO ANTERIOR', 'SALDO PARCIAL', 'SALDO TOTAL DISPONÍVEL DIA', 'SALDO TOTAL DISPONÃVEL DIA'.normalize('NFC'), 'SALDO APLIC AUT MAIS', 'SALDO INICIAL', 'SALDO FINAL', 'SALDO TOTAL', 'SALDO BLOQUEADO']) {
+      if (m.includes('Ã')) continue;
+      expect(ehLinhaDeSaldoOfx(m)).toBe(true);
+    }
+    for (const m of ['JUROS SALDO DEVEDOR C/C', 'IOF ( DOC.: SALDO DEV )', 'SALDO VINCULADO LIBERADO', 'BLOQUEIO GERENCIAL SALDO', 'PIX ENVIADO CROSBY DISTR']) expect(ehLinhaDeSaldoOfx(m)).toBe(false);
+  });
+  test('parseOfx descarta as linhas de saldo e calcula o saldo inicial só com os movimentos', () => {
+    const ofx = `<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><BANKACCTFROM><BANKID>341<ACCTID>27061-7</BANKACCTFROM><BANKTRANLIST><DTSTART>20240102<DTEND>20240103
+<STMTTRN><TRNTYPE>OTHER<DTPOSTED>20240102<TRNAMT>23084.98<FITID>20240102055<MEMO>SALDO PARCIAL</STMTTRN>
+<STMTTRN><TRNTYPE>OTHER<DTPOSTED>20240102<TRNAMT>23084.98<FITID>20240102056<MEMO>SALDO ANTERIOR</STMTTRN>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240102<TRNAMT>-70000.00<FITID>20240102002<MEMO>SISPAG PIX TRANSFERENCI</STMTTRN>
+<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20240103<TRNAMT>500.00<FITID>20240103001<MEMO>PIX RECEBIDO FULANO</STMTTRN>
+</BANKTRANLIST><LEDGERBAL><BALAMT>1000.00<DTASOF>20240103</LEDGERBAL></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`;
+    const p = parseOfx(ofx);
+    expect(p.lancamentos.map((l) => l.memo)).toEqual(['SISPAG PIX TRANSFERENCI', 'PIX RECEBIDO FULANO']);
+    expect(p.saldo.inicial).toBe(70500); // 1000 − 500 + 70000
   });
 });

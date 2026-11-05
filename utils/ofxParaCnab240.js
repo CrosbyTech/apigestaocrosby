@@ -66,6 +66,15 @@ const campo = (bloco, tag) => {
   return m ? m[1].trim() : null;
 };
 
+// Itaú põe no OFX linhas informativas de SALDO como se fossem lançamentos
+// ("SALDO ANTERIOR", "SALDO PARCIAL", "SALDO TOTAL DISPONÍVEL DIA", "SALDO
+// APLIC AUT MAIS", "SALDO INICIAL/FINAL"). Não são movimentos: entravam como
+// entrada/saída e estragavam o saldo inicial calculado pelo LEDGERBAL.
+export const ehLinhaDeSaldoOfx = (memo) =>
+  /^SALDO( (ANTERIOR|PARCIAL|INICIAL|FINAL|TOTAL( DISPONIVEL( DIA)?)?|APLIC AUT MAIS|BLOQUEADO|DO DIA|DIA))?$/.test(
+    String(memo || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim(),
+  );
+
 export function parseOfx(texto) {
   const t = String(texto || '');
   if (!/<OFX>/i.test(t)) throw new Error('Arquivo não parece ser OFX (sem tag <OFX>).');
@@ -88,6 +97,7 @@ export function parseOfx(texto) {
     const valor = round2(Number(campo(b, 'TRNAMT')?.replace(',', '.')));
     if (!Number.isFinite(valor)) continue;
     const dt = parseDataOfx(campo(b, 'DTPOSTED'));
+    if (ehLinhaDeSaldoOfx(campo(b, 'MEMO') || campo(b, 'NAME'))) continue; // linha de saldo do Itaú, não é lançamento
     lancamentos.push({
       fitid: campo(b, 'FITID'),
       tipoOfx: (campo(b, 'TRNTYPE') || '').toUpperCase(),
