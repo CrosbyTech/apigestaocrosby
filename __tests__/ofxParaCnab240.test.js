@@ -204,3 +204,12 @@ describe('gerarCnab240', () => {
     expect(() => gerarCnab240(ex, { cnpj: '17177680000116' })).toThrow(/empresa/);
   });
 });
+
+describe('Stone — texto novo de liquidação de vendas (29/10/2026+)', () => {
+  test('"Recebimento de vendas Valor referente à liquidação de suas - vendas de cartão." é venda no cartão', () => {
+    const r = classificarLancamento({ memo: 'Recebimento de vendas Valor referente à liquidação de suas - vendas de cartão.', valor: 391.42 });
+    expect(r.grupo).toBe('cartao');
+    expect(r.descricao).toBe('VENDAS CARTÃO (LIQUIDAÇÃO STONE)');
+    expect(r.bandeira).toBeNull();
+  });
+});

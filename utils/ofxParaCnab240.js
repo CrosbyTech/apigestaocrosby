@@ -165,6 +165,22 @@ export function classificarLancamento(l) {
   const up = memo.toUpperCase();
   const deb = l.valor < 0;
 
+  // Desde 29/10/2026 a Stone passou a escrever só "Recebimento de vendas Valor
+  // referente à liquidação de suas - vendas de cartão.", sem bandeira nem tipo:
+  // é o mesmo depósito de vendas (a carteira vem do arquivo de conciliação)
+  if (/^RECEBIMENTO DE VENDAS\b/.test(up)) {
+    return {
+      grupo: 'cartao',
+      categoria: '205',
+      historico: '0CR1',
+      descricao: 'VENDAS CARTÃO (LIQUIDAÇÃO STONE)',
+      documento: 'STONE CARTAO',
+      contraparte: null,
+      bandeira: null,
+      tipoCartao: null,
+    };
+  }
+
   // "Recebimento vendas - Mastercard | Crédito"
   let m = up.match(/^RECEBIMENTO VENDAS\s*-\s*([A-Z ]+?)\s*(?:\|\s*(CREDITO|DEBITO))?$/);
   if (m) {

@@ -1122,7 +1122,11 @@ async function cruzarDepositoComTotvs(loja, stonecode, parcelas) {
 // ─── entradas Stone: depósitos do arquivo de conciliação ─────
 const fmtBr = (v) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const lojaStoneDoCnpj = (cnpj) => STONE_LOJAS.find((l) => l.cnpj === soDigitos(cnpj) && l.apiKey && l.stonecode) || null;
-export const ehEntradaStone = (l) => Number(l.valor) > 0 && String(l.banco || '').toUpperCase() === 'STONE' && ['antecipacao', 'cartao'].includes(String(l.categoria || ''));
+// inclui o texto novo da Stone (29/10/2026+) "Recebimento de vendas Valor referente à liquidação…", que entrou como "outros" nas importações antigas
+export const ehEntradaStone = (l) =>
+  Number(l.valor) > 0 &&
+  String(l.banco || '').toUpperCase() === 'STONE' &&
+  (['antecipacao', 'cartao'].includes(String(l.categoria || '')) || /^RECEBIMENTO DE VENDAS/i.test(semAcento(String(l.memo || ''))));
 
 /** Um candidato por depósito (Payment) da Stone, com as parcelas liquidadas somadas. */
 export function depositosStoneDoDia(dia, loja, code) {
@@ -1208,8 +1212,8 @@ function pontuarEntradaStone(l, c, usado = 0) {
       score += 10;
       motivos.push('bandeira confere');
     }
-  } else if ((cat === 'antecipacao') !== (c.stone?.tipo === 'ANTECIPACAO')) {
-    score -= 10;
+  } else if (['antecipacao', 'cartao'].includes(cat) && (cat === 'antecipacao') !== (c.stone?.tipo === 'ANTECIPACAO')) {
+    score -= 10; // linha diz antecipação e o depósito não (ou vice-versa); texto novo sem tipo não penaliza
   }
   return { ...c, score, motivos, parcial: false, valorDuplicata: c.valor, restanteAntes: c.valor, restanteDepois: 0 };
 }

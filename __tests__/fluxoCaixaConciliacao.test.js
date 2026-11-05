@@ -362,3 +362,15 @@ describe('pró-labore (saídas para os sócios, pessoa física)', () => {
     expect(pessoaProLabore({ valor: -1000, contraparte_nome: 'FABIO FERREIRA DE LIMA AZEVEDO', transferencia_id: 9 })).toBeNull();
   });
 });
+
+describe('texto novo da Stone (29/10/2026+): "Recebimento de vendas Valor referente à liquidação…"', () => {
+  test('entra na busca de depósitos Stone mesmo classificado como outros, sem penalidade de tipo', () => {
+    const l = { id: 1, conta_id: 17, data: '2026-10-30', valor: 391.42, categoria: 'outros', banco: 'STONE', memo: 'Recebimento de vendas Valor referente à liquidação de suas - vendas de cartão.' };
+    expect(ehEntradaStone(l)).toBe(true);
+    const dep = { origem: 'STONE', id: '134006802|2026-10-30|P9', valor: 391.42, data: '2026-10-30', nome: 'STONE', stone: { tipo: 'ANTECIPACAO', carteira: 'Antecipação' } };
+    const c = candidatosEntradaStone(l, [dep]);
+    expect(c).toHaveLength(1);
+    expect(c[0].score).toBe(100);
+    expect(decidir(c).automatico).toBe(true);
+  });
+});
