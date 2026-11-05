@@ -858,7 +858,57 @@ export const TIPOS_CR = { 1: 'Fatura', 2: 'Cheque', 3: 'Dinheiro', 4: 'Cartão d
 export const TIPOS_CR_PIX = { 1: TIPOS_CR[1], 10: TIPOS_CR[10], 14: TIPOS_CR[14], 26: TIPOS_CR[26] };
 // Pix do QR Code emitido pelo TOTVS (Fiserv): valor cai líquido da taxa fixa
 export const TAXA_PIX_FISERV = 0.79;
-export const ehEntradaPixTotvs = (l) => Number(l.valor) > 0 && String(l.categoria || '') === 'pix' && /FISERV/i.test(String(l.contraparte_banco || ''));
+// (a) banco da contraparte FISERV (Stone) ou (b) Pix recebido do CNPJ da própria
+// conta (Sicredi mostra o pagador como a própria empresa): é o QR Code do TOTVS
+// liquidado pela Fiserv, 1 ou vários títulos por crédito, cada um −R$ 0,79
+export const ehEntradaPixTotvs = (l) =>
+  Number(l.valor) > 0 &&
+  String(l.categoria || '') === 'pix' &&
+  !/DEVOLU/i.test(String(l.descricao || '')) &&
+  !l.transferencia_id &&
+  (/FISERV/i.test(String(l.contraparte_banco || '')) || (soDigitos(l.contraparte_doc).length === 14 && soDigitos(l.contraparte_doc) === soDigitos(l.conta_cnpj)));
+
+/**
+ * Lote de Pix TOTVS: a Fiserv junta vários Pix num crédito só. Procura o
+ * subconjunto de títulos PIX (tipo 26) pagos no dia (ou na véspera) cujos
+ * valores PAGOS (líquidos da taxa) somam exatamente o valor do crédito.
+ * Devolve os itens ou null. Busca em profundidade limitada (maiores primeiro).
+ */
+export function loteTitulosPix(l, itens, usados = new Map(), { maxNos = 300000 } = {}) {
+  const alvo = Math.round(Math.abs(Number(l.valor)) * 100);
+  const livre = (c) => c.valorPago != null && (usados.get(`${c.origem}:${c.id}`) || 0) < VALOR_TOL && Number(c.cr?.tipoDocumento) === 26;
+  const tentar = (datas) => {
+    const pool = itens
+      .filter((c) => livre(c) && datas.includes(c.data))
+      .map((c) => ({ c, cents: Math.round(c.valorPago * 100) }))
+      .filter((x) => x.cents > 0 && x.cents <= alvo)
+      .sort((a, b) => b.cents - a.cents);
+    if (pool.length < 2) return null;
+    const total = pool.reduce((s, x) => s + x.cents, 0);
+    if (total < alvo) return null;
+    let best = null;
+    let nos = 0;
+    const sufixo = new Array(pool.length + 1).fill(0);
+    for (let i = pool.length - 1; i >= 0; i--) sufixo[i] = sufixo[i + 1] + pool[i].cents;
+    const dfs = (i, resto, esc) => {
+      if (best || nos++ > maxNos) return;
+      if (resto === 0) {
+        if (esc.length >= 2) best = [...esc];
+        return;
+      }
+      if (i >= pool.length || resto < 0 || sufixo[i] < resto) return;
+      esc.push(pool[i]);
+      dfs(i + 1, resto - pool[i].cents, esc);
+      esc.pop();
+      if (!best) dfs(i + 1, resto, esc);
+    };
+    dfs(0, alvo, []);
+    return best ? best.map((x) => x.c) : null;
+  };
+  return tentar([l.data]) || tentar([l.data, addDias(l.data, -1)]);
+}
+const itensLotePix = (lote) => lote.map((c) => ({ origem: c.origem, id: c.id, nome: c.nome, doc: c.doc, duplicata: c.duplicata, vencimento: c.vencimento, data: c.data, empresa: c.empresa, detalhe: c.detalhe, valorDuplicata: c.valorPago, valor: c.valorPago, cr: c.cr }));
+const justificativaLotePix = (lote) => `Lote Pix TOTVS (Fiserv): ${lote.length} títulos · ${lote.map((c) => `${(c.nome || '').split(' ').slice(0, 2).join(' ')} ${String(c.duplicata || '').split('|')[0]} ${Number(c.valorPago).toFixed(2)}`).join(' + ')}`;
 // qualquer Pix recebido de cliente (não transferência do grupo, não devolução)
 export const ehEntradaPixCliente = (l) => Number(l.valor) > 0 && String(l.categoria || '') === 'pix' && !l.transferencia_id && !/DEVOLU/i.test(String(l.descricao || ''));
 export const ehEntradaPixMaquininha = (l) => Number(l.valor) > 0 && String(l.banco || '').toUpperCase() === 'STONE' && String(l.categoria || '') === 'pix' && /MAQUININHA/i.test(`${l.descricao || ''} ${l.memo || ''}`);
@@ -1508,7 +1558,7 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
         ? { multiplo: true, itens: alocados, valorTotal: round2(alocados.reduce((s, a) => s + a.valorUsado, 0)), valorDuplicata: round2(alocados.reduce((s, a) => s + a.valorDuplicata, 0)), nome: alocados[0].nome, motivos: ['escolha manual'] }
         : { ...referenciaDe({ ...alocados[0], valor: alocados[0].valorDuplicata, restanteDepois: round2(alocados[0].valorDuplicata - (usados.get(`${alocados[0].origem}:${alocados[0].id}`) || 0) - alocados[0].valorUsado), motivos: ['escolha manual'] }), itens: alocados },
       justificativa: justificativa || (multi ? `${alocados.length} duplicatas: ${alocados.map((a) => `${a.nome || ''} ${a.duplicata || a.id} (${a.valorUsado.toFixed(2)})`).join(' + ')}` : [alocados[0].parcial ? 'PARCIAL' : null, alocados[0].nome, alocados[0].detalhe].filter(Boolean).join(' · ')),
-      automatico: false,
+      automatico: !!automatico,
       pontuacao,
       usuario: usuario || null,
     };
@@ -1889,7 +1939,12 @@ export async function buscarCandidatos(lancamentoId) {
       const cr = await fonteTotvsCR(filiais, janela);
       const usados = await usadosNaJanela({ de: l.data, ate: l.data });
       const candidatos = candidatosPara(l, { totvs: cr }, usados);
-      return { lancamento: l, candidatos, avisos: [], decisao: decidir(candidatos), filiais };
+      let decisao = decidir(candidatos);
+      if (!decisao.automatico && !candidatos.some((c) => !c.parcial) && ehEntradaPixTotvs(l)) {
+        const lote = loteTitulosPix(l, cr, usados);
+        if (lote) decisao = { automatico: true, motivo: 'lote de Pix TOTVS', lote: itensLotePix(lote), justificativa: justificativaLotePix(lote) };
+      }
+      return { lancamento: l, candidatos, avisos: [], decisao, filiais };
     }
     if (!ehEntradaStone(l)) return { lancamento: l, candidatos: [], avisos: ['Só entradas Pix e as vendas Stone (antecipação/liquidação) têm busca automática por enquanto; para boleto/TED use a justificativa manual.'] };
     const loja = lojaStoneDoCnpj(l.conta_cnpj);
@@ -1978,6 +2033,20 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
       const f = crPorCnpj.get(chave);
       l.filiaisConta = f.proprias;
       candidatos = candidatosPara(l, { totvs: f.itens }, usados);
+      if (!candidatos.some((c) => !c.parcial) && ehEntradaPixTotvs(l)) {
+        const lote = loteTitulosPix(l, f.itens, usados);
+        if (lote) {
+          const itens = itensLotePix(lote);
+          try {
+            if (!simular) await salvarConciliacao({ lancamentoId: l.id, origem: 'MULTIPLO', referencia: { itens }, justificativa: justificativaLotePix(lote), usuario, automatico: true, pontuacao: null });
+            for (const c of lote) marcarUso(usados, c.origem, c.id, c.valorPago);
+            resultado.conciliadas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, origem: 'MULTIPLO', nome: `lote Pix ${lote.length} títulos`, score: null });
+          } catch (e) {
+            resultado.avisos.push(`${l.data} ${Number(l.valor).toFixed(2)}: ${e.message}`);
+          }
+          continue;
+        }
+      }
     } else {
       const loja = lojaStoneDoCnpj(l.conta_cnpj);
       if (!loja) {
@@ -2045,4 +2114,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, ehDepositoRedeProvavel, ehDepositoRedeMemo, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, ehDepositoRedeProvavel, ehDepositoRedeMemo, loteTitulosPix, decidir };

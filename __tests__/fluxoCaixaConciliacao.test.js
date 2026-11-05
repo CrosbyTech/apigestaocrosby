@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel, ehDepositoRedeMemo } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel, ehDepositoRedeMemo, loteTitulosPix } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -395,5 +395,24 @@ describe('depósitos da Rede na Sicredi (histórico REDE …)', () => {
     expect(ehDepositoRedeMemo({ valor: 200, memo: 'REDE DEBITO ELO |0009-73' })).toBe(true);
     expect(ehDepositoRedeMemo({ valor: -200, memo: 'REDE DEBITO ELO |0009-73' })).toBe(false);
     expect(ehDepositoRedeMemo({ valor: 200, memo: 'RECEBIMENTO PIX 17177680001007 REDE SUL LTDA' })).toBe(false);
+  });
+});
+
+describe('lote de Pix TOTVS (Fiserv junta vários títulos num crédito)', () => {
+  const tit = (id, pago, data = '2026-10-01', tipo = 26) => ({ origem: 'TOTVS_CR', id, valor: pago + 0.79, valorPago: pago, data, nome: 'CLIENTE ' + id, duplicata: id + '|1', cr: { tipoDocumento: tipo } });
+  const itens = [tit('a', 279.21), tit('b', 148.21), tit('c', 834.14), tit('d', 98.71), tit('e', 972.96), tit('f', 422.36), tit('g', 50, '2026-10-01', 1)];
+  test('acha o subconjunto que soma exatamente o crédito (maiores primeiro)', () => {
+    const l = { valor: 427.42, data: '2026-10-01' };
+    expect(loteTitulosPix(l, itens).map((c) => c.id)).toEqual(['a', 'b']);
+    expect(loteTitulosPix({ valor: 1395.32, data: '2026-10-01' }, itens).map((c) => c.id)).toEqual(['e', 'f']);
+  });
+  test('título já usado, tipo diferente de PIX ou sem soma exata → null', () => {
+    expect(loteTitulosPix({ valor: 427.42, data: '2026-10-01' }, itens, new Map([['TOTVS_CR:a', 279.21]]))).toBeNull();
+    expect(loteTitulosPix({ valor: 148.71, data: '2026-10-01' }, itens)).toBeNull(); // 98.71 + 50 (tipo 1) não vale
+    expect(loteTitulosPix({ valor: 1000, data: '2026-10-01' }, itens)).toBeNull();
+  });
+  test('Sicredi: Pix recebido do CNPJ da própria conta é Pix TOTVS', () => {
+    expect(ehEntradaPixTotvs({ valor: 427.42, categoria: 'pix', descricao: 'RECEBIMENTO PIX', contraparte_doc: '17177680000116', conta_cnpj: '17177680000116' })).toBe(true);
+    expect(ehEntradaPixTotvs({ valor: 427.42, categoria: 'pix', descricao: 'RECEBIMENTO PIX', contraparte_doc: '17177680001007', conta_cnpj: '17177680000116' })).toBe(false);
   });
 });
