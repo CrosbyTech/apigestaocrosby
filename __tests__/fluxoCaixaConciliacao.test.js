@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -311,5 +311,22 @@ describe('saque automático da Pagar.me para a conta Stone', () => {
     expect(ehSaquePagarme(ted, cnpjs)).toBe(true);
     expect(ehSaquePagarme({ ...ted, transferencia_id: 5 }, cnpjs)).toBe(false); // já casada com a saída de outra conta
     expect(ehSaquePagarme({ ...ted, contraparte_doc: '17177680000205' }, cnpjs)).toBe(false);
+  });
+});
+
+describe('compra no cartão × estorno', () => {
+  const compra = (id, data, seq) => ({ id, conta_id: 14, data, seq, valor: -338.27, categoria: 'cartao_compra', descricao: 'COMPRA CARTÃO STONE (PRÉ-PAGO)', contraparte_nome: 'IFD  ATACADAO SA' });
+  const estorno = (id, data, seq) => ({ id, conta_id: 14, data, seq, valor: 338.27, categoria: 'cartao_compra', descricao: 'ESTORNO COMPRA CARTÃO STONE', contraparte_nome: 'IFD  ATACADAO SA' });
+  test('duas compras e dois estornos iguais: cada estorno casa com a compra mais próxima antes dele', () => {
+    const p = parearEstornosCartao([compra(116, '2026-10-16', 116), estorno(117, '2026-10-16', 117), compra(118, '2026-10-16', 118), estorno(132, '2026-10-18', 132)]);
+    expect(p.get(117)).toMatchObject({ papel: 'ESTORNO', parId: 116 });
+    expect(p.get(132)).toMatchObject({ papel: 'ESTORNO', parId: 118 });
+    expect(p.get(116)).toMatchObject({ papel: 'COMPRA', parId: 117 });
+    expect(p.size).toBe(4);
+  });
+  test('estabelecimento diferente, valor diferente ou compra já conciliada não casam', () => {
+    expect(parearEstornosCartao([{ ...compra(1, '2026-10-16', 1), contraparte_nome: 'OUTRA LOJA' }, estorno(2, '2026-10-16', 2)]).size).toBe(0);
+    expect(parearEstornosCartao([{ ...compra(1, '2026-10-16', 1), valor: -300 }, estorno(2, '2026-10-16', 2)]).size).toBe(0);
+    expect(parearEstornosCartao([compra(1, '2026-10-16', 1), estorno(2, '2026-10-16', 2)], new Set([1])).size).toBe(0);
   });
 });

@@ -181,6 +181,57 @@ const conciliacaoPixDevolvido = (par) => ({
   automatico: true,
 });
 
+// ─── compra no cartão × estorno ───────────────────────────────
+// Compra no cartão (pré-pago Stone, débito…) estornada pelo estabelecimento:
+// saída e entrada "ESTORNO COMPRA CARTÃO" de mesmo valor e mesmo estabelecimento
+// na mesma conta, estorno até 60 dias depois da compra. Mesma lógica do Pix
+// devolvido: derivado na leitura, compra já conciliada fica de fora.
+const ehCompraCartao = (l) => Number(l.valor) < 0 && String(l.categoria || '') === 'cartao_compra' && !/ESTORNO/i.test(String(l.descricao || ''));
+const ehEstornoCartao = (l) => Number(l.valor) > 0 && /ESTORNO/i.test(String(l.descricao || '')) && /CART/i.test(String(l.descricao || ''));
+export function parearEstornosCartao(lancamentos, idsComConciliacao = new Set()) {
+  const pares = new Map();
+  const porConta = new Map();
+  for (const l of lancamentos) {
+    if (!ehCompraCartao(l) && !ehEstornoCartao(l)) continue;
+    if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
+    porConta.get(l.conta_id).push(l);
+  }
+  const estab = (l) => normNome(l.contraparte_nome || '').slice(0, 12);
+  for (const lista of porConta.values()) {
+    lista.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : (a.seq ?? 0) - (b.seq ?? 0)));
+    const compras = lista.filter(ehCompraCartao);
+    for (const est of lista.filter(ehEstornoCartao)) {
+      const cands = compras.filter(
+        (c) =>
+          !pares.has(c.id) &&
+          !idsComConciliacao.has(c.id) &&
+          Math.abs(Math.abs(Number(c.valor)) - Number(est.valor)) <= VALOR_TOL &&
+          c.data <= est.data &&
+          diffDias(est.data, c.data) <= 60 &&
+          (!estab(est) || estab(c) === estab(est)) &&
+          // no mesmo dia, a compra tem de vir antes do estorno na ordem do extrato
+          (c.data < est.data || (c.seq ?? 0) < (est.seq ?? Infinity)),
+      );
+      if (!cands.length) continue;
+      const c = cands[cands.length - 1]; // a compra mais próxima antes do estorno
+      pares.set(est.id, { papel: 'ESTORNO', parId: c.id, parValor: round2(c.valor), parData: c.data, parSeq: c.seq ?? null, estabelecimento: c.contraparte_nome || est.contraparte_nome || null });
+      pares.set(c.id, { papel: 'COMPRA', parId: est.id, parValor: round2(est.valor), parData: est.data, parSeq: est.seq ?? null, estabelecimento: c.contraparte_nome || est.contraparte_nome || null });
+    }
+  }
+  return pares;
+}
+const fmtDataBr = (iso) => String(iso || '').slice(0, 10).split('-').reverse().join('/');
+const conciliacaoEstornoCartao = (par) => ({
+  id: null,
+  origem: 'CARTAO_ESTORNADO',
+  referencia: par,
+  justificativa:
+    par.papel === 'COMPRA'
+      ? `Compra no cartão estornada em ${fmtDataBr(par.parData)}${par.estabelecimento ? ` (${par.estabelecimento})` : ''}`
+      : `Estorno da compra no cartão de ${fmtDataBr(par.parData)}${par.estabelecimento ? ` (${par.estabelecimento})` : ''}`,
+  automatico: true,
+});
+
 // ─── saque automático da Pagar.me → conta Stone ───────────────
 // A Pagar.me (grupo Stone) transfere o saldo disponível todo dia para a conta
 // Stone da mesma empresa. No extrato Stone isso aparece como entrada
@@ -245,6 +296,7 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
   const paresBoleto = parearTarifasBoleto(lancamentos);
   const comGravada = new Set(lancamentos.filter((l) => porChave.has(l.chave)).map((l) => l.id));
   const paresDevolucao = parearDevolucoesPix(lancamentos, comGravada);
+  const paresEstorno = parearEstornosCartao(lancamentos, comGravada);
   const pagarme = lancamentos.some((l) => /ENTRE CONTAS STONE|TED RECEBIDA/i.test(semAcento(String(l.descricao || '')))) ? await contasPagarmePorCnpj().catch(() => new Map()) : new Map();
   const cnpjsPagarme = new Set(pagarme.keys());
 
@@ -256,6 +308,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = conciliacaoParBoleto(paresBoleto.get(l.id));
     } else if (paresDevolucao.has(l.id)) {
       l.conciliacao = conciliacaoPixDevolvido(paresDevolucao.get(l.id));
+    } else if (paresEstorno.has(l.id)) {
+      l.conciliacao = conciliacaoEstornoCartao(paresEstorno.get(l.id));
     } else if (ehSaquePagarme(l, cnpjsPagarme)) {
       l.conciliacao = conciliacaoSaquePagarme(l, pagarme.get(cnpjSaquePagarme(l, cnpjsPagarme)));
     } else if (l.transferencia_id && l.transferencia) {
@@ -1736,8 +1790,9 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   // tarifa de boleto × depósito por boleto e Pix enviado × devolução já se resolvem entre si
   const paresBoleto = parearTarifasBoleto(lancs || []);
   const paresDevolucao = parearDevolucoesPix(lancs || []);
+  const paresEstorno = parearEstornosCartao(lancs || []);
   // saídas e entradas Stone (antecipação / liquidação de vendas); as outras entradas ficam pendentes
-  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
+  const alvo = (lancs || []).map(enriquecer).filter((l) => !paresBoleto.has(l.id) && !paresDevolucao.has(l.id) && !paresEstorno.has(l.id)).filter((l) => (l.valor < 0 ? apenas !== 'entradas' : apenas !== 'saidas' && (ehEntradaStone(l) || ehEntradaPixCliente(l))));
   const porConta = new Map();
   for (const l of alvo) {
     if (!porConta.has(l.conta_id)) porConta.set(l.conta_id, []);
@@ -1828,4 +1883,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
