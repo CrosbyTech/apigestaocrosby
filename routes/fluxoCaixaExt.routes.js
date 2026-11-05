@@ -299,7 +299,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const q = req.query;
     try {
-      return successResponse(res, await conciliacao.buscarContasPagar({ duplicata: q.duplicata, fornecedor: q.fornecedor, codigo: q.codigo, cnpj: q.cnpj, nome: q.nome, tipoData: q.tipoData, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, status: q.status, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
+      return successResponse(res, await conciliacao.buscarContasPagar({ duplicata: q.duplicata, fornecedor: q.fornecedor, codigo: q.codigo, cnpj: q.cnpj, nome: q.nome, tipoData: q.tipoData, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, status: q.status, valorMin: q.valorMin, valorMax: q.valorMax, fontes: q.fontes, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
     } catch (e) {
       return tratar(res, e);
     }

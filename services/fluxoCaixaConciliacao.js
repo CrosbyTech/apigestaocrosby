@@ -707,8 +707,11 @@ const porDataDesc = (campo) => (a, b) => String(b[campo] || '').localeCompare(St
  * Busca MANUAL no Contas a Pagar (TOTVS) + Liberação + Solicitações. Devolve
  * só o que bate com os filtros; traz pagas e em aberto (marca `pago`).
  */
-export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax, lancamentoId } = {}) {
+export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax, fontes, lancamentoId } = {}) {
   const avisos = [];
+  // onde procurar: contas a pagar do TOTVS, Liberação de Pagamento e/ou Solicitações Crosby (padrão: as três)
+  const fontesSel = new Set(String(fontes || 'totvs,liberacao,solicitacoes').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean));
+  if (!fontesSel.size) throw new Error('Escolha pelo menos uma fonte (Contas a Pagar, Liberação ou Solicitações).');
   const f = filtrosBuscaManual({ numero: duplicata, pessoa: fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax });
   if (!f.temAlgo) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, período ou valor).');
   if (!f.numero && !f.temPessoa && !f.temPeriodo) throw new Error('Para buscar só por valor, informe também o período (vencimento, emissão ou pagamento).');
@@ -728,9 +731,21 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   const token = tokenData?.access_token;
   if (!token) avisos.push('TOTVS indisponível (sem token).');
   let supplierCodes = null;
+  let docDoCodigo = null; // Solicitações não guardam o código do fornecedor, só o CNPJ/CPF
   if (codigoFornecedor != null) {
     supplierCodes = [codigoFornecedor];
-    if (token) await nomesFornecedores([codigoFornecedor], token).catch(() => {});
+    if (token) {
+      try {
+        const r = await axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { filter: { personCodeList: [codigoFornecedor] }, page: 1, pageSize: 5 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 });
+        const p0 = (r.data?.items || [])[0];
+        if (p0) {
+          cacheNomes.set(p0.code, p0.name || p0.fantasyName || null);
+          docDoCodigo = soDigitos(p0.cnpj || p0.cpf || p0.cpfCnpj) || null;
+        } else avisos.push(`Fornecedor de código ${codigoFornecedor} não encontrado no TOTVS.`);
+      } catch (e) {
+        avisos.push(`fornecedor por código: ${e.message}`);
+      }
+    }
   } else if (token && docFornecedor) {
     try {
       const r = await axios.post(`${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { filter: { cnpjList: [docFornecedor] }, page: 1, pageSize: 20 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 });
@@ -760,7 +775,7 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   }
 
   // nome sem nenhum fornecedor conhecido: no TOTVS não dá para filtrar por nome → não varre tudo
-  const buscarTotvs = token && (f.duplicata || supplierCodes?.length || (!nomeRe && !docFornecedor && codigoFornecedor == null && f.temPeriodo));
+  const buscarTotvs = fontesSel.has('totvs') && token && (f.duplicata || supplierCodes?.length || (!nomeRe && !docFornecedor && codigoFornecedor == null && f.temPeriodo));
   if (buscarTotvs) {
     try {
       const branchCodeList = await getBranchCodes(token);
@@ -809,7 +824,7 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   }
 
   // ── Liberação de Pagamento (qualquer status) e Solicitações, com os mesmos filtros
-  try {
+  if (fontesSel.has('liberacao')) try {
     let q = supabase.from(T.lib).select('id,cd_empresa,nm_empresa,nm_fornecedor,cd_fornecedor,vl_duplicata,vl_real,dt_emissao,dt_vencimento,dt_pagamento,pago_em,status,forma_pagamento,chave_pix,banco_pagamento,nr_duplicata,nr_parcela,ds_despesaitem,dados_completos').neq('status', 'CANCELADO').limit(300);
     if (f.duplicata) q = q.eq('nr_duplicata', f.duplicata);
     if (nomeRe) q = q.ilike('nm_fornecedor', `%${nomeRe}%`);
@@ -822,7 +837,8 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
     if (f.pagamentoAte) q = q.lte('dt_pagamento', f.pagamentoAte);
     if (f.valorMin != null) q = q.gte('vl_duplicata', f.valorMin);
     if (f.valorMax != null) q = q.lte('vl_duplicata', f.valorMax);
-    const { data } = await q;
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
     for (const p of data || []) {
       const doc = soDigitos(p.dados_completos?.nr_cpfcnpj_fornecedor) || null;
       if (docFornecedor && doc && doc !== docFornecedor) continue;
@@ -845,19 +861,27 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   } catch (e) {
     avisos.push(`Liberação de Pagamento: ${e.message}`);
   }
-  if (!f.pagamentoDe && !f.pagamentoAte) try {
-    let q = supabase.from(T.sol).select('id,nm_empresa,supplier_name,supplier_code,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,descricao,tipo_solicitacao,duplicate_code').is('pagamento_liberacao_id', null).not('status', 'in', '("rejeitado","cancelado")').limit(200);
+  if (fontesSel.has('solicitacoes')) try {
+    // todas as etapas (pendente, aprovada, NF, enviada ao TOTVS, paga); a que já virou Liberação aparece pela Liberação
+    let q = supabase.from(T.sol).select('id,nm_empresa,supplier_name,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,descricao,tipo_solicitacao,duplicate_code,pago_em').not('status', 'in', '("rejeitado","cancelado")').limit(300);
+    if (fontesSel.has('liberacao')) q = q.is('pagamento_liberacao_id', null);
+    if (f.pagamentoDe) q = q.gte('pago_em', f.pagamentoDe);
+    if (f.pagamentoAte) q = q.lte('pago_em', `${f.pagamentoAte}T23:59:59`);
     if (f.duplicata) q = q.eq('duplicate_code', f.duplicata);
     if (nomeRe) q = q.ilike('supplier_name', `%${nomeRe}%`);
     if (docFornecedor) q = q.eq('supplier_cpf_cnpj', docFornecedor);
-    if (codigoFornecedor != null) q = q.eq('supplier_code', codigoFornecedor);
+    if (codigoFornecedor != null) {
+      if (docDoCodigo) q = q.eq('supplier_cpf_cnpj', docDoCodigo);
+      else throw new Error('o código do fornecedor não tem CNPJ/CPF no TOTVS para procurar nas solicitações');
+    }
     if (f.de) q = q.gte('dt_vencimento', f.de);
     if (f.ate) q = q.lte('dt_vencimento', f.ate);
     if (f.emissaoDe) q = q.gte('dt_emissao', f.emissaoDe);
     if (f.emissaoAte) q = q.lte('dt_emissao', f.emissaoAte);
     if (f.valorMin != null) q = q.gte('valor_total', f.valorMin);
     if (f.valorMax != null) q = q.lte('valor_total', f.valorMax);
-    const { data } = await q;
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
     for (const s of data || []) {
       out.push({
         origem: 'SOLICITACAO',
@@ -871,8 +895,8 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
         doc: soDigitos(s.supplier_cpf_cnpj) || null,
         empresa: s.nm_empresa || null,
         duplicata: s.duplicate_code ? `${s.duplicate_code}|` : null,
-        detalhe: [s.tipo_solicitacao, s.descricao ? String(s.descricao).slice(0, 60) : null, s.status].filter(Boolean).join(' · '),
-        pago: false,
+        detalhe: [s.tipo_solicitacao, s.descricao ? String(s.descricao).slice(0, 60) : null, ETAPAS_SOL[s.status] || s.status].filter(Boolean).join(' · '),
+        pago: /^pago/i.test(String(s.status || '')) || !!s.pago_em,
       });
     }
   } catch (e) {
