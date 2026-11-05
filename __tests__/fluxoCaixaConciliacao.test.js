@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel, ehDepositoRedeMemo, loteTitulosPix } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel, ehDepositoRedeMemo, loteTitulosPix , filtrosBuscaManual } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -414,5 +414,22 @@ describe('lote de Pix TOTVS (Fiserv junta vários títulos num crédito)', () =>
   test('Sicredi: Pix recebido do CNPJ da própria conta é Pix TOTVS', () => {
     expect(ehEntradaPixTotvs({ valor: 427.42, categoria: 'pix', descricao: 'RECEBIMENTO PIX', contraparte_doc: '17177680000116', conta_cnpj: '17177680000116' })).toBe(true);
     expect(ehEntradaPixTotvs({ valor: 427.42, categoria: 'pix', descricao: 'RECEBIMENTO PIX', contraparte_doc: '17177680001007', conta_cnpj: '17177680000116' })).toBe(false);
+  });
+});
+
+describe('busca manual no contas a pagar/receber: só o que foi pesquisado', () => {
+  test('campos separados (código, CNPJ, nome) e tipo de data com período', () => {
+    const f = filtrosBuscaManual({ codigo: '1234', tipoData: 'pagamento', de: '2026-10-01', ate: '2026-10-31', status: 'pago', valorMin: '10,5' });
+    expect(f).toMatchObject({ codigo: 1234, doc: null, nome: null, pagamentoDe: '2026-10-01', pagamentoAte: '2026-10-31', vencimentoDe: null, status: 'pago', valorMin: 10.5, temPeriodo: true, temPessoa: true });
+    const e = filtrosBuscaManual({ cnpj: '12.345.678/0001-90', tipoData: 'emissao', de: '2026-09-01' });
+    expect(e).toMatchObject({ doc: '12345678000190', emissaoDe: '2026-09-01', emissaoAte: null });
+    const v = filtrosBuscaManual({ nome: ' Ifood  Com ', de: '2026-10-01', ate: '2026-10-31' });
+    expect(v).toMatchObject({ nome: 'Ifood Com', vencimentoDe: '2026-10-01', vencimentoAte: '2026-10-31' });
+  });
+  test('campo único antigo ainda é classificado (código, CNPJ ou nome)', () => {
+    expect(filtrosBuscaManual({ pessoa: '456' })).toMatchObject({ codigo: 456, doc: null, nome: null });
+    expect(filtrosBuscaManual({ pessoa: '12345678000190' })).toMatchObject({ codigo: null, doc: '12345678000190' });
+    expect(filtrosBuscaManual({ pessoa: 'Claro' })).toMatchObject({ codigo: null, doc: null, nome: 'Claro' });
+    expect(filtrosBuscaManual({}).temAlgo).toBe(false);
   });
 });

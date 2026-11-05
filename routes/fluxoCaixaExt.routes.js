@@ -14,7 +14,8 @@
 //   POST   /transferencias/recasar?de&ate  → refaz o casamento automático
 //   PATCH  /lancamentos/:id                 → fornecedor / observação / forma / tipo
 //   GET    /formas                          → formas de pagamento padronizadas
-//   GET    /conciliacao/buscar-cr?titulo|cliente|de|ate|emissaoDe|emissaoAte|valorMin|valorMax → busca manual no contas a receber (entradas Pix)
+//   GET    /conciliacao/buscar-cr?titulo|codigo|cnpj|nome|tipoData(vencimento|emissao|pagamento)|de|ate|status(todos|aberto|pago)|valorMin|valorMax → busca manual no contas a receber (só o pesquisado)
+//   GET    /conciliacao/buscar-cp?duplicata|codigo|cnpj|nome|tipoData|de|ate|status|valorMin|valorMax → busca manual no contas a pagar + Liberação + Solicitações (só o pesquisado)
 //   GET    /conciliacao/candidatos?lancamentoId → candidatos (Liberação, Solicitações, TOTVS CP)
 //   POST   /conciliacao/automatica {contaId?, de, ate} → concilia saídas pendentes com decisão segura
 //   POST   /conciliacao/techfin (arquivos: CSVs da Techfin; ?simular=1) → repasses do Pix TOTVS × extrato × contas a receber
@@ -286,7 +287,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const q = req.query;
     try {
-      return successResponse(res, await conciliacao.buscarContasReceber({ titulo: q.titulo, cliente: q.cliente, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
+      return successResponse(res, await conciliacao.buscarContasReceber({ titulo: q.titulo, cliente: q.cliente, codigo: q.codigo, cnpj: q.cnpj, nome: q.nome, tipoData: q.tipoData, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, status: q.status, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
     } catch (e) {
       return tratar(res, e);
     }
@@ -298,7 +299,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const q = req.query;
     try {
-      return successResponse(res, await conciliacao.buscarContasPagar({ duplicata: q.duplicata, fornecedor: q.fornecedor, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
+      return successResponse(res, await conciliacao.buscarContasPagar({ duplicata: q.duplicata, fornecedor: q.fornecedor, codigo: q.codigo, cnpj: q.cnpj, nome: q.nome, tipoData: q.tipoData, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, status: q.status, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
     } catch (e) {
       return tratar(res, e);
     }

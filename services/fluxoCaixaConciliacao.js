@@ -650,19 +650,74 @@ async function nomesFornecedores(codes, token) {
 }
 
 /**
- * Busca MANUAL no Contas a Pagar (TOTVS) + Liberação + Solicitações, pelos
- * filtros do usuário: nº da duplicata, fornecedor (nome ou CNPJ), vencimento
- * (de/até) e faixa de valor. Traz pagas e em aberto; marca `pago`.
+ * Filtros da busca MANUAL (mesmos das telas Contas a Pagar / Receber):
+ * pessoa por código, CNPJ/CPF ou nome (campos separados; `pessoa` solto
+ * ainda é aceito e classificado), tipo de data (vencimento / emissão /
+ * pagamento) com período, status (todos / aberto / pago) e faixa de valor.
+ * A busca devolve SÓ o que foi pesquisado: sem pré-filtro pelo lançamento,
+ * sem ordenação por proximidade e sem motivos/pontuação.
  */
-export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissaoDe, emissaoAte, valorMin, valorMax, lancamentoId } = {}) {
+export function filtrosBuscaManual({ numero, pessoa, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, pagamentoDe, pagamentoAte, status, valorMin, valorMax }) {
+  const f = {
+    numero: soDigitos(numero) || null,
+    codigo: codigo != null && String(codigo).trim() !== '' ? Number(soDigitos(codigo)) : null,
+    doc: [14, 11].includes(soDigitos(cnpj).length) ? soDigitos(cnpj) : null,
+    nome: limparTxt(nome) || null,
+    vencimentoDe: null,
+    vencimentoAte: null,
+    emissaoDe: emissaoDe || null,
+    emissaoAte: emissaoAte || null,
+    pagamentoDe: pagamentoDe || null,
+    pagamentoAte: pagamentoAte || null,
+    status: ['aberto', 'pago'].includes(String(status || '').toLowerCase()) ? String(status).toLowerCase() : 'todos',
+    valorMin: valorMin != null && valorMin !== '' ? Number(String(valorMin).replace(',', '.')) : null,
+    valorMax: valorMax != null && valorMax !== '' ? Number(String(valorMax).replace(',', '.')) : null,
+  };
+  // campo único antigo: classifica (código < 11 dígitos, CNPJ/CPF, senão nome)
+  const solto = limparTxt(pessoa);
+  if (solto && f.codigo == null && !f.doc && !f.nome) {
+    const dig = soDigitos(solto);
+    if (/^\d+$/.test(solto) && dig.length < 11) f.codigo = Number(dig);
+    else if ([14, 11].includes(dig.length) && !/[A-Za-z]/.test(solto)) f.doc = dig;
+    else f.nome = solto;
+  }
+  if (!Number.isFinite(f.codigo)) f.codigo = null;
+  const modo = String(tipoData || 'vencimento').toLowerCase();
+  if (de || ate) {
+    if (modo === 'emissao') {
+      f.emissaoDe = de || f.emissaoDe;
+      f.emissaoAte = ate || f.emissaoAte;
+    } else if (modo === 'pagamento' || modo === 'liquidacao') {
+      f.pagamentoDe = de || f.pagamentoDe;
+      f.pagamentoAte = ate || f.pagamentoAte;
+    } else {
+      f.vencimentoDe = de || null;
+      f.vencimentoAte = ate || null;
+    }
+  }
+  f.temPeriodo = !!(f.vencimentoDe || f.vencimentoAte || f.emissaoDe || f.emissaoAte || f.pagamentoDe || f.pagamentoAte);
+  f.temPessoa = f.codigo != null || !!f.doc || !!f.nome;
+  f.temAlgo = f.temPessoa || f.temPeriodo || !!f.numero || f.valorMin != null || f.valorMax != null;
+  return f;
+}
+const filtrarStatus = (lista, status) => (status === 'pago' ? lista.filter((c) => c.pago) : status === 'aberto' ? lista.filter((c) => !c.pago) : lista);
+const porDataDesc = (campo) => (a, b) => String(b[campo] || '').localeCompare(String(a[campo] || ''));
+
+/**
+ * Busca MANUAL no Contas a Pagar (TOTVS) + Liberação + Solicitações. Devolve
+ * só o que bate com os filtros; traz pagas e em aberto (marca `pago`).
+ */
+export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax, lancamentoId } = {}) {
   const avisos = [];
-  const f = { duplicata: soDigitos(duplicata) || null, fornecedor: limparTxt(fornecedor), de: de || null, ate: ate || null, emissaoDe: emissaoDe || null, emissaoAte: emissaoAte || null, valorMin: valorMin != null && valorMin !== '' ? Number(valorMin) : null, valorMax: valorMax != null && valorMax !== '' ? Number(valorMax) : null };
-  if (!f.duplicata && !f.fornecedor && !f.de && !f.ate && !f.emissaoDe && !f.emissaoAte && f.valorMin == null && f.valorMax == null) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, emissão, vencimento ou valor).');
-  const digitosForn = soDigitos(f.fornecedor);
-  const docFornecedor = digitosForn.length === 14 || digitosForn.length === 11 ? digitosForn : null;
-  // só dígitos, mais curto que um CPF → é o código do fornecedor no TOTVS
-  const codigoFornecedor = f.fornecedor && /^\d+$/.test(f.fornecedor.trim()) && digitosForn.length < 11 ? Number(digitosForn) : null;
-  const nomeRe = f.fornecedor && !docFornecedor && codigoFornecedor == null ? f.fornecedor : null;
+  const f = filtrosBuscaManual({ numero: duplicata, pessoa: fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax });
+  if (!f.temAlgo) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, período ou valor).');
+  if (!f.numero && !f.temPessoa && !f.temPeriodo) throw new Error('Para buscar só por valor, informe também o período (vencimento, emissão ou pagamento).');
+  f.duplicata = f.numero;
+  f.de = f.vencimentoDe;
+  f.ate = f.vencimentoAte;
+  const docFornecedor = f.doc;
+  const codigoFornecedor = f.codigo;
+  const nomeRe = f.nome;
 
   const usados = await usadosTotais();
   const lanc = lancamentoId ? await lancamentoEnriquecido(lancamentoId) : null;
@@ -704,7 +759,9 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
     if (!supplierCodes.length && !f.duplicata) avisos.push(`Nenhum fornecedor com "${nomeRe}" no histórico de pagamentos; no TOTVS a busca foi só pelos outros filtros.`);
   }
 
-  if (token && (f.duplicata || supplierCodes?.length || f.de || f.ate || f.emissaoDe || f.emissaoAte || f.valorMin != null || f.valorMax != null)) {
+  // nome sem nenhum fornecedor conhecido: no TOTVS não dá para filtrar por nome → não varre tudo
+  const buscarTotvs = token && (f.duplicata || supplierCodes?.length || (!nomeRe && !docFornecedor && codigoFornecedor == null && f.temPeriodo));
+  if (buscarTotvs) {
     try {
       const branchCodeList = await getBranchCodes(token);
       const filter = { branchCodeList };
@@ -714,12 +771,8 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
       if (f.ate) filter.endExpiredDate = `${f.ate}T23:59:59`;
       if (f.emissaoDe) filter.startIssueDate = `${f.emissaoDe}T00:00:00`;
       if (f.emissaoAte) filter.endIssueDate = `${f.emissaoAte}T23:59:59`;
-      if (!f.duplicata && !supplierCodes?.length && !f.de && !f.ate && !f.emissaoDe && !f.emissaoAte) {
-        // só valor: limita ao entorno do lançamento (±60 dias) para não varrer o TOTVS inteiro
-        const base = lanc?.data || new Date().toISOString().slice(0, 10);
-        filter.startExpiredDate = `${addDias(base, -60)}T00:00:00`;
-        filter.endExpiredDate = `${addDias(base, 60)}T23:59:59`;
-      }
+      if (f.pagamentoDe) filter.startSettlementDate = `${f.pagamentoDe}T00:00:00`;
+      if (f.pagamentoAte) filter.endSettlementDate = `${f.pagamentoAte}T23:59:59`;
       if (f.valorMin != null) filter.startDuplicateValue = f.valorMin;
       if (f.valorMax != null) filter.endDuplicateValue = f.valorMax;
       const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 60000 });
@@ -765,6 +818,8 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
     if (f.ate) q = q.lte('dt_vencimento', f.ate);
     if (f.emissaoDe) q = q.gte('dt_emissao', f.emissaoDe);
     if (f.emissaoAte) q = q.lte('dt_emissao', f.emissaoAte);
+    if (f.pagamentoDe) q = q.gte('dt_pagamento', f.pagamentoDe);
+    if (f.pagamentoAte) q = q.lte('dt_pagamento', f.pagamentoAte);
     if (f.valorMin != null) q = q.gte('vl_duplicata', f.valorMin);
     if (f.valorMax != null) q = q.lte('vl_duplicata', f.valorMax);
     const { data } = await q;
@@ -790,7 +845,7 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
   } catch (e) {
     avisos.push(`Liberação de Pagamento: ${e.message}`);
   }
-  try {
+  if (!f.pagamentoDe && !f.pagamentoAte) try {
     let q = supabase.from(T.sol).select('id,nm_empresa,supplier_name,supplier_code,supplier_cpf_cnpj,valor_total,dt_vencimento,dt_emissao,status,forma_pagamento,pagamento_liberacao_id,descricao,tipo_solicitacao,duplicate_code').is('pagamento_liberacao_id', null).not('status', 'in', '("rejeitado","cancelado")').limit(200);
     if (f.duplicata) q = q.eq('duplicate_code', f.duplicata);
     if (nomeRe) q = q.ilike('supplier_name', `%${nomeRe}%`);
@@ -826,24 +881,20 @@ export async function buscarContasPagar({ duplicata, fornecedor, de, ate, emissa
 
   // duplicatas da Liberação já cobrem as do TOTVS com o mesmo número
   const dupsLib = new Set(out.filter((c) => c.origem === 'LIBERACAO' && c.duplicata).map((c) => c.duplicata));
-  const lista = out
-    .filter((c) => !(c.origem === 'TOTVS_CP' && dupsLib.has(c.duplicata)))
-    .map((c) => {
-      const usado = usados.get(`${c.origem}:${c.id}`) || 0;
-      return { ...c, usado, restante: round2((c.valorDuplicata ?? c.valor) - usado) };
-    })
-    .filter((c) => c.restante > VALOR_TOL);
-  // mais perto do valor/data da saída primeiro
-  const alvo = lanc ? Math.abs(lanc.valor) : null;
-  lista.sort((a, b) => {
-    if (alvo != null) {
-      const da = Math.abs((a.restante ?? a.valor) - alvo);
-      const db = Math.abs((b.restante ?? b.valor) - alvo);
-      if (da !== db) return da - db;
-    }
-    return String(b.vencimento || '').localeCompare(String(a.vencimento || ''));
-  });
-  return { candidatos: lista.slice(0, 200), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
+  const lista = filtrarStatus(
+    out
+      .filter((c) => !(c.origem === 'TOTVS_CP' && dupsLib.has(c.duplicata)))
+      .map((c) => {
+        const usado = usados.get(`${c.origem}:${c.id}`) || 0;
+        const restante = round2((c.valorDuplicata ?? c.valor) - usado);
+        // título já todo usado em outra conciliação continua na lista (foi pesquisado), só não pode ser escolhido
+        return { ...c, usado, restante, esgotada: restante <= VALOR_TOL, motivos: [], score: null };
+      }),
+    f.status,
+  );
+  // só o que foi pesquisado, do vencimento mais recente para o mais antigo (sem ranking pelo lançamento)
+  lista.sort(porDataDesc('vencimento'));
+  return { candidatos: lista.slice(0, 300), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
 }
 const limparTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
@@ -1031,33 +1082,44 @@ async function filiaisParaPix(l) {
  * filtra por título, código/CPF-CNPJ do cliente e datas; nome e valor são
  * filtrados aqui (nome só entre os títulos do mês da linha, já carregados).
  */
-export async function buscarContasReceber({ titulo, cliente, de, ate, emissaoDe, emissaoAte, valorMin, valorMax, lancamentoId } = {}) {
+export async function buscarContasReceber({ titulo, cliente, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax, lancamentoId } = {}) {
   const avisos = [];
-  const f = { titulo: soDigitos(titulo) || null, cliente: limparTxt(cliente), de: de || null, ate: ate || null, emissaoDe: emissaoDe || null, emissaoAte: emissaoAte || null, valorMin: valorMin != null && valorMin !== '' ? Number(valorMin) : null, valorMax: valorMax != null && valorMax !== '' ? Number(valorMax) : null };
-  if (!f.titulo && !f.cliente && !f.de && !f.ate && !f.emissaoDe && !f.emissaoAte && f.valorMin == null && f.valorMax == null) throw new Error('Informe pelo menos um filtro (título, cliente, emissão, vencimento ou valor).');
-  const dig = soDigitos(f.cliente);
-  const docCliente = dig.length === 11 || dig.length === 14 ? dig : null;
-  const codCliente = f.cliente && /^\d+$/.test(f.cliente) && dig.length < 11 ? Number(dig) : null;
-  const nomeRe = f.cliente && !docCliente && codCliente == null ? normNome(f.cliente) : null;
+  const f = filtrosBuscaManual({ numero: titulo, pessoa: cliente, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax });
+  if (!f.temAlgo) throw new Error('Informe pelo menos um filtro (título, cliente, período ou valor).');
+  // a API não filtra por nome nem por valor: sem período seria varrer tudo
+  if (!f.numero && f.codigo == null && !f.doc && !f.temPeriodo) throw new Error('Para buscar por nome do cliente ou só por valor, informe também o período (vencimento, emissão ou pagamento).');
+  f.titulo = f.numero;
+  f.cliente = f.nome || (f.doc ? f.doc : f.codigo != null ? String(f.codigo) : '');
+  f.de = f.vencimentoDe;
+  f.ate = f.vencimentoAte;
+  const docCliente = f.doc;
+  const codCliente = f.codigo;
+  const nomeRe = f.nome ? normNome(f.nome) : null;
 
   const lanc = lancamentoId ? await lancamentoEnriquecido(lancamentoId) : null;
   const { filiais, proprias } = lanc ? await filiasSeguras(lanc) : { filiais: [], proprias: [] };
   const tokenData = await getToken();
   if (!tokenData?.access_token) throw new Error('Token TOTVS indisponível.');
   const token = tokenData.access_token;
-  const branchCodeList = filiais.length ? filiais : await getBranchCodes(token);
+  // busca manual vale para todas as empresas (a conta não restringe o que foi pesquisado)
+  const branchCodeList = await getBranchCodes(token);
   const usados = await usadosTotais();
 
   let itens = [];
   const soValor = !f.titulo && !docCliente && codCliente == null && !nomeRe && !f.de && !f.ate && !f.emissaoDe && !f.emissaoAte;
   if ((nomeRe && !f.titulo) || soValor) {
-    // nome ou só valor: a API não filtra por isso → procura entre os títulos
-    // emitidos/pagos no mês da linha (já carregados para a conciliação)
-    const base = lanc?.data || new Date().toISOString().slice(0, 10);
-    const todos = await fonteTotvsCR(branchCodeList, janelaMensal({ de: base, ate: base }));
+    // nome ou só valor: a API não filtra por isso → pede os títulos do PERÍODO
+    // informado (vencimento/emissão/pagamento) e filtra o nome aqui
+    const filter = { branchCodeList, documentTypeList: Object.keys(TIPOS_CR_PIX).map(Number) };
+    if (f.de) filter.startExpiredDate = `${f.de}T00:00:00`;
+    if (f.ate) filter.endExpiredDate = `${f.ate}T23:59:59`;
+    if (f.emissaoDe) filter.startIssueDate = `${f.emissaoDe}T00:00:00`;
+    if (f.emissaoAte) filter.endIssueDate = `${f.emissaoAte}T23:59:59`;
+    if (f.pagamentoDe) filter.startPaymentDate = `${f.pagamentoDe}T00:00:00`;
+    if (f.pagamentoAte) filter.endPaymentDate = `${f.pagamentoAte}T23:59:59`;
+    const todos = await titulosCRPorFiltro(filter, token, avisos);
     itens = nomeRe ? todos.filter((c) => normNome(c.nome || '').includes(nomeRe)) : todos;
-    if (nomeRe && !itens.length) avisos.push(`Nenhum cliente com "${f.cliente}" nos títulos emitidos/pagos no mês da linha; tente o CPF/CNPJ ou o código do cliente.`);
-    if (soValor) avisos.push('Só valor: busca entre os títulos emitidos ou pagos no mês da linha.');
+    if (nomeRe && !itens.length) avisos.push(`Nenhum cliente com "${f.cliente}" nos títulos do período; tente o CPF/CNPJ ou o código do cliente.`);
   } else {
     const filter = { branchCodeList, documentTypeList: Object.keys(TIPOS_CR_PIX).map(Number) };
     if (f.titulo) filter.receivableCodeList = [Number(f.titulo)];
@@ -1067,60 +1129,65 @@ export async function buscarContasReceber({ titulo, cliente, de, ate, emissaoDe,
     if (f.ate) filter.endExpiredDate = `${f.ate}T23:59:59`;
     if (f.emissaoDe) filter.startIssueDate = `${f.emissaoDe}T00:00:00`;
     if (f.emissaoAte) filter.endIssueDate = `${f.emissaoAte}T23:59:59`;
-    const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`, { filter, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 90000 });
-    const first = await pedir(1);
-    let brutos = [...(first.data?.items || [])];
-    const totalPages = Math.min(Number(first.data?.totalPages) || 1, 10);
-    for (let p = 2; p <= totalPages; p++) brutos.push(...((await pedir(p)).data?.items || []));
-    if ((Number(first.data?.totalPages) || 1) > 10) avisos.push('Busca limitada aos primeiros 1.000 títulos; refine os filtros.');
-    const vistos = new Set();
-    brutos = brutos.filter((it) => {
-      const k = `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`;
-      if (vistos.has(k) || ![1, 2].includes(Number(it.status))) return false;
-      vistos.add(k);
-      return true;
-    });
-    await nomesClientes(brutos, token);
-    itens = brutos.map((it) => {
-      const liquidado = !!(it.settlementDate || it.paymentDate);
-      const dataPag = liquidado ? String(it.paymentDate || it.settlementDate).slice(0, 10) : null;
-      const tipo = TIPOS_CR[it.documentType] || `tipo ${it.documentType}`;
-      return {
-        origem: 'TOTVS_CR',
-        id: `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`,
-        branch: Number(it.branchCode),
-        valor: round2(it.installmentValue),
-        valorPago: liquidado && it.paidValue ? round2(it.paidValue) : null,
-        data: dataPag || (it.issueDate ? String(it.issueDate).slice(0, 10) : null),
-        emissao: it.issueDate ? String(it.issueDate).slice(0, 10) : null,
-        nome: cacheClientes.get(it.customerCode) || null,
-        doc: soDigitos(it.customerCpfCnpj) || null,
-        empresa: `Empresa ${it.branchCode}`,
-        detalhe: [tipo, it.bearerName ? `portador ${it.bearerName}` : null, `título ${it.receivableCode}/${it.installmentCode}`, `emitido ${String(it.issueDate || '').slice(0, 10)}`, liquidado ? `pago ${dataPag}` : 'em aberto'].filter(Boolean).join(' · '),
-        duplicata: `${it.receivableCode}|${it.installmentCode}`,
-        vencimento: it.expiredDate ? String(it.expiredDate).slice(0, 10) : null,
-        cr: { tipoDocumento: it.documentType, tipo, portador: it.bearerName, portadorCodigo: it.bearerCode, clienteCodigo: it.customerCode, liquidacao: dataPag, emissao: it.issueDate ? String(it.issueDate).slice(0, 10) : null, valorTitulo: round2(it.installmentValue), valorPago: round2(it.paidValue || 0), juros: round2(it.interestValue || 0), desconto: round2(it.discountValue || 0), status: it.status },
-      };
-    });
+    if (f.pagamentoDe) filter.startPaymentDate = `${f.pagamentoDe}T00:00:00`;
+    if (f.pagamentoAte) filter.endPaymentDate = `${f.pagamentoAte}T23:59:59`;
+    itens = await titulosCRPorFiltro(filter, token, avisos);
   }
   // valor (a API ignora faixa de valor): título OU valor pago dentro da faixa
   if (f.valorMin != null) itens = itens.filter((c) => c.valor >= f.valorMin || (c.valorPago != null && c.valorPago >= f.valorMin));
   if (f.valorMax != null) itens = itens.filter((c) => c.valor <= f.valorMax || (c.valorPago != null && c.valorPago <= f.valorMax));
-  const alvo = lanc ? Math.abs(lanc.valor) : null;
-  const lista = itens.map((c) => {
-    const capacidade = c.valorPago ?? c.valor; // o que entra na conta
-    const usado = usados.get(`${c.origem}:${c.id}`) || 0;
-    return { ...c, valorDuplicata: capacidade, pago: c.valorPago != null, usado: round2(usado), restante: round2(capacidade - usado), motivos: [], score: null, ...(proprias.includes(c.branch) ? { empresaDaConta: true } : {}) };
-  }).filter((c) => c.restante > VALOR_TOL);
-  lista.sort((a, b) => {
-    if (alvo != null) {
-      const da = Math.abs(a.restante - alvo);
-      const db = Math.abs(b.restante - alvo);
-      if (da !== db) return da - db;
-    }
-    return String(b.data || '').localeCompare(String(a.data || ''));
+  const lista = filtrarStatus(
+    itens
+      .map((c) => {
+        const capacidade = c.valorPago ?? c.valor; // o que entra na conta
+        const usado = usados.get(`${c.origem}:${c.id}`) || 0;
+        const restante = round2(capacidade - usado);
+        return { ...c, valorDuplicata: capacidade, pago: c.valorPago != null, usado: round2(usado), restante, esgotada: restante <= VALOR_TOL, motivos: [], score: null, ...(proprias.includes(c.branch) ? { empresaDaConta: true } : {}) };
+      }),
+    f.status,
+  );
+  // só o que foi pesquisado, do mais recente para o mais antigo (sem ranking pelo lançamento)
+  lista.sort(porDataDesc('data'));
+  return { candidatos: lista.slice(0, 300), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
+}
+
+// títulos do contas a receber (tipos Pix) por filtro da API, já no formato dos candidatos
+async function titulosCRPorFiltro(filter, token, avisos) {
+  const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-receivable/v2/documents/search`, { filter, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 90000 });
+  const first = await pedir(1);
+  let brutos = [...(first.data?.items || [])];
+  const totalPages = Math.min(Number(first.data?.totalPages) || 1, 10);
+  for (let p = 2; p <= totalPages; p++) brutos.push(...((await pedir(p)).data?.items || []));
+  if ((Number(first.data?.totalPages) || 1) > 10) avisos.push('Busca limitada aos primeiros 1.000 títulos; refine os filtros.');
+  const vistos = new Set();
+  brutos = brutos.filter((it) => {
+    const k = `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`;
+    if (vistos.has(k) || ![1, 2].includes(Number(it.status))) return false;
+    vistos.add(k);
+    return true;
   });
-  return { candidatos: lista.slice(0, 200), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
+  await nomesClientes(brutos, token);
+  return brutos.map((it) => {
+    const liquidado = !!(it.settlementDate || it.paymentDate);
+    const dataPag = liquidado ? String(it.paymentDate || it.settlementDate).slice(0, 10) : null;
+    const tipo = TIPOS_CR[it.documentType] || `tipo ${it.documentType}`;
+    return {
+      origem: 'TOTVS_CR',
+      id: `${it.branchCode}|${it.receivableCode}|${it.installmentCode}`,
+      branch: Number(it.branchCode),
+      valor: round2(it.installmentValue),
+      valorPago: liquidado && it.paidValue ? round2(it.paidValue) : null,
+      data: dataPag || (it.issueDate ? String(it.issueDate).slice(0, 10) : null),
+      emissao: it.issueDate ? String(it.issueDate).slice(0, 10) : null,
+      nome: cacheClientes.get(it.customerCode) || null,
+      doc: soDigitos(it.customerCpfCnpj) || null,
+      empresa: `Empresa ${it.branchCode}`,
+      detalhe: [tipo, it.bearerName ? `portador ${it.bearerName}` : null, `título ${it.receivableCode}/${it.installmentCode}`, `emitido ${String(it.issueDate || '').slice(0, 10)}`, liquidado ? `pago ${dataPag}` : 'em aberto'].filter(Boolean).join(' · '),
+      duplicata: `${it.receivableCode}|${it.installmentCode}`,
+      vencimento: it.expiredDate ? String(it.expiredDate).slice(0, 10) : null,
+      cr: { tipoDocumento: it.documentType, tipo, portador: it.bearerName, portadorCodigo: it.bearerCode, clienteCodigo: it.customerCode, liquidacao: dataPag, emissao: it.issueDate ? String(it.issueDate).slice(0, 10) : null, valorTitulo: round2(it.installmentValue), valorPago: round2(it.paidValue || 0), juros: round2(it.interestValue || 0), desconto: round2(it.discountValue || 0), status: it.status },
+    };
+  });
 }
 
 // ─── depósito Stone × títulos de cartão do TOTVS ──────────────
