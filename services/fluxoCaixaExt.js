@@ -113,6 +113,21 @@ function nomesBatem(a, b) {
   if (p < 8) return false;
   return x.startsWith(y.slice(0, p)) || y.startsWith(x.slice(0, p)) || x.includes(y) || y.includes(x);
 }
+// Nomes pelos quais cada empresa do grupo aparece nos extratos (razão social
+// antiga/nova, nome do sócio no Pix). Chave = raiz do CNPJ da conta.
+const APELIDOS_EMPRESA = {
+  17177680: ['FERREIRA COMERCIO E CONFECCOES LTDA', 'CROSBY CR VESTUARIO LTDA', 'CROSBY'],
+  27728810: ['FA MODA & VAREJO LTDA', 'FABIO FERREIRA DE LIMA AZEVEDO', 'FABIO FERREIRA DE LIMA AZEVEDO LTDA'],
+  53661116: ['IRMAOS VAREJO COMERCIAL LTDA', 'FLAVIO FERREIRA DE LIMA AZEVEDO LTDA', 'FLAVIO FERREIRA DE LIMA AZEVEDO'],
+  33592092: ['IRMAOS CR VESTUARIO LTDA'],
+};
+// contraparte do lançamento bate com a conta (titular gravado OU qualquer nome da empresa)
+function contraparteBateConta(nome, conta) {
+  if (!nome || !conta) return false;
+  if (nomesBatem(nome, conta.titular_nome)) return true;
+  const raiz = String(conta.titular_cnpj || '').replace(/\D/g, '').slice(0, 8);
+  return (APELIDOS_EMPRESA[raiz] || []).some((ap) => nomesBatem(nome, ap));
+}
 
 const bancoBate = (textoBanco, banco) => {
   const up = semAcento(textoBanco).toUpperCase();
@@ -500,22 +515,18 @@ export async function casarTransferencias({ de, ate, escopo }) {
     if (!entradasPorValor.has(k)) entradasPorValor.set(k, []);
     entradasPorValor.get(k).push(r);
   }
-  const usados = new Set();
-  const pares = [];
+  // 1) pontua TODAS as combinações saída × entrada de mesmo valor (entrada até
+  //    3 dias depois: PIX agendado / fim de semana); 2) fecha os pares do
+  //    melhor para o pior — assim um encadeamento A→B→C (mesmo valor, mesmo
+  //    dia) vira A→B e B→C em vez de A→C com as pontas de B soltas.
+  const combos = [];
   for (const s of rows) {
-    if (Number(s.valor) >= 0 || Math.abs(Number(s.valor)) < 1 || usados.has(s.id)) continue;
+    if (Number(s.valor) >= 0 || Math.abs(Number(s.valor)) < 1) continue;
     const origem = porId.get(s.conta_id);
-    // a entrada pode cair até 3 dias depois da saída (PIX agendado/fim de
-    // semana: sexta na Stone → segunda na Sicredi); acima de 1 dia exige
-    // mais evidência (CNPJ/nome), ver pontuação abaixo
-    const cands = (entradasPorValor.get(cents(s.valor)) || []).filter((e) => {
-      if (usados.has(e.id) || e.conta_id === s.conta_id) return false;
-      const d = diffDias(e.data, s.data);
-      return d >= 0 && d <= 3;
-    });
-    if (!cands.length) continue;
-    let melhor = null;
-    for (const e of cands) {
+    for (const e of entradasPorValor.get(cents(s.valor)) || []) {
+      if (e.conta_id === s.conta_id) continue;
+      const dd = diffDias(e.data, s.data);
+      if (dd < 0 || dd > 3) continue;
       const destino = porId.get(e.conta_id);
       let sc = 0;
       if (s.contraparte_doc && destino?.titular_cnpj) {
@@ -526,16 +537,21 @@ export async function casarTransferencias({ de, ate, escopo }) {
         if (e.contraparte_doc === origem.titular_cnpj) sc += 3;
         else if (e.contraparte_doc.slice(0, 8) === origem.titular_cnpj.slice(0, 8)) sc += 1;
       }
-      if (nomesBatem(s.contraparte_nome, destino?.titular_nome)) sc += 2;
-      if (nomesBatem(e.contraparte_nome, origem?.titular_nome)) sc += 2;
+      if (contraparteBateConta(s.contraparte_nome, destino)) sc += 2;
+      if (contraparteBateConta(e.contraparte_nome, origem)) sc += 2;
       if (s.contraparte_banco && destino && bancoBate(s.contraparte_banco, destino.banco)) sc += 1;
       if (e.contraparte_banco && origem && bancoBate(e.contraparte_banco, origem.banco)) sc += 1;
-      const dd = diffDias(e.data, s.data);
       if (dd === 0) sc += 1;
       else if (dd >= 2) sc -= 1;
-      if (!melhor || sc > melhor.sc) melhor = { e, sc };
+      if (sc >= 2) combos.push({ s, e, sc, dd });
     }
-    if (!melhor || melhor.sc < 2) continue;
+  }
+  combos.sort((a, b) => b.sc - a.sc || a.dd - b.dd || (a.s.data < b.s.data ? -1 : a.s.data > b.s.data ? 1 : 0));
+  const usados = new Set();
+  const pares = [];
+  for (const { s, e: melhorE, sc } of combos) {
+    if (usados.has(s.id) || usados.has(melhorE.id)) continue;
+    const melhor = { e: melhorE, sc };
     usados.add(s.id);
     usados.add(melhor.e.id);
     pares.push({
