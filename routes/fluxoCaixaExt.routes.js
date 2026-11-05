@@ -17,6 +17,7 @@
 //   GET    /conciliacao/buscar-cr?titulo|cliente|de|ate|emissaoDe|emissaoAte|valorMin|valorMax → busca manual no contas a receber (entradas Pix)
 //   GET    /conciliacao/candidatos?lancamentoId → candidatos (Liberação, Solicitações, TOTVS CP)
 //   POST   /conciliacao/automatica {contaId?, de, ate} → concilia saídas pendentes com decisão segura
+//   POST   /conciliacao/techfin (arquivos: CSVs da Techfin; ?simular=1) → repasses do Pix TOTVS × extrato × contas a receber
 //   POST   /conciliacao {lancamentoId, origem, referencia, justificativa} → grava/justifica
 //   DELETE /conciliacao/:id                  → desfaz
 // Sem as tabelas → 503 MIGRATION_PENDING (migrations/fluxo_caixa_ext.sql).
@@ -32,6 +33,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { FORMAS } from '../utils/extratosBancariosPdf.js';
 import fluxo, { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 import conciliacao from '../services/fluxoCaixaConciliacao.js';
+import { importarTechfin } from '../services/techfinConciliacao.js';
 import { urlComprovante } from '../services/comprovantesStone.js';
 
 const upload = multer({
@@ -297,6 +299,20 @@ router.get(
     const q = req.query;
     try {
       return successResponse(res, await conciliacao.buscarContasPagar({ duplicata: q.duplicata, fornecedor: q.fornecedor, de: q.de, ate: q.ate, emissaoDe: q.emissaoDe, emissaoAte: q.emissaoAte, valorMin: q.valorMin, valorMax: q.valorMax, lancamentoId: q.lancamentoId ? Number(q.lancamentoId) : null }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.post(
+  '/conciliacao/techfin',
+  comUpload([{ name: 'arquivos', maxCount: 60 }, { name: 'arquivo', maxCount: 1 }]),
+  asyncHandler(async (req, res) => {
+    try {
+      const simular = ['1', 'true'].includes(String(req.query?.simular ?? req.body?.simular ?? ''));
+      const r = await importarTechfin({ arquivos: req.arquivos.map((f) => ({ buffer: f.buffer, nome: f.originalname })), usuario: usuarioDe(req), simular, escopo });
+      return successResponse(res, r, simular ? 'Simulação concluída' : `${r.totais.conciliadas} repasse(s) conciliado(s)`);
     } catch (e) {
       return tratar(res, e);
     }

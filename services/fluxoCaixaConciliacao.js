@@ -933,7 +933,7 @@ async function nomesClientes(itens, token) {
 }
 
 const cacheCR = new Map();
-async function fonteTotvsCR(branchCodes, { de, ate }) {
+export async function fonteTotvsCR(branchCodes, { de, ate }) {
   const key = `${branchCodes.join(',')}|${de}|${ate}`;
   const hit = cacheCR.get(key);
   if (hit && hit.itens && Date.now() - hit.em < 60 * 60 * 1000) return hit.itens;
@@ -1494,10 +1494,10 @@ async function usadosNaJanela({ de, ate }) {
   return m;
 }
 // uso acumulado de TODAS as conciliações (busca manual pode trazer duplicatas antigas)
-async function usadosTotais() {
+export async function usadosTotais() {
   return usadosNaJanela({ de: '2000-01-01', ate: '2099-12-31' });
 }
-const marcarUso = (usados, origem, id, valor) => usados.set(`${origem}:${id}`, round2((usados.get(`${origem}:${id}`) || 0) + Math.abs(valor)));
+export const marcarUso = (usados, origem, id, valor) => usados.set(`${origem}:${id}`, round2((usados.get(`${origem}:${id}`) || 0) + Math.abs(valor)));
 
 // ─── gravação ─────────────────────────────────────────────────
 async function lancamentoComChave(lancamentoId) {
@@ -1512,7 +1512,7 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
     const pessoa = PESSOAS_PRO_LABORE.find((p) => p.id === referencia?.pessoaId) || PESSOAS_PRO_LABORE.find((p) => p.cpf === soDigitos(referencia?.cpf));
@@ -1542,11 +1542,13 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
       if (disponivel <= VALOR_TOL) throw new Error(`A duplicata ${it.duplicata || it.id} (R$ ${valorDup.toFixed(2)}) já foi totalmente usada em outras saídas.`);
       const usar = round2(Math.min(disponivel, restante));
       restante = round2(restante - usar);
-      alocados.push({ origem: it.origem, id: it.id, nome: it.nome, doc: it.doc, duplicata: it.duplicata, vencimento: it.vencimento, data: it.data, empresa: it.empresa, detalhe: it.detalhe, valorDuplicata: valorDup, valorUsado: usar, parcial: usar < disponivel - VALOR_TOL || jaUsado > VALOR_TOL });
+      alocados.push({ origem: it.origem, id: it.id, nome: it.nome, doc: it.doc, duplicata: it.duplicata, vencimento: it.vencimento, data: it.data, empresa: it.empresa, detalhe: it.detalhe, valorDuplicata: valorDup, valorUsado: usar, parcial: usar < disponivel - VALOR_TOL || jaUsado > VALOR_TOL, ...(it.cr ? { cr: it.cr } : {}), ...(it.techfin ? { techfin: it.techfin } : {}) });
       if (restante <= VALOR_TOL) break;
     }
     if (restante > VALOR_TOL) throw new Error(`As duplicatas selecionadas (R$ ${round2(Math.abs(Number(l.valor)) - restante).toFixed(2)} disponíveis) não cobrem a saída de R$ ${Math.abs(Number(l.valor)).toFixed(2)}.`);
     const multi = alocados.length > 1;
+    const motivos = Array.isArray(referencia.motivos) && referencia.motivos.length ? referencia.motivos : ['escolha manual'];
+    const extra = referencia.techfin ? { techfin: referencia.techfin } : {};
     const row = {
       conta_id: l.conta_id,
       lancamento_id: l.id,
@@ -1555,8 +1557,8 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
       valor: l.valor,
       origem: multi ? 'MULTIPLO' : alocados[0].origem,
       referencia: multi
-        ? { multiplo: true, itens: alocados, valorTotal: round2(alocados.reduce((s, a) => s + a.valorUsado, 0)), valorDuplicata: round2(alocados.reduce((s, a) => s + a.valorDuplicata, 0)), nome: alocados[0].nome, motivos: ['escolha manual'] }
-        : { ...referenciaDe({ ...alocados[0], valor: alocados[0].valorDuplicata, restanteDepois: round2(alocados[0].valorDuplicata - (usados.get(`${alocados[0].origem}:${alocados[0].id}`) || 0) - alocados[0].valorUsado), motivos: ['escolha manual'] }), itens: alocados },
+        ? { multiplo: true, itens: alocados, valorTotal: round2(alocados.reduce((s, a) => s + a.valorUsado, 0)), valorDuplicata: round2(alocados.reduce((s, a) => s + a.valorDuplicata, 0)), nome: alocados[0].nome, motivos, ...extra }
+        : { ...referenciaDe({ ...alocados[0], valor: alocados[0].valorDuplicata, restanteDepois: round2(alocados[0].valorDuplicata - (usados.get(`${alocados[0].origem}:${alocados[0].id}`) || 0) - alocados[0].valorUsado), motivos }), itens: alocados, ...extra },
       justificativa: justificativa || (multi ? `${alocados.length} duplicatas: ${alocados.map((a) => `${a.nome || ''} ${a.duplicata || a.id} (${a.valorUsado.toFixed(2)})`).join(' + ')}` : [alocados[0].parcial ? 'PARCIAL' : null, alocados[0].nome, alocados[0].detalhe].filter(Boolean).join(' · ')),
       automatico: !!automatico,
       pontuacao,
