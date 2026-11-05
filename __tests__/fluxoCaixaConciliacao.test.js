@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -294,5 +294,22 @@ describe('Pix enviado × devolução recebida', () => {
   test('contraparte diferente ou saída depois da devolução não casa', () => {
     expect(parearDevolucoesPix([sd(1, 1, { contraparte_nome: 'OUTRA EMPRESA' }), dev(2, 2)]).size).toBe(0);
     expect(parearDevolucoesPix([dev(2, 2), sd(1, 3, { data: '2026-10-27' })]).size).toBe(0);
+  });
+});
+
+describe('saque automático da Pagar.me para a conta Stone', () => {
+  const cnpjs = new Set(['27728810000549', '17177680001007']);
+  const l = (over = {}) => ({ valor: 39751.81, banco: 'STONE', descricao: 'TRANSFERÊNCIA ENTRE CONTAS STONE', memo: 'Fabio Ferreira De Lima Azevedo - Transferência | Conta Stone', conta_cnpj: '27728810000549', ...over });
+  test('entrada "entre contas Stone" em conta Stone com Pagar.me do mesmo CNPJ é saque Pagar.me', () => {
+    expect(ehSaquePagarme(l(), cnpjs)).toBe(true);
+    expect(ehSaquePagarme(l({ conta_cnpj: '17177680000205' }), cnpjs)).toBe(false); // João Pessoa não tem Pagar.me
+    expect(ehSaquePagarme(l({ descricao: 'RECEBIMENTO PIX' }), cnpjs)).toBe(false);
+    expect(ehSaquePagarme(l({ valor: -10 }), cnpjs)).toBe(false);
+  });
+  test('TED recebida na Sicredi vinda do CNPJ da conta Pagar.me também é saque Pagar.me', () => {
+    const ted = { valor: 5870.81, banco: 'SICREDI', descricao: 'TED RECEBIDA', memo: 'TED 17177680001007 FERREIRA COMERCIO E CONFECCOES', contraparte_doc: '17177680001007', conta_cnpj: '17177680000116' };
+    expect(ehSaquePagarme(ted, cnpjs)).toBe(true);
+    expect(ehSaquePagarme({ ...ted, transferencia_id: 5 }, cnpjs)).toBe(false); // já casada com a saída de outra conta
+    expect(ehSaquePagarme({ ...ted, contraparte_doc: '17177680000205' }, cnpjs)).toBe(false);
   });
 });

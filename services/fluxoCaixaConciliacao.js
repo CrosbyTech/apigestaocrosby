@@ -181,6 +181,36 @@ const conciliacaoPixDevolvido = (par) => ({
   automatico: true,
 });
 
+// ─── saque automático da Pagar.me → conta Stone ───────────────
+// A Pagar.me (grupo Stone) transfere o saldo disponível todo dia para a conta
+// Stone da mesma empresa. No extrato Stone isso aparece como entrada
+// "TRANSFERÊNCIA ENTRE CONTAS STONE" com o nome do próprio titular (Fabio
+// Ferreira… para FA Moda, Ferreira Comércio para o CNPJ 0010-07). A leitura
+// dos saques pela API da Pagar.me está bloqueada por IP, então a entrada é
+// reconhecida pela conta Pagar.me cadastrada com o MESMO CNPJ da conta Stone.
+// Duas formas: (a) "entre contas Stone" na conta Stone do mesmo CNPJ da Pagar.me;
+// (b) TED recebida em qualquer banco cujo remetente é o CNPJ da conta Pagar.me
+// (ex.: Pagar.me CROSBY, CNPJ 0010-07, saca para a Sicredi da Ferreira Comércio).
+export const cnpjSaquePagarme = (l, cnpjsPagarme) => {
+  if (Number(l.valor) <= 0 || l.transferencia_id) return null;
+  const desc = String(l.descricao || '');
+  if (String(l.banco || '').toUpperCase() === 'STONE' && /ENTRE CONTAS STONE/i.test(desc) && cnpjsPagarme.has(soDigitos(l.conta_cnpj))) return soDigitos(l.conta_cnpj);
+  if (/^TED RECEBIDA/i.test(semAcento(desc)) && cnpjsPagarme.has(soDigitos(l.contraparte_doc))) return soDigitos(l.contraparte_doc);
+  return null;
+};
+export const ehSaquePagarme = (l, cnpjsPagarme) => cnpjSaquePagarme(l, cnpjsPagarme) != null;
+async function contasPagarmePorCnpj() {
+  const { data } = await supabase.from('fluxo_caixa_contas').select('id,apelido,titular_nome,titular_cnpj').eq('banco', 'PAGARME');
+  return new Map((data || []).filter((c) => c.titular_cnpj).map((c) => [soDigitos(c.titular_cnpj), c]));
+}
+const conciliacaoSaquePagarme = (l, pg) => ({
+  id: null,
+  origem: 'PAGARME_SAQUE',
+  referencia: { pagarmeContaId: pg.id, pagarmeApelido: pg.apelido, cnpj: pg.titular_cnpj, contraparte: l.contraparte_nome || null, via: /TED/i.test(String(l.descricao || '')) ? 'TED' : 'entre contas Stone' },
+  justificativa: `Saque automático da Pagar.me (${pg.apelido}) para esta conta${/TED/i.test(String(l.descricao || '')) ? ' por TED' : ''}`,
+  automatico: true,
+});
+
 // ─── leitura das conciliações gravadas ────────────────────────
 export async function listarConciliacoes({ de, ate, contaIds } = {}) {
   let q = supabase.from(T.conc).select('*');
@@ -215,6 +245,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
   const paresBoleto = parearTarifasBoleto(lancamentos);
   const comGravada = new Set(lancamentos.filter((l) => porChave.has(l.chave)).map((l) => l.id));
   const paresDevolucao = parearDevolucoesPix(lancamentos, comGravada);
+  const pagarme = lancamentos.some((l) => /ENTRE CONTAS STONE|TED RECEBIDA/i.test(semAcento(String(l.descricao || '')))) ? await contasPagarmePorCnpj().catch(() => new Map()) : new Map();
+  const cnpjsPagarme = new Set(pagarme.keys());
 
   for (const l of lancamentos) {
     const g = porChave.get(l.chave);
@@ -224,6 +256,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = conciliacaoParBoleto(paresBoleto.get(l.id));
     } else if (paresDevolucao.has(l.id)) {
       l.conciliacao = conciliacaoPixDevolvido(paresDevolucao.get(l.id));
+    } else if (ehSaquePagarme(l, cnpjsPagarme)) {
+      l.conciliacao = conciliacaoSaquePagarme(l, pagarme.get(cnpjSaquePagarme(l, cnpjsPagarme)));
     } else if (l.transferencia_id && l.transferencia) {
       l.conciliacao = {
         id: null,
@@ -1794,4 +1828,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
