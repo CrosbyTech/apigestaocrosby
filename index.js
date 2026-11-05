@@ -139,6 +139,7 @@ import baixaLotesRoutes from './routes/baixaLotes.routes.js';
 import { iniciarJobPixTadeu } from './services/pixTadeuPagarme.js';
 import metasInadimplenciaRoutes from './routes/metasInadimplencia.routes.js';
 import { iniciarJobMetasSnapshot } from './services/metasInadimplenciaSnapshot.js';
+import fluxoSaldosRoutes from './routes/fluxoSaldos.routes.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
@@ -248,6 +249,7 @@ app.use('/api/baixa-automatica', baixaAutomaticaPagarmeRoutes); // baixa automá
 app.use('/api/conferencia-baixas', conferenciaBaixasRoutes); // Solicitações de Baixa × TOTVS: baixadas na mão viram processadas, desfeitas voltam a pendentes
 app.use('/api/pix-tadeu', pixTadeuRoutes); // Pix recebidos na Pagar.me fora do HeadCoach (links/Gerador do Dryland) → Solicitações de Baixa
 app.use('/api/metas-inadimplencia', metasInadimplenciaRoutes); // snapshot da aba Metas Inadimplência no banco do HeadCoach (lê rápido; /gerar reprocessa do TOTVS)
+app.use('/api/fluxo-saldos', fluxoSaldosRoutes); // Fluxo de Saldos: saldo em dinheiro por loja/dia, sangria e pedido de retirada
 app.use('/api/previsao-recebimento', previsaoRecebimentoRoutes); // Fluxo de Recebíveis / Previsão de Recebimento (João, 27/10/2026)
 app.use('/api/portal-boletos', portalBoletosRoutes); // boletos/Pix da Pagar.me no Portal de Títulos (João, 27/10/2026)
 app.use('/api/baixa-lotes', baixaLotesRoutes); // histórico dos lotes de baixa (Solicitações de Baixa → TOTVS)
