@@ -217,8 +217,7 @@ describe('Stone — texto novo de liquidação de vendas (29/10/2026+)', () => {
 
 describe('OFX do Itaú: linhas de saldo não são lançamentos', () => {
   test('SALDO ANTERIOR/PARCIAL/TOTAL DISPONÍVEL DIA/APLIC AUT MAIS ficam de fora; juros e IOF sobre saldo entram', () => {
-    for (const m of ['SALDO ANTERIOR', 'SALDO PARCIAL', 'SALDO TOTAL DISPONÍVEL DIA', 'SALDO TOTAL DISPONÃVEL DIA'.normalize('NFC'), 'SALDO APLIC AUT MAIS', 'SALDO INICIAL', 'SALDO FINAL', 'SALDO TOTAL', 'SALDO BLOQUEADO']) {
-      if (m.includes('Ã')) continue;
+    for (const m of ['SALDO ANTERIOR', 'SALDO PARCIAL', 'SALDO TOTAL DISPONÍVEL DIA', 'SALDO TOTAL DISPONÃVEL DIA', 'SALDO APLIC AUT MAIS', 'SALDO INICIAL', 'SALDO FINAL', 'SALDO TOTAL', 'SALDO BLOQUEADO']) {
       expect(ehLinhaDeSaldoOfx(m)).toBe(true);
     }
     for (const m of ['JUROS SALDO DEVEDOR C/C', 'IOF ( DOC.: SALDO DEV )', 'SALDO VINCULADO LIBERADO', 'BLOQUEIO GERENCIAL SALDO', 'PIX ENVIADO CROSBY DISTR']) expect(ehLinhaDeSaldoOfx(m)).toBe(false);
