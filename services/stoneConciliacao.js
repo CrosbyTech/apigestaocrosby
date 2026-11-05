@@ -456,7 +456,19 @@ export async function obterDiaStone(loja, dataIso, { force = false, layout = LAY
   if (!force) {
     if (memCache.has(key)) return { ...memCache.get(key), _cache: 'mem' };
     const db = await lerCacheDb(loja.stonecode, dataIso, layout);
-    if (db) {
+    // Arquivo vazio e sem data de geração = a Stone ainda não tinha fechado o
+    // dia quando baixamos (visto em 04/11/2026: Patos 27/10 cacheado vazio
+    // tinha venda). Não confia se foi baixado até 3 dias depois do dia:
+    // rebaixa (no máx. 1x a cada 6h). Baixado vazio depois disso = dia vazio mesmo.
+    const baixadoMs = db?._baixadoEm ? new Date(db._baixadoEm).getTime() : 0;
+    const vazioSuspeito =
+      db &&
+      !db.header?.geradoEm &&
+      !(db.transacoes || []).length &&
+      !(db.pagamentos || []).length &&
+      baixadoMs - new Date(`${dataIso}T00:00:00-03:00`).getTime() < 3 * 86400 * 1000 &&
+      Date.now() - baixadoMs > 6 * 3600 * 1000;
+    if (db && !vazioSuspeito) {
       memCache.set(key, db);
       return db;
     }
