@@ -11,7 +11,8 @@
 //   POST   /ler        (multipart: arquivo) → só lê o PDF (conferência), não grava
 //   POST   /importar   (multipart: arquivos[]) → grava e recasa transferências
 //   GET    /painel?de&ate[&contas&bancos&tipo&formas&categoria&contraparte&busca]
-//   POST   /transferencias/recasar?de&ate  → refaz o casamento automático
+//   POST   /transferencias/recasar?de&ate  → refaz o casamento automático (antes completa a contraparte escondida no texto)
+//   POST   /lancamentos/enriquecer-contrapartes?de&ate → completa contraparte_doc/nome/banco pelo histórico (dados antigos)
 //   PATCH  /lancamentos/:id                 → fornecedor / observação / forma / tipo
 //   GET    /formas                          → formas de pagamento padronizadas
 //   GET    /conciliacao/buscar-cr?titulo|codigo|cnpj|nome|tipoData(vencimento|emissao|pagamento)|de|ate|status(todos|aberto|pago)|valorMin|valorMax → busca manual no contas a receber (só o pesquisado)
@@ -213,12 +214,25 @@ router.get(
 );
 
 router.post(
+  '/lancamentos/enriquecer-contrapartes',
+  asyncHandler(async (req, res) => {
+    const { de, ate } = { ...req.query, ...(req.body || {}) };
+    try {
+      return successResponse(res, await fluxo.enriquecerContrapartes({ de: de ? String(de) : null, ate: ate ? String(ate) : null, escopo }), 'Contrapartes completadas');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+router.post(
   '/transferencias/recasar',
   asyncHandler(async (req, res) => {
     const de = req.query.de || req.body?.de;
     const ate = req.query.ate || req.body?.ate;
     if (!de || !ate) return errorResponse(res, 'Informe de e ate.', 400);
     try {
+      await fluxo.enriquecerContrapartes({ de: String(de), ate: String(ate), escopo }).catch(() => {});
       return successResponse(res, await fluxo.casarTransferencias({ de: String(de), ate: String(ate), escopo }), 'Transferências recasadas');
     } catch (e) {
       return tratar(res, e);

@@ -18,8 +18,9 @@
 import crypto from 'node:crypto';
 import supabase from '../config/supabase.js';
 import { lerExtratoBancario, BANCOS, FORMAS } from '../utils/extratosBancariosPdf.js';
-import { anexarConciliacoes } from './fluxoCaixaConciliacao.js';
+import { anexarConciliacoes, PESSOAS_PRO_LABORE } from './fluxoCaixaConciliacao.js';
 import { anexarComprovantes } from './comprovantesStone.js';
+import { extrairContraparte, completarContraparte } from '../utils/contraparteExtrato.js';
 
 const T = {
   contas: 'fluxo_caixa_contas',
@@ -116,25 +117,79 @@ function nomesBatem(a, b) {
 // Nomes pelos quais cada empresa do grupo aparece nos extratos (razão social
 // antiga/nova, nome do sócio no Pix). Chave = raiz do CNPJ da conta.
 const APELIDOS_EMPRESA = {
-  17177680: ['FERREIRA COMERCIO E CONFECCOES LTDA', 'CROSBY CR VESTUARIO LTDA', 'CROSBY'],
+  17177680: ['FERREIRA COMERCIO E CONFECCOES LTDA', 'CROSBY CR VESTUARIO LTDA', 'CROSBY', 'CROSBY DISTRIBUICAO E CONFECCAO LTDA', 'CROSBY DISTRIBUICAO E CONFECCAO EIRELI', 'CROSBY DIST CONFEC EIRELI'],
   27728810: ['FA MODA & VAREJO LTDA', 'FABIO FERREIRA DE LIMA AZEVEDO', 'FABIO FERREIRA DE LIMA AZEVEDO LTDA'],
   53661116: ['IRMAOS VAREJO COMERCIAL LTDA', 'FLAVIO FERREIRA DE LIMA AZEVEDO LTDA', 'FLAVIO FERREIRA DE LIMA AZEVEDO'],
-  33592092: ['IRMAOS CR VESTUARIO LTDA'],
+  // a conta Itaú 653039046-4 (hoje Irmãos CR) recebia em 2024 como "FLAVIO F LIMA AZ"
+  33592092: ['IRMAOS CR VESTUARIO LTDA', 'FLAVIO FERREIRA DE LIMA AZEVEDO LTDA', 'FLAVIO FERREIRA DE LIMA AZEVEDO'],
 };
+// nome fantasia usado por qualquer empresa do grupo no Pix ("CROSBY", "IRMAOS"):
+// vale como pista fraca (+1) para qualquer conta do grupo
+const APELIDOS_GRUPO = ['CROSBY', 'IRMAOS'];
+const contraparteBateGrupo = (nome) => !!nome && APELIDOS_GRUPO.some((ap) => normNome(nome) === ap || nomeTruncadoBate(nome, ap) || nomeTruncadoBate(ap, nome));
+// CPF do sócio que aparece como contraparte do Pix da empresa dele (cadastro
+// do pró-labore em fluxoCaixaConciliacao; o nome do sócio já cobre os demais)
+const DOCS_EMPRESA = { 27728810: PESSOAS_PRO_LABORE.filter((p) => /FABIO/i.test(p.pessoa || p.id)).map((p) => String(p.cpf).replace(/\D/g, '')) };
+const PARTICULAS = new Set(['DE', 'DA', 'DO', 'DAS', 'DOS', 'E', 'L', 'A']);
+const tokensNome = (s) => normNome(s).split(' ').filter((t) => t && !PARTICULAS.has(t));
+// nome truncado do extrato ("FABIO F LIMA AZE", "CROSBY DIST CONF", "CROSBY") bate
+// com o nome completo quando cada pedaço é prefixo do pedaço correspondente
+export function nomeTruncadoBate(curto, longo) {
+  const c = tokensNome(curto);
+  const l = tokensNome(longo);
+  if (!c.length || !l.length) return false;
+  if (c[0].length < 3 || !l[0].startsWith(c[0])) return false;
+  let j = 0;
+  let letras = 0;
+  for (const t of c) {
+    while (j < l.length && !l[j].startsWith(t)) j++;
+    if (j >= l.length) return false;
+    letras += t.length;
+    j++;
+  }
+  return letras >= 5;
+}
 // contraparte do lançamento bate com a conta (titular gravado OU qualquer nome da empresa)
 function contraparteBateConta(nome, conta) {
   if (!nome || !conta) return false;
-  if (nomesBatem(nome, conta.titular_nome)) return true;
+  if (nomesBatem(nome, conta.titular_nome) || nomeTruncadoBate(nome, conta.titular_nome)) return true;
   const raiz = String(conta.titular_cnpj || '').replace(/\D/g, '').slice(0, 8);
-  return (APELIDOS_EMPRESA[raiz] || []).some((ap) => nomesBatem(nome, ap));
+  return (APELIDOS_EMPRESA[raiz] || []).some((ap) => nomesBatem(nome, ap) || nomeTruncadoBate(nome, ap));
+}
+// documento da contraparte (CNPJ da empresa ou CPF do sócio) aponta para a conta
+function docAponta(doc, conta) {
+  const d = String(doc || '').replace(/\D/g, '');
+  const cnpj = String(conta?.titular_cnpj || '').replace(/\D/g, '');
+  if (!d || !cnpj) return 0;
+  if (d === cnpj) return 3;
+  if (d.length === 14 && d.slice(0, 8) === cnpj.slice(0, 8)) return 1;
+  if ((DOCS_EMPRESA[cnpj.slice(0, 8)] || []).includes(d)) return 3;
+  return 0;
+}
+// agência/conta citadas no histórico (Santander "PIX ENVIADO ISPB/2207/00000367338", Itaú "TRANSF 6530.56927-3") apontam para a conta
+function contaCitadaBate(pista, conta) {
+  if (!pista || !conta) return false;
+  const ag = String(conta.agencia || '').replace(/\D/g, '');
+  const num = String(conta.conta || '').replace(/\D/g, '');
+  const numDv = `${num}${String(conta.conta_dv || '').replace(/\D/g, '')}`;
+  if (!num) return false;
+  const agOk = !ag || !pista.agencia || String(Number(ag)) === String(Number(pista.agencia));
+  const nums = [pista.numero, pista.numeroSemDv].filter(Boolean).map((x) => String(Number(x)));
+  return agOk && nums.some((n) => n === String(Number(num)) || n === String(Number(numDv)) || (numDv.length > 1 && n === String(Number(numDv.slice(0, -1)))));
 }
 
 const bancoBate = (textoBanco, banco) => {
   const up = semAcento(textoBanco).toUpperCase();
   if (banco === 'SICREDI') return /SICREDI|COOPERATIVA DE CREDITO/.test(up);
   if (banco === 'STONE') return /STONE/.test(up);
-  if (banco === 'CAIXA') return /CAIXA ECONOMICA/.test(up);
+  if (banco === 'CAIXA') return /CAIXA ECONOMICA|^CAIXA$/.test(up);
   if (banco === 'MENTORE') return /MENTORE/.test(up);
+  if (banco === 'ITAU') return /\bITAU\b/.test(up);
+  if (banco === 'BB') return /BANCO DO BRASIL|^BB$/.test(up);
+  if (banco === 'SANTANDER') return /SANTANDER/.test(up);
+  if (banco === 'UNICRED') return /UNICRED/.test(up);
+  if (banco === 'BRADESCO') return /BRADESCO/.test(up);
+  if (banco === 'BNB') return /NORDESTE|^BNB$/.test(up);
   return false;
 };
 
@@ -353,9 +408,14 @@ async function persistirExtrato(extrato, { nomeArquivo, usuario, hash, arquivoPa
     descricao: l.descricao || null,
     memo: l.memo || null,
     documento: l.documento || null,
-    contraparte_nome: l.contraparteNome || null,
-    contraparte_doc: l.contraparteDoc || null,
-    contraparte_banco: l.contraparteBanco || null,
+    ...(() => {
+      const { patch } = completarContraparte(l, extrato.banco);
+      return {
+        contraparte_nome: patch.nome || l.contraparteNome || null,
+        contraparte_doc: patch.doc || l.contraparteDoc || null,
+        contraparte_banco: patch.banco || l.contraparteBanco || null,
+      };
+    })(),
     bandeira: l.bandeira || null,
     loja: l.loja || null,
     saldo_apos: l.saldoApos,
@@ -474,6 +534,51 @@ export async function excluirImportacao(id) {
  * outra conta, ou banco da contraparte = banco da outra conta).
  * Pares automáticos anteriores do período são refeitos.
  */
+/**
+ * Completa contraparte_doc/nome/banco dos lançamentos já importados a partir
+ * do histórico/documento (extratos antigos de 2024/2025 guardavam o CNPJ e o
+ * nome só no texto). Só preenche o que falta ou é lixo. Grava em lotes por
+ * SQL (exec_sql) para não fazer um UPDATE por linha.
+ */
+export async function enriquecerContrapartes({ de, ate, escopo } = {}) {
+  const { esc, existe } = await prepararEscopo(escopo);
+  const contas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('id,banco'), esc, existe));
+  const bancoDe = new Map(contas.map((c) => [c.id, c.banco]));
+  const ids = contas.map((c) => c.id);
+  if (!ids.length) return { lidos: 0, atualizados: 0 };
+  const rows = await buscarTodos(() => {
+    let q = supabase.from(T.lanc).select('id,conta_id,memo,documento,contraparte_nome,contraparte_doc,contraparte_banco').in('conta_id', ids).order('id');
+    if (de) q = q.gte('data', de);
+    if (ate) q = q.lte('data', ate);
+    return q;
+  });
+  const patches = [];
+  for (const r of rows) {
+    const { patch } = completarContraparte(r, bancoDe.get(r.conta_id) || null);
+    if (Object.keys(patch).length) patches.push({ id: r.id, ...patch });
+  }
+  const sqlStr = (v) => (v == null ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`);
+  let atualizados = 0;
+  for (let i = 0; i < patches.length; i += 400) {
+    const fatia = patches.slice(i, i + 400);
+    const values = fatia.map((p) => `(${p.id}, ${sqlStr(p.nome)}, ${sqlStr(p.doc)}, ${sqlStr(p.banco)})`).join(',');
+    const query = `update ${T.lanc} l set contraparte_nome = coalesce(v.nome, l.contraparte_nome), contraparte_doc = coalesce(v.doc, l.contraparte_doc), contraparte_banco = coalesce(v.banco, l.contraparte_banco) from (values ${values}) as v(id, nome, doc, banco) where l.id = v.id`;
+    const { error } = await supabase.rpc('exec_sql', { query });
+    if (error) {
+      // sem a RPC: um a um
+      for (const p of fatia) {
+        const upd = {};
+        if (p.nome) upd.contraparte_nome = p.nome;
+        if (p.doc) upd.contraparte_doc = p.doc;
+        if (p.banco) upd.contraparte_banco = p.banco;
+        lancar((await supabase.from(T.lanc).update(upd).eq('id', p.id)).error);
+      }
+    }
+    atualizados += fatia.length;
+  }
+  return { lidos: rows.length, atualizados };
+}
+
 export async function casarTransferencias({ de, ate, escopo }) {
   const deM = addDias(de, -1);
   const ateM = addDias(ate, 1);
@@ -496,25 +601,36 @@ export async function casarTransferencias({ de, ate, escopo }) {
     }
   }
 
-  const rows = await buscarTodos(() =>
+  const brutos = await buscarTodos(() =>
     supabase
       .from(T.lanc)
-      .select('id,conta_id,data,valor,forma,categoria,contraparte_nome,contraparte_doc,contraparte_banco')
+      .select('id,conta_id,data,valor,forma,categoria,descricao,memo,documento,contraparte_nome,contraparte_doc,contraparte_banco')
       .in('conta_id', idsEscopo)
       .gte('data', deM)
       .lte('data', ateM)
-      .in('categoria', ['pix', 'transferencia'])
+      .in('categoria', ['pix', 'transferencia', 'outros'])
       .is('transferencia_id', null)
       .order('data'),
   );
+  // "outros" só entra quando o histórico é claramente TED/transferência (Sicredi 2024 classificou a TED recebida como outros)
+  const rows = brutos.filter((r) => r.categoria !== 'outros' || /^(TED|DOC|TRANSF)/i.test(semAcento(`${r.descricao || ''} ${r.memo || ''}`).trim()));
+  const pistaDe = new Map();
+  for (const r of rows) pistaDe.set(r.id, extrairContraparte(r, porId.get(r.conta_id)?.banco || null));
   const cents = (v) => Math.round(Math.abs(Number(v)) * 100);
   const entradasPorValor = new Map();
+  const saidasPorValor = new Map();
   for (const r of rows) {
-    if (Number(r.valor) <= 0 || Math.abs(Number(r.valor)) < 1) continue;
+    if (Math.abs(Number(r.valor)) < 1) continue;
     const k = cents(r.valor);
-    if (!entradasPorValor.has(k)) entradasPorValor.set(k, []);
-    entradasPorValor.get(k).push(r);
+    const mapa = Number(r.valor) > 0 ? entradasPorValor : saidasPorValor;
+    if (!mapa.has(k)) mapa.set(k, []);
+    mapa.get(k).push(r);
   }
+  // lançamento sem nenhuma pista de contraparte (nem nome, nem documento, nem banco/conta)
+  const semPista = (r) => {
+    const p = pistaDe.get(r.id) || {};
+    return !r.contraparte_nome && !r.contraparte_doc && !r.contraparte_banco && !p.nome && !p.doc && !p.banco && !p.conta && !p.mesmaTitularidade;
+  };
   // 1) pontua TODAS as combinações saída × entrada de mesmo valor (entrada até
   //    3 dias depois: PIX agendado / fim de semana); 2) fecha os pares do
   //    melhor para o pior — assim um encadeamento A→B→C (mesmo valor, mesmo
@@ -531,21 +647,33 @@ export async function casarTransferencias({ de, ate, escopo }) {
       // no dia, Sicredi debita na segunda) — nesse caso exige evidência forte
       if (dd > 3 || dd < -3) continue;
       const destino = porId.get(e.conta_id);
+      const ps = pistaDe.get(s.id) || {};
+      const pe = pistaDe.get(e.id) || {};
       let sc = 0;
-      if (s.contraparte_doc && destino?.titular_cnpj) {
-        if (s.contraparte_doc === destino.titular_cnpj) sc += 3;
-        else if (s.contraparte_doc.slice(0, 8) === destino.titular_cnpj.slice(0, 8)) sc += 1;
-      }
-      if (e.contraparte_doc && origem?.titular_cnpj) {
-        if (e.contraparte_doc === origem.titular_cnpj) sc += 3;
-        else if (e.contraparte_doc.slice(0, 8) === origem.titular_cnpj.slice(0, 8)) sc += 1;
-      }
-      if (contraparteBateConta(s.contraparte_nome, destino)) sc += 2;
-      if (contraparteBateConta(e.contraparte_nome, origem)) sc += 2;
-      if (s.contraparte_banco && destino && bancoBate(s.contraparte_banco, destino.banco)) sc += 1;
-      if (e.contraparte_banco && origem && bancoBate(e.contraparte_banco, origem.banco)) sc += 1;
+      sc += Math.max(docAponta(s.contraparte_doc, destino), docAponta(ps.doc, destino));
+      sc += Math.max(docAponta(e.contraparte_doc, origem), docAponta(pe.doc, origem));
+      if (contraparteBateConta(s.contraparte_nome, destino) || contraparteBateConta(ps.nome, destino)) sc += 2;
+      else if (contraparteBateGrupo(s.contraparte_nome) || contraparteBateGrupo(ps.nome)) sc += 1;
+      if (contraparteBateConta(e.contraparte_nome, origem) || contraparteBateConta(pe.nome, origem)) sc += 2;
+      else if (contraparteBateGrupo(e.contraparte_nome) || contraparteBateGrupo(pe.nome)) sc += 1;
+      const bancoS = s.contraparte_banco || ps.banco;
+      const bancoE = e.contraparte_banco || pe.banco;
+      if (bancoS && destino && bancoBate(bancoS, destino.banco)) sc += 1;
+      if (bancoE && origem && bancoBate(bancoE, origem.banco)) sc += 1;
+      // agência/conta de destino citadas na saída (Santander/Itaú)
+      if (ps.conta && contaCitadaBate(ps.conta, destino)) sc += 3;
+      // "mesma titularidade" (Santander): destino é conta do mesmo CNPJ
+      if (ps.mesmaTitularidade && origem?.titular_cnpj && origem.titular_cnpj === destino?.titular_cnpj) sc += 3;
       if (dd === 0) sc += 1;
       else if (dd >= 2 || dd < 0) sc -= 1;
+      // sem nenhuma pista dos dois lados: só o par ÚNICO do dia (mesmo valor, nenhuma
+      // outra saída/entrada igual em ±3 dias) com valor ≥ R$ 1.000 vale como entre contas
+      if (sc === 1 && dd === 0 && semPista(s) && semPista(e) && Math.abs(Number(s.valor)) >= 1000) {
+        const k = cents(s.valor);
+        const outrasE = (entradasPorValor.get(k) || []).filter((x) => x.id !== e.id && Math.abs(diffDias(x.data, s.data)) <= 3);
+        const outrasS = (saidasPorValor.get(k) || []).filter((x) => x.id !== s.id && Math.abs(diffDias(x.data, e.data)) <= 3);
+        if (!outrasE.length && !outrasS.length) sc = 2;
+      }
       if (dd < 0 && sc < 4) continue; // entrada antes da saída só com CNPJ/nome batendo
       if (sc >= 2) combos.push({ s, e, sc, dd: Math.abs(dd) });
     }
