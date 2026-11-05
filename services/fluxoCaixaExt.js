@@ -526,7 +526,10 @@ export async function casarTransferencias({ de, ate, escopo }) {
     for (const e of entradasPorValor.get(cents(s.valor)) || []) {
       if (e.conta_id === s.conta_id) continue;
       const dd = diffDias(e.data, s.data);
-      if (dd < 0 || dd > 3) continue;
+      // entrada até 3 dias depois da saída; ou até 3 dias ANTES quando o banco
+      // da saída só lança no dia útil seguinte (Pix no sábado: Stone credita
+      // no dia, Sicredi debita na segunda) — nesse caso exige evidência forte
+      if (dd > 3 || dd < -3) continue;
       const destino = porId.get(e.conta_id);
       let sc = 0;
       if (s.contraparte_doc && destino?.titular_cnpj) {
@@ -542,8 +545,9 @@ export async function casarTransferencias({ de, ate, escopo }) {
       if (s.contraparte_banco && destino && bancoBate(s.contraparte_banco, destino.banco)) sc += 1;
       if (e.contraparte_banco && origem && bancoBate(e.contraparte_banco, origem.banco)) sc += 1;
       if (dd === 0) sc += 1;
-      else if (dd >= 2) sc -= 1;
-      if (sc >= 2) combos.push({ s, e, sc, dd });
+      else if (dd >= 2 || dd < 0) sc -= 1;
+      if (dd < 0 && sc < 4) continue; // entrada antes da saída só com CNPJ/nome batendo
+      if (sc >= 2) combos.push({ s, e, sc, dd: Math.abs(dd) });
     }
   }
   combos.sort((a, b) => b.sc - a.sc || a.dd - b.dd || (a.s.data < b.s.data ? -1 : a.s.data > b.s.data ? 1 : 0));
