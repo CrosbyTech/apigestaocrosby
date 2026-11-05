@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -372,5 +372,18 @@ describe('texto novo da Stone (29/10/2026+): "Recebimento de vendas Valor refere
     expect(c).toHaveLength(1);
     expect(c[0].score).toBe(100);
     expect(decidir(c).automatico).toBe(true);
+  });
+});
+
+describe('depósito da Rede na conta Stone (venda na maquininha Rede)', () => {
+  const l = (over = {}) => ({ valor: 365.3, categoria: 'cartao', memo: 'Recebimento vendas - Visa | Crédito', bandeira: 'VISA', ...over });
+  test('linha por bandeira, arquivo Stone do dia lido e sem candidato → Rede', () => {
+    expect(ehDepositoRedeProvavel(l(), [], true)).toBe(true);
+  });
+  test('com candidato Stone, antecipação, dia sem arquivo ou texto novo sem bandeira → não', () => {
+    expect(ehDepositoRedeProvavel(l(), [{ id: 'x' }], true)).toBe(false);
+    expect(ehDepositoRedeProvavel(l({ memo: 'Recebimento vendas - Antecipação | Crédito', categoria: 'antecipacao' }), [], true)).toBe(false);
+    expect(ehDepositoRedeProvavel(l(), [], false)).toBe(false);
+    expect(ehDepositoRedeProvavel(l({ memo: 'Recebimento de vendas Valor referente à liquidação de suas - vendas de cartão.', categoria: 'outros' }), [], true)).toBe(false);
   });
 });

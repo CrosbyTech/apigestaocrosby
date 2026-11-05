@@ -1172,7 +1172,8 @@ async function fonteStone(loja, { de, ate }) {
       for (const dia of r.dias) itens.push(...depositosStoneDoDia(dia, loja, code));
     }
     const avisos = erros.length ? [`Stone ${loja.nome}: ${erros.length} dia(s) sem arquivo (${erros[0].data}: ${erros[0].erro})`] : [];
-    return { itens, avisos, em: Date.now() };
+    const diasComErro = new Set(erros.map((e) => e.data));
+    return { itens, avisos, diasComErro, em: Date.now() };
   })();
   cacheStone.set(key, { promessa, em: Date.now() });
   try {
@@ -1217,6 +1218,25 @@ function pontuarEntradaStone(l, c, usado = 0) {
   }
   return { ...c, score, motivos, parcial: false, valorDuplicata: c.valor, restanteAntes: c.valor, restanteDepois: 0 };
 }
+
+// Lojas que vendiam na maquininha da REDE com repasse automático para a conta
+// Stone: o extrato mostra "Recebimento vendas - Visa | Crédito" igual ao da
+// Stone, mas o arquivo da Stone do dia não tem o depósito. Conferido com o
+// relatório de recebimentos da Rede de out/2026 (Midway + Cidade Jardim =
+// R$ 53.283,68, ao centavo). Só vale para linha por bandeira (não antecipação),
+// com o arquivo Stone do dia lido e sem nenhum candidato.
+export const ehDepositoRedeProvavel = (l, candidatos, diaStoneLido) =>
+  Number(l.valor) > 0 &&
+  String(l.categoria || '') === 'cartao' &&
+  /^RECEBIMENTO VENDAS\s*-\s*/i.test(semAcento(String(l.memo || ''))) &&
+  !/ANTECIPA/i.test(semAcento(String(l.memo || ''))) &&
+  diaStoneLido &&
+  (!candidatos || candidatos.length === 0);
+const conciliacaoDepositoRede = (l) => ({
+  origem: 'REDE_DEPOSITO',
+  referencia: { adquirente: 'REDE', bandeira: l.bandeira || null, memo: l.memo || null, motivos: ['linha por bandeira sem depósito no arquivo da Stone do dia'] },
+  justificativa: `Depósito da Rede (venda na maquininha Rede${l.bandeira ? ` · ${l.bandeira}` : ''}, repassada à conta Stone)`,
+});
 
 export function candidatosEntradaStone(l, itens, usados = new Map()) {
   const lista = [];
@@ -1419,7 +1439,7 @@ async function lancamentoComChave(lancamentoId) {
 }
 
 export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'MANUAL', 'MULTIPLO', 'PRO_LABORE'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
     const pessoa = PESSOAS_PRO_LABORE.find((p) => p.id === referencia?.pessoaId) || PESSOAS_PRO_LABORE.find((p) => p.cpf === soDigitos(referencia?.cpf));
@@ -1947,7 +1967,18 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
         stonePorCnpj.set(loja.cnpj, f);
         resultado.avisos.push(...f.avisos);
       }
-      candidatos = candidatosEntradaStone(l, stonePorCnpj.get(loja.cnpj).itens, usados);
+      const fonte = stonePorCnpj.get(loja.cnpj);
+      candidatos = candidatosEntradaStone(l, fonte.itens, usados);
+      if (ehDepositoRedeProvavel(l, candidatos, !(fonte.diasComErro || new Set()).has(l.data))) {
+        const c = conciliacaoDepositoRede(l);
+        try {
+          if (!simular) await salvarConciliacao({ lancamentoId: l.id, origem: c.origem, referencia: c.referencia, justificativa: c.justificativa, usuario, automatico: true, pontuacao: null });
+          resultado.conciliadas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, origem: c.origem, nome: 'REDE', score: null });
+        } catch (e) {
+          resultado.avisos.push(`${l.data} ${Number(l.valor).toFixed(2)}: ${e.message}`);
+        }
+        continue;
+      }
     }
     const d = decidir(candidatos);
     if (d.automatico) {
@@ -1991,4 +2022,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, ehDepositoRedeProvavel, decidir };
