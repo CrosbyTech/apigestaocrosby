@@ -36,7 +36,8 @@ import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL, httpsAgent, getBranchCodes } from '../totvsrouter/totvsHelper.js';
 import { STONE_LOJAS, stonecodesDaLoja } from '../config/stoneConciliacao.js';
 import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
-import { mapearFiliaisTotvsPorCnpj } from './totvsCartoesStone.js';
+import { mapearFiliaisTotvsPorCnpj, resolverFiliaisLoja, buscarTitulosCartaoStone } from './totvsCartoesStone.js';
+import { bater } from './stoneBatimento.js';
 import { vincularComprovanteASolicitacao, solicitacoesDaConciliacao, comprovantePorChave, urlComprovante } from './comprovantesStone.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
@@ -871,6 +872,76 @@ export async function buscarContasReceber({ titulo, cliente, de, ate, emissaoDe,
   return { candidatos: lista.slice(0, 200), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
 }
 
+// ─── depósito Stone × títulos de cartão do TOTVS ──────────────
+// Cada parcela liquidada num depósito vem de uma venda (NSU). O batimento da
+// Conciliação Stone (NSU + autorização + valor) diz qual título de cartão do
+// contas a receber corresponde a cada venda; aqui só reaproveitamos isso para
+// mostrar, parcela a parcela, o título do TOTVS ou a falta dele.
+const cacheTitulosCartao = new Map();
+async function titulosCartaoCache(filiais, de, ate) {
+  const key = `${[...filiais].sort().join(',')}|${de}|${ate}`;
+  const hit = cacheTitulosCartao.get(key);
+  if (hit && Date.now() - hit.em < 10 * 60 * 1000) return hit.titulos;
+  const titulos = await buscarTitulosCartaoStone({ branchCodes: filiais, inicioIso: de, fimIso: ate });
+  cacheTitulosCartao.set(key, { em: Date.now(), titulos });
+  return titulos;
+}
+async function cruzarDepositoComTotvs(loja, stonecode, parcelas) {
+  const datas = [...new Set(parcelas.map((x) => String(x.dataCaptura || '').slice(0, 10)).filter(Boolean))].sort();
+  if (!datas.length) return null;
+  // vendas (transações) dos dias de captura, pelo NSU
+  const nsus = new Set(parcelas.map((x) => String(x.nsu)));
+  const transacoes = [];
+  for (const d of datas) {
+    try {
+      const dia = await obterDiaStone({ ...loja, stonecode }, d);
+      for (const t of dia.transacoes || []) if (nsus.has(String(t.nsu))) transacoes.push({ ...t, stonecode });
+    } catch {
+      /* dia sem arquivo: a parcela fica "venda não localizada" */
+    }
+  }
+  const mapa = await mapearFiliaisTotvsPorCnpj().catch(() => null);
+  const { filiais, nomesFiliais } = resolverFiliaisLoja(loja, mapa);
+  if (!filiais.length) return { aviso: 'Loja sem empresa no TOTVS.', parcelas: [] };
+  const titulos = await titulosCartaoCache(filiais, addDias(datas[0], -1), addDias(datas[datas.length - 1], 1));
+  let vinculos = [];
+  try {
+    const { data } = await supabase.from('stone_conciliacao_vinculos').select('*').eq('stonecode', String(stonecode));
+    vinculos = data || [];
+  } catch {
+    /* sem vínculos manuais */
+  }
+  const r = bater(transacoes, titulos, vinculos);
+  const parPorNsu = new Map(r.pares.map((pr) => [String(pr.stone.nsu), pr]));
+  const transPorNsu = new Map(transacoes.map((t) => [String(t.nsu), t]));
+  const porParcela = parcelas.map((x) => {
+    const nsu = String(x.nsu);
+    const pr = parPorNsu.get(nsu);
+    const t = transPorNsu.get(nsu);
+    if (pr) {
+      const tit = pr.totvs;
+      const parc = (tit.parcelasDetalhe || []).find((q) => q.numero === Number(x.parcela ?? x.numero)) || null;
+      const ok = pr.tipo === 'exato' || pr.tipo === 'manual' || pr.tipo === 'agrupado';
+      return {
+        nsu,
+        parcela: x.parcela ?? x.numero,
+        situacao: ok ? 'batida' : 'divergente',
+        rotulo: pr.rotulo,
+        divergencias: pr.divergencias || [],
+        titulo: { filial: tit.filial, empresa: nomesFiliais?.[tit.filial] || null, numero: tit.titulo, parcelas: tit.parcelas, valor: tit.valor, cliente: tit.nomeCliente || tit.cliente || null, nf: tit.nf, portador: tit.portador, parcela: parc },
+        venda: t ? { data: t.dataVenda, bandeira: t.bandeira, tipo: t.tipoConta, bruto: t.valorBruto, parcelas: t.parcelas, autorizacao: t.codAutorizacao } : null,
+      };
+    }
+    return { nsu, parcela: x.parcela ?? x.numero, situacao: t ? 'sem_titulo' : 'venda_nao_localizada', rotulo: t ? 'Sem título no TOTVS' : 'Venda não localizada no arquivo do dia', titulo: null, venda: t ? { data: t.dataVenda, bandeira: t.bandeira, tipo: t.tipoConta, bruto: t.valorBruto, parcelas: t.parcelas, autorizacao: t.codAutorizacao } : null };
+  });
+  const conta = (sit) => porParcela.filter((q) => q.situacao === sit).length;
+  return {
+    filiais,
+    resumo: { parcelas: porParcela.length, batidas: conta('batida'), divergentes: conta('divergente'), semTitulo: conta('sem_titulo'), vendaNaoLocalizada: conta('venda_nao_localizada'), titulosNoPeriodo: titulos.length },
+    parcelas: porParcela,
+  };
+}
+
 // ─── entradas Stone: depósitos do arquivo de conciliação ─────
 const fmtBr = (v) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const lojaStoneDoCnpj = (cnpj) => STONE_LOJAS.find((l) => l.cnpj === soDigitos(cnpj) && l.apiKey && l.stonecode) || null;
@@ -1517,9 +1588,15 @@ export async function detalheConciliacao(id) {
         const dia = await obterDiaStone({ ...loja, stonecode: st.stonecode || loja.stonecode }, ref.data);
         origem.stone.parcelas = (dia.liquidacoes || [])
           .filter((x) => x.paymentId === st.paymentId)
-          .map((x) => ({ nsu: x.nsu, dataCaptura: x.dataCaptura, formaEntrada: x.formaEntrada, parcela: x.numero, bruto: x.bruto, liquido: x.liquido, taxa: x.taxa, mdr: x.mdr, antecipada: x.antecipada, dataOriginal: x.dataOriginal, dataPagamento: x.dataPagamento }))
+          .map((x) => ({ nsu: x.nsu, dataCaptura: x.dataCaptura, formaEntrada: x.formaEntrada, parcela: x.parcela ?? x.numero, bruto: x.bruto, liquido: x.liquido, taxa: x.taxa, mdr: x.mdr, antecipada: x.antecipada, dataOriginal: x.dataOriginal, dataPagamento: x.dataPagamento }))
           .sort((a, b) => String(a.dataCaptura).localeCompare(String(b.dataCaptura)));
         origem.stone.eventos = (dia.eventosFinanceiros || []).filter((e) => e.paymentId === st.paymentId);
+        // parcela a parcela, o título de cartão no contas a receber do TOTVS
+        try {
+          origem.stone.cruzamento = await cruzarDepositoComTotvs(loja, st.stonecode || loja.stonecode, origem.stone.parcelas);
+        } catch (e) {
+          origem.stone.cruzamento = { aviso: `Não foi possível cruzar com o TOTVS agora (${e.message}).`, parcelas: [] };
+        }
       }
     } catch (e) {
       origem.stone.erroParcelas = e.message;
