@@ -15,17 +15,22 @@
  */
 import supabase from '../config/supabase.js';
 
-// Lojas candidatas (próprias) — confirmar de/para com o João (memory fluxo-saldos).
-// code = branchCode TOTVS; pode incluir franquias depois.
+// De/para loja -> branchCode (Tadeu, 05/11/2026). ATENÇÃO: o código da VENDA vem
+// SEM o zero final (x10 = filial de teste). Ex.: Cidade Jardim é 87, não 870.
+// 12 lojas do grupo (sem franquias 60xx).
 export const LOJAS = [
-  { code: 600, nome: 'Crosby Recife' },
-  { code: 870, nome: 'Cidade Jardim' },
-  { code: 880, nome: 'Guararapes' },
-  { code: 930, nome: 'Imperatriz' },
-  { code: 940, nome: 'Patos' },
-  { code: 950, nome: 'Midway' },
-  { code: 970, nome: 'Teresina' },
-  { code: 980, nome: 'Recife (Shopping)' },
+  { code: 2, nome: 'João Pessoa' },
+  { code: 5, nome: 'Nova Cruz' },
+  { code: 55, nome: 'Parnamirim' },
+  { code: 65, nome: 'Canguaretama' },
+  { code: 87, nome: 'Cidade Jardim' },
+  { code: 88, nome: 'Guararapes' },
+  { code: 90, nome: 'Ayrton Senna' },
+  { code: 93, nome: 'Imperatriz' },
+  { code: 94, nome: 'Patos' },
+  { code: 95, nome: 'Midway' },
+  { code: 97, nome: 'Teresina' },
+  { code: 98, nome: 'Recife' },
 ];
 
 const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
