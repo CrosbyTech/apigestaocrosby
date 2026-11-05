@@ -43,6 +43,7 @@ const NIVEIS = {
   valor_diverge: { nivel: 2, rotulo: 'NSU e AUT batem · valor diverge' },
   nsu_diverge: { nivel: 3, rotulo: 'Valor e AUT batem · NSU diverge' },
   aut_diverge: { nivel: 4, rotulo: 'Valor e NSU batem · AUT diverge' },
+  agrupado: { nivel: 1, rotulo: 'Exato · títulos somados (mesmo NSU)' },
 };
 
 function divergencias(s, t) {
@@ -150,6 +151,33 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
     }
   }
 
+  // Um pagamento no cartão (1 NSU na Stone) dividido em 2+ títulos no TOTVS
+  // (duas NFs com o mesmo NSU/AUT). Visto em Patos 04/11/2026: Stone R$ 333,00
+  // = títulos 195120 (155,00) + 195121 (178,00). O par 1:1 ficava "valor
+  // diverge" e o outro título sobrava em "só no TOTVS". Se os títulos livres
+  // com o mesmo NSU e AUT completam o valor da Stone, juntam no par.
+  for (const p of pares) {
+    if (p.tipo !== 'valor_diverge') continue;
+    const s = p.stone;
+    const extras = [...totvsLivres.values()].filter(
+      (t) => bateNsu(s, t) && bateAut(s, t) && t.chave !== p.totvs.chave,
+    );
+    if (!extras.length) continue;
+    const soma = round2(extras.reduce((a, t) => a + t.valor, round2(p.totvs.valor)));
+    if (soma !== round2(s.valorBruto)) continue;
+    for (const t of extras) totvsLivres.delete(t.chave);
+    Object.assign(p, NIVEIS.agrupado, {
+      tipo: 'agrupado',
+      totvsExtras: extras,
+      valorTotvsTotal: soma,
+      diferencaValor: 0,
+      divergencias: [
+        `1 pagamento no cartão dividido em ${extras.length + 1} títulos no TOTVS (${[p.totvs, ...extras].map((t) => `${t.filial}/${t.titulo} ${t.valor}`).join(' + ')})`,
+        ...divergencias(s, { ...p.totvs, valor: soma }),
+      ],
+    });
+  }
+
   const stoneSemTotvs = [...stoneLivres.values()];
   // Sobra do TOTVS: só título de portador Stone é problema desta conciliação
   const totvsSemStone = [...totvsLivres.values()].filter((t) => t.portadorStone !== false);
@@ -172,9 +200,9 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
     conciliadas: {
       qtd: pares.length,
       valorStone: soma(pares, (p) => p.stone.valorBruto),
-      valorTotvs: soma(pares, (p) => p.totvs.valor),
-      exatas: pares.filter((p) => p.tipo === 'exato' || p.tipo === 'manual').length,
-      comDivergencia: pares.filter((p) => p.tipo !== 'exato' && p.tipo !== 'manual').length,
+      valorTotvs: soma(pares, (p) => p.valorTotvsTotal ?? p.totvs.valor),
+      exatas: pares.filter((p) => p.tipo === 'exato' || p.tipo === 'manual' || p.tipo === 'agrupado').length,
+      comDivergencia: pares.filter((p) => p.tipo !== 'exato' && p.tipo !== 'manual' && p.tipo !== 'agrupado').length,
       porNivel: Object.fromEntries(Object.keys(NIVEIS).map((k) => [k, pares.filter((p) => p.tipo === k).length])),
     },
     stoneSemTotvs: { qtd: stoneSemTotvs.length, valor: soma(stoneSemTotvs, (s) => s.valorBruto) },
