@@ -65,16 +65,49 @@ async function extrairPaginas(buffer) {
 }
 
 /** agrupa itens pelo Y (mesma linha visual), ordenados pelo X */
-function agruparLinhas(itens, tol = 2.5) {
+// Nos extratos mais novos (set/2024+) o valor, o texto e o sinal C/D da mesma
+// linha vêm com Y levemente diferente (ex.: 619 / 614 / 609); as linhas da
+// tabela ficam ~12 pt uma da outra. Agrupa em cadeia: o item entra na linha se
+// estiver a até `tol` do ÚLTIMO item encaixado (não do primeiro).
+function agruparLinhas(itens, tol = 5.5) {
   const ordenados = [...itens].sort((a, b) => b.y - a.y || a.x - b.x);
   const linhas = [];
   for (const it of ordenados) {
     const l = linhas.at(-1);
-    if (l && Math.abs(l.y - it.y) <= tol) l.itens.push(it);
-    else linhas.push({ y: it.y, itens: [it] });
+    if (l && Math.abs(l.yUltimo - it.y) <= tol) {
+      l.itens.push(it);
+      l.yUltimo = it.y;
+    } else linhas.push({ y: it.y, yUltimo: it.y, itens: [it] });
   }
   for (const l of linhas) l.itens.sort((a, b) => a.x - b.x);
-  return linhas;
+  // Sinal C/D que o PDF escreveu numa linha só dele (até ~14 pt acima ou
+  // abaixo do número): devolve o sinal para a linha do número correspondente.
+  const ehSinal = (i) => /^[CD]$/.test(i.s);
+  const temNumero = (l) => l.itens.some((i) => RE_VALOR.test(i.s));
+  for (let k = 0; k < linhas.length; k++) {
+    const l = linhas[k];
+    if (!l.itens.length || !l.itens.every(ehSinal)) continue;
+    for (const sinal of [...l.itens]) {
+      let melhor = null;
+      for (const d of [-1, 1, -2, 2]) {
+        const o = linhas[k + d];
+        if (!o || !temNumero(o) || Math.abs(o.y - l.y) > 14) continue;
+        const num = o.itens.find((i) => RE_VALOR.test(i.s) && sinal.x >= i.x - 2 && sinal.x2 >= i.x2 - 2 && sinal.x <= i.x2 + 22);
+        if (!num) continue;
+        const jaTem = o.itens.some((i) => ehSinal(i) && i.x >= num.x - 2 && i.x2 >= num.x2 - 2 && i.x <= num.x2 + 22);
+        if (!jaTem) {
+          melhor = o;
+          break;
+        }
+      }
+      if (melhor) {
+        melhor.itens.push({ ...sinal, y: melhor.y });
+        melhor.itens.sort((a, b) => a.x - b.x);
+        l.itens = l.itens.filter((i) => i !== sinal);
+      }
+    }
+  }
+  return linhas.filter((l) => l.itens.length);
 }
 const texto = (itens) => limpar(itens.map((i) => i.s).join(' '));
 
@@ -127,19 +160,30 @@ export async function lerExtratoBb(buffer) {
   let saldoAnterior = null;
   let saldoFinal = null;
   let seq = 0;
+  // valor/saldo que ficou sozinho no fim de uma página enquanto o resto da
+  // linha (data, histórico, sinal) foi para o começo da página seguinte
+  let sobras = [];
   for (const pg of paginas) {
     for (const l of agruparLinhas(pg.itens)) {
-      const its = l.itens;
-      const t = texto(its);
+      const t = texto(l.itens);
       if (/^Dt\.\s*balancete/i.test(t)) continue;
+      const soNumeros = l.itens.length && l.itens.every((i) => RE_VALOR.test(i.s) || /^[CD]$/.test(i.s));
+      const temData = l.itens.some((i) => RE_DATA.test(i.s) && i.x < cols.xMov + 120);
+      if (soNumeros && !temData) {
+        sobras = l.itens;
+        continue;
+      }
+      const its = temData && sobras.length ? [...sobras, ...l.itens].sort((a, b) => a.x - b.x) : l.itens;
+      if (temData) sobras = [];
       // sinal C/D fica logo à direita do número: valor termina antes de xSaldo−10; saldo depois
       const sinais = its.filter((i) => /^[CD]$/.test(i.s));
       const numeros = its.filter((i) => RE_VALOR.test(i.s));
       const valorIt = numeros.find((i) => i.x >= cols.xValor - 40 && i.x2 <= cols.xSaldo - 2);
       const saldoIt = numeros.find((i) => i !== valorIt && i.x >= cols.xSaldo - 40);
+      // o C/D fica à direita do número; às vezes alinhado pela borda direita (x2 igual)
       const sinalDe = (num) => {
         if (!num) return null;
-        const s = sinais.find((i) => i.x > num.x2 - 1 && i.x < num.x2 + 20);
+        const s = sinais.find((i) => i.x >= num.x - 2 && i.x2 >= num.x2 - 2 && i.x <= num.x2 + 22);
         return s ? s.s : null;
       };
       const datas = its.filter((i) => RE_DATA.test(i.s) && i.x < cols.xMov + 120);
