@@ -234,6 +234,22 @@ router.patch(
   }),
 );
 
+// ─── pró-labore: saídas aos sócios em todas as contas do período ──
+router.get(
+  '/pro-labore',
+  asyncHandler(async (req, res) => {
+    const { de, ate } = req.query;
+    if (!de || !ate) return errorResponse(res, 'Informe de e ate (YYYY-MM-DD).', 400);
+    try {
+      const r = await fluxo.painel({ de: String(de), ate: String(ate) });
+      const lancamentos = (r.lancamentos || []).filter((l) => l.proLabore || l.conciliacao?.origem === 'PRO_LABORE');
+      return successResponse(res, { de, ate, pessoas: conciliacao.PESSOAS_PRO_LABORE, lancamentos });
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // ─── conciliação das pendências ───────────────────────────────
 router.get(
   '/conciliacao/candidatos',
