@@ -313,6 +313,27 @@ const conciliacaoProLabore = (pessoa) => ({
   automatico: true,
 });
 
+// ─── depósitos da Rede na Sicredi (histórico diz REDE + bandeira + loja) ──
+// "REDE ANTEC MASTER |0002-05", "REDE DEBITO VISA |0009-73": antecipação ou
+// liquidação da maquininha da Rede creditada na Sicredi. Conferido com os
+// relatórios de recebimentos da Rede de out/2026 (R$ 42.238,26 ao centavo, dia
+// a dia). Derivado na leitura; a taxa por linha depende do relatório
+// detalhado da Rede.
+const RE_REDE_MEMO = /^REDE\s*-?\s*(ANTEC\w*|ANTECIPACAO|DEBITO|CREDITO|DEB|CRED)\b/i;
+export const ehDepositoRedeMemo = (l) => Number(l.valor) > 0 && RE_REDE_MEMO.test(semAcento(String(l.memo || '')).toUpperCase());
+const conciliacaoDepositoRedeMemo = (l) => {
+  const up = semAcento(String(l.memo || '')).toUpperCase();
+  const antecip = /ANTEC/.test(up);
+  const loja = (up.match(/\|\s*([\d-]+)/) || [])[1] || l.loja || null;
+  return {
+    id: null,
+    origem: 'REDE_DEPOSITO',
+    referencia: { adquirente: 'REDE', bandeira: l.bandeira || null, loja, antecipacao: antecip, memo: l.memo || null },
+    justificativa: `Depósito da Rede · ${antecip ? 'antecipação' : 'liquidação'}${l.bandeira ? ` ${l.bandeira}` : ''}${loja ? ` · loja ${loja}` : ''}`,
+    automatico: true,
+  };
+};
+
 // ─── saque automático da Pagar.me → conta Stone ───────────────
 // A Pagar.me (grupo Stone) transfere o saldo disponível todo dia para a conta
 // Stone da mesma empresa. No extrato Stone isso aparece como entrada
@@ -396,6 +417,8 @@ export async function anexarConciliacoes(lancamentos, { de, ate }) {
       l.conciliacao = conciliacaoAplicacaoStone(paresAplicacao.get(l.id));
     } else if (pessoaProLabore(l)) {
       l.conciliacao = conciliacaoProLabore(pessoaProLabore(l));
+    } else if (!l.transferencia_id && ehDepositoRedeMemo(l)) {
+      l.conciliacao = conciliacaoDepositoRedeMemo(l);
     } else if (ehSaquePagarme(l, cnpjsPagarme)) {
       l.conciliacao = conciliacaoSaquePagarme(l, pagarme.get(cnpjSaquePagarme(l, cnpjsPagarme)));
     } else if (l.transferencia_id && l.transferencia) {
@@ -2022,4 +2045,4 @@ export async function prepararFontes({ de, ate }) {
   return { janela: f.janela, liberacao: f.liberacao.length, solicitacoes: f.solicitacoes.length, totvs: f.totvs.length, contasReceber: itensCr.length, avisos: f.avisos, ms: Date.now() - t0 };
 }
 
-export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, ehDepositoRedeProvavel, decidir };
+export default { prepararFontes, detalheConciliacao, atualizarAnexos, atualizarJustificativa, pessoaProLabore, PESSOAS_PRO_LABORE, buscarContasPagar, buscarContasReceber, parearTarifasBoleto, parearDevolucoesPix, parearEstornosCartao, parearAplicacoesStone, atribuirChaves, anexarConciliacoes, listarConciliacoes, buscarCandidatos, conciliarAutomatico, salvarConciliacao, excluirConciliacao, carregarFontes, candidatosPara, candidatosEntradaStone, depositosStoneDoDia, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, ehSaquePagarme, ehDepositoRedeProvavel, ehDepositoRedeMemo, decidir };

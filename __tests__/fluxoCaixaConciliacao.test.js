@@ -1,6 +1,6 @@
 // Regras puras da conciliação bancária: chave estável, pontuação, uso parcial
 // de duplicata e decisão automática.
-import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel } from '../services/fluxoCaixaConciliacao.js';
+import { atribuirChaves, candidatosPara, decidir, depositosStoneDoDia, candidatosEntradaStone, ehEntradaStone, ehEntradaPixMaquininha, ehEntradaPixTotvs, ehEntradaPixCliente, parearTarifasBoleto, parearDevolucoesPix, ehSaquePagarme, parearEstornosCartao, parearAplicacoesStone, pessoaProLabore, ehDepositoRedeProvavel, ehDepositoRedeMemo } from '../services/fluxoCaixaConciliacao.js';
 
 const saida = (over = {}) => ({ id: 1, conta_id: 18, data: '2026-09-01', seq: 1, valor: -43.41, memo: 'PAGAMENTO PIX CLARO', descricao: 'PAGAMENTO PIX', contraparte_nome: 'CLARO', contraparte_doc: '40432544000147', banco: 'SICREDI', conta_apelido: 'Sicredi 36733-8', conta_titular: 'CROSBY CR VESTUARIO LTDA', ...over });
 const lib = (over = {}) => ({ origem: 'LIBERACAO', id: 'L1', valor: 43.41, data: '2026-09-01', nome: 'CLARO', doc: '40432544000147', empresa: 'CROSBY MATRIZ', detalhe: 'TELEFONE · BOLETO', bancoPagamento: 'SICREDI CROSBY', duplicata: '160605|6', vencimento: '2026-08-17', ...over });
@@ -385,5 +385,15 @@ describe('depósito da Rede na conta Stone (venda na maquininha Rede)', () => {
     expect(ehDepositoRedeProvavel(l({ memo: 'Recebimento vendas - Antecipação | Crédito', categoria: 'antecipacao' }), [], true)).toBe(false);
     expect(ehDepositoRedeProvavel(l(), [], false)).toBe(false);
     expect(ehDepositoRedeProvavel(l({ memo: 'Recebimento de vendas Valor referente à liquidação de suas - vendas de cartão.', categoria: 'outros' }), [], true)).toBe(false);
+  });
+});
+
+describe('depósitos da Rede na Sicredi (histórico REDE …)', () => {
+  test('antecipação e liquidação da Rede são reconhecidas pelo histórico', () => {
+    expect(ehDepositoRedeMemo({ valor: 1000, memo: 'REDE ANTEC MASTER |0002-05' })).toBe(true);
+    expect(ehDepositoRedeMemo({ valor: 1000, memo: 'REDE ANTECIPACAO VISA |0011-98' })).toBe(true);
+    expect(ehDepositoRedeMemo({ valor: 200, memo: 'REDE DEBITO ELO |0009-73' })).toBe(true);
+    expect(ehDepositoRedeMemo({ valor: -200, memo: 'REDE DEBITO ELO |0009-73' })).toBe(false);
+    expect(ehDepositoRedeMemo({ valor: 200, memo: 'RECEBIMENTO PIX 17177680001007 REDE SUL LTDA' })).toBe(false);
   });
 });
