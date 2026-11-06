@@ -19,7 +19,9 @@
 //   POST /promocao-valores/buscar-produtos  { termos[], tamanhos[] }
 //        → produtos cujo nome contém QUALQUER termo E cujo tamanho está na
 //          lista (erp_produtos + base importada); vira lote de SKUs na tela
-//   GET  /promocao-valores/itens?branch&promotionCode&priceCode
+//   (promoções e itens ficam copiados no Supabase — totvs_promocoes /
+//    totvs_promocao_itens — e as consultas saem de lá; refresh relê o TOTVS)
+//   GET  /promocao-valores/itens?branch&promotionCode&priceCode&refresh=1
 //        → todos os itens da promoção com preço atual e valor promocional (para
 //          filtrar e zerar o desconto — a API não exclui item de promoção)
 //   GET|POST /promocao-valores/base-produtos   situação / carga da base de busca
@@ -216,12 +218,127 @@ async function listarLinhasPromocao({ branch, promotionCode, status }) {
 const cacheItensPromocao = new Map(); // `${branch}:${promotionCode}` → { at, mapa }
 const CACHE_ITENS_TTL = 30 * 60 * 1000;
 
+// ─── Cópia no Supabase (totvs_promocoes / totvs_promocao_itens) ─────────────
+// Ler a promoção no TOTVS é lento; toda leitura completa e toda gravação da
+// tela ficam salvas no banco, e as consultas seguintes saem de lá.
+const STATUS_TOTVS = { Open: 'A', Blocked: 'B', Closed: 'E' };
+
+// Grava o que veio do GET /promotion. As promoções lidas por inteiro têm os
+// itens trocados pelos do TOTVS (o que saiu da promoção sai do banco também).
+async function salvarLinhasPromocao(branch, linhas) {
+  const porPromo = new Map();
+  for (const l of linhas) {
+    const code = Number(l.promotionCode);
+    if (!code) continue;
+    if (!porPromo.has(code)) {
+      porPromo.set(code, {
+        cab: {
+          empresa: branch,
+          promocao_code: code,
+          descricao: l.promotionDescription || null,
+          inicio: l.startDate || null,
+          fim: l.endDate || null,
+          status: l.status || null,
+        },
+        itens: new Map(),
+      });
+    }
+    if (l.productCode != null) {
+      porPromo.get(code).itens.set(Number(l.productCode), {
+        empresa: branch,
+        promocao_code: code,
+        produto_code: Number(l.productCode),
+        valor_promocional: l.promotionValue ?? null,
+        valor_anterior: l.previousValue ?? null,
+        origem: 'totvs',
+        atualizado_em: new Date().toISOString(),
+      });
+    }
+  }
+  const agora = new Date().toISOString();
+  for (const [code, { cab, itens }] of porPromo) {
+    const lista = [...itens.values()];
+    for (const lote of chunk(lista, 1000)) {
+      const { error } = await supabase.from('totvs_promocao_itens').upsert(lote, { onConflict: 'empresa,promocao_code,produto_code' });
+      if (error) throw error;
+    }
+    // tira do banco o que não está mais na promoção do TOTVS
+    const noBanco = [];
+    for (let de = 0; ; de += 1000) {
+      const { data } = await supabase
+        .from('totvs_promocao_itens')
+        .select('produto_code')
+        .eq('empresa', branch)
+        .eq('promocao_code', code)
+        .order('produto_code')
+        .range(de, de + 999);
+      noBanco.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    const sairam = noBanco.map((r) => r.produto_code).filter((c) => !itens.has(c));
+    for (const lote of chunk(sairam, 500)) {
+      await supabase.from('totvs_promocao_itens').delete().eq('empresa', branch).eq('promocao_code', code).in('produto_code', lote);
+    }
+    const { error } = await supabase
+      .from('totvs_promocoes')
+      .upsert({ ...cab, qtd_itens: lista.length, lido_totvs_em: agora, atualizado_em: agora }, { onConflict: 'empresa,promocao_code' });
+    if (error) throw error;
+  }
+}
+
+const salvarEmSegundoPlano = (branch, linhas) =>
+  salvarLinhasPromocao(branch, linhas).catch((e) => console.log(`⚠️ [promocao-valores] cópia no banco falhou: ${e.message}`));
+
+async function itensDoBanco(branch, promotionCode) {
+  const { data: cab } = await supabase
+    .from('totvs_promocoes')
+    .select('lido_totvs_em')
+    .eq('empresa', branch)
+    .eq('promocao_code', promotionCode)
+    .maybeSingle();
+  if (!cab?.lido_totvs_em) return null; // nunca lida por inteiro: vai ao TOTVS
+  const mapa = new Map();
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await supabase
+      .from('totvs_promocao_itens')
+      .select('produto_code, valor_promocional, valor_anterior')
+      .eq('empresa', branch)
+      .eq('promocao_code', promotionCode)
+      .order('produto_code')
+      .range(de, de + 999);
+    if (error) throw error;
+    for (const r of data || []) {
+      mapa.set(Number(r.produto_code), {
+        previousValue: r.valor_anterior != null ? Number(r.valor_anterior) : null,
+        promotionValue: r.valor_promocional != null ? Number(r.valor_promocional) : null,
+      });
+    }
+    if (!data || data.length < 1000) break;
+  }
+  return { mapa, lidoEm: cab.lido_totvs_em };
+}
+
 // Mapa productCode → { previousValue, promotionValue } dos itens da promoção.
-async function itensDaPromocao(branch, promotionCode, { fresco = true } = {}) {
+// Ordem: memória → banco (Supabase) → TOTVS. totvs: true força o TOTVS (e
+// atualiza o banco). Se o banco estiver defasado, gravarLote troca update ↔ insert.
+async function itensDaPromocao(branch, promotionCode, { fresco = true, totvs = false, info = null } = {}) {
   const chave = `${branch}:${promotionCode}`;
   const cached = cacheItensPromocao.get(chave);
-  if (!fresco && cached && Date.now() - cached.at < CACHE_ITENS_TTL) {
+  if (!totvs && !fresco && cached && Date.now() - cached.at < CACHE_ITENS_TTL) {
+    if (info) Object.assign(info, { fonte: 'memoria', lidoEm: cached.lidoEm || null });
     return cached.mapa;
+  }
+  if (!totvs) {
+    try {
+      const banco = await itensDoBanco(branch, promotionCode);
+      if (banco) {
+        cacheItensPromocao.set(chave, { at: Date.now(), mapa: banco.mapa, lidoEm: banco.lidoEm });
+        if (info) Object.assign(info, { fonte: 'banco', lidoEm: banco.lidoEm });
+        return banco.mapa;
+      }
+    } catch (e) {
+      console.log(`⚠️ [promocao-valores] banco indisponível, lendo o TOTVS: ${e.message}`);
+    }
   }
   const linhas = await listarLinhasPromocao({ branch, promotionCode, status: 'all' });
   const mapa = new Map();
@@ -232,8 +349,39 @@ async function itensDaPromocao(branch, promotionCode, { fresco = true } = {}) {
       promotionValue: l.promotionValue ?? null,
     });
   }
-  cacheItensPromocao.set(chave, { at: Date.now(), mapa });
+  const lidoEm = new Date().toISOString();
+  cacheItensPromocao.set(chave, { at: Date.now(), mapa, lidoEm });
+  if (info) Object.assign(info, { fonte: 'totvs', lidoEm });
+  // promoção sem itens não volta linha nenhuma: só salva quando há o que salvar
+  if (linhas.length) await salvarLinhasPromocao(branch, linhas).catch((e) => console.log(`⚠️ [promocao-valores] cópia no banco falhou: ${e.message}`));
   return mapa;
+}
+
+// Depois de gravar no TOTVS: o banco fica com o valor novo
+async function registrarGravacao(branch, promotionCode, itens) {
+  const agora = new Date().toISOString();
+  const linhas = itens.map((i) => ({
+    empresa: branch,
+    promocao_code: promotionCode,
+    produto_code: i.productCode,
+    valor_promocional: i.promotionValue,
+    origem: 'headcoach',
+    atualizado_em: agora,
+  }));
+  for (const lote of chunk(linhas, 1000)) {
+    const { error } = await supabase.from('totvs_promocao_itens').upsert(lote, { onConflict: 'empresa,promocao_code,produto_code' });
+    if (error) throw error;
+  }
+  const { count } = await supabase
+    .from('totvs_promocao_itens')
+    .select('produto_code', { count: 'exact', head: true })
+    .eq('empresa', branch)
+    .eq('promocao_code', promotionCode);
+  if (count != null) {
+    await supabase.from('totvs_promocoes').update({ qtd_itens: count, atualizado_em: agora }).eq('empresa', branch).eq('promocao_code', promotionCode);
+  }
+  const cached = cacheItensPromocao.get(`${branch}:${promotionCode}`);
+  if (cached) for (const i of itens) cached.mapa.set(i.productCode, { previousValue: null, promotionValue: i.promotionValue });
 }
 
 const STATUS_LABEL = { A: 'Aberta', B: 'Bloqueada', E: 'Encerrada' };
@@ -259,8 +407,33 @@ router.get(
         `${cached.promocoes.length} promoções (cache)`,
       );
     }
+    // Banco primeiro (rápido); vazio ou refresh → TOTVS
+    if (!refresh) {
+      let q = supabase.from('totvs_promocoes').select('*').eq('empresa', branch).order('promocao_code', { ascending: false });
+      if (STATUS_TOTVS[status]) q = q.eq('status', STATUS_TOTVS[status]);
+      const { data, error } = await q;
+      if (!error && data?.length) {
+        const promocoes = data.map((p) => ({
+          branchCode: p.empresa,
+          promotionCode: p.promocao_code,
+          description: p.descricao || '',
+          startDate: p.inicio,
+          endDate: p.fim,
+          status: p.status,
+          statusLabel: STATUS_LABEL[p.status] || p.status || null,
+          itens: p.qtd_itens,
+        }));
+        const lidoEm = data.reduce((m, p) => (p.lido_totvs_em && p.lido_totvs_em > m ? p.lido_totvs_em : m), '');
+        return successResponse(
+          res,
+          { promocoes, cache: true, banco: true, at: lidoEm ? new Date(lidoEm).getTime() : null },
+          `${promocoes.length} promoções (banco)`,
+        );
+      }
+    }
     try {
       const linhas = await listarLinhasPromocao({ branch, status });
+      salvarEmSegundoPlano(branch, linhas);
       const porCodigo = new Map();
       for (const l of linhas) {
         const code = Number(l.promotionCode);
@@ -422,7 +595,8 @@ router.get(
     const priceCode = parseInt(req.query.priceCode, 10) || 1;
     if (!branch || !promotionCode) return errorResponse(res, 'branch e promotionCode obrigatórios', 400, 'MISSING_PARAMS');
     try {
-      const itens = await itensDaPromocao(branch, promotionCode, { fresco: true });
+      const info = {};
+      const itens = await itensDaPromocao(branch, promotionCode, { fresco: true, totvs: req.query.refresh === '1', info });
       const precos = await precosRapidos([...itens.keys()], branch, priceCode);
       const rows = [...itens.entries()].map(([productCode, it]) => {
         const p = precos.get(productCode);
@@ -442,7 +616,7 @@ router.get(
           erro: p?.price > 0 ? null : 'Produto sem preço nesta empresa/tipo de preço',
         };
       });
-      return successResponse(res, { rows, priceCode }, `${rows.length} itens na promoção`);
+      return successResponse(res, { rows, priceCode, fonte: info.fonte, lidoEm: info.lidoEm }, `${rows.length} itens na promoção`);
     } catch (err) {
       return handleTotvsError(res, err, 'ao ler os itens da promoção');
     }
@@ -768,6 +942,13 @@ router.post(
           resultado.atualizados.push(...r.okAlternativo);
           resultado.erros.push(...r.erros.map((e) => ({ ...e, operacao: 'insert' })));
         }
+      }
+
+      const gravados = new Set([...resultado.atualizados, ...resultado.inseridos].map(Number));
+      if (gravados.size) {
+        await registrarGravacao(branch, promotionCode, itens.filter((i) => gravados.has(i.productCode))).catch((e) =>
+          console.log(`⚠️ [promocao-valores] gravado no TOTVS, mas a cópia no banco falhou: ${e.message}`),
+        );
       }
 
       console.log(
