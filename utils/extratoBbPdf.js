@@ -259,6 +259,24 @@ export async function lerExtratoBb(buffer) {
     }
   }
 
+  // Contraparte: o BB põe na continuação do histórico "dd/mm hh:mm NOME" (2024)
+  // ou "dd/mm hh:mm CNPJ NOME" (2025+), e às vezes só o CNPJ com zeros à
+  // esquerda ("Transferência enviada 22/07 18:50 00017177680000116").
+  for (const l of lanc) {
+    const m = String(l.historico || '').match(/^(.*?)\s*(\d{2}\/\d{2})\s+(\d{2}:\d{2})\s*(.*)$/);
+    l.historicoBase = m ? limpar(m[1]) || l.historico : l.historico;
+    l.hora = m ? m[3] : null;
+    let resto = m ? limpar(m[4]) : '';
+    let doc = null;
+    const mDoc = resto.match(/^0*(\d{11}|\d{14})(?!\d)\s*(.*)$/);
+    if (mDoc) {
+      doc = mDoc[1];
+      resto = limpar(mDoc[2]);
+    }
+    l.contraparteDoc = doc;
+    l.contraparteNome = resto && /[A-Za-z]{2}/.test(resto) ? resto : null;
+  }
+
   if (saldoAnterior == null) throw new Error('Não achei a linha "Saldo Anterior" no extrato.');
   if (saldoFinal == null) throw new Error('Não achei a linha "S A L D O" (saldo final) no extrato.');
 

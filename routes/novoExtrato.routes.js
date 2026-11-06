@@ -2,7 +2,8 @@
 // New Extrato Bancário (reconstrução do zero) — /api/novo-extrato
 //   POST /importar            (multipart "arquivos"; ?forcar=1 aceita saldo que não bate)
 //   GET  /contas              contas/importações já gravadas
-//   GET  /lancamentos?de&ate&bancos&contas&tipos&busca
+//   GET  /lancamentos?de&ate&bancos&contas&tipos&busca  (traz também transferencias [pares] e semPar)
+//   POST /transferencias/recasar                        refaz o casamento entre as contas importadas
 // Serviço: services/novoExtrato.js · leitor BB: utils/extratoBbPdf.js
 // ============================================================
 import express from 'express';
@@ -50,6 +51,17 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await novo.listarContas());
+    } catch (e) {
+      return errorResponse(res, e.message, 500, 'NOVO_EXTRATO');
+    }
+  }),
+);
+
+router.post(
+  '/transferencias/recasar',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await novo.casarTransferencias(), 'Transferências recasadas');
     } catch (e) {
       return errorResponse(res, e.message, 500, 'NOVO_EXTRATO');
     }
