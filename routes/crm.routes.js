@@ -1688,6 +1688,12 @@ router.post(
         info.set(Number(r.code), { cpf: String(r.cpf || '').replace(/\D/g, ''), nome: r.nm_pessoa || '' });
     }
 
+    const exclude = new Set(
+      String(q.exclude || '')
+        .split(',')
+        .map((n) => parseInt(n, 10))
+        .filter(Boolean),
+    );
     const r2 = (v) => Math.round(v * 100) / 100;
     const elegiveis = [...agg.values()]
       .map((a) => ({
@@ -1696,7 +1702,7 @@ router.post(
         nome: info.get(a.personCode)?.nome || null,
         cashback: r2((a.valor * percent) / 100),
       }))
-      .filter((a) => a.cpf && a.cashback > 0)
+      .filter((a) => a.cpf && a.cashback > 0 && !exclude.has(a.personCode))
       .sort((x, y) => y.cashback - x.cashback);
 
     const alvo = limit > 0 ? elegiveis.slice(0, limit) : elegiveis;
