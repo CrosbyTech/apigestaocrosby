@@ -19,6 +19,9 @@
 //   POST /promocao-valores/buscar-produtos  { termos[], tamanhos[] }
 //        → produtos cujo nome contém QUALQUER termo E cujo tamanho está na
 //          lista (erp_produtos + base importada); vira lote de SKUs na tela
+//   GET  /promocao-valores/itens?branch&promotionCode&priceCode
+//        → todos os itens da promoção com preço atual e valor promocional (para
+//          filtrar e zerar o desconto — a API não exclui item de promoção)
 //   GET|POST /promocao-valores/base-produtos   situação / carga da base de busca
 //        (relatório de produtos acabados do TOTVS em CSV)
 //
@@ -353,6 +356,99 @@ async function precosPorCodigo(productCodes, branch, priceCode) {
   return mapa;
 }
 
+// Preço pelo Supabase primeiro (erp_precos, cópia do TOTVS mantida pelo sync;
+// hoje só empresas 1 e 2 no tipo 1) com nome/cor/tamanho do erp_produtos ou da
+// base importada; o que faltar vai ao TOTVS (prices/search, o caminho lento).
+async function precosRapidos(productCodes, branch, priceCode) {
+  const codigos = [...new Set(productCodes.map(Number).filter((c) => c > 0))];
+  const mapa = new Map();
+  try {
+    const precos = new Map();
+    for (const lote of chunk(codigos, 500)) {
+      const { data, error } = await supabase
+        .from('erp_precos')
+        .select('produto_code, preco_code, preco_nome, preco, preco_promocional, promocao')
+        .eq('empresa', branch)
+        .eq('preco_code', priceCode)
+        .in('produto_code', lote);
+      if (error) throw error;
+      for (const r of data || []) precos.set(Number(r.produto_code), r);
+    }
+    const nomes = new Map();
+    const comPreco = [...precos.keys()];
+    for (const lote of chunk(comPreco, 500)) {
+      const [erp, base] = await Promise.all([
+        supabase.from('erp_produtos').select('code, nome, sku, referencia_code, cor_nome, tamanho').in('code', lote),
+        supabase.from('promocao_produtos_base').select('code, nome, referencia_code, cor_nome, tamanho').in('code', lote),
+      ]);
+      for (const r of base.data || []) nomes.set(Number(r.code), r);
+      for (const r of erp.data || []) nomes.set(Number(r.code), r);
+    }
+    for (const [code, p] of precos) {
+      const n = nomes.get(code);
+      if (!n) continue; // sem nome: deixa o TOTVS responder
+      mapa.set(code, {
+        productCode: code,
+        productName: n.nome || null,
+        productSku: n.sku || null,
+        referenceCode: n.referencia_code || null,
+        colorName: n.cor_nome || null,
+        sizeName: n.tamanho || null,
+        priceCode: p.preco_code,
+        priceName: p.preco_nome || null,
+        price: p.preco != null ? Number(p.preco) : null,
+        promotionalPrice: p.preco_promocional != null ? Number(p.preco_promocional) : null,
+        promotionalInformation: p.promocao || null,
+      });
+    }
+  } catch (err) {
+    console.log(`⚠️ [Preço Promocional] preços do Supabase indisponíveis: ${err.message}`);
+  }
+  const faltam = codigos.filter((c) => !mapa.has(c));
+  if (faltam.length) {
+    const doTotvs = await precosPorCodigo(faltam, branch, priceCode);
+    for (const [k, v] of doTotvs) mapa.set(k, v);
+  }
+  return mapa;
+}
+
+// Itens de uma promoção do TOTVS já no formato da prévia (para ver, filtrar e
+// zerar o desconto: a API não tem exclusão de item, só promotion-values/update)
+router.get(
+  '/promocao-valores/itens',
+  asyncHandler(async (req, res) => {
+    const branch = parseInt(req.query.branch, 10);
+    const promotionCode = parseInt(req.query.promotionCode, 10);
+    const priceCode = parseInt(req.query.priceCode, 10) || 1;
+    if (!branch || !promotionCode) return errorResponse(res, 'branch e promotionCode obrigatórios', 400, 'MISSING_PARAMS');
+    try {
+      const itens = await itensDaPromocao(branch, promotionCode, { fresco: true });
+      const precos = await precosRapidos([...itens.keys()], branch, priceCode);
+      const rows = [...itens.entries()].map(([productCode, it]) => {
+        const p = precos.get(productCode);
+        return {
+          sku: String(productCode),
+          productCode,
+          productName: p?.productName || null,
+          productSku: p?.productSku || null,
+          referenceCode: p?.referenceCode || null,
+          colorName: p?.colorName || null,
+          sizeName: p?.sizeName || null,
+          priceName: p?.priceName || null,
+          price: p?.price ?? null,
+          naPromocao: true,
+          valorPromocaoAtual: it.promotionValue ?? null,
+          status: p?.price > 0 ? 'ok' : 'sem_preco',
+          erro: p?.price > 0 ? null : 'Produto sem preço nesta empresa/tipo de preço',
+        };
+      });
+      return successResponse(res, { rows, priceCode }, `${rows.length} itens na promoção`);
+    } catch (err) {
+      return handleTotvsError(res, err, 'ao ler os itens da promoção');
+    }
+  }),
+);
+
 router.post(
   '/promocao-valores/preview',
   asyncHandler(async (req, res) => {
@@ -393,7 +489,7 @@ router.post(
       await mapConcorrente(lookupPendentes, resolverLookup);
 
       // 2) Preço atual na empresa/tipo de preço
-      let precos = await precosPorCodigo([...porSku.values()], branch, priceCode);
+      let precos = await precosRapidos([...porSku.values()], branch, priceCode);
 
       // 3) Numéricos que não acharam preço: podem ser EAN curto / SKU — tenta
       //    o lookup e busca o preço de novo.
