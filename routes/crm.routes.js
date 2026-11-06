@@ -1592,6 +1592,182 @@ router.get(
   }),
 );
 
+// =============================================================================
+// POST /api/crm/franquia-cashback-creditar
+// CREDITA (escreve!) o cashback de 20% das vendas de franquia no TOTVS
+// (person/v2/bonus-due-date, tipo 14, validade 90 dias). Credita por
+// (cliente × filial), só vendas COM CPF. Proteções:
+//   • confirm=true é OBRIGATÓRIO para gravar (sem ele, só simula).
+//   • limit=N credita no máximo N (para teste controlado).
+// Query: branches (6106,6107) · datemin,datemax · ops (9009,9063) · percent (20)
+//        · confirm (false) · limit (0 = todos)
+// =============================================================================
+const FRANQUIA_BONUS_TYPE = 14;
+const FRANQUIA_BONUS_VALIDADE_DIAS = 90;
+router.post(
+  '/franquia-cashback-creditar',
+  asyncHandler(async (req, res) => {
+    const q = { ...req.query, ...req.body };
+    const branches = String(q.branches || '6106,6107')
+      .split(',')
+      .map((n) => parseInt(n, 10))
+      .filter(Boolean);
+    const ops = new Set(
+      String(q.ops || '9009,9063')
+        .split(',')
+        .map((n) => parseInt(n, 10))
+        .filter(Boolean),
+    );
+    const percent = Number(q.percent || 20);
+    const confirm = String(q.confirm) === 'true';
+    const limit = parseInt(q.limit, 10) || 0;
+    const isoD = (d) => d.toISOString().slice(0, 10);
+    const ymd = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? s : null);
+    const hoje = new Date();
+    const dmax = ymd(q.datemax) || isoD(hoje);
+    const dmin = ymd(q.datemin) || isoD(new Date(hoje.getTime() - 30 * 86400000));
+
+    let tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    let token = tokenData.access_token;
+
+    // 1) Agrega vendas por (cliente|filial) via fiscal-movement
+    const FM_URL = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+    const agg = new Map(); // `${personCode}|${branchCode}` -> { personCode, branchCode, valor, qtd }
+    for (let pg = 1; pg <= 200; pg++) {
+      let data = null;
+      for (let t = 0; t < 3 && !data; t++) {
+        try {
+          const r = await axios.post(
+            FM_URL,
+            {
+              filter: { branchCodeList: branches, startMovementDate: dmin, endMovementDate: dmax },
+              page: pg,
+              pageSize: 1000,
+            },
+            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 120000 },
+          );
+          data = r.data;
+        } catch (err) {
+          if (err.response?.status === 401) {
+            try {
+              token = (await getToken(true)).access_token;
+            } catch {}
+          } else {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        }
+      }
+      if (!data) break;
+      for (const it of data.items || []) {
+        const op = Number(it.operationCode);
+        const val = Number(it.netValue || 0);
+        const pc = it.personCode;
+        const bc = it.branchCode;
+        if (!ops.has(op) || !pc || !bc || val <= 0) continue;
+        const key = `${pc}|${bc}`;
+        const a = agg.get(key) || { personCode: pc, branchCode: bc, valor: 0, qtd: 0 };
+        a.valor += val;
+        a.qtd += 1;
+        agg.set(key, a);
+      }
+      if (!data.hasNext) break;
+    }
+
+    // 2) CPF/nome (só credita quem tem CPF)
+    const codes = [...new Set([...agg.values()].map((a) => a.personCode))];
+    const info = new Map();
+    for (let i = 0; i < codes.length; i += 300) {
+      const { data } = await supabase
+        .from('pes_pessoa')
+        .select('code,cpf,nm_pessoa')
+        .in('code', codes.slice(i, i + 300));
+      for (const r of data || [])
+        info.set(Number(r.code), { cpf: String(r.cpf || '').replace(/\D/g, ''), nome: r.nm_pessoa || '' });
+    }
+
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const elegiveis = [...agg.values()]
+      .map((a) => ({
+        ...a,
+        cpf: info.get(a.personCode)?.cpf || null,
+        nome: info.get(a.personCode)?.nome || null,
+        cashback: r2((a.valor * percent) / 100),
+      }))
+      .filter((a) => a.cpf && a.cashback > 0)
+      .sort((x, y) => y.cashback - x.cashback);
+
+    const alvo = limit > 0 ? elegiveis.slice(0, limit) : elegiveis;
+
+    // 3) Sem confirm → só simula (não grava)
+    if (!confirm) {
+      return successResponse(
+        res,
+        {
+          confirm: false,
+          periodo: { datemin: dmin, datemax: dmax },
+          creditaria: alvo.length,
+          totalCashback: r2(alvo.reduce((s, a) => s + a.cashback, 0)),
+          itens: alvo,
+        },
+        `SIMULAÇÃO: creditaria ${alvo.length} (R$ ${r2(alvo.reduce((s, a) => s + a.cashback, 0))}). Use confirm=true para gravar.`,
+      );
+    }
+
+    // 4) CONFIRM → grava o bônus (bonus-due-date) por item
+    const fim = new Date(hoje.getTime() + FRANQUIA_BONUS_VALIDADE_DIAS * 86400000);
+    const creditados = [];
+    const erros = [];
+    for (const a of alvo) {
+      const payload = {
+        branchCode: a.branchCode,
+        personCode: a.personCode,
+        bonusType: FRANQUIA_BONUS_TYPE,
+        movementDate: isoD(hoje),
+        bonusValue: a.cashback,
+        startDate: isoD(hoje),
+        endDate: isoD(fim),
+        historic: 'Cashback franquia (HeadCoach)',
+      };
+      try {
+        await axios.post(`${TOTVS_BASE_URL}/person/v2/bonus-due-date`, payload, {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          timeout: 30000,
+        });
+        creditados.push({ personCode: a.personCode, branchCode: a.branchCode, nome: a.nome, cashback: a.cashback });
+      } catch (err) {
+        if (err.response?.status === 401) {
+          try {
+            token = (await getToken(true)).access_token;
+          } catch {}
+        }
+        const d = err.response?.data;
+        erros.push({
+          personCode: a.personCode,
+          branchCode: a.branchCode,
+          erro: Array.isArray(d) ? d.map((x) => x.message).join('; ') : d?.message || err.message,
+        });
+      }
+    }
+
+    return successResponse(
+      res,
+      {
+        confirm: true,
+        periodo: { datemin: dmin, datemax: dmax },
+        creditados: creditados.length,
+        totalCreditado: r2(creditados.reduce((s, c) => s + c.cashback, 0)),
+        erros: erros.length,
+        detalhe_creditados: creditados,
+        detalhe_erros: erros,
+      },
+      `Creditados ${creditados.length} · R$ ${r2(creditados.reduce((s, c) => s + c.cashback, 0))} · ${erros.length} erros`,
+    );
+  }),
+);
+
 // GET /api/crm/lead-generation/cashback-vendedor
 //   Monta a lista de clientes do vendedor a partir do Supabase
 //   (notas_fiscais.dealer_code), sem depender da carteira do ERP, e consulta
