@@ -17704,6 +17704,74 @@ router.get(
       if (data.length < PAGE) break;
     }
 
+    // 1b) Franquia: ops 9009/9063 NÃO geram NF, então não entram no passo
+    // acima. Pra filiais de franquia (>= 1000) busca os compradores no
+    // fiscal-movement. Sem isso, pós-venda e cashback de franquia ficavam
+    // vazios mesmo havendo venda/saldo. (mesma fonte do franquia-cashback-dryrun)
+    const franquiaBranches = branchCodes.filter((b) => b >= 1000);
+    if (franquiaBranches.length > 0) {
+      const FRANQUIA_OPS = new Set([9009, 9063]);
+      try {
+        let tk = (await getToken())?.access_token;
+        if (tk) {
+          const FM_URL = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+          for (let pg = 1; pg <= 200; pg++) {
+            let fm = null;
+            for (let t = 0; t < 3 && !fm; t++) {
+              try {
+                const r = await axios.post(
+                  FM_URL,
+                  {
+                    filter: {
+                      branchCodeList: franquiaBranches,
+                      startMovementDate: dateStr,
+                      endMovementDate: dateStr,
+                    },
+                    page: pg,
+                    pageSize: 1000,
+                  },
+                  {
+                    headers: {
+                      Authorization: `Bearer ${tk}`,
+                      'Content-Type': 'application/json',
+                    },
+                    timeout: 120000,
+                  },
+                );
+                fm = r.data;
+              } catch (err) {
+                if (err.response?.status === 401) {
+                  try {
+                    tk = (await getToken(true)).access_token;
+                  } catch {}
+                } else {
+                  await new Promise((res2) => setTimeout(res2, 2000));
+                }
+              }
+            }
+            if (!fm) break;
+            for (const it of fm.items || []) {
+              const op = Number(it.operationCode);
+              const pc = it.personCode;
+              const val = Number(it.netValue || 0);
+              if (!FRANQUIA_OPS.has(op) || pc == null || val <= 0) continue;
+              if (porCliente.has(pc)) continue;
+              porCliente.set(pc, {
+                code: pc,
+                nome: it.personName || '',
+                telefone: '',
+                branch_code: it.branchCode,
+                data_compra: String(it.movementDate || dateStr).slice(0, 10),
+              });
+            }
+            if (!fm.hasNext) break;
+          }
+        }
+      } catch (e) {
+        console.warn('[pos-vendas] fiscal-movement franquia falhou:', e.message);
+      }
+    }
+
     const codes = [...porCliente.keys()];
 
     // 2) Telefone via pes_pessoa (lote). Fallback: 1º de phones[].
@@ -17732,9 +17800,12 @@ router.get(
       }
     }
 
-    const clientes = [...porCliente.values()].sort((a, b) =>
-      String(a.nome).localeCompare(String(b.nome)),
-    );
+    const clientes = [...porCliente.values()]
+      .filter((c) => {
+        const up = String(c.nome || '').toUpperCase();
+        return !up.startsWith('CROSBY') && !up.startsWith('TESTE');
+      })
+      .sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
 
     return successResponse(res, {
       date: dateStr,
