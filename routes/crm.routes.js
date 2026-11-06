@@ -1463,7 +1463,14 @@ router.get(
         .map((n) => parseInt(n, 10))
         .filter(Boolean),
     );
-    const percent = Number(req.query.percent || 20);
+    const percentDefault = Number(req.query.percent || 20);
+    // Se TODAS as filiais pedidas têm regra própria (ex.: Ceará Mirim = 10%),
+    // usa essa regra; senão, cai no param. (FRANQUIA_PERCENT_POR_FILIAL abaixo)
+    const regras = branches.map((b) => FRANQUIA_PERCENT_POR_FILIAL[b]).filter((v) => v != null);
+    const percent =
+      regras.length === branches.length && regras.length
+        ? Math.max(...regras)
+        : percentDefault;
     const isoD = (d) => d.toISOString().slice(0, 10);
     const ymd = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? s : null);
     const hoje = new Date();
@@ -1594,11 +1601,13 @@ router.get(
 
 // =============================================================================
 // POST /api/crm/franquia-cashback-creditar
-// CREDITA (escreve!) o cashback de 20% das vendas de franquia no TOTVS
+// CREDITA (escreve!) o cashback das vendas de franquia no TOTVS
 // (person/v2/bonus-due-date, tipo 14, validade 90 dias). Credita por
-// (cliente × filial), só vendas COM CPF. Proteções:
+// (cliente × filial × dia), só vendas COM CPF. Proteções:
 //   • confirm=true é OBRIGATÓRIO para gravar (sem ele, só simula).
 //   • limit=N credita no máximo N (para teste controlado).
+// O percentual de GERAÇÃO é por filial (FRANQUIA_PERCENT_POR_FILIAL); o param
+// `percent` só vale pra filiais sem regra específica.
 // Query: branches (6106,6107) · datemin,datemax · ops (9009,9063) · percent (20)
 //        · confirm (false) · limit (0 = todos)
 // =============================================================================
@@ -1608,6 +1617,12 @@ const FRANQUIA_BONUS_VALIDADE_DIAS = 90;
 // manualmente em 06/11 e NÃO está no franquia_cashback_log; a partir daqui o
 // log cuida da idempotência.
 const FRANQUIA_CASHBACK_INICIO = '2026-11-07';
+// Percentual de geração do cashback POR FILIAL de franquia. Ceará Mirim
+// (6106/6107) = 10% (regra do franqueado: gera 10% e o cliente usa até 10% da
+// próxima compra). Filial sem regra aqui cai no param `percent` (default 20).
+const FRANQUIA_PERCENT_POR_FILIAL = { 6106: 10, 6107: 10 };
+const pctFranquia = (branchCode, fallback) =>
+  FRANQUIA_PERCENT_POR_FILIAL[Number(branchCode)] ?? fallback;
 router.post(
   '/franquia-cashback-creditar',
   asyncHandler(async (req, res) => {
@@ -1740,7 +1755,8 @@ router.post(
         ...a,
         cpf: info.get(a.personCode)?.cpf || null,
         nome: info.get(a.personCode)?.nome || null,
-        cashback: r2((a.valor * percent) / 100),
+        percent: pctFranquia(a.branchCode, percent),
+        cashback: r2((a.valor * pctFranquia(a.branchCode, percent)) / 100),
       }))
       .filter(
         (a) =>
