@@ -16,6 +16,11 @@
 //   POST /promocao-valores/aplicar  { branch, promotionCode, items[], incluirNovos?, primeiroLote? }
 //        items: [{ productCode, promotionValue }]
 //        → atualiza/insere em lotes e devolve o resultado por item
+//   POST /promocao-valores/buscar-produtos  { termos[], tamanhos[] }
+//        → produtos cujo nome contém QUALQUER termo E cujo tamanho está na
+//          lista (erp_produtos + base importada); vira lote de SKUs na tela
+//   GET|POST /promocao-valores/base-produtos   situação / carga da base de busca
+//        (relatório de produtos acabados do TOTVS em CSV)
 //
 // Sem limite de SKUs: a página divide a planilha em lotes e chama estas rotas
 // em loop (primeiroLote: false nos lotes seguintes reaproveita os itens lidos).
@@ -36,6 +41,7 @@ import {
 } from '../utils/errorHandler.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
+import supabase from '../config/supabase.js';
 
 const router = express.Router();
 
@@ -464,6 +470,99 @@ router.post(
     } catch (err) {
       return handleTotvsError(res, err, 'ao montar prévia');
     }
+  }),
+);
+
+// ─── Busca no cadastro por nome / tamanho (lotes sem planilha) ───────────────
+// Duas fontes: erp_produtos (cópia do TOTVS, ainda incompleta) e
+// promocao_produtos_base (relatório de produtos acabados importado em CSV).
+// Junta as duas pelo código; o que o erp_produtos marca como inativo/bloqueado
+// sai mesmo que esteja na base.
+const limparFiltro = (v) => String(v || '').trim().toUpperCase();
+const filtroSeguro = (t) => t.replace(/[,()*%]/g, ' ').trim();
+
+async function buscarTabela(tabela, colunas, { termos, tamanhos }) {
+  const out = [];
+  const PAGINA = 1000;
+  for (let de = 0; ; de += PAGINA) {
+    let q = supabase.from(tabela).select(colunas).order('code').range(de, de + PAGINA - 1);
+    if (tamanhos.length) q = q.in('tamanho', tamanhos);
+    if (termos.length) q = q.or(termos.map((t) => `nome.ilike.%${filtroSeguro(t)}%`).join(','));
+    const { data, error } = await q;
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < PAGINA) break;
+  }
+  return out;
+}
+
+router.post(
+  '/promocao-valores/buscar-produtos',
+  asyncHandler(async (req, res) => {
+    const termos = [...new Set((Array.isArray(req.body?.termos) ? req.body.termos : []).map(limparFiltro).filter(Boolean))];
+    const tamanhos = [...new Set((Array.isArray(req.body?.tamanhos) ? req.body.tamanhos : []).map(limparFiltro).filter(Boolean))];
+    if (!termos.length && !tamanhos.length) {
+      return errorResponse(res, 'Informe ao menos um termo do nome ou um tamanho', 400, 'MISSING_FILTER');
+    }
+    try {
+      const [erp, base] = await Promise.all([
+        buscarTabela('erp_produtos', 'code, nome, referencia_code, cor_nome, tamanho, ativo, bloqueado', { termos, tamanhos }),
+        buscarTabela('promocao_produtos_base', 'code, nome, referencia_code, cor_nome, tamanho', { termos, tamanhos }).catch(() => []),
+      ]);
+      const porCodigo = new Map();
+      const fora = new Set();
+      for (const p of erp) {
+        if (!p.ativo || p.bloqueado) fora.add(p.code);
+        else porCodigo.set(p.code, { ...p, fonte: 'totvs' });
+      }
+      for (const p of base) {
+        if (!fora.has(p.code) && !porCodigo.has(p.code)) porCodigo.set(p.code, { ...p, fonte: 'base' });
+      }
+      const itens = [...porCodigo.values()]
+        .map(({ ativo, bloqueado, ...p }) => p)
+        .sort((a, b) => a.code - b.code);
+      return successResponse(res, { itens, termos, tamanhos, inativosFora: fora.size }, `${itens.length} produto(s)`);
+    } catch (err) {
+      return errorResponse(res, err.message, 500, 'DB_ERROR');
+    }
+  }),
+);
+
+// Atualiza a base de busca com o relatório de produtos do TOTVS (a página lê o
+// CSV e manda em lotes). Produto que já existe tem os dados trocados.
+router.post(
+  '/promocao-valores/base-produtos',
+  asyncHandler(async (req, res) => {
+    const linhas = (Array.isArray(req.body?.linhas) ? req.body.linhas : [])
+      .map((l) => ({
+        code: parseInt(l.code, 10),
+        nome: String(l.nome || '').trim(),
+        unidade: l.unidade ? String(l.unidade).trim() : null,
+        referencia_code: l.referencia_code ? String(l.referencia_code).trim() : null,
+        fisico: Number.isFinite(Number(l.fisico)) ? Number(l.fisico) : null,
+        cor_code: l.cor_code ? String(l.cor_code).trim() : null,
+        cor_nome: l.cor_nome ? String(l.cor_nome).trim() : null,
+        tamanho: l.tamanho ? String(l.tamanho).trim().toUpperCase() : null,
+        fonte: req.body?.fonte ? String(req.body.fonte).slice(0, 120) : null,
+        importado_em: new Date().toISOString(),
+      }))
+      .filter((l) => l.code > 0 && l.nome);
+    if (!linhas.length) return errorResponse(res, 'Nenhuma linha válida', 400, 'EMPTY');
+    for (let k = 0; k < linhas.length; k += 1000) {
+      const { error } = await supabase.from('promocao_produtos_base').upsert(linhas.slice(k, k + 1000), { onConflict: 'code' });
+      if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    }
+    return successResponse(res, { gravados: linhas.length }, `${linhas.length} produto(s) na base`);
+  }),
+);
+
+router.get(
+  '/promocao-valores/base-produtos',
+  asyncHandler(async (req, res) => {
+    const { count, error } = await supabase.from('promocao_produtos_base').select('code', { count: 'exact', head: true });
+    if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    const { data } = await supabase.from('promocao_produtos_base').select('importado_em, fonte').order('importado_em', { ascending: false }).limit(1);
+    return successResponse(res, { total: count || 0, atualizadoEm: data?.[0]?.importado_em || null, fonte: data?.[0]?.fonte || null }, 'Base de produtos');
   }),
 );
 
