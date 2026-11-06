@@ -551,7 +551,7 @@ async function precosRapidos(productCodes, branch, priceCode) {
     const comPreco = [...precos.keys()];
     for (const lote of chunk(comPreco, 500)) {
       const [erp, base] = await Promise.all([
-        supabase.from('erp_produtos').select('code, nome, sku, referencia_code, cor_nome, tamanho').in('code', lote),
+        supabase.from('erp_produtos').select('code, nome, sku, referencia_code, cor_nome, tamanho, classificacoes').in('code', lote),
         supabase.from('promocao_produtos_base').select('code, nome, referencia_code, cor_nome, tamanho').in('code', lote),
       ]);
       for (const r of base.data || []) nomes.set(Number(r.code), r);
@@ -567,6 +567,8 @@ async function precosRapidos(productCodes, branch, priceCode) {
         referenceCode: n.referencia_code || null,
         colorName: n.cor_nome || null,
         sizeName: n.tamanho || null,
+        // gênero do cadastro do TOTVS (classificação GENERO), quando há
+        genero: (n.classificacoes || []).find((c) => c?.typeName === 'GENERO')?.name || null,
         priceCode: p.preco_code,
         priceName: p.preco_nome || null,
         price: p.preco != null ? Number(p.preco) : null,
@@ -608,6 +610,7 @@ router.get(
           referenceCode: p?.referenceCode || null,
           colorName: p?.colorName || null,
           sizeName: p?.sizeName || null,
+          genero: p?.genero || null,
           priceName: p?.priceName || null,
           price: p?.price ?? null,
           naPromocao: true,
@@ -710,6 +713,7 @@ router.post(
           referenceCode: p.referenceCode,
           colorName: p.colorName,
           sizeName: p.sizeName,
+          genero: p.genero || null,
           priceName: p.priceName,
           price: p.price,
           promotionalPrice: p.promotionalPrice,
