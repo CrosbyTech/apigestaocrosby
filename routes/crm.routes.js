@@ -1604,6 +1604,10 @@ router.get(
 // =============================================================================
 const FRANQUIA_BONUS_TYPE = 14;
 const FRANQUIA_BONUS_VALIDADE_DIAS = 90;
+// Não credita vendas antes desta data: o backlog 07/10–06/11 foi creditado
+// manualmente em 06/11 e NÃO está no franquia_cashback_log; a partir daqui o
+// log cuida da idempotência.
+const FRANQUIA_CASHBACK_INICIO = '2026-11-07';
 router.post(
   '/franquia-cashback-creditar',
   asyncHandler(async (req, res) => {
@@ -1625,7 +1629,17 @@ router.post(
     const ymd = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? s : null);
     const hoje = new Date();
     const dmax = ymd(q.datemax) || isoD(hoje);
-    const dmin = ymd(q.datemin) || isoD(new Date(hoje.getTime() - 30 * 86400000));
+    // Piso: nunca credita antes de FRANQUIA_CASHBACK_INICIO (backlog já feito).
+    const inicio = ymd(q.inicio) || FRANQUIA_CASHBACK_INICIO;
+    let dmin = ymd(q.datemin) || isoD(new Date(hoje.getTime() - 30 * 86400000));
+    if (dmin < inicio) dmin = inicio;
+    if (dmax < dmin) {
+      return successResponse(
+        res,
+        { confirm, periodo: { datemin: dmin, datemax: dmax }, creditaria: 0, itens: [], nota: 'período anterior ao início do programa' },
+        'Nada a creditar (período anterior ao início).',
+      );
+    }
 
     let tokenData = await getToken();
     if (!tokenData?.access_token) {
@@ -1633,9 +1647,9 @@ router.post(
     }
     let token = tokenData.access_token;
 
-    // 1) Agrega vendas por (cliente|filial) via fiscal-movement
+    // 1) Agrega vendas por (filial|cliente|DIA) via fiscal-movement
     const FM_URL = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
-    const agg = new Map(); // `${personCode}|${branchCode}` -> { personCode, branchCode, valor, qtd }
+    const agg = new Map(); // `${bc}|${pc}|${dia}` -> { branchCode, personCode, dia, valor, qtd }
     for (let pg = 1; pg <= 200; pg++) {
       let data = null;
       for (let t = 0; t < 3 && !data; t++) {
@@ -1666,9 +1680,10 @@ router.post(
         const val = Number(it.netValue || 0);
         const pc = it.personCode;
         const bc = it.branchCode;
-        if (!ops.has(op) || !pc || !bc || val <= 0) continue;
-        const key = `${pc}|${bc}`;
-        const a = agg.get(key) || { personCode: pc, branchCode: bc, valor: 0, qtd: 0 };
+        const dia = it.movementDate ? String(it.movementDate).slice(0, 10) : null;
+        if (!ops.has(op) || !pc || !bc || !dia || val <= 0 || dia < inicio) continue;
+        const key = `${bc}|${pc}|${dia}`;
+        const a = agg.get(key) || { branchCode: bc, personCode: pc, dia, valor: 0, qtd: 0 };
         a.valor += val;
         a.qtd += 1;
         agg.set(key, a);
@@ -1688,6 +1703,31 @@ router.post(
         info.set(Number(r.code), { cpf: String(r.cpf || '').replace(/\D/g, ''), nome: r.nm_pessoa || '' });
     }
 
+    // 3) Idempotência: o que já está no log (franquia_cashback_log) é pulado.
+    const jaCreditado = new Set(); // `${bc}|${pc}|${dia}`
+    let logDisponivel = true;
+    {
+      const { data: logRows, error: logErr } = await supabase
+        .from('franquia_cashback_log')
+        .select('branch_code,person_code,dia')
+        .gte('dia', dmin)
+        .lte('dia', dmax)
+        .in('branch_code', branches);
+      if (logErr) {
+        logDisponivel = false; // tabela ausente/erro
+        if (confirm) {
+          return errorResponse(
+            res,
+            `Log de idempotência indisponível (${logErr.message}). Rode a migration franquia_cashback_log.sql antes de creditar.`,
+            500,
+            'LOG_UNAVAILABLE',
+          );
+        }
+      } else {
+        for (const r of logRows || []) jaCreditado.add(`${r.branch_code}|${r.person_code}|${String(r.dia).slice(0, 10)}`);
+      }
+    }
+
     const exclude = new Set(
       String(q.exclude || '')
         .split(',')
@@ -1702,18 +1742,26 @@ router.post(
         nome: info.get(a.personCode)?.nome || null,
         cashback: r2((a.valor * percent) / 100),
       }))
-      .filter((a) => a.cpf && a.cashback > 0 && !exclude.has(a.personCode))
+      .filter(
+        (a) =>
+          a.cpf &&
+          a.cashback > 0 &&
+          !exclude.has(a.personCode) &&
+          !jaCreditado.has(`${a.branchCode}|${a.personCode}|${a.dia}`),
+      )
       .sort((x, y) => y.cashback - x.cashback);
 
     const alvo = limit > 0 ? elegiveis.slice(0, limit) : elegiveis;
 
-    // 3) Sem confirm → só simula (não grava)
+    // 4) Sem confirm → só simula (não grava)
     if (!confirm) {
       return successResponse(
         res,
         {
           confirm: false,
           periodo: { datemin: dmin, datemax: dmax },
+          logDisponivel,
+          jaCreditadosNoPeriodo: jaCreditado.size,
           creditaria: alvo.length,
           totalCashback: r2(alvo.reduce((s, a) => s + a.cashback, 0)),
           itens: alvo,
@@ -1722,7 +1770,7 @@ router.post(
       );
     }
 
-    // 4) CONFIRM → grava o bônus (bonus-due-date) por item
+    // 5) CONFIRM → grava o bônus (bonus-due-date) e registra no log
     const fim = new Date(hoje.getTime() + FRANQUIA_BONUS_VALIDADE_DIAS * 86400000);
     const creditados = [];
     const erros = [];
@@ -1742,7 +1790,21 @@ router.post(
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           timeout: 30000,
         });
-        creditados.push({ personCode: a.personCode, branchCode: a.branchCode, nome: a.nome, cashback: a.cashback });
+        // registra no log ANTES de contar como creditado (idempotência)
+        const { error: insErr } = await supabase
+          .from('franquia_cashback_log')
+          .upsert(
+            {
+              branch_code: a.branchCode,
+              person_code: a.personCode,
+              dia: a.dia,
+              valor_venda: r2(a.valor),
+              cashback: a.cashback,
+            },
+            { onConflict: 'branch_code,person_code,dia', ignoreDuplicates: true },
+          );
+        if (insErr) console.error('[franquia-cashback] log falhou:', insErr.message);
+        creditados.push({ personCode: a.personCode, branchCode: a.branchCode, dia: a.dia, nome: a.nome, cashback: a.cashback });
       } catch (err) {
         if (err.response?.status === 401) {
           try {
@@ -1753,6 +1815,7 @@ router.post(
         erros.push({
           personCode: a.personCode,
           branchCode: a.branchCode,
+          dia: a.dia,
           erro: Array.isArray(d) ? d.map((x) => x.message).join('; ') : d?.message || err.message,
         });
       }
