@@ -4,9 +4,10 @@
  *
  * Regra de negócio:
  *  - Busca no Contas a Pagar (TOTVS) os títulos NORMAIS e EM ABERTO cujo
- *    VENCIMENTO cai entre hoje e hoje+3 dias (ou seja, ~3 dias antes de vencer).
- *  - Considera apenas as despesas monitoradas (salários, energia, água,
- *    telefone, internet, vale alimentação/transporte, férias, rescisão).
+ *    VENCIMENTO cai entre hoje-3 e hoje+3 dias: provisiona ~3 dias antes de
+ *    vencer e, olhando 3 dias para trás, pega o que ficou de fora.
+ *  - Entram todas as despesas, menos banco, imposto, pró-labore, Facebook,
+ *    renegociações e produção antiga (Yago 06/11/2026); ver motivoForaDaProvisao.
  *  - Além disso, provisiona as duplicatas específicas escolhidas na tela
  *    (Liberação de Pagamento → Provisão → "Selecionar duplicatas"), gravadas em
  *    `provisao_duplicatas_selecionadas`: par (fornecedor, nº duplicata), sem
@@ -28,19 +29,59 @@ import { criarNotificacaoSistema } from '../services/notificacoesSistema.js';
 // Papéis que recebem a notificação do job (Administrador + Proprietário)
 const ROLES_NOTIFICACAO = ['owner', 'admin'];
 
-// ─── Despesas monitoradas (cd_despesaitem) ──────────────────────────────────
-// Ver src/config/despesas.json
-const EXPENSE_CODES = [
-  6010, // ENERGIA ELETRICA
-  6011, // AGUA E ESGOTO
-  6012, // TELEFONE
-  6028, // INTERNET
-  3003, // VALE ALIMENTACAO E REFEICAO
-  3008, // SALARIOS E ORDENADOS
-  3012, // FERIAS
-  3022, // RESCISAO CONTRATO DE TRABALHO
-  3036, // VALE TRANSPORTE
+// ─── O que NÃO sobe automaticamente (Yago 06/11/2026) ──────────────────────
+// cd_despesaitem: ver src/config/despesas.json (gestaocrosby).
+// IMPOSTO: 5000–5999 (IPTU, ICMS, ISS, PIS/COFINS, Simples, parcelamentos…),
+//   3013 INSS e 3014 FGTS.
+// BANCO: 7000–7999 (juros, tarifas, IOF, encargos de empréstimo), 12000–12999
+//   empréstimos, 96 JUROS DE EMPRESTIMO, 97 IOF, 239 EMPRESTIMO, tarifas de
+//   cartão/Pix (9001, 9002, 9005), 9003 ALUGUEL DE MAQUINETAS; e todo título com
+//   nome de banco, empréstimo, financiamento, consórcio ou cartão de crédito
+//   (mesmos termos do Contas a Pagar, isFaturaBanco).
+// PRÓ-LABORE, FACEBOOK e as RENEGOCIAÇÕES (lista da página Renegociações).
+// PRODUÇÃO antiga: 1001/1002/1003/1005/1006 emitidas antes de 01/10/2026 (a
+//   que tem Solicitação Crosby já chega à Liberação pela solicitação).
+const CODIGOS_IMPOSTO = new Set([3013, 3014]);
+const CODIGOS_BANCO = new Set([96, 97, 239, 9001, 9002, 9003, 9005]);
+const TERMOS_BANCO = /emprestimo|financiamento|consorcio|cartao de credito|cartao credito|juros financeir|capital de giro|banco|itau|santander|bradesco|sicredi|unicred|caixa economica|\b(bb|bnb|fgi)\b/;
+const DESPESAS_PRODUCAO = new Set([1001, 1002, 1003, 1005, 1006]);
+const PRODUCAO_EMISSAO_MINIMA = '2026-10-01';
+
+// Mesma lista de src/pages/Renegociacoes.jsx (gestaocrosby): cd do fornecedor
+// e mês ('AAAA-MM') da primeira parcela; null = tudo. Mudou lá, mude aqui.
+export const RENEGOCIACOES = [
+  { cd: 5520, nome: 'EXCIM IMPORTACAO E EXPORTACAO SA', inicio: '2026-03' },
+  { cd: 40700, nome: 'SULNOVE INDUSTRIA DE EMBALAGENS LTDA', inicio: '2026-07' },
+  { cd: 30037, nome: 'PASSAMANARIA DO NORDESTE S A', inicio: '2026-06' },
+  { cd: 20950, nome: 'ARTECA', inicio: '2026-08' },
+  { cd: 67813, nome: 'ELIAN INDUSTRIA TEXTIL LTDA', inicio: '2026-04' },
+  { cd: 32136, nome: 'RENAUXVIEW', inicio: '2026-06' },
+  { cd: 11766, nome: 'NOVAPELLI', inicio: '2026-07' },
+  { cd: 6499, nome: 'LUNELLI TEXTIL LTDA', inicio: null },
+  { cd: 6975, nome: 'VICUNHA', inicio: null },
 ];
+
+const semAcento = (s) =>
+  String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+/** Motivo para o título não subir, ou null quando ele entra na provisão. */
+export function motivoForaDaProvisao(item) {
+  const codigo = parseInt(item?.cd_despesaitem, 10);
+  const texto = semAcento(`${item?.nm_fornecedor || ''} ${item?.ds_despesaitem || ''}`);
+  const reneg = RENEGOCIACOES.find((r) => String(r.cd) === String(item?.cd_fornecedor));
+  if (reneg && (!reneg.inicio || String(item?.dt_vencimento || '').slice(0, 7) >= reneg.inicio)) return 'renegociação';
+  if ((codigo >= 5000 && codigo <= 5999) || CODIGOS_IMPOSTO.has(codigo)) return 'imposto';
+  if ((codigo >= 7000 && codigo <= 7999) || (codigo >= 12000 && codigo <= 12999) || CODIGOS_BANCO.has(codigo)) return 'banco';
+  if (TERMOS_BANCO.test(texto)) return 'banco';
+  if (/pro.?labore/.test(texto)) return 'pró-labore';
+  if (/facebook/.test(texto)) return 'facebook';
+  const emissao = String(item?.dt_emissao || '').slice(0, 10);
+  if (DESPESAS_PRODUCAO.has(codigo) && emissao && emissao < PRODUCAO_EMISSAO_MINIMA) return 'produção antiga';
+  return null;
+}
 
 // Duplicatas específicas selecionadas pela tela (tabela
 // provisao_duplicatas_selecionadas). Diferente das despesas: entram
@@ -61,8 +102,9 @@ export async function carregarDuplicatasSelecionadas() {
   }));
 }
 
-// Janela de antecedência (dias). hoje .. hoje+DIAS_ANTECEDENCIA
+// Janela (dias): hoje-DIAS_RETROATIVOS .. hoje+DIAS_ANTECEDENCIA
 const DIAS_ANTECEDENCIA = 3;
+const DIAS_RETROATIVOS = 3;
 
 // As duplicatas selecionadas são pesquisadas no MÊS CORRENTE inteiro (1º ao
 // último dia), por vencimento — tanto para trás quanto para frente dentro do mês.
@@ -129,7 +171,6 @@ async function buscarContasPagar(branchCodes, dtInicio, dtFim) {
     situacao: 'N', // Normal
     previsao: 'TODOS',
     filtroPagamento: 'ABERTO',
-    expenseCodeList: EXPENSE_CODES,
   };
   const { data } = await axios.post(
     `${SELF_BASE_URL}/api/totvs/accounts-payable/search`,
@@ -137,7 +178,7 @@ async function buscarContasPagar(branchCodes, dtInicio, dtFim) {
     { headers: { 'Content-Type': 'application/json' }, timeout: 180000 },
   );
   // successResponse => { success, message, data: { ..., data: mappedItems } }
-  return data?.data?.data || [];
+  return (data?.data?.data || []).filter((it) => !motivoForaDaProvisao(it));
 }
 
 // Busca livre no Contas a Pagar (títulos Normais em aberto) por fornecedor
@@ -312,8 +353,9 @@ function montarRegistro(item, nomeEmpresaMap, nowIso, origem = 'despesa') {
 // Retorna: { ok, janela, encontrados, novos, jaExistentes, inseridos }
 export async function executarProvisaoLiberacao(opts = {}) {
   const dryRun = !!opts.dryRun;
-  const dtInicio = opts.dtInicio || hojeSaoPaulo();
-  const dtFim = opts.dtFim || addDays(dtInicio, DIAS_ANTECEDENCIA);
+  const hoje = hojeSaoPaulo();
+  const dtInicio = opts.dtInicio || addDays(hoje, -DIAS_RETROATIVOS);
+  const dtFim = opts.dtFim || addDays(hoje, DIAS_ANTECEDENCIA);
   const janela = `${dtInicio} → ${dtFim}`;
 
   const result = {
@@ -344,7 +386,7 @@ export async function executarProvisaoLiberacao(opts = {}) {
     }
     console.log(`🏢 [provisao-liberacao] ${branchCodes.length} filiais consideradas`);
 
-    // 2. Buscar títulos: despesas monitoradas (janela 3 dias) +
+    // 2. Buscar títulos: tudo menos o que motivoForaDaProvisao barra (hoje-3 .. hoje+3) +
     //    duplicatas selecionadas na tela (por fornecedor/duplicata, mês corrente).
     const selecionadas = await carregarDuplicatasSelecionadas();
     const [itensDespesas, itensReneg] = await Promise.all([
@@ -520,5 +562,5 @@ export function iniciarJobProvisaoLiberacao() {
     () => rodar('diário', {}),
     { timezone: 'America/Sao_Paulo' },
   );
-  console.log('⏰ [provisao-liberacao] Agendado para 07:00 BRT (vencimento hoje..+3d)');
+  console.log('⏰ [provisao-liberacao] Agendado para 07:00 BRT (vencimento -3d..+3d, ver motivoForaDaProvisao)');
 }
