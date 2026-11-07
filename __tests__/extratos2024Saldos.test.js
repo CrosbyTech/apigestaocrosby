@@ -16,6 +16,7 @@ import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
+import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2024_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2024';
 const temPasta = fs.existsSync(RAIZ);
@@ -42,6 +43,7 @@ const CONFERIDOS_NO_PDF = [
   { banco: 'SANTANDER', conta: '13000599', mes: '2024-11', saldoFinal: 1702.52 },
   { banco: 'SANTANDER', conta: '13006882', mes: '2024-01', saldoInicial: 6549.48 },
   { banco: 'SANTANDER', conta: '13001128', mes: '2024-01', saldoInicial: 3100.95 },
+  { banco: 'UNICRED', conta: '7098', mes: '2024-09', saldoInicial: 1481.61 }, // "Saldo Anterior" do layout antigo
 ];
 
 const ARQUIVOS = [
@@ -54,13 +56,17 @@ const ARQUIVOS = [
     .filter((f) => !/DEZEMBRO\.pdf$|JOAO PESSOA\.pdf$/i.test(f))
     .map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: lerExtratoSantander })),
   ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: (b) => lerExtratoSantanderOfx(b) })),
+  ...listar('UNICRED', /\.pdf$/i).map((f) => ({ banco: 'UNICRED', arquivo: path.join(RAIZ, 'UNICRED', f), ler: lerExtratoUnicred })),
 ];
 // Sicredi: o OFX do mesmo mês (exportado à parte) traz o saldo final do banco → contraprova do PDF
 const campoOfx = (t, tag) => (t.match(new RegExp(`<${tag}>([^<\r\n]*)`, 'i')) || [])[1]?.trim();
-const OFX_SICREDI = listar('SICREDI', /\.ofx$/i).map((f) => {
-  const t = fs.readFileSync(path.join(RAIZ, 'SICREDI', f), 'latin1');
-  return { arquivo: f, conta: (campoOfx(t, 'ACCTID') || '').replace(/^0+/, ''), mes: (campoOfx(t, 'DTSTART') || '').replace(/^(\d{4})(\d{2}).*/, '$1-$2'), saldoFinal: r2(Number(campoOfx(t, 'BALAMT'))) };
-});
+// (Unicred também: LEDGERBAL no fim do mês)
+const OFX_SICREDI = ['SICREDI', 'UNICRED'].flatMap((sub) =>
+  listar(sub, /\.ofx$/i).map((f) => {
+    const t = fs.readFileSync(path.join(RAIZ, sub, f), 'latin1');
+    return { banco: sub, arquivo: f, conta: (campoOfx(t, 'ACCTID') || '').replace(/^0+/, ''), mes: (campoOfx(t, 'DTSTART') || '').replace(/^(\d{4})(\d{2}).*/, '$1-$2'), saldoFinal: r2(Number(campoOfx(t, 'BALAMT'))) };
+  }),
+);
 const leituras = new Map(); // arquivo → leitura
 
 // saldo da conta no fim de uma data, recalculado a partir do arquivo (saldo inicial + lançamentos até a data)
@@ -159,11 +165,12 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
     expect(verificados.length).toBeGreaterThan(0);
   });
 
-  test('Sicredi: saldo final do PDF = saldo final do OFX do mesmo mês', () => {
+  test('Sicredi e Unicred: saldo final do PDF = saldo final do OFX do mesmo mês', () => {
     let conferidos = 0;
     for (const l of leituras.values()) {
-      if (l.banco !== 'SICREDI') continue;
-      const o = OFX_SICREDI.find((x) => x.mes === l.mesReferencia && x.conta.endsWith(`${l.conta}${l.contaDv}`));
+      if (l.banco !== 'SICREDI' && l.banco !== 'UNICRED') continue;
+      // (o OFX de set/2024 da Fabio na Unicred veio com a conta truncada "7098")
+      const o = OFX_SICREDI.find((x) => x.banco === l.banco && x.mes === l.mesReferencia && x.conta.length >= 4 && `${l.conta}${l.contaDv}`.startsWith(x.conta));
       if (!o) continue;
       expect({ conta: l.conta, mes: l.mesReferencia, ofx: o.saldoFinal }).toEqual({ conta: l.conta, mes: l.mesReferencia, ofx: l.saldoFinal });
       conferidos++;

@@ -18,6 +18,7 @@ import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
+import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 
 const ativo = !!process.env.SUPABASE_SERVICE_KEY && !process.env.NEB_TEST_SKIP;
 const describeSe = ativo ? describe : describe.skip;
@@ -56,6 +57,8 @@ const FIM_2024 = [
   { banco: 'SANTANDER', conta: '13000599', saldo: 11141.2 },
   { banco: 'SANTANDER', conta: '13001128', saldo: 1095.23 },
   { banco: 'SANTANDER', conta: '13006882', saldo: 8255.8 },
+  { banco: 'UNICRED', conta: '6850', saldo: 369.19 },
+  { banco: 'UNICRED', conta: '7098', saldo: 848.05 },
 ];
 
 describeSe('New Extrato — saldos gravados no banco', () => {
@@ -169,6 +172,7 @@ describeSe('New Extrato — saldos gravados no banco', () => {
         ...listar('SICREDI', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoSicredi })),
         ...listar('SANTANDER', /\.pdf$/i).filter((a) => !/DEZEMBRO\.pdf$|JOAO PESSOA\.pdf$/i.test(a)).map((a) => ({ a, ler: lerExtratoSantander })),
         ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((a) => ({ a, ler: (b) => lerExtratoSantanderOfx(b) })),
+        ...listar('UNICRED', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoUnicred })),
       ];
       let conferidos = 0;
       for (const { a, ler } of arquivos) {
