@@ -18,6 +18,8 @@ import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoCaixaOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
+import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
+import { lerExtratoSantanderOfx, ehOfxSantander } from '../utils/extratoSantanderOfx.js';
 
 const T = { imp: 'neb_importacoes', lanc: 'neb_lancamentos', transf: 'neb_transferencias' };
 const semAcento = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -154,9 +156,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') === '%PDF') return /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
+  if (cab.toString('latin1') === '%PDF') return /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú ou Sicredi) ou OFX (Caixa).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi ou Santander) ou OFX (Caixa ou Santander).');
 }
 
 /**
@@ -168,11 +170,17 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
   let leitura = null;
   if (SHOPPING_RECIFE.test(String(nome || ''))) throw new Error('Arquivo da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   if (banco === 'OFX') {
-    leitura = lerExtratoCaixaOfx(buffer); // só a Caixa por enquanto (BANKID 104); outro banco dá erro claro
-    banco = 'CAIXA';
+    // OFX: o banco vem do BANKID (104 Caixa, 033 Santander); outro banco dá erro claro
+    if (ehOfxSantander(buffer)) {
+      leitura = lerExtratoSantanderOfx(buffer);
+      banco = 'SANTANDER';
+    } else {
+      leitura = lerExtratoCaixaOfx(buffer);
+      banco = 'CAIXA';
+    }
   } else {
     // PDF: tenta primeiro o leitor sugerido pelo nome do arquivo e depois o outro
-    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi };
+    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander };
     const ordem = [banco, ...Object.keys(LEITORES)].filter((b, i, a) => LEITORES[b] && a.indexOf(b) === i);
     const erros = [];
     for (const b of ordem) {
@@ -185,7 +193,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
         erros.push(`${b}: ${e.message}`);
       }
     }
-    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú e do Sicredi e o OFX da Caixa. ${erros.join(' · ')}`);
+    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú, do Sicredi e do Santander (consolidado) e o OFX da Caixa e do Santander. ${erros.join(' · ')}`);
   }
   if (SHOPPING_RECIFE.test(`${leitura.titular || ''} ${leitura.titularCnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const { conferencia } = leitura;
