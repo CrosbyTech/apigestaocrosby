@@ -32,7 +32,7 @@ const GRUPO = {
   17177680: ['CROSBY', 'CROSBY D CONFECCAO', 'CROSBY DISTRIBUICAO E CONFECCAO', 'CROSBY CR VESTUARIO', 'FERREIRA COMERCIO E CONFECCOES'],
   27728810: ['FABIO F LIMA AZEVEDO', 'FABIO FERREIRA DE LIMA AZEVEDO', 'FA MODA VAREJO', 'FA MODA & VAREJO'],
   53661116: ['IRMAOS VAREJO COMERCIAL', 'FLAVIO FERREIRA DE LIMA AZEVEDO', 'FLAVIO F LIMA AZEVEDO'],
-  33592092: ['IRMAOS C V', 'IRMAOS CR VESTUARIO', 'IRMAOS C V LTDA'],
+  33592092: ['IRMAOS C V', 'IRMAOS CR VESTUARIO', 'IRMAOS C V LTDA', 'IRMAOS CROSBY'],
   // 36.569.459 (Crosby Recife Mall / Shopping Recife) NÃO entra: regra do Yago (06/11/2026), nada da Shopping Recife em nenhum banco
 };
 const SHOPPING_RECIFE = /SHOPPING\s*RECIFE|RECIFE\s*MALL|36\.?569\.?459/i;
@@ -436,10 +436,13 @@ export async function casarTransferencias() {
         const outrasS = (saidasPorValor.get(cents(s.valor)) || []).filter((x) => x.id !== s.id && Math.abs(dd(x.data, e.data)) <= 1);
         if (!outrasE.length && !outrasS.length) sc = 2;
       }
-      // contraparte apontando para OUTRA empresa (não a da conta de destino) desqualifica
-      const raizS = s.grupo_raiz || raizDoGrupo(s.contraparte_nome, s.contraparte_doc);
+      // contraparte com CNPJ/CPF apontando para OUTRA empresa (não a da conta de destino) desqualifica.
+      // Só pelo documento: o nome é rótulo (no Santander "PIX ENVIADO CROSBY" sai até da conta da
+      // Fabio para a Sicredi da Fabio) e muitas vezes vem truncado.
+      const raizDoc = (r) => (r.contraparte_doc ? raizDoGrupo(null, r.contraparte_doc) : null);
+      const raizS = raizDoc(s);
       if (raizS && destino?.cnpjRaiz && raizS !== destino.cnpjRaiz) continue;
-      const raizE = e.grupo_raiz || raizDoGrupo(e.contraparte_nome, e.contraparte_doc);
+      const raizE = raizDoc(e);
       if (raizE && origem?.cnpjRaiz && raizE !== origem.cnpjRaiz) continue;
       if (sc >= 2) combos.push({ s, e, sc, d });
     }

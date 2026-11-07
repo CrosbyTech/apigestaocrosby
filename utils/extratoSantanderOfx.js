@@ -14,7 +14,7 @@
 //     CHECKNUM = documento; não há contraparte.
 // ============================================================
 import crypto from 'node:crypto';
-import { CONTAS_SANTANDER, hintDaDescricao } from './extratoSantanderPdf.js';
+import { CONTAS_SANTANDER, hintDaDescricao, contraparteSantander } from './extratoSantanderPdf.js';
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const limpar = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -61,9 +61,11 @@ export function lerExtratoSantanderOfx(buffer) {
     const data = dataOfx(campo(b, 'DTPOSTED'));
     if (!Number.isFinite(valor) || !data) continue;
     const memo = campo(b, 'MEMO') || campo(b, 'NAME') || '';
-    const base = limpar(memo.replace(/\s{2,}.*$/, '')); // "IOF IMPOSTO ...     0000000153915 / 000173838" → descrição antes do detalhe
+    const [descricao, ...detalhes] = memo.split(/\s{2,}/); // "IOF IMPOSTO ...     0000000153915 / 000173838" → descrição + detalhe
+    const detalhe = limpar(detalhes.join(' ')) || null;
+    const cp = contraparteSantander(descricao, detalhe, conhecida?.titular || null, conhecida?.cnpj || null);
     const doc = [campo(b, 'CHECKNUM'), campo(b, 'FITID')].find((d) => d && !/^0+$/.test(d)) || null;
-    lanc.push({ data, valor, natureza: valor < 0 ? 'D' : 'C', historico: memo, historicoBase: base, historicoDescricao: null, documento: doc, contraparteNome: null, contraparteDoc: null, hora: null, hint: hintDaDescricao(base), tipoOfx: (campo(b, 'TRNTYPE') || '').toUpperCase() });
+    lanc.push({ data, valor, natureza: valor < 0 ? 'D' : 'C', historico: detalhe ? `${limpar(descricao)} · ${detalhe}` : limpar(descricao), historicoBase: cp.base, historicoDescricao: null, documento: doc, contraparteNome: cp.nome, contraparteDoc: cp.doc, hora: null, hint: hintDaDescricao(descricao), tipoOfx: (campo(b, 'TRNTYPE') || '').toUpperCase() });
   }
   lanc.forEach((l, i) => (l.ordem = i));
   lanc.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : a.ordem - b.ordem));

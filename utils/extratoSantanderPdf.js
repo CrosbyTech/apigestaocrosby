@@ -103,6 +103,72 @@ export function contraparteDaContinuacao(txt) {
   if (/^\d{6,}\s*\/\s*\d{6,}$/.test(t)) return { doc: null, nome: null }; // detalhe de título (nosso número / convênio)
   return { doc: null, nome: /[A-Za-z]{3}/.test(t) ? t : null };
 }
+// Contas do grupo em outros bancos, como aparecem no detalhe do Pix do Santander
+// ("341/6530/0000000000270617" = banco/agência/conta com zeros à esquerda): conta+dígito → empresa
+const CONTAS_GRUPO_OUTROS_BANCOS = [
+  { banco: '341', conta: '270617', titular: 'CROSBY DIST CONFEC EIRELI ME', cnpj: '17177680000116' },
+  { banco: '341', conta: '336889', titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+  { banco: '341', conta: '390464', titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+  { banco: '341', conta: '980736', titular: 'IRMAOS VAREJO COMERCIAL LTDA', cnpj: '53661116000138' },
+  { banco: '341', conta: '981413', titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000549' },
+  { banco: '001', conta: '587117', titular: 'CROSBY D CONFECCAO LTDA', cnpj: '17177680000116' },
+  { banco: '001', conta: '369608', titular: 'FABIO F LIMA AZEVEDO', cnpj: '27728810000115' },
+  { banco: '001', conta: '370517', titular: 'IRMAOS C V LTDA', cnpj: '33592092000103' },
+  { banco: '748', conta: '367338', titular: 'CROSBY CR VESTUARIO LTDA', cnpj: '17177680000116' },
+  { banco: '748', conta: '326933', titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+  { banco: '748', conta: '367346', titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+  { banco: '104', conta: '5781363862', titular: 'CROSBY DISTRIBUICAO E CONF LTDA', cnpj: '17177680000116' },
+  { banco: '104', conta: '5781364591', titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+  { banco: '104', conta: '5781366357', titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+  { banco: '033', conta: '130005995', titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA', cnpj: '17177680000116' },
+  { banco: '033', conta: '130011282', titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA (JOAO PESSOA)', cnpj: null },
+  { banco: '033', conta: '130068824', titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+];
+const BANCOS_NO_NOME = /\b(UNICRED|SICREDI|ITAU|SANTANDER|BRADESCO|CAIXA|BNB|STONE|NUBANK|INTER|BB)\b/gi;
+/**
+ * Contraparte de um lançamento do Santander: pela descrição ("PIX ENVIADO CROSBY",
+ * "PIX RECEBIDO 17177680000116", "TED RECEBIDA 02732968000138"), pelo detalhe
+ * ("341/6530/0000000000270617" = conta de destino/origem; "SANTANDER 03209092000102")
+ * e, em "TRANSF VALORES MESMA TITULARIDADE", o próprio titular da conta.
+ */
+export function contraparteSantander(descricao, detalhe, titular = null, cnpjTitular = null) {
+  const d = limpar(descricao);
+  const up = semAcento(d).toUpperCase();
+  const out = { nome: null, doc: null, base: d, contaDestino: null };
+  if (/MESMA TITULARIDADE/.test(up)) {
+    out.nome = titular;
+    out.doc = cnpjTitular;
+    return out;
+  }
+  const m = up.match(/^(PIX ENVIADO|PIX RECEBIDO|TED RECEBIDA|TED ENVIADA|TED EMITIDA|DOC RECEBIDO|DOC ENVIADO|TRANSFERENCIA RECEBIDA|TRANSFERENCIA ENVIADA)(?:\s*-\s*DIF TIT)?\s*(.*)$/);
+  if (m) {
+    out.base = limpar(d.slice(0, m[1].length));
+    const resto = limpar(d.slice(d.length - m[2].length));
+    const mDoc = resto.match(/(?<!\d)(\d{11}|\d{14})(?!\d)/);
+    if (mDoc && docValido(mDoc[1])) out.doc = mDoc[1];
+    let nome = resto.replace(/(?<!\d)\d{11}(?!\d)|(?<!\d)\d{14}(?!\d)/g, ' ').replace(/\s+\d{5,}\s*$/, '').replace(BANCOS_NO_NOME, ' ');
+    nome = limpar(nome);
+    if (/[A-Za-z]{2}/.test(nome)) out.nome = nome;
+  }
+  const det = limpar(detalhe || '');
+  if (det) {
+    const mConta = det.match(/^(\d{3})\/(\d{4})\/(\d{6,})$/);
+    if (mConta) {
+      const digitos = mConta[3].replace(/^0+/, '');
+      const c = CONTAS_GRUPO_OUTROS_BANCOS.find((x) => x.banco === mConta[1] && (digitos.endsWith(x.conta) || x.conta.endsWith(digitos)));
+      out.contaDestino = `${mConta[1]}/${mConta[2]}/${digitos}`;
+      if (c) {
+        if (!out.doc) out.doc = c.cnpj;
+        if (!out.nome) out.nome = c.titular;
+      }
+    } else {
+      const cp = contraparteDaContinuacao(det);
+      if (cp.doc && !out.doc) out.doc = cp.doc;
+      if (cp.nome && !out.nome) out.nome = cp.nome;
+    }
+  }
+  return out;
+}
 export function hintDaDescricao(desc) {
   const up = semAcento(desc).toUpperCase();
   if (/\bPIX\b/.test(up)) return 'PIX';
@@ -185,10 +251,11 @@ export async function lerExtratoSantander(buffer) {
       // continuação do lançamento anterior (detalhe / contraparte)
       const ult = lanc.at(-1);
       if (ult && !dataIt && its.every((i) => i.x >= 55) && !saldoIt) {
-        const cp = contraparteDaContinuacao(t);
         ult.detalhe = ult.detalhe ? `${ult.detalhe} | ${t}` : t;
+        const cp = contraparteSantander(ult.descricao, t, titular, cnpj);
         if (cp.doc && !ult.contraparteDoc) ult.contraparteDoc = cp.doc;
         if (cp.nome && !ult.contraparteNome) ult.contraparteNome = cp.nome;
+        if (cp.contaDestino) ult.contaDestino = cp.contaDestino;
       }
       if (saldoIt && ult) saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s) });
       continue;
@@ -201,7 +268,8 @@ export async function lerExtratoSantander(buffer) {
     let descricao = texto(descItens);
     descricao = descricao.replace(/^A\s+(?=[A-Z])/, ''); // marcador "A" antes da descrição
     const documento = texto(its.filter((i) => i.x >= 300 && i.x < 360 && i.s !== '-')) || null;
-    lanc.push({ pagina: l.pagina, data: dataAtual, descricao, documento, valor, contraparteNome: null, contraparteDoc: null, detalhe: null, hint: hintDaDescricao(descricao) });
+    const cp0 = contraparteSantander(descricao, null, titular, cnpj);
+    lanc.push({ pagina: l.pagina, data: dataAtual, descricao, documento, valor, contraparteNome: cp0.nome, contraparteDoc: cp0.doc, detalhe: null, hint: hintDaDescricao(descricao) });
     if (saldoIt) saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s) });
   }
   if (saldoAnterior == null) throw new Error('Não achei a linha "SALDO EM dd/mm" (saldo anterior) na movimentação.');
@@ -217,7 +285,7 @@ export async function lerExtratoSantander(buffer) {
     l.dataBalancete = l.data;
     l.natureza = l.valor < 0 ? 'D' : 'C';
     l.historico = l.detalhe ? `${l.descricao} · ${l.detalhe}` : l.descricao;
-    l.historicoBase = l.descricao;
+    l.historicoBase = contraparteSantander(l.descricao, null, titular, cnpj).base;
     l.historicoDescricao = null;
     l.hora = null;
   });
@@ -262,4 +330,4 @@ export async function lerExtratoSantander(buffer) {
   };
 }
 
-export default { lerExtratoSantander, CONTAS_SANTANDER, contraparteDaContinuacao, hintDaDescricao };
+export default { lerExtratoSantander, CONTAS_SANTANDER, contraparteDaContinuacao, contraparteSantander, hintDaDescricao };
