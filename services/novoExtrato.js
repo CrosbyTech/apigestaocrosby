@@ -415,7 +415,8 @@ export async function casarTransferencias() {
       const origem = contas.get(chaveConta(s));
       const destino = contas.get(chaveConta(e));
       let sc = apontaPara(s, destino) + apontaPara(e, origem);
-      const ehPixOuTransf = (r) => /PIX|TRANSF|TED|TEV|DOC/i.test(semAcento(r.historico_base || ''));
+      // SISPAG = sistema de pagamentos do Itaú: quem recebe vê "SISPAG <pagador>", quem paga vê "SISPAG FORNECEDORES …"
+      const ehPixOuTransf = (r) => /PIX|TRANSF|TED|TEV|DOC|SISPAG/i.test(semAcento(r.historico_base || ''));
       if (!ehPixOuTransf(s) || !ehPixOuTransf(e)) continue;
       if (d === 0) sc += 1;
       // sem nenhuma contraparte dos dois lados: par único do dia, ≥ R$ 1.000
@@ -460,7 +461,7 @@ export async function casarTransferencias() {
     // Regra do Yago (06/11/2026): QUALQUER entrada vinda de um CNPJ do grupo e
     // QUALQUER saída para um CNPJ do grupo é entre contas, mesmo sem a outra
     // ponta importada (inclusive a própria empresa em outro banco).
-    const semPar = !par && raiz && /PIX|TRANSF|TED|TEV|DOC/i.test(semAcento(r.historico_base || ''));
+    const semPar = !par && raiz && /PIX|TRANSF|TED|TEV|DOC|SISPAG/i.test(semAcento(r.historico_base || ''));
     const tipo = par || semPar ? 'TRANSFERENCIA' : Number(r.valor) > 0 ? 'ENTRADA' : 'SAIDA';
     if (tipo !== r.tipo || (par || null) !== (r.transferencia_id || null) || (raiz || null) !== (r.grupo_raiz || null)) sets.push({ id: r.id, tipo, par, raiz });
   }
