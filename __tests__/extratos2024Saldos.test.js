@@ -14,6 +14,8 @@ import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoCaixaOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
+import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
+import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 
 const RAIZ = process.env.EXTRATOS_2024_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2024';
 const temPasta = fs.existsSync(RAIZ);
@@ -36,6 +38,10 @@ const CONFERIDOS_NO_PDF = [
   { banco: 'ITAU', conta: '39046', mes: '2024-12', saldoFinal: 8244.05 },
   { banco: 'ITAU', conta: '98073', mes: '2024-12', saldoFinal: 2308.86 },
   { banco: 'ITAU', conta: '98141', mes: '2024-12', saldoFinal: 31260.11 },
+  { banco: 'SANTANDER', conta: '13000599', mes: '2024-01', saldoInicial: 290030.44, saldoFinal: 11994.96 }, // "SALDO EM 31/12" e "SALDO EM 31/01" do PDF
+  { banco: 'SANTANDER', conta: '13000599', mes: '2024-11', saldoFinal: 1702.52 },
+  { banco: 'SANTANDER', conta: '13006882', mes: '2024-01', saldoInicial: 6549.48 },
+  { banco: 'SANTANDER', conta: '13001128', mes: '2024-01', saldoInicial: 3100.95 },
 ];
 
 const ARQUIVOS = [
@@ -43,6 +49,11 @@ const ARQUIVOS = [
   ...listar('CAIXA', /\.ofx$/i).map((f) => ({ banco: 'CAIXA', arquivo: path.join(RAIZ, 'CAIXA', f), ler: (b) => lerExtratoCaixaOfx(b) })),
   ...listar('ITAU', /\.pdf$/i).map((f) => ({ banco: 'ITAU', arquivo: path.join(RAIZ, 'ITAU', f), ler: lerExtratoItau })),
   ...listar('SICREDI', /\.pdf$/i).map((f) => ({ banco: 'SICREDI', arquivo: path.join(RAIZ, 'SICREDI', f), ler: lerExtratoSicredi })),
+  // Santander: PDF consolidado (jan–nov); dezembro só no formato "Internet Banking" sem saldo → OFX "Money 2000 ou superior"
+  ...listar('SANTANDER', /\.pdf$/i)
+    .filter((f) => !/DEZEMBRO\.pdf$|JOAO PESSOA\.pdf$/i.test(f))
+    .map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: lerExtratoSantander })),
+  ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: (b) => lerExtratoSantanderOfx(b) })),
 ];
 // Sicredi: o OFX do mesmo mês (exportado à parte) traz o saldo final do banco → contraprova do PDF
 const campoOfx = (t, tag) => (t.match(new RegExp(`<${tag}>([^<\r\n]*)`, 'i')) || [])[1]?.trim();
@@ -103,7 +114,7 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
       // cada saldo de fim de dia impresso bate (BB e Itaú); a Caixa não imprime saldo por dia
       expect(l.conferencia.divergencias).toEqual([]);
       // (BB Irmãos tem meses sem nenhum lançamento: saldo 0 → 0, sem saldo diário impresso)
-      if (a.banco !== 'CAIXA' && l.lancamentos.length) expect(l.conferencia.saldosDiariosConferidos).toBeGreaterThan(0);
+      if (a.banco !== 'CAIXA' && l.formato !== 'ofx' && l.lancamentos.length) expect(l.conferencia.saldosDiariosConferidos).toBeGreaterThan(0);
       expect(l.conferencia.bate).toBe(true);
       // o saldo após cada lançamento também encadeia linha a linha
       let corrente = l.saldoInicial;
