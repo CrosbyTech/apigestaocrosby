@@ -21,7 +21,9 @@ const T = { imp: 'neb_importacoes', lanc: 'neb_lancamentos', transf: 'neb_transf
 const semAcento = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 const normNome = (v) => semAcento(v).toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\b(LTDA|ME|EPP|EIRELI|SA|S A|CIA)\b/g, ' ').replace(/\s+/g, ' ').trim();
 const soDigitos = (v) => String(v ?? '').replace(/\D/g, '');
-// Empresas do grupo: raiz do CNPJ + nomes/razões sociais pelos quais aparecem nos extratos
+// Empresas do grupo: raiz do CNPJ (todas as filiais: 0001-16, 0005-40, 0008-92, 0013-50…) +
+// nomes/razões sociais pelos quais aparecem nos extratos. Regra do Yago: qualquer
+// movimento com um desses CNPJs na outra ponta é entre contas.
 const GRUPO = {
   17177680: ['CROSBY', 'CROSBY D CONFECCAO', 'CROSBY DISTRIBUICAO E CONFECCAO', 'CROSBY CR VESTUARIO', 'FERREIRA COMERCIO E CONFECCOES'],
   27728810: ['FABIO F LIMA AZEVEDO', 'FABIO FERREIRA DE LIMA AZEVEDO', 'FA MODA VAREJO', 'FA MODA & VAREJO'],
@@ -444,19 +446,19 @@ export async function casarTransferencias() {
     const par = idPar.get(r.id) || null;
     const raiz = r.grupo_raiz || raizDoGrupo(r.contraparte_nome, r.contraparte_doc);
     // sem par mas a contraparte é empresa do grupo (outra conta não importada) → transferência sem par
-    // Saída para empresa do grupo (inclusive a própria, em outro banco) é entre contas.
-    // ENTRADA vinda do próprio CNPJ é ambígua (Pix do QR Code do TOTVS liquidado
-    // pela Fiserv chega com o CNPJ da própria empresa como pagador) → fica como entrada
-    // até achar o par na outra conta.
-    const propria = contas.get(chaveConta(r))?.cnpjRaiz;
-    const semPar = !par && raiz && (Number(r.valor) < 0 || raiz !== propria) && /PIX|TRANSF|TED|TEV|DOC/i.test(semAcento(r.historico_base || ''));
+    // Regra do Yago (06/11/2026): QUALQUER entrada vinda de um CNPJ do grupo e
+    // QUALQUER saída para um CNPJ do grupo é entre contas, mesmo sem a outra
+    // ponta importada (inclusive a própria empresa em outro banco).
+    const semPar = !par && raiz && /PIX|TRANSF|TED|TEV|DOC/i.test(semAcento(r.historico_base || ''));
     const tipo = par || semPar ? 'TRANSFERENCIA' : Number(r.valor) > 0 ? 'ENTRADA' : 'SAIDA';
     if (tipo !== r.tipo || (par || null) !== (r.transferencia_id || null) || (raiz || null) !== (r.grupo_raiz || null)) sets.push({ id: r.id, tipo, par, raiz });
   }
   for (let i = 0; i < sets.length; i += 400) {
-    const values = sets.slice(i, i + 400).map((x) => `(${x.id}, ${sqlStr(x.tipo)}, ${x.par == null ? 'NULL' : x.par}, ${sqlStr(x.raiz)})`).join(',');
-    const { error } = await supabase.rpc('exec_sql', { query: `update ${T.lanc} l set tipo = v.tipo, transferencia_id = v.par, grupo_raiz = v.raiz from (values ${values}) as v(id, tipo, par, raiz) where l.id = v.id` });
+    // casts explícitos: um lote só com NULL em "par" faria o Postgres tipar a coluna como text
+    const values = sets.slice(i, i + 400).map((x) => `(${x.id}::bigint, ${sqlStr(x.tipo)}::text, ${x.par == null ? 'NULL::bigint' : `${x.par}::bigint`}, ${sqlStr(x.raiz)}::text)`).join(',');
+    const { data: ret, error } = await supabase.rpc('exec_sql', { query: `update ${T.lanc} l set tipo = v.tipo, transferencia_id = v.par, grupo_raiz = v.raiz from (values ${values}) as v(id, tipo, par, raiz) where l.id = v.id` });
     if (error) throw new Error(error.message);
+    if (ret && typeof ret === 'object' && ret.error) throw new Error(String(ret.error));
   }
   return { pares: pares.length, valor: round2(pares.reduce((a, p) => a + p.valor, 0)), semPar: sets.filter((x) => x.tipo === 'TRANSFERENCIA' && !x.par).length, atualizados: sets.length };
 }
