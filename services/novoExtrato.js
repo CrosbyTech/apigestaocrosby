@@ -16,6 +16,7 @@
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoCaixaOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 
 const T = { imp: 'neb_importacoes', lanc: 'neb_lancamentos', transf: 'neb_transferencias' };
 const semAcento = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -29,8 +30,9 @@ const GRUPO = {
   27728810: ['FABIO F LIMA AZEVEDO', 'FABIO FERREIRA DE LIMA AZEVEDO', 'FA MODA VAREJO', 'FA MODA & VAREJO'],
   53661116: ['IRMAOS VAREJO COMERCIAL', 'FLAVIO FERREIRA DE LIMA AZEVEDO', 'FLAVIO F LIMA AZEVEDO'],
   33592092: ['IRMAOS C V', 'IRMAOS CR VESTUARIO', 'IRMAOS C V LTDA'],
-  36569459: ['CROSBY RECIFE MALL'],
+  // 36.569.459 (Crosby Recife Mall / Shopping Recife) NÃO entra: regra do Yago (06/11/2026), nada da Shopping Recife em nenhum banco
 };
+const SHOPPING_RECIFE = /SHOPPING\s*RECIFE|RECIFE\s*MALL|36\.?569\.?459/i;
 const PARTICULAS = new Set(['DE', 'DA', 'DO', 'DAS', 'DOS', 'E']);
 const tokens = (v) => normNome(v).split(' ').filter((t) => t && !PARTICULAS.has(t));
 // nome curto/truncado do extrato bate com o nome completo quando cada pedaço é prefixo do pedaço correspondente
@@ -150,9 +152,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') === '%PDF') return /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : null;
+  if (cab.toString('latin1') === '%PDF') return /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil) ou OFX (Caixa).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil ou Itaú) ou OFX (Caixa).');
 }
 
 /**
@@ -161,19 +163,28 @@ function detectarBanco(nome, buffer) {
 export async function importarExtrato({ buffer, nome, usuario = null, forcar = false }) {
   await garantirTabelas();
   let banco = detectarBanco(nome, buffer);
-  let leitura;
+  let leitura = null;
+  if (SHOPPING_RECIFE.test(String(nome || ''))) throw new Error('Arquivo da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   if (banco === 'OFX') {
     leitura = lerExtratoCaixaOfx(buffer); // só a Caixa por enquanto (BANKID 104); outro banco dá erro claro
     banco = 'CAIXA';
   } else {
-    try {
-      leitura = await lerExtratoBb(buffer);
-      banco = 'BB';
-    } catch (e) {
-      if (banco === 'BB') throw e;
-      throw new Error(`Banco não reconhecido no arquivo "${nome}". Por enquanto o New Extrato lê o PDF do Banco do Brasil e o OFX da Caixa. ${e.message}`);
+    // PDF: tenta primeiro o leitor sugerido pelo nome do arquivo e depois o outro
+    const ordem = banco === 'ITAU' ? ['ITAU', 'BB'] : ['BB', 'ITAU'];
+    const erros = [];
+    for (const b of ordem) {
+      try {
+        leitura = b === 'ITAU' ? await lerExtratoItau(buffer) : await lerExtratoBb(buffer);
+        banco = b;
+        break;
+      } catch (e) {
+        if (/Shopping Recife/i.test(e.message)) throw e;
+        erros.push(`${b}: ${e.message}`);
+      }
     }
+    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil e do Itaú e o OFX da Caixa. ${erros.join(' · ')}`);
   }
+  if (SHOPPING_RECIFE.test(`${leitura.titular || ''} ${leitura.titularCnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const { conferencia } = leitura;
   if (!conferencia.bate && !forcar) {
     const d = conferencia.divergencias[0];
