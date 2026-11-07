@@ -21,6 +21,7 @@ import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx, ehOfxSantander } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
+import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 
 const T = { imp: 'neb_importacoes', lanc: 'neb_lancamentos', transf: 'neb_transferencias' };
 const semAcento = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -157,9 +158,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') === '%PDF') return /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
+  if (cab.toString('latin1') === '%PDF') return /BRADESCO/.test(n) ? 'BRADESCO' : /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander ou Unicred) ou OFX (Caixa ou Santander).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred ou Bradesco) ou OFX (Caixa ou Santander).');
 }
 
 /**
@@ -181,7 +182,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     }
   } else {
     // PDF: tenta primeiro o leitor sugerido pelo nome do arquivo e depois o outro
-    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander, UNICRED: lerExtratoUnicred };
+    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander, UNICRED: lerExtratoUnicred, BRADESCO: lerExtratoBradesco };
     const ordem = [banco, ...Object.keys(LEITORES)].filter((b, i, a) => LEITORES[b] && a.indexOf(b) === i);
     const erros = [];
     for (const b of ordem) {
@@ -194,7 +195,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
         erros.push(`${b}: ${e.message}`);
       }
     }
-    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú, do Sicredi, do Santander (consolidado) e da Unicred e o OFX da Caixa e do Santander. ${erros.join(' · ')}`);
+    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú, do Sicredi, do Santander (consolidado), da Unicred e do Bradesco e o OFX da Caixa e do Santander. ${erros.join(' · ')}`);
   }
   if (SHOPPING_RECIFE.test(`${leitura.titular || ''} ${leitura.titularCnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const { conferencia } = leitura;
@@ -342,7 +343,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     hora: l.hora || null,
     contraparte_nome: l.contraparteNome || null,
     contraparte_doc: l.contraparteDoc || null,
-    tipo: l.valor > 0 ? 'ENTRADA' : 'SAIDA',
+    tipo: l.tipo === 'APLICACAO' ? 'APLICACAO' : l.valor > 0 ? 'ENTRADA' : 'SAIDA',
     grupo_raiz: raizDoGrupo(l.contraparteNome, l.contraparteDoc),
   }));
   for (let i = 0; i < rows.length; i += 500) {
@@ -411,7 +412,7 @@ export async function casarTransferencias() {
   const entradasPorValor = new Map();
   const saidasPorValor = new Map();
   for (const r of rows) {
-    if (cents(r.valor) < 100) continue;
+    if (cents(r.valor) < 100 || r.tipo === 'APLICACAO') continue; // aplicação automática não casa com nada
     const m = Number(r.valor) > 0 ? entradasPorValor : saidasPorValor;
     const k = cents(r.valor);
     if (!m.has(k)) m.set(k, []);
@@ -421,7 +422,7 @@ export async function casarTransferencias() {
   const ehPixOuTransf = (r) => /PIX|TRANSF|TED|TEV|DOC|SISPAG/i.test(semAcento(r.historico_base || ''));
   const combos = [];
   for (const s of rows) {
-    if (Number(s.valor) >= 0) continue;
+    if (Number(s.valor) >= 0 || s.tipo === 'APLICACAO') continue;
     for (const e of entradasPorValor.get(cents(s.valor)) || []) {
       if (chaveConta(e) === chaveConta(s)) continue;
       const d = dd(e.data, s.data);
@@ -476,14 +477,14 @@ export async function casarTransferencias() {
   const capacidade = new Map(); // id da saída de lote → centavos ainda não alocados
   const lotesPorConta = new Map();
   for (const r of rows) {
-    if (usados.has(r.id) || Number(r.valor) >= 0 || !LOTE.test(semAcento(r.historico_base || '').trim())) continue;
+    if (usados.has(r.id) || Number(r.valor) >= 0 || r.tipo === 'APLICACAO' || !LOTE.test(semAcento(r.historico_base || '').trim())) continue;
     capacidade.set(r.id, cents(r.valor));
     const k = chaveConta(r);
     if (!lotesPorConta.has(k)) lotesPorConta.set(k, []);
     lotesPorConta.get(k).push(r);
   }
   const alocado = new Map(); // id da saída de lote → centavos transferidos para o grupo
-  const entradasSemPar = rows.filter((r) => Number(r.valor) > 0 && !usados.has(r.id) && cents(r.valor) >= 100).sort((a, b) => a.data.localeCompare(b.data) || cents(b.valor) - cents(a.valor));
+  const entradasSemPar = rows.filter((r) => Number(r.valor) > 0 && !usados.has(r.id) && cents(r.valor) >= 100 && r.tipo !== 'APLICACAO').sort((a, b) => a.data.localeCompare(b.data) || cents(b.valor) - cents(a.valor));
   for (const e of entradasSemPar) {
     const raiz = e.grupo_raiz || raizDoGrupo(e.contraparte_nome, e.contraparte_doc);
     if (!raiz || !ehPixOuTransf(e)) continue;
@@ -523,6 +524,7 @@ export async function casarTransferencias() {
   const sqlStr = (v) => (v == null ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`);
   const sets = [];
   for (const r of rows) {
+    if (r.tipo === 'APLICACAO') continue; // aplicação automática fica como está
     const par = idPar.get(r.id) || null;
     const raiz = r.grupo_raiz || raizDoGrupo(r.contraparte_nome, r.contraparte_doc);
     // sem par mas a contraparte é empresa do grupo (outra conta não importada) → transferência sem par
@@ -581,9 +583,14 @@ export async function listarLancamentos({ de, ate, bancos = [], contas = [], tip
     .filter((l) => !tipos.length || tipos.includes(l.tipo))
     .filter((l) => !b || `${l.historico || ''} ${l.documento || ''} ${l.historico_codigo || ''} ${l.contraparte_nome || ''} ${l.contraparte_doc || ''} ${Math.abs(l.valor).toFixed(2).replace('.', ',')}`.toLowerCase().includes(b));
   // Recebido/Pago só com lançamentos de fora; transferências (as duas pontas) ficam fora e contam uma vez
-  const resumo = { entradas: 0, saidas: 0, qtdEntradas: 0, qtdSaidas: 0, transfEnviadas: 0, transfRecebidas: 0, transfSemParEnviadas: 0, transfSemParRecebidas: 0, transfParteLote: 0, qtdParteLote: 0, qtdTransf: 0, qtd: filtrados.length };
+  const resumo = { entradas: 0, saidas: 0, qtdEntradas: 0, qtdSaidas: 0, transfEnviadas: 0, transfRecebidas: 0, transfSemParEnviadas: 0, transfSemParRecebidas: 0, transfParteLote: 0, qtdParteLote: 0, qtdTransf: 0, aplicado: 0, resgatado: 0, qtdAplicacoes: 0, qtd: filtrados.length };
   for (const l of filtrados) {
-    if (l.tipo === 'TRANSFERENCIA') {
+    if (l.tipo === 'APLICACAO') {
+      // dinheiro indo/voltando da aplicação automática (Invest Fácil): nem recebido nem pago
+      resumo.qtdAplicacoes++;
+      if (l.valor < 0) resumo.aplicado = round2(resumo.aplicado - l.valor);
+      else resumo.resgatado = round2(resumo.resgatado + l.valor);
+    } else if (l.tipo === 'TRANSFERENCIA') {
       resumo.qtdTransf++;
       if (l.transferencia_id) {
         if (l.valor > 0) resumo.transfRecebidas = round2(resumo.transfRecebidas + l.valor);
