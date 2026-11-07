@@ -123,6 +123,7 @@ alter table ${T.lanc} add column if not exists transferencia_id bigint;
 alter table ${T.lanc} add column if not exists grupo_raiz text;
 alter table ${T.lanc} add column if not exists titular_cnpj text;
 alter table ${T.lanc} add column if not exists historico_descricao text;
+alter table ${T.lanc} add column if not exists valor_transferido numeric(15,2) not null default 0;
 alter table ${T.imp} add column if not exists titular_cnpj text;
 alter table ${T.imp} add column if not exists formato text;
 alter table ${T.imp} add column if not exists encadeamento jsonb;
@@ -384,7 +385,7 @@ export async function casarTransferencias() {
   for (const i of imps) if (!contas.has(`${i.banco}|${i.conta}`)) contas.set(`${i.banco}|${i.conta}`, { banco: i.banco, conta: i.conta, titular: i.titular, cnpj: i.titular_cnpj || null, cnpjRaiz: null });
   // raiz do CNPJ de cada conta: pelo CNPJ gravado (Caixa) ou pelo nome do titular (o PDF do BB não traz o CNPJ)
   for (const c of contas.values()) c.cnpjRaiz = (c.cnpj && soDigitos(c.cnpj).slice(0, 8)) || raizDoGrupo(c.titular, null);
-  const rows = await todos(() => supabase.from(T.lanc).select('id,banco,conta,data,valor,historico_base,contraparte_nome,contraparte_doc,grupo_raiz,tipo,transferencia_id').order('data').order('id'));
+  const rows = await todos(() => supabase.from(T.lanc).select('id,banco,conta,data,valor,historico_base,contraparte_nome,contraparte_doc,grupo_raiz,tipo,transferencia_id,valor_transferido').order('data').order('id'));
   // zera o estado anterior
   const { error: eDel } = await supabase.from(T.transf).delete().gte('id', 0);
   if (eDel) throw new Error(eDel.message);
@@ -407,6 +408,8 @@ export async function casarTransferencias() {
     if (!m.has(k)) m.set(k, []);
     m.get(k).push(r);
   }
+  // SISPAG = sistema de pagamentos do Itaú: quem recebe vê "SISPAG <pagador>", quem paga vê "SISPAG FORNECEDORES …"
+  const ehPixOuTransf = (r) => /PIX|TRANSF|TED|TEV|DOC|SISPAG/i.test(semAcento(r.historico_base || ''));
   const combos = [];
   for (const s of rows) {
     if (Number(s.valor) >= 0) continue;
@@ -417,8 +420,6 @@ export async function casarTransferencias() {
       const origem = contas.get(chaveConta(s));
       const destino = contas.get(chaveConta(e));
       let sc = apontaPara(s, destino) + apontaPara(e, origem);
-      // SISPAG = sistema de pagamentos do Itaú: quem recebe vê "SISPAG <pagador>", quem paga vê "SISPAG FORNECEDORES …"
-      const ehPixOuTransf = (r) => /PIX|TRANSF|TED|TEV|DOC|SISPAG/i.test(semAcento(r.historico_base || ''));
       if (!ehPixOuTransf(s) || !ehPixOuTransf(e)) continue;
       if (d === 0) sc += 1;
       // sem nenhuma contraparte dos dois lados: par único do dia, ≥ R$ 1.000
@@ -444,13 +445,66 @@ export async function casarTransferencias() {
     usados.add(c.e.id);
     pares.push({ data: c.s.data, data_entrada: c.e.data, valor: round2(Math.abs(Number(c.s.valor))), origem_lancamento_id: c.s.id, destino_lancamento_id: c.e.id, origem_banco: c.s.banco, origem_conta: c.s.conta, destino_banco: c.e.banco, destino_conta: c.e.conta, evidencia: c.sc >= 3 ? 'contraparte' : c.sc === 2 && (c.s.contraparte_nome || c.e.contraparte_nome) ? 'nome' : 'valor e dia únicos' });
   }
-  // grava pares e marca as duas pontas
+  // ── parte de lote (Yago, 06/11/2026) ──────────────────────────────────
+  // A saída "SISPAG …" do Itaú é a remessa de pagamentos: dentro dela pode haver
+  // fornecedor E transferência para conta do grupo, e o que entra na outra conta
+  // pode ser só uma parte do valor. Entrada sem par vinda de empresa do grupo →
+  // procura, nas contas dessa empresa, uma saída de lote do mesmo dia (ou do dia
+  // anterior) com "espaço" (valor ainda não alocado) ≥ entrada. A saída continua
+  // SAÍDA com valor_transferido (a parte), ou vira TRANSFERENCIA se o lote inteiro
+  // foi para o grupo. Só lotes que podem carregar transferência: fornecedores,
+  // Pix transferência, TED e transf. c/c Itaú (boleto, tributo, salário, QR não).
+  const LOTE = /^SISPAG(\s+FORNECEDORES)?(\s+(PIX\s+TRANSFERENCI\w*|TED|TRANSF\s+CC\s+ITAU))?$/i;
+  const contasDaRaiz = new Map();
+  for (const [k, c] of contas) {
+    if (!c.cnpjRaiz) continue;
+    if (!contasDaRaiz.has(c.cnpjRaiz)) contasDaRaiz.set(c.cnpjRaiz, new Set());
+    contasDaRaiz.get(c.cnpjRaiz).add(k);
+  }
+  const capacidade = new Map(); // id da saída de lote → centavos ainda não alocados
+  const lotesPorConta = new Map();
+  for (const r of rows) {
+    if (usados.has(r.id) || Number(r.valor) >= 0 || !LOTE.test(semAcento(r.historico_base || '').trim())) continue;
+    capacidade.set(r.id, cents(r.valor));
+    const k = chaveConta(r);
+    if (!lotesPorConta.has(k)) lotesPorConta.set(k, []);
+    lotesPorConta.get(k).push(r);
+  }
+  const alocado = new Map(); // id da saída de lote → centavos transferidos para o grupo
+  const entradasSemPar = rows.filter((r) => Number(r.valor) > 0 && !usados.has(r.id) && cents(r.valor) >= 100).sort((a, b) => a.data.localeCompare(b.data) || cents(b.valor) - cents(a.valor));
+  for (const e of entradasSemPar) {
+    const raiz = e.grupo_raiz || raizDoGrupo(e.contraparte_nome, e.contraparte_doc);
+    if (!raiz || !ehPixOuTransf(e)) continue;
+    const origens = contasDaRaiz.get(raiz);
+    if (!origens) continue;
+    let melhor = null;
+    for (const k of origens) {
+      if (k === chaveConta(e)) continue;
+      for (const s of lotesPorConta.get(k) || []) {
+        const d = dd(e.data, s.data);
+        if (d < 0 || d > 1) continue;
+        const cap = capacidade.get(s.id);
+        if (cap < cents(e.valor)) continue;
+        if (!melhor || d < melhor.d || (d === melhor.d && cap < capacidade.get(melhor.s.id))) melhor = { s, d };
+      }
+    }
+    if (!melhor) continue;
+    const s = melhor.s;
+    capacidade.set(s.id, capacidade.get(s.id) - cents(e.valor));
+    alocado.set(s.id, (alocado.get(s.id) || 0) + cents(e.valor));
+    usados.add(e.id);
+    pares.push({ data: s.data, data_entrada: e.data, valor: round2(Number(e.valor)), origem_lancamento_id: s.id, destino_lancamento_id: e.id, origem_banco: s.banco, origem_conta: s.conta, destino_banco: e.banco, destino_conta: e.conta, evidencia: 'parte do lote SISPAG' });
+  }
+  const valorPorId = new Map(rows.map((r) => [r.id, cents(r.valor)]));
+  const loteCheio = (id) => alocado.has(id) && alocado.get(id) === valorPorId.get(id);
+  // grava pares e marca as duas pontas (a saída de lote só recebe o id do par quando o lote inteiro foi para o grupo)
   const idPar = new Map();
   for (let i = 0; i < pares.length; i += 300) {
-    const { data, error } = await supabase.from(T.transf).insert(pares.slice(i, i + 300)).select('id,origem_lancamento_id,destino_lancamento_id');
+    const { data, error } = await supabase.from(T.transf).insert(pares.slice(i, i + 300)).select('id,origem_lancamento_id,destino_lancamento_id,evidencia');
     if (error) throw new Error(error.message);
     for (const t of data || []) {
-      idPar.set(t.origem_lancamento_id, t.id);
+      if (!alocado.has(t.origem_lancamento_id)) idPar.set(t.origem_lancamento_id, t.id);
+      else if (loteCheio(t.origem_lancamento_id) && !idPar.has(t.origem_lancamento_id)) idPar.set(t.origem_lancamento_id, t.id);
       idPar.set(t.destino_lancamento_id, t.id);
     }
   }
@@ -463,18 +517,21 @@ export async function casarTransferencias() {
     // Regra do Yago (06/11/2026): QUALQUER entrada vinda de um CNPJ do grupo e
     // QUALQUER saída para um CNPJ do grupo é entre contas, mesmo sem a outra
     // ponta importada (inclusive a própria empresa em outro banco).
-    const semPar = !par && raiz && /PIX|TRANSF|TED|TEV|DOC|SISPAG/i.test(semAcento(r.historico_base || ''));
+    const semPar = !par && raiz && ehPixOuTransf(r);
     const tipo = par || semPar ? 'TRANSFERENCIA' : Number(r.valor) > 0 ? 'ENTRADA' : 'SAIDA';
-    if (tipo !== r.tipo || (par || null) !== (r.transferencia_id || null) || (raiz || null) !== (r.grupo_raiz || null)) sets.push({ id: r.id, tipo, par, raiz });
+    // parte do lote SISPAG que foi para o grupo (a saída continua SAÍDA, mas essa parte não é "pago")
+    const vt = tipo === 'SAIDA' && alocado.has(r.id) ? round2(alocado.get(r.id) / 100) : 0;
+    if (tipo !== r.tipo || (par || null) !== (r.transferencia_id || null) || (raiz || null) !== (r.grupo_raiz || null) || vt !== round2(Number(r.valor_transferido || 0))) sets.push({ id: r.id, tipo, par, raiz, vt });
   }
   for (let i = 0; i < sets.length; i += 400) {
     // casts explícitos: um lote só com NULL em "par" faria o Postgres tipar a coluna como text
-    const values = sets.slice(i, i + 400).map((x) => `(${x.id}::bigint, ${sqlStr(x.tipo)}::text, ${x.par == null ? 'NULL::bigint' : `${x.par}::bigint`}, ${sqlStr(x.raiz)}::text)`).join(',');
-    const { data: ret, error } = await supabase.rpc('exec_sql', { query: `update ${T.lanc} l set tipo = v.tipo, transferencia_id = v.par, grupo_raiz = v.raiz from (values ${values}) as v(id, tipo, par, raiz) where l.id = v.id` });
+    const values = sets.slice(i, i + 400).map((x) => `(${x.id}::bigint, ${sqlStr(x.tipo)}::text, ${x.par == null ? 'NULL::bigint' : `${x.par}::bigint`}, ${sqlStr(x.raiz)}::text, ${x.vt}::numeric)`).join(',');
+    const { data: ret, error } = await supabase.rpc('exec_sql', { query: `update ${T.lanc} l set tipo = v.tipo, transferencia_id = v.par, grupo_raiz = v.raiz, valor_transferido = v.vt from (values ${values}) as v(id, tipo, par, raiz, vt) where l.id = v.id` });
     if (error) throw new Error(error.message);
     if (ret && typeof ret === 'object' && ret.error) throw new Error(String(ret.error));
   }
-  return { pares: pares.length, valor: round2(pares.reduce((a, p) => a + p.valor, 0)), semPar: sets.filter((x) => x.tipo === 'TRANSFERENCIA' && !x.par).length, atualizados: sets.length };
+  const partes = pares.filter((p) => p.evidencia === 'parte do lote SISPAG');
+  return { pares: pares.length, valor: round2(pares.reduce((a, p) => a + p.valor, 0)), partesDeLote: partes.length, valorPartesDeLote: round2(partes.reduce((a, p) => a + p.valor, 0)), semPar: sets.filter((x) => x.tipo === 'TRANSFERENCIA' && !x.par).length, atualizados: sets.length };
 }
 
 export async function listarContas() {
@@ -508,11 +565,11 @@ export async function listarLancamentos({ de, ate, bancos = [], contas = [], tip
   });
   const b = String(busca || '').trim().toLowerCase();
   const filtrados = rows
-    .map((l) => ({ ...l, valor: Number(l.valor), saldo_apos: l.saldo_apos == null ? null : Number(l.saldo_apos), tipo: l.tipo || (Number(l.valor) > 0 ? 'ENTRADA' : 'SAIDA'), sentido: Number(l.valor) > 0 ? 'ENTRADA' : 'SAIDA' }))
+    .map((l) => ({ ...l, valor: Number(l.valor), valor_transferido: round2(Number(l.valor_transferido || 0)), saldo_apos: l.saldo_apos == null ? null : Number(l.saldo_apos), tipo: l.tipo || (Number(l.valor) > 0 ? 'ENTRADA' : 'SAIDA'), sentido: Number(l.valor) > 0 ? 'ENTRADA' : 'SAIDA' }))
     .filter((l) => !tipos.length || tipos.includes(l.tipo))
     .filter((l) => !b || `${l.historico || ''} ${l.documento || ''} ${l.historico_codigo || ''} ${l.contraparte_nome || ''} ${l.contraparte_doc || ''} ${Math.abs(l.valor).toFixed(2).replace('.', ',')}`.toLowerCase().includes(b));
   // Recebido/Pago só com lançamentos de fora; transferências (as duas pontas) ficam fora e contam uma vez
-  const resumo = { entradas: 0, saidas: 0, qtdEntradas: 0, qtdSaidas: 0, transfEnviadas: 0, transfRecebidas: 0, transfSemParEnviadas: 0, transfSemParRecebidas: 0, qtdTransf: 0, qtd: filtrados.length };
+  const resumo = { entradas: 0, saidas: 0, qtdEntradas: 0, qtdSaidas: 0, transfEnviadas: 0, transfRecebidas: 0, transfSemParEnviadas: 0, transfSemParRecebidas: 0, transfParteLote: 0, qtdParteLote: 0, qtdTransf: 0, qtd: filtrados.length };
   for (const l of filtrados) {
     if (l.tipo === 'TRANSFERENCIA') {
       resumo.qtdTransf++;
@@ -525,8 +582,14 @@ export async function listarLancamentos({ de, ate, bancos = [], contas = [], tip
       resumo.entradas = round2(resumo.entradas + l.valor);
       resumo.qtdEntradas++;
     } else {
-      resumo.saidas = round2(resumo.saidas - l.valor);
+      // saída de lote SISPAG com uma parte para o grupo: só o resto é "pago"; a parte conta como transferência enviada
+      resumo.saidas = round2(resumo.saidas - l.valor - l.valor_transferido);
       resumo.qtdSaidas++;
+      if (l.valor_transferido) {
+        resumo.transfEnviadas = round2(resumo.transfEnviadas + l.valor_transferido);
+        resumo.transfParteLote = round2(resumo.transfParteLote + l.valor_transferido);
+        resumo.qtdParteLote++;
+      }
     }
   }
   resumo.resultado = round2(resumo.entradas - resumo.saidas);
