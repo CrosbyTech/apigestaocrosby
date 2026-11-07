@@ -190,6 +190,7 @@ describeSe('New Extrato — saldos gravados no banco', () => {
         const imp = imps.find((i) => i.banco === l.banco && i.conta === l.conta && i.mes_referencia === l.mesReferencia);
         if (!imp) continue; // não importado (ex.: duplicata descartada)
         if (imp.encadeamento?.viaEncadeamento) continue; // Caixa dezembro: saldo do arquivo é de janeiro, o gravado vem do encadeamento
+        if (l.layout === 'mensal' && imp.arquivo_nome && imp.arquivo_nome !== path.basename(a)) continue; // Bradesco: "Extrato Mensal" de um mês importado pelo "Consolidado" (saldo com Invest Fácil)
         expect({ arquivo: path.basename(a), gravado: r2(Number(imp.saldo_final)) }).toEqual({ arquivo: path.basename(a), gravado: l.saldoFinal });
         conferidos++;
       }

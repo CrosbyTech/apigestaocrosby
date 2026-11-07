@@ -144,6 +144,8 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
     for (const [conta, meses] of porConta()) {
       for (const [mes, ls] of meses) {
         for (const l of ls.slice(1)) {
+          // Bradesco out/nov têm "Extrato Mensal" (saldo com Invest Fácil) e "Consolidado" (só c/c) do mesmo mês: saldos diferentes por definição
+          if ((l.saldoInclui || 'cc') !== (ls[0].saldoInclui || 'cc')) continue;
           expect({ conta, mes, saldoInicial: l.saldoInicial, saldoFinal: l.saldoFinal }).toEqual({ conta, mes, saldoInicial: ls[0].saldoInicial, saldoFinal: ls[0].saldoFinal });
         }
       }
