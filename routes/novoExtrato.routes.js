@@ -1,10 +1,10 @@
 // ============================================================
 // New Extrato Bancário (reconstrução do zero) — /api/novo-extrato
-//   POST /importar            (multipart "arquivos": PDF do BB ou do Itaú, OFX da Caixa; ?forcar=1 aceita saldo que não bate/encadeia)
+//   POST /importar            (multipart "arquivos": PDF do BB, Itaú ou Sicredi, OFX da Caixa; ?forcar=1 aceita saldo que não bate/encadeia)
 //   GET  /contas              contas/importações já gravadas
 //   GET  /lancamentos?de&ate&bancos&contas&tipos&busca  (traz também transferencias [pares] e semPar)
 //   POST /transferencias/recasar                        refaz o casamento entre as contas importadas
-// Serviço: services/novoExtrato.js · leitores: utils/extratoBbPdf.js, utils/extratoItauPdf.js, utils/extratoCaixaOfx.js
+// Serviço: services/novoExtrato.js · leitores: utils/extratoBbPdf.js, utils/extratoItauPdf.js, utils/extratoSicrediPdf.js, utils/extratoCaixaOfx.js
 // ============================================================
 import express from 'express';
 import multer from 'multer';
@@ -17,7 +17,7 @@ const upload = multer({
   limits: { fileSize: 30 * 1024 * 1024, files: 40 },
   fileFilter: (req, file, cb) => {
     const ok = /\.(pdf|ofx)$/i.test(file.originalname || '') || file.mimetype === 'application/pdf';
-    cb(ok ? null : new Error('Envie o extrato em PDF (BB ou Itaú) ou OFX (Caixa).'), ok);
+    cb(ok ? null : new Error('Envie o extrato em PDF (BB, Itaú ou Sicredi) ou OFX (Caixa).'), ok);
   },
 });
 const usuarioDe = (req) => req.headers['x-user-email'] || req.headers['x-user-name'] || null;

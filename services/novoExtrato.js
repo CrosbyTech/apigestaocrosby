@@ -17,6 +17,7 @@ import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoCaixaOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
+import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 
 const T = { imp: 'neb_importacoes', lanc: 'neb_lancamentos', transf: 'neb_transferencias' };
 const semAcento = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -152,9 +153,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') === '%PDF') return /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
+  if (cab.toString('latin1') === '%PDF') return /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil ou Itaú) ou OFX (Caixa).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú ou Sicredi) ou OFX (Caixa).');
 }
 
 /**
@@ -170,11 +171,12 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     banco = 'CAIXA';
   } else {
     // PDF: tenta primeiro o leitor sugerido pelo nome do arquivo e depois o outro
-    const ordem = banco === 'ITAU' ? ['ITAU', 'BB'] : ['BB', 'ITAU'];
+    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi };
+    const ordem = [banco, ...Object.keys(LEITORES)].filter((b, i, a) => LEITORES[b] && a.indexOf(b) === i);
     const erros = [];
     for (const b of ordem) {
       try {
-        leitura = b === 'ITAU' ? await lerExtratoItau(buffer) : await lerExtratoBb(buffer);
+        leitura = await LEITORES[b](buffer);
         banco = b;
         break;
       } catch (e) {
@@ -182,7 +184,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
         erros.push(`${b}: ${e.message}`);
       }
     }
-    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil e do Itaú e o OFX da Caixa. ${erros.join(' · ')}`);
+    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú e do Sicredi e o OFX da Caixa. ${erros.join(' · ')}`);
   }
   if (SHOPPING_RECIFE.test(`${leitura.titular || ''} ${leitura.titularCnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const { conferencia } = leitura;
