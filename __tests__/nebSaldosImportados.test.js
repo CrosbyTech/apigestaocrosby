@@ -19,6 +19,7 @@ import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
+import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 
 const ativo = !!process.env.SUPABASE_SERVICE_KEY && !process.env.NEB_TEST_SKIP;
 const describeSe = ativo ? describe : describe.skip;
@@ -59,7 +60,13 @@ const FIM_2024 = [
   { banco: 'SANTANDER', conta: '13006882', saldo: 8255.8 },
   { banco: 'UNICRED', conta: '6850', saldo: 369.19 },
   { banco: 'UNICRED', conta: '7098', saldo: 848.05 },
+  { banco: 'BRADESCO', conta: '249374', saldo: 1.0 },
+  { banco: 'BRADESCO', conta: '249286', saldo: 1.0 },
 ];
+// Importações aceitas com "forçar", com motivo conhecido: o saldo não encadeia com o mês vizinho
+// (Bradesco set/2024 veio no "Extrato Mensal", cujo saldo soma o Invest Fácil; os outros meses são só conta corrente)
+const FORCADAS = new Set(['BRADESCO|249374|2024-09', 'BRADESCO|249374|2024-10', 'BRADESCO|249286|2024-09', 'BRADESCO|249286|2024-10']);
+const forcada = (i) => FORCADAS.has(`${i.banco}|${i.conta}|${i.mes_referencia}`);
 
 describeSe('New Extrato — saldos gravados no banco', () => {
   let imps = [];
@@ -93,7 +100,8 @@ describeSe('New Extrato — saldos gravados no banco', () => {
       const rot = { id: i.id, conta: `${i.banco} ${i.conta}`, mes: i.mes_referencia };
       expect({ ...rot, qtd: ls.length }).toEqual({ ...rot, qtd: i.qtd });
       expect({ ...rot, saldoFinal: r2(Number(i.saldo_inicial) + soma) }).toEqual({ ...rot, saldoFinal: r2(Number(i.saldo_final)) });
-      expect({ ...rot, bate: i.bate }).toEqual({ ...rot, bate: true });
+      if (!forcada(i)) expect({ ...rot, bate: i.bate }).toEqual({ ...rot, bate: true });
+      else expect({ ...rot, leitorBateu: i.encadeamento?.bate === false && Math.abs(Number(i.saldo_calculado) - Number(i.saldo_final)) <= 0.005 }).toEqual({ ...rot, leitorBateu: true });
       // "saldo após" encadeado linha a linha e igual ao saldo final na última
       let corrente = r2(Number(i.saldo_inicial));
       for (const l of ls) {
@@ -116,6 +124,7 @@ describeSe('New Extrato — saldos gravados no banco', () => {
       for (const [mes, i] of meses) {
         const seg = meses.get(mesSeguinte(mes));
         if (!seg) continue;
+        if (forcada(seg)) continue; // diferença conhecida (Invest Fácil)
         expect({ conta, de: mes, para: seg.mes_referencia, saldo: r2(Number(seg.saldo_inicial)) }).toEqual({ conta, de: mes, para: seg.mes_referencia, saldo: r2(Number(i.saldo_final)) });
         verificados++;
       }
@@ -173,6 +182,7 @@ describeSe('New Extrato — saldos gravados no banco', () => {
         ...listar('SANTANDER', /\.pdf$/i).filter((a) => !/DEZEMBRO\.pdf$|JOAO PESSOA\.pdf$/i.test(a)).map((a) => ({ a, ler: lerExtratoSantander })),
         ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((a) => ({ a, ler: (b) => lerExtratoSantanderOfx(b) })),
         ...listar('UNICRED', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoUnicred })),
+        ...listar('BRADESCO', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoBradesco })),
       ];
       let conferidos = 0;
       for (const { a, ler } of arquivos) {

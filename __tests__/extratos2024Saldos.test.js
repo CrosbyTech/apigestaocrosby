@@ -17,6 +17,7 @@ import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
+import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2024_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2024';
 const temPasta = fs.existsSync(RAIZ);
@@ -44,6 +45,8 @@ const CONFERIDOS_NO_PDF = [
   { banco: 'SANTANDER', conta: '13006882', mes: '2024-01', saldoInicial: 6549.48 },
   { banco: 'SANTANDER', conta: '13001128', mes: '2024-01', saldoInicial: 3100.95 },
   { banco: 'UNICRED', conta: '7098', mes: '2024-09', saldoInicial: 1481.61 }, // "Saldo Anterior" do layout antigo
+  { banco: 'BRADESCO', conta: '249374', mes: '2024-09', saldoInicial: 1092.94, saldoFinal: 999.93 }, // Extrato Mensal (c/c + Invest Fácil)
+  { banco: 'BRADESCO', conta: '249374', mes: '2024-12', saldoFinal: 1.0 }, // conta corrente (o resto fica no Invest Fácil)
 ];
 
 const ARQUIVOS = [
@@ -57,6 +60,7 @@ const ARQUIVOS = [
     .map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: lerExtratoSantander })),
   ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: (b) => lerExtratoSantanderOfx(b) })),
   ...listar('UNICRED', /\.pdf$/i).map((f) => ({ banco: 'UNICRED', arquivo: path.join(RAIZ, 'UNICRED', f), ler: lerExtratoUnicred })),
+  ...listar('BRADESCO', /\.pdf$/i).map((f) => ({ banco: 'BRADESCO', arquivo: path.join(RAIZ, 'BRADESCO', f), ler: lerExtratoBradesco })),
 ];
 // Sicredi: o OFX do mesmo mês (exportado à parte) traz o saldo final do banco → contraprova do PDF
 const campoOfx = (t, tag) => (t.match(new RegExp(`<${tag}>([^<\r\n]*)`, 'i')) || [])[1]?.trim();
@@ -157,6 +161,8 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
         // o extrato da Caixa avança até o 1º dia útil do mês seguinte e o arquivo seguinte repete esse dia:
         // o saldo final do anterior tem de ser igual ao saldo do seguinte naquela mesma data
         if (saldoBancoForaDoMes(seg)) continue; // dezembro da Caixa: conferido em "saldos conferidos a olho" pelo encadeamento
+        // Bradesco set/2024 veio no "Extrato Mensal", cujo saldo soma o Invest Fácil; os outros meses são só conta corrente → não encadeiam
+        if ((ant.saldoInclui || 'cc') !== (seg.saldoInclui || 'cc')) continue;
         const esperado = ant.banco === 'CAIXA' ? saldoNaData(seg, corteCaixa(ant)) : seg.saldoInicial;
         expect({ conta, de: mes, para: seg.mesReferencia, saldo: esperado }).toEqual({ conta, de: mes, para: seg.mesReferencia, saldo: ant.saldoFinal });
         verificados.push(`${conta} ${mes}`);
