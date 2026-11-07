@@ -15,6 +15,7 @@
 // ============================================================
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
+import { lerExtratoCaixaOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 
 const T = { imp: 'neb_importacoes', lanc: 'neb_lancamentos', transf: 'neb_transferencias' };
 const semAcento = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -115,6 +116,12 @@ alter table ${T.lanc} add column if not exists contraparte_doc text;
 alter table ${T.lanc} add column if not exists tipo text;
 alter table ${T.lanc} add column if not exists transferencia_id bigint;
 alter table ${T.lanc} add column if not exists grupo_raiz text;
+alter table ${T.lanc} add column if not exists titular_cnpj text;
+alter table ${T.lanc} add column if not exists historico_descricao text;
+alter table ${T.imp} add column if not exists titular_cnpj text;
+alter table ${T.imp} add column if not exists formato text;
+alter table ${T.imp} add column if not exists encadeamento jsonb;
+alter table ${T.imp} add column if not exists descartados integer;
 create table if not exists ${T.transf} (
   id bigserial primary key,
   data date not null,
@@ -141,9 +148,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') !== '%PDF') throw new Error('Envie o extrato em PDF.');
-  if (/\bBB\b|BANCO DO BRASIL/.test(n)) return 'BB';
-  return null; // decide pelo conteúdo
+  if (cab.toString('latin1') === '%PDF') return /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : null;
+  if (ehOfx(buffer)) return 'OFX';
+  throw new Error('Envie o extrato em PDF (Banco do Brasil) ou OFX (Caixa).');
 }
 
 /**
@@ -153,12 +160,17 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
   await garantirTabelas();
   let banco = detectarBanco(nome, buffer);
   let leitura;
-  try {
-    leitura = await lerExtratoBb(buffer);
-    banco = 'BB';
-  } catch (e) {
-    if (banco === 'BB') throw e;
-    throw new Error(`Banco não reconhecido no arquivo "${nome}". Por enquanto o New Extrato lê só o PDF do Banco do Brasil (Consultas - Extrato de conta corrente). ${e.message}`);
+  if (banco === 'OFX') {
+    leitura = lerExtratoCaixaOfx(buffer); // só a Caixa por enquanto (BANKID 104); outro banco dá erro claro
+    banco = 'CAIXA';
+  } else {
+    try {
+      leitura = await lerExtratoBb(buffer);
+      banco = 'BB';
+    } catch (e) {
+      if (banco === 'BB') throw e;
+      throw new Error(`Banco não reconhecido no arquivo "${nome}". Por enquanto o New Extrato lê o PDF do Banco do Brasil e o OFX da Caixa. ${e.message}`);
+    }
   }
   const { conferencia } = leitura;
   if (!conferencia.bate && !forcar) {
@@ -183,6 +195,73 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     const { error } = await supabase.from(T.imp).delete().in('id', substituidas);
     if (error) throw new Error(error.message);
   }
+  // ── sobreposição com o que já existe da mesma conta ──
+  // Caixa: o extrato "do mês" vai até o 1º dia útil do mês seguinte e o mês
+  // seguinte repete esse dia. Dia que já está importado em outra importação
+  // da conta é descartado deste arquivo; o saldo é ajustado para o último dia
+  // que ficou (saldo final do arquivo − movimentos descartados depois dele).
+  const datasArq = leitura.lancamentos.map((l) => l.data).sort();
+  const jaImportados = datasArq.length
+    ? await todos(() => supabase.from(T.lanc).select('data,valor').eq('banco', banco).eq('conta', leitura.conta).gte('data', datasArq[0]).lte('data', datasArq.at(-1)).order('id'))
+    : [];
+  const datasOcupadas = new Set(jaImportados.map((l) => l.data));
+  const descartados = leitura.lancamentos.filter((l) => datasOcupadas.has(l.data));
+  const mantidos = leitura.lancamentos.filter((l) => !datasOcupadas.has(l.data));
+  let saldoFinalArquivo = leitura.saldoFinal;
+  let saldoFinalGravar = leitura.saldoFinal;
+  if (descartados.length) {
+    const ultimaMantida = mantidos.length ? mantidos.map((l) => l.data).sort().at(-1) : null;
+    const depois = descartados.filter((l) => !ultimaMantida || l.data > ultimaMantida).reduce((s, l) => s + l.valor, 0);
+    saldoFinalGravar = round2(leitura.saldoFinal - depois);
+    const saldoInicial = round2(saldoFinalGravar - mantidos.reduce((s, l) => s + l.valor, 0));
+    let c = saldoInicial;
+    mantidos.forEach((l, i) => {
+      l.seq = i + 1;
+      c = round2(c + l.valor);
+      l.saldoApos = c;
+    });
+    leitura.saldoInicial = saldoInicial;
+    leitura.lancamentos = mantidos;
+    conferencia.saldoInicial = saldoInicial;
+    conferencia.saldoCalculado = c;
+    conferencia.saldoFinalInformado = saldoFinalGravar;
+    conferencia.descartados = descartados.length;
+  }
+  // encadeamento com a importação anterior da conta (saldo final dela = saldo inicial desta)
+  let encadeamento = null;
+  const inicioLanc = leitura.lancamentos.map((l) => l.data).sort()[0] || leitura.periodo.inicio;
+  if (inicioLanc) {
+    const { data: ant } = await supabase.from(T.imp).select('id,mes_referencia,periodo_fim,saldo_final').eq('banco', banco).eq('conta', leitura.conta).lt('periodo_fim', inicioLanc).order('periodo_fim', { ascending: false }).limit(1);
+    const a = ant?.[0];
+    if (a) {
+      const dif = round2(Number(leitura.saldoInicial) - Number(a.saldo_final));
+      encadeamento = { anteriorMes: a.mes_referencia, anteriorFim: a.periodo_fim, saldoFinalAnterior: Number(a.saldo_final), saldoInicialDeste: leitura.saldoInicial, diferenca: dif, bate: Math.abs(dif) <= 0.005 };
+    }
+  }
+  // OFX cujo saldo final (DTASOF) é de DEPOIS do último lançamento do arquivo
+  // (Caixa de dezembro: BALAMT em 03/01 já com os movimentos de janeiro): o saldo
+  // do fim do mês vem do encadeamento — saldo final do mês anterior + movimentos
+  // deste arquivo. Conferido no PDF de dez/2024 da Crosby (17.259,00 em 31/12).
+  const ultimaDataLanc = leitura.lancamentos.map((l) => l.data).sort().at(-1) || null;
+  if (encadeamento && !encadeamento.bate && leitura.formato === 'ofx' && leitura.saldoFinalEm && ultimaDataLanc && leitura.saldoFinalEm > ultimaDataLanc) {
+    const inicial = encadeamento.saldoFinalAnterior;
+    let c = inicial;
+    for (const l of leitura.lancamentos) {
+      c = round2(c + l.valor);
+      l.saldoApos = c;
+    }
+    leitura.saldoInicial = inicial;
+    saldoFinalGravar = c;
+    conferencia.saldoInicial = inicial;
+    conferencia.saldoCalculado = c;
+    conferencia.saldoFinalInformado = c;
+    conferencia.nota = `saldo final do arquivo (${leitura.saldoFinal.toFixed(2)} em ${leitura.saldoFinalEm}) é de depois do fim do mês; usado o encadeamento com ${encadeamento.anteriorMes}`;
+    encadeamento = { ...encadeamento, saldoInicialDeste: inicial, diferenca: 0, bate: true, viaEncadeamento: true, saldoArquivoEm: leitura.saldoFinalEm, saldoArquivo: leitura.saldoFinal };
+  }
+  const bateGeral = conferencia.bate && (!encadeamento || encadeamento.bate);
+  if (!bateGeral && !forcar) {
+    throw Object.assign(new Error(`O saldo não encadeia com o mês anterior (${encadeamento.anteriorMes}): saldo final anterior ${encadeamento.saldoFinalAnterior.toFixed(2)} × saldo inicial deste ${encadeamento.saldoInicialDeste.toFixed(2)} (diferença ${encadeamento.diferenca.toFixed(2)}). Provável mês faltando ou arquivo de outro período.`), { status: 422, leitura });
+  }
   const { data: imp, error: eImp } = await supabase
     .from(T.imp)
     .insert({
@@ -191,13 +270,17 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
       conta: leitura.conta,
       conta_dv: leitura.contaDv,
       titular: leitura.titular,
+      titular_cnpj: leitura.titularCnpj || null,
+      formato: leitura.formato || 'pdf',
       mes_referencia: leitura.mesReferencia,
-      periodo_inicio: leitura.periodo.inicio,
-      periodo_fim: leitura.periodo.fim,
+      periodo_inicio: leitura.lancamentos.length && leitura.lancamentos.map((l) => l.data).sort()[0] < leitura.periodo.inicio ? leitura.lancamentos.map((l) => l.data).sort()[0] : leitura.periodo.inicio,
+      periodo_fim: leitura.lancamentos.length ? leitura.lancamentos.map((l) => l.data).sort().at(-1) > leitura.periodo.fim ? leitura.lancamentos.map((l) => l.data).sort().at(-1) : leitura.periodo.fim : leitura.periodo.fim,
       saldo_inicial: leitura.saldoInicial,
-      saldo_final: leitura.saldoFinal,
+      saldo_final: saldoFinalGravar,
       saldo_calculado: conferencia.saldoCalculado,
-      bate: conferencia.bate,
+      bate: bateGeral,
+      encadeamento,
+      descartados: descartados.length,
       qtd: leitura.lancamentos.length,
       total_creditos: conferencia.totalCreditos,
       total_debitos: conferencia.totalDebitos,
@@ -215,6 +298,8 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     conta: leitura.conta,
     conta_dv: leitura.contaDv,
     titular: leitura.titular,
+    titular_cnpj: leitura.titularCnpj || null,
+    historico_descricao: l.historicoDescricao || null,
     data: l.data,
     data_balancete: l.dataBalancete,
     seq: l.seq,
@@ -250,8 +335,11 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     mesReferencia: leitura.mesReferencia,
     periodo: leitura.periodo,
     qtd: rows.length,
+    descartados: descartados.length,
     saldoInicial: leitura.saldoInicial,
-    saldoFinal: leitura.saldoFinal,
+    saldoFinal: saldoFinalGravar,
+    saldoFinalArquivo,
+    encadeamento,
     conferencia,
   };
 }
@@ -276,11 +364,11 @@ async function todos(montar, pagina = 1000) {
  */
 export async function casarTransferencias() {
   await garantirTabelas();
-  const imps = await todos(() => supabase.from(T.imp).select('id,banco,conta,conta_dv,titular').order('id'));
+  const imps = await todos(() => supabase.from(T.imp).select('id,banco,conta,conta_dv,titular,titular_cnpj').order('id'));
   const contas = new Map();
-  for (const i of imps) if (!contas.has(`${i.banco}|${i.conta}`)) contas.set(`${i.banco}|${i.conta}`, { banco: i.banco, conta: i.conta, titular: i.titular, cnpjRaiz: null });
-  // raiz do CNPJ de cada conta pelo nome do titular (o PDF do BB não traz o CNPJ do titular)
-  for (const c of contas.values()) c.cnpjRaiz = raizDoGrupo(c.titular, null);
+  for (const i of imps) if (!contas.has(`${i.banco}|${i.conta}`)) contas.set(`${i.banco}|${i.conta}`, { banco: i.banco, conta: i.conta, titular: i.titular, cnpj: i.titular_cnpj || null, cnpjRaiz: null });
+  // raiz do CNPJ de cada conta: pelo CNPJ gravado (Caixa) ou pelo nome do titular (o PDF do BB não traz o CNPJ)
+  for (const c of contas.values()) c.cnpjRaiz = (c.cnpj && soDigitos(c.cnpj).slice(0, 8)) || raizDoGrupo(c.titular, null);
   const rows = await todos(() => supabase.from(T.lanc).select('id,banco,conta,data,valor,historico_base,contraparte_nome,contraparte_doc,grupo_raiz,tipo,transferencia_id').order('data').order('id'));
   // zera o estado anterior
   const { error: eDel } = await supabase.from(T.transf).delete().gte('id', 0);
@@ -314,7 +402,7 @@ export async function casarTransferencias() {
       const origem = contas.get(chaveConta(s));
       const destino = contas.get(chaveConta(e));
       let sc = apontaPara(s, destino) + apontaPara(e, origem);
-      const ehPixOuTransf = (r) => /PIX|TRANSF|TED|DOC/i.test(semAcento(r.historico_base || ''));
+      const ehPixOuTransf = (r) => /PIX|TRANSF|TED|TEV|DOC/i.test(semAcento(r.historico_base || ''));
       if (!ehPixOuTransf(s) || !ehPixOuTransf(e)) continue;
       if (d === 0) sc += 1;
       // sem nenhuma contraparte dos dois lados: par único do dia, ≥ R$ 1.000
@@ -361,7 +449,7 @@ export async function casarTransferencias() {
     // pela Fiserv chega com o CNPJ da própria empresa como pagador) → fica como entrada
     // até achar o par na outra conta.
     const propria = contas.get(chaveConta(r))?.cnpjRaiz;
-    const semPar = !par && raiz && (Number(r.valor) < 0 || raiz !== propria) && /PIX|TRANSF|TED|DOC/i.test(semAcento(r.historico_base || ''));
+    const semPar = !par && raiz && (Number(r.valor) < 0 || raiz !== propria) && /PIX|TRANSF|TED|TEV|DOC/i.test(semAcento(r.historico_base || ''));
     const tipo = par || semPar ? 'TRANSFERENCIA' : Number(r.valor) > 0 ? 'ENTRADA' : 'SAIDA';
     if (tipo !== r.tipo || (par || null) !== (r.transferencia_id || null) || (raiz || null) !== (r.grupo_raiz || null)) sets.push({ id: r.id, tipo, par, raiz });
   }
