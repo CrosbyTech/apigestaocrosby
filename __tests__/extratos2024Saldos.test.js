@@ -18,6 +18,7 @@ import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
+import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2024_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2024';
 const temPasta = fs.existsSync(RAIZ);
@@ -47,6 +48,9 @@ const CONFERIDOS_NO_PDF = [
   { banco: 'UNICRED', conta: '7098', mes: '2024-09', saldoInicial: 1481.61 }, // "Saldo Anterior" do layout antigo
   { banco: 'BRADESCO', conta: '249374', mes: '2024-09', saldoInicial: 1092.94, saldoFinal: 999.93 }, // Extrato Mensal (c/c + Invest Fácil)
   { banco: 'BRADESCO', conta: '249374', mes: '2024-12', saldoFinal: 1.0 }, // conta corrente (o resto fica no Invest Fácil)
+  { banco: 'BNB', conta: '69918', mes: '2024-09', saldoInicial: 1359.11, saldoFinal: 101748.4 },
+  { banco: 'BNB', conta: '69361', mes: '2024-09', saldoInicial: 434.8, saldoFinal: 1356.94 },
+  { banco: 'BNB', conta: '2286', mes: '2024-05', saldoInicial: 7175.74, saldoFinal: 39.35 }, // consolidado, conta antiga da agência 185
 ];
 
 const ARQUIVOS = [
@@ -61,6 +65,8 @@ const ARQUIVOS = [
   ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((f) => ({ banco: 'SANTANDER', arquivo: path.join(RAIZ, 'SANTANDER', f), ler: (b) => lerExtratoSantanderOfx(b) })),
   ...listar('UNICRED', /\.pdf$/i).map((f) => ({ banco: 'UNICRED', arquivo: path.join(RAIZ, 'UNICRED', f), ler: lerExtratoUnicred })),
   ...listar('BRADESCO', /\.pdf$/i).map((f) => ({ banco: 'BRADESCO', arquivo: path.join(RAIZ, 'BRADESCO', f), ler: lerExtratoBradesco })),
+  // BNB: "no período" (uma conta) e "Extrato Consolidado" (várias contas → array de leituras)
+  ...listar('BNB', /\.pdf$/i).map((f) => ({ banco: 'BNB', arquivo: path.join(RAIZ, 'BNB', f), ler: lerExtratoBnb })),
 ];
 // Sicredi: o OFX do mesmo mês (exportado à parte) traz o saldo final do banco → contraprova do PDF
 const campoOfx = (t, tag) => (t.match(new RegExp(`<${tag}>([^<\r\n]*)`, 'i')) || [])[1]?.trim();
@@ -111,8 +117,10 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
   test.each(ARQUIVOS.map((a) => [path.basename(a.arquivo), a]))(
     '%s',
     async (_nome, a) => {
-      const l = await a.ler(fs.readFileSync(a.arquivo));
-      leituras.set(a.arquivo, l);
+      const lida = await a.ler(fs.readFileSync(a.arquivo));
+      const ls = Array.isArray(lida) ? lida : [lida];
+      ls.forEach((l, i) => leituras.set(ls.length > 1 ? `${a.arquivo}#${i}` : a.arquivo, l));
+      for (const l of ls) {
       expect(l.banco).toBe(a.banco);
       expect(l.mesReferencia).toMatch(/^2024-\d{2}$/);
       // nada da Shopping Recife
@@ -132,12 +140,13 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
         corrente = r2(corrente + x.valor);
         expect(x.saldoApos).toBe(corrente);
       }
+      }
     },
     TIMEOUT,
   );
 
   test('todos os arquivos foram lidos', () => {
-    expect(leituras.size).toBe(ARQUIVOS.length);
+    expect(leituras.size).toBeGreaterThanOrEqual(ARQUIVOS.length);
   });
 
   test('o mesmo mês em dois arquivos tem o mesmo saldo inicial e final', () => {
@@ -146,6 +155,8 @@ describeSe('extratos 2024 — saldo recalculado = saldo do extrato', () => {
         for (const l of ls.slice(1)) {
           // Bradesco out/nov têm "Extrato Mensal" (saldo com Invest Fácil) e "Consolidado" (só c/c) do mesmo mês: saldos diferentes por definição
           if ((l.saldoInclui || 'cc') !== (ls[0].saldoInclui || 'cc')) continue;
+          // BNB consolidado sem demonstrativo para a conta (só "SALDO CONTA CORRENTE") não diz o saldo anterior
+          if ([l, ls[0]].some((x) => x.layout === 'consolidado' && x.banco === 'BNB' && !x.lancamentos.length)) continue;
           expect({ conta, mes, saldoInicial: l.saldoInicial, saldoFinal: l.saldoFinal }).toEqual({ conta, mes, saldoInicial: ls[0].saldoInicial, saldoFinal: ls[0].saldoFinal });
         }
       }

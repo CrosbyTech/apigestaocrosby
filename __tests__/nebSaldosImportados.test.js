@@ -20,6 +20,7 @@ import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
+import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
 
 const ativo = !!process.env.SUPABASE_SERVICE_KEY && !process.env.NEB_TEST_SKIP;
 const describeSe = ativo ? describe : describe.skip;
@@ -62,6 +63,12 @@ const FIM_2024 = [
   { banco: 'UNICRED', conta: '7098', saldo: 848.05 },
   { banco: 'BRADESCO', conta: '249374', saldo: 1.0 },
   { banco: 'BRADESCO', conta: '249286', saldo: 1.0 },
+  { banco: 'BNB', conta: '69918', saldo: 1124.09 },
+  { banco: 'BNB', conta: '69919', saldo: 1038.99 },
+  { banco: 'BNB', conta: '69921', saldo: 1081.57 },
+  { banco: 'BNB', conta: '69922', saldo: 0 },
+  { banco: 'BNB', conta: '69361', saldo: 1043.99 },
+  { banco: 'BNB', conta: '69363', saldo: 0 },
 ];
 // Importações aceitas com "forçar", com motivo conhecido: o saldo não encadeia com o mês vizinho
 // (Bradesco set/2024 veio no "Extrato Mensal", cujo saldo soma o Invest Fácil; os outros meses são só conta corrente)
@@ -183,16 +190,19 @@ describeSe('New Extrato — saldos gravados no banco', () => {
         ...listar('SANTANDER', /DEZEMBRO Money 2000|JOAO PESSOA MONEY 2000/i).map((a) => ({ a, ler: (b) => lerExtratoSantanderOfx(b) })),
         ...listar('UNICRED', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoUnicred })),
         ...listar('BRADESCO', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoBradesco })),
+        ...listar('BNB', /\.pdf$/i).map((a) => ({ a, ler: lerExtratoBnb })),
       ];
       let conferidos = 0;
       for (const { a, ler } of arquivos) {
-        const l = await ler(fs.readFileSync(a));
+        const lida = await ler(fs.readFileSync(a));
+        for (const l of Array.isArray(lida) ? lida : [lida]) {
         const imp = imps.find((i) => i.banco === l.banco && i.conta === l.conta && i.mes_referencia === l.mesReferencia);
         if (!imp) continue; // não importado (ex.: duplicata descartada)
         if (imp.encadeamento?.viaEncadeamento) continue; // Caixa dezembro: saldo do arquivo é de janeiro, o gravado vem do encadeamento
         if (l.layout === 'mensal' && imp.arquivo_nome && imp.arquivo_nome !== path.basename(a)) continue; // Bradesco: "Extrato Mensal" de um mês importado pelo "Consolidado" (saldo com Invest Fácil)
-        expect({ arquivo: path.basename(a), gravado: r2(Number(imp.saldo_final)) }).toEqual({ arquivo: path.basename(a), gravado: l.saldoFinal });
+        expect({ arquivo: path.basename(a), conta: l.conta, gravado: r2(Number(imp.saldo_final)) }).toEqual({ arquivo: path.basename(a), conta: l.conta, gravado: l.saldoFinal });
         conferidos++;
+        }
       }
       expect(conferidos).toBeGreaterThan(0);
     },
