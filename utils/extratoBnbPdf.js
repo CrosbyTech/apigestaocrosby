@@ -224,6 +224,7 @@ function lerConsolidado(todas, todoTexto, buffer, paginas) {
   const titularGeral = limpar((todoTexto.match(/Titular:\s*(.+)/) || [])[1] || '') || null;
   const contas = [];
   let atual = null;
+  let ultimaCC = null; // última conta corrente vista: o demonstrativo dela pode vir só depois da seção de fundos
   let dentro = false;
   for (const l of todas) {
     const its = l.itens;
@@ -238,9 +239,16 @@ function lerConsolidado(todas, todoTexto, buffer, paginas) {
     }
     if (atual && !dentro) {
       const mSc = t.match(/^SALDO CONTA CORRENTE\.*\s*(-?[\d.]+,\d{2}[-+]?)$/i);
-      if (mSc) atual.saldoAtual = numBr(mSc[1]);
+      if (mSc) { atual.saldoAtual = numBr(mSc[1]); ultimaCC = atual; }
     }
     if (/^>\s*APLICACOES|^>\s*FUNDOS|^>\s*MOVIMENTACOES BNB/.test(tUp)) { atual = null; dentro = false; continue; }
+    // "> DEMONSTRATIVO DA MOVIMENTACAO DE CONTA CORRENTE" depois da seção de fundos pertence à última conta corrente
+    // (ex.: 69.919-0 em set/2024: SALDO CONTA CORRENTE, fundo BNB CONTA RESERVA e só então o demonstrativo com a transferência)
+    if (/^>\s*DEMONSTRATIVO DA MOVIMENTACAO DE CONTA CORRENTE/.test(tUp)) {
+      if ((!atual || atual.saldoAtual == null) && ultimaCC && ultimaCC.saldoAnterior == null) atual = ultimaCC;
+      dentro = false;
+      continue;
+    }
     if (!atual) continue;
     if (/^DIA HISTORICO DOCUMENTO VALOR SALDO/.test(tUp)) { dentro = true; continue; }
     if (!dentro) continue;
