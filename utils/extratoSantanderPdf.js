@@ -45,6 +45,8 @@ export const CONTAS_SANTANDER = {
   '1575|13000599-5': { titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA', cnpj: '17177680000116', apelido: 'CROSBY' },
   '1575|13001128-2': { titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA (JOAO PESSOA)', cnpj: null, apelido: 'CROSBY JOAO PESSOA' },
   '4543|13006882-4': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115', apelido: 'FABIO' },
+  '1575|29000199-0': { titular: 'CROSBY CR VESTUARIO LTDA (CONTA VINCULADA)', cnpj: '17177680000116', apelido: 'CROSBY VINC' }, // cobrança garantia, 2025
+  '1575|13008301-7': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103', apelido: 'IRMAOS' }, // aberta em 2025
 };
 const SHOPPING_RECIFE = /SHOPPING\s*RECIFE|RECIFE\s*MALL|36\.?569\.?459/i;
 
@@ -179,6 +181,185 @@ export function hintDaDescricao(desc) {
   return null;
 }
 
+// ─── Layouts do Internet Banking Empresarial (2025) ───────────────────────────────────────────
+// IBE: "Períodos: 01/01/2025 a 31/01/2025"; colunas Data | Histórico | Documento | Valor (R$) | Saldo (R$);
+//      1ª linha "SALDO ANTERIOR <saldo>"; as outras só trazem o valor (sem saldo por linha nem saldo final impresso)
+//      → saldo final = anterior + movimentos, conferido pelo encadeamento com o mês seguinte.
+// IBPJ: extrato "novo" (set/2025+), ordem DECRESCENTE; para cada dia uma linha "Saldo do dia Cc <saldo>" seguida dos
+//      lançamentos do dia; colunas Data | Histórico (+ complemento: data, PERIODO, CNPJ, documento) | Valor ("- R $ 89,00");
+//      sem período no cabeçalho (mês = o das datas) e sem saldo anterior (= saldo do 1º dia − movimentos dele).
+//      O texto vem picado em letras soltas ("Pi x Recebido", "E x trato") → cola.
+const RE_VALOR_IB = /^-?\d{1,3}(\.\d{3})*,\d{2}$/;
+const RE_DATA_IB = /^\d{2}\/\d{2}\/\d{4}$/;
+const dataIsoIb = (d) => { const m = d.match(/(\d{2})\/(\d{2})\/(\d{4})/); return `${m[3]}-${m[2]}-${m[1]}`; };
+// "Pi x Recebido" → "Pix Recebido"; "Tarifa E x trato" → "Tarifa Extrato"; "Deb . Custas" → "Deb. Custas"
+const colar = (tokens) => {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (out.length && /^[a-z.]$/i.test(t)) {
+      out[out.length - 1] += t;
+      if (tokens[i + 1] && /^[a-z]/.test(tokens[i + 1])) { out[out.length - 1] += tokens[i + 1]; i++; }
+    } else out.push(t);
+  }
+  return limpar(out.join(' '));
+};
+function cabecalhoIb(todoTexto) {
+  const m = todoTexto.match(/^(.+?)\s+Ag[êe]ncia\s*:?\s*(\d{4})\s+Conta\s*:?\s*(\d{8,9})\s*$/m);
+  if (!m) throw new Error('Não achei "NOME Agência: 1575 Conta: 130005995" no cabeçalho do Internet Banking Empresarial.');
+  const dig = m[3];
+  return { titular: limpar(m[1]), agencia: m[2], conta: dig.slice(0, -1), contaDv: dig.slice(-1) };
+}
+function lerIbe(todas, todoTexto) {
+  const cab = cabecalhoIb(todoTexto);
+  const mPer = todoTexto.match(/Per[íi]odos:\s*(\d{2}\/\d{2}\/\d{4})\s+a\s+(\d{2}\/\d{2}\/\d{4})/);
+  if (!mPer) throw new Error('Não achei "Períodos: dd/mm/aaaa a dd/mm/aaaa".');
+  const periodo = { inicio: dataIsoIb(mPer[1]), fim: dataIsoIb(mPer[2]) };
+  const lanc = [];
+  const saldosDia = [];
+  let saldoAnterior = null;
+  for (const l of todas) {
+    const its = l.itens;
+    const t = texto(its);
+    const dataIt = its.find((i) => i.x < 90 && RE_DATA_IB.test(i.s)); // a tabela pode vir deslocada (julho: data em x≈65)
+    if (!dataIt) {
+      // histórico comprido que quebrou para a linha de baixo (sem data, só texto na coluna Histórico)
+      const ult = lanc.at(-1);
+      const peda = texto(its.filter((i) => i.x >= 95 && i.x < 400));
+      if (ult && peda && its.every((i) => i.x >= 95 && i.x < 400) && !/^(Data|Internet Banking|Agência|Conta Corrente|Consultar|Op[çc][ãa]o|Per[íi]odos|Cart[ãa]o|Agora|movimenta|Conta Corrente|O extrato|Acessar)/i.test(t)) ult.descricao = limpar(`${ult.descricao} ${peda}`);
+      continue;
+    }
+    // Valor (R$) termina em x≈485; Saldo (R$), só na última linha de cada dia, começa em x≈505
+    const nums = its.filter((i) => RE_VALOR_IB.test(i.s) && i.x >= 440);
+    const saldoIt = nums.find((i) => i.x >= 505);
+    const valorIt = nums.find((i) => i.x < 505);
+    const hist = texto(its.filter((i) => i !== dataIt && i.x >= 95 && i.x < 400 && !RE_VALOR_IB.test(i.s)));
+    if (/^SALDO ANTERIOR/i.test(hist)) { if (saldoIt || valorIt) saldoAnterior = numBr((saldoIt || valorIt).s); continue; }
+    if (!valorIt) continue;
+    const data = dataIsoIb(dataIt.s);
+    if (data > periodo.fim) continue; // o extrato entra no 1º dia útil do mês seguinte (o mês seguinte repete esse dia)
+    const documento = texto(its.filter((i) => i.x >= 400 && i.x < 440 && /^\d+$/.test(i.s))) || null;
+    lanc.push({ pagina: l.pagina, data, descricao: hist, documento: documento && !/^0+$/.test(documento) ? documento : null, valor: numBr(valorIt.s), detalhe: null });
+    if (saldoIt) saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s) });
+  }
+  if (saldoAnterior == null) throw new Error('Não achei a linha "SALDO ANTERIOR" do Internet Banking Empresarial.');
+  const saldoFinal = saldosDia.length && saldosDia.at(-1).apos === lanc.length - 1 ? saldosDia.at(-1).valor : null;
+  return { ...cab, mesRef: periodo.inicio.slice(0, 7), periodo, saldoAnterior, saldoFinal, lanc, saldosDia, layout: 'ibe', fonte: 'PDF Internet Banking Empresarial: SALDO ANTERIOR e saldo impresso no fim de cada dia' };
+}
+function lerIbpj(todas, todoTexto) {
+  const cab = cabecalhoIb(todoTexto);
+  const RE_DET = /^(\d{2}\/\d{2}\/\d{4}|\d{2}\/\d{2}\/\d{2}|\d{2}\/\d{2}|\d{5,}|\d{4}\/\d+|\/|PERIODO|:|A|\d{4}|JANEIRO|FEVEREIRO|MAR[ÇC]O|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO)$/i;
+  const porDia = new Map(); // data → { saldo, linhas: [] } na ordem do PDF (decrescente)
+  for (const l of todas) {
+    const its = [...l.itens].sort((a, b) => a.x - b.x);
+    const dataIt = its.find((i) => i.x < 60 && RE_DATA_IB.test(i.s));
+    if (!dataIt) continue;
+    const data = dataIsoIb(dataIt.s);
+    const dinheiroTok = its.filter((i) => i.x >= 430).map((i) => i.s).join(' ');
+    const mVal = dinheiroTok.match(/(\d{1,3}(?:\.\d{3})*,\d{2})/);
+    if (!mVal) continue;
+    const valor = numBr(mVal[1]) * (/-/.test(dinheiroTok) ? -1 : 1);
+    const meio = its.filter((i) => i !== dataIt && i.x >= 90 && i.x < 430);
+    const histTok = meio.filter((i) => !RE_DET.test(i.s) || i.x < 165 && !RE_DATA_IB.test(i.s) && !/^\d{5,}$/.test(i.s)).map((i) => i.s);
+    const detTok = meio.filter((i) => !histTok.includes(i.s) || (RE_DET.test(i.s) && i.x >= 165)).map((i) => i.s);
+    const historico = colar(histTok);
+    const detalhe = limpar(detTok.join(' ')) || null;
+    if (!porDia.has(data)) porDia.set(data, { saldo: null, linhas: [] });
+    const dia = porDia.get(data);
+    if (/^Saldo do dia/i.test(historico)) { dia.saldo = valor; continue; }
+    dia.linhas.push({ pagina: l.pagina, data, descricao: historico, documento: null, valor, detalhe });
+  }
+  if (!porDia.size) throw new Error('Nenhuma linha com data no extrato IBPJ.');
+  const dias = [...porDia.keys()].sort();
+  const freq = {};
+  for (const d of dias) freq[d.slice(0, 7)] = (freq[d.slice(0, 7)] || 0) + porDia.get(d).linhas.length + 1;
+  const mesRef = Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0];
+  const periodo = { inicio: `${mesRef}-01`, fim: ultimoDiaMes(mesRef) };
+  for (const d of [...dias]) if (d > periodo.fim) { porDia.delete(d); dias.splice(dias.indexOf(d), 1); } // 1º dia útil do mês seguinte fica de fora
+  // saldo anterior = saldo do 1º dia com saldo − movimentos até ele
+  const primeiroComSaldo = dias.find((d) => porDia.get(d).saldo != null);
+  if (!primeiroComSaldo) throw new Error('Nenhuma linha "Saldo do dia Cc" no extrato IBPJ.');
+  let movAte = 0;
+  for (const d of dias) { movAte += porDia.get(d).linhas.reduce((s, x) => s + x.valor, 0); if (d === primeiroComSaldo) break; }
+  const saldoAnterior = round2(porDia.get(primeiroComSaldo).saldo - movAte);
+  const lanc = [];
+  const saldosDia = [];
+  let saldoFinal = saldoAnterior;
+  for (const d of dias) {
+    const dia = porDia.get(d);
+    for (const x of [...dia.linhas].reverse()) lanc.push(x); // dentro do dia o PDF também é decrescente
+    if (dia.saldo != null) { saldosDia.push({ apos: lanc.length - 1, valor: dia.saldo }); saldoFinal = dia.saldo; }
+  }
+  return { ...cab, mesRef, periodo, saldoAnterior, saldoFinal, lanc, saldosDia, layout: 'ibpj', fonte: 'PDF Internet Banking Empresarial (novo): "Saldo do dia Cc" conferido dia a dia; saldo anterior = saldo do 1º dia − movimentos dele' };
+}
+/** Fecha a leitura (numeração, saldo após cada linha, conferência) no formato dos outros leitores. */
+function montarSantander(r, paginas, buffer) {
+  const conhecida = CONTAS_SANTANDER[`${r.agencia}|${r.conta}-${r.contaDv}`] || null;
+  const titular = conhecida?.titular || r.titular || null;
+  const cnpj = conhecida?.cnpj || null;
+  if (SHOPPING_RECIFE.test(`${r.titular || ''} ${titular} ${cnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
+  const lanc = r.lanc;
+  let corrente = round2(r.saldoAnterior);
+  const divergencias = [];
+  lanc.forEach((l, i) => {
+    corrente = round2(corrente + l.valor);
+    l.seq = i + 1;
+    l.saldoApos = corrente;
+    l.saldoInformado = null;
+    l.dataBalancete = l.data;
+    l.natureza = l.valor < 0 ? 'D' : 'C';
+    l.historico = l.detalhe ? `${l.descricao} · ${l.detalhe}` : l.descricao;
+    const cp = contraparteSantander(l.descricao, l.detalhe, titular, cnpj);
+    l.historicoBase = cp.base;
+    l.contraparteNome = l.contraparteNome ?? cp.nome;
+    l.contraparteDoc = l.contraparteDoc ?? cp.doc;
+    l.hint = hintDaDescricao(l.descricao);
+    l.historicoDescricao = null;
+    l.hora = null;
+  });
+  for (const s of r.saldosDia) {
+    const l = lanc[s.apos];
+    if (!l) continue;
+    l.saldoInformado = s.valor;
+    if (Math.abs(l.saldoApos - s.valor) > 0.005) divergencias.push({ seq: l.seq, data: l.data, historico: l.descricao, saldoCalculado: l.saldoApos, saldoInformado: s.valor, diferenca: round2(s.valor - l.saldoApos) });
+  }
+  const saldoFinal = r.saldoFinal == null ? corrente : round2(r.saldoFinal);
+  const totalCreditos = round2(lanc.filter((l) => l.valor > 0).reduce((s, l) => s + l.valor, 0));
+  const totalDebitos = round2(lanc.filter((l) => l.valor < 0).reduce((s, l) => s - l.valor, 0));
+  const bate = divergencias.length === 0 && Math.abs(corrente - saldoFinal) <= 0.005;
+  return {
+    banco: 'SANTANDER',
+    bancoCodigo: '033',
+    formato: 'pdf',
+    layout: r.layout,
+    agencia: r.agencia,
+    conta: r.conta,
+    contaDv: r.contaDv,
+    titular,
+    titularCnpj: cnpj,
+    mesReferencia: r.mesRef,
+    periodo: r.periodo,
+    saldoInicial: round2(r.saldoAnterior),
+    saldoFinal,
+    saldoFinalCalculado: r.saldoFinal == null, // IBE: não há saldo final impresso
+    lancamentos: lanc,
+    conferencia: {
+      fonte: r.fonte,
+      saldoInicial: round2(r.saldoAnterior),
+      totalCreditos,
+      totalDebitos,
+      saldoCalculado: corrente,
+      saldoFinalInformado: saldoFinal,
+      diferencaFinal: round2(saldoFinal - corrente),
+      saldosDiariosConferidos: r.saldosDia.length,
+      divergencias,
+      bate,
+    },
+    paginas: paginas.length,
+    hash: crypto.createHash('sha1').update(buffer).digest('hex'),
+  };
+}
+
 /**
  * Lê o PDF "Extrato Consolidado Inteligente" do Santander. Mesmo formato dos outros leitores.
  * @param {Buffer} buffer
@@ -187,8 +368,10 @@ export async function lerExtratoSantander(buffer) {
   const paginas = await paginasDo(buffer);
   const todas = paginas.flatMap((p) => linhasDe(p.itens).map((l) => ({ ...l, pagina: p.numero })));
   const todoTexto = todas.map((l) => texto(l.itens)).join('\n');
+  if (/Internet Banking Empresarial/i.test(todoTexto) && /Per[íi]odos:/.test(todoTexto)) return montarSantander(lerIbe(todas, todoTexto), paginas, buffer);
+  if (/Internet Banking Empresarial/i.test(todoTexto) && /Saldo do dia/i.test(todoTexto)) return montarSantander(lerIbpj(todas, todoTexto), paginas, buffer);
   if (SHOPPING_RECIFE.test(todoTexto)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
-  if (!/EXTRATO CONSOLIDADO/i.test(todoTexto) || !/Movimenta[çc][ãa]o/.test(todoTexto)) throw new Error('Este PDF não parece ser o "Extrato Consolidado Inteligente" do Santander (dezembro vem em outro formato: use o OFX).');
+  if (!/EXTRATO CONSOLIDADO/i.test(todoTexto) || !/Movimenta[çc][ãa]o/.test(todoTexto)) throw new Error('Este PDF não parece ser um extrato do Santander ("Extrato Consolidado Inteligente" ou Internet Banking Empresarial).');
 
   // cabeçalho do resumo
   const mMes = todoTexto.match(/EXTRATO CONSOLIDADO INTELIGENTE\s*\n\s*([a-zç]+)\/(\d{4})/i);
