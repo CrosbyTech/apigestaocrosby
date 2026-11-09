@@ -43,14 +43,86 @@ export const FORNECEDOR_BANCO = {
   UNICRED: { cnpj: '73750424000147', nome: 'COOPERATIVA DE ECONOMIA E CREDITO MUTUO UNICRED INTEGRACAO' },
 };
 
-/** A saída é tarifa / encargo / IOF / custas? (só essas podem virar duplicata em lote) */
-export function ehTarifa(l) {
-  if (!l || Number(l.valor) >= 0 || l.transferencia_id || l.tipo === 'TRANSFERENCIA') return false;
+/**
+ * Saída que pode virar duplicata em lote ("tarifas e afins").
+ * Entra: tarifa, encargo, IOF, custas/protesto/cartório, juros/mensalidade/
+ * anuidade/cesta e CANCELAMENTO/ESTORNO DE VENDA (João, 09/11/2026).
+ * Fica de fora: Pix, pagamento de boleto, transferência, compra no cartão e
+ * fatura de cartão (ex.: anúncios Facebook de R$ 5 mil no cartão pré-pago Stone
+ * — não são tarifa; virariam "Tarifa bancária" errada no TOTVS).
+ */
+export function motivoNaoTarifa(l) {
+  if (!l || Number(l.valor) >= 0) return 'não é saída';
+  if (l.transferencia_id || l.tipo === 'TRANSFERENCIA') return 'transferência';
   const forma = semAcento(l.forma).toUpperCase();
-  if (/TARIFA|ENCARGO/.test(forma)) return true;
-  if (String(l.categoria || '').toLowerCase() === 'tarifa') return true;
+  const cat = String(l.categoria || '').toLowerCase();
   const txt = semAcento(`${l.descricao || ''} ${l.memo || ''}`).toUpperCase();
-  return /\b(TARIFA|TAR\b|TAXA|IOF|ENCARGO|ENCARGOS|PROTESTO|CUSTAS|CARTORIO|MENSALIDADE|ANUIDADE|CESTA|MANUTENCAO DE CONTA|JUROS\s+(AD|ADIANT|S\/ SALDO|LIMITE)|JUROS AD)\b/.test(txt);
+  if (/PIX/.test(forma) || cat === 'pix' || /\bPIX\b/.test(txt)) return 'Pix';
+  if (/BOLETO/.test(forma) || cat === 'boleto' || cat === 'pagamento' || /\bBOLETO\b|PAGAMENTO DE TITULO|PAGTO\.? TITULO|LIQUIDACAO DE TITULO/.test(txt)) return 'pagamento de boleto';
+  if (/TRANSFER/.test(forma) || cat === 'transferencia') return 'transferência';
+  if (/FATURA/.test(forma) || /FATURA CARTAO|PAGAMENTO FATURA/.test(txt)) return 'fatura de cartão';
+  if (/COMPRA CARTAO/.test(forma) || cat === 'cartao_compra' || /COMPRA CARTAO/.test(txt)) return 'compra no cartão';
+  if (/TARIFA|ENCARGO/.test(forma) || cat === 'tarifa') return null;
+  if (/\b(TARIFA|TAR\b|TAXA|IOF|ENCARGO|ENCARGOS|PROTESTO|CUSTAS|CARTORIO|MENSALIDADE|ANUIDADE|CESTA|MANUTENCAO DE CONTA|JUROS)\b/.test(txt)) return null;
+  if (/CANCELAMENTO DE VENDA|ESTORNO DE VENDA|CHARGEBACK/.test(txt)) return null;
+  return 'não é tarifa/encargo';
+}
+export const ehTarifa = (l) => motivoNaoTarifa(l) === null;
+
+/** Saídas PENDENTES de todas as contas no período (mesma regra da tela), com a conta. */
+export async function saidasPendentes({ de, ate, escopo = 'crosby' }) {
+  const { anexarConciliacoes } = await import('./fluxoCaixaConciliacao.js');
+  const { data: contas, error: eC } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome,titular_cnpj,escopo,ativo');
+  if (eC) throw new Error(eC.message);
+  const contasEsc = (contas || []).filter((c) => (c.escopo || 'crosby') === escopo && c.ativo !== false);
+  const contaDe = new Map(contasEsc.map((c) => [c.id, c]));
+  const todos = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from('fluxo_caixa_lancamentos')
+      .select('*')
+      .in('conta_id', [...contaDe.keys()])
+      .gte('data', de)
+      .lte('data', ate)
+      .order('conta_id')
+      .order('data')
+      .order('seq')
+      .range(from, from + 999);
+    if (error) throw new Error(error.message);
+    todos.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const lista = todos.map((l) => {
+    const c = contaDe.get(l.conta_id);
+    return { ...l, valor: Number(l.valor), banco: c?.banco, conta_apelido: c?.apelido, conta_cnpj: c?.titular_cnpj };
+  });
+  await anexarConciliacoes(lista, { de, ate });
+  const mapa = await mapearFiliaisTotvsPorCnpj().catch(() => null);
+  return lista
+    .filter((l) => l.valor < 0 && l.pendente && !l.transferencia_id && l.tipo !== 'TRANSFERENCIA')
+    .map((l) => {
+      const c = contaDe.get(l.conta_id);
+      const filial = (mapa?.get(soDig(c?.titular_cnpj)) || [])[0] || null;
+      return {
+        id: l.id,
+        data: l.data,
+        valor: round2(Math.abs(l.valor)),
+        forma: l.forma,
+        categoria: l.categoria,
+        descricao: l.descricao,
+        memo: l.memo,
+        contraparte: l.contraparte_nome || null,
+        contaId: l.conta_id,
+        conta: c?.apelido || null,
+        banco: c?.banco || null,
+        titular: c?.titular_nome || null,
+        cnpj: c?.titular_cnpj || null,
+        empresa: filial ? `${filial.code} · ${filial.nome}` : c?.titular_nome || null,
+        elegivel: ehTarifa(l) && !!FORNECEDOR_BANCO[String(c?.banco || '').toUpperCase()],
+        motivoBloqueio: motivoNaoTarifa(l) || (!FORNECEDOR_BANCO[String(c?.banco || '').toUpperCase()] ? `banco ${c?.banco} sem fornecedor no TOTVS` : null),
+      };
+    })
+    .sort((a, b) => String(a.empresa).localeCompare(String(b.empresa)) || String(a.banco).localeCompare(String(b.banco)) || a.data.localeCompare(b.data));
 }
 
 const novoCodigo = () => Math.floor(10000000 + Math.random() * 89999999);
@@ -149,7 +221,7 @@ export async function criarDuplicatasTarifas({ lancamentoIds, usuario = null, si
     }
     const base = { lancamentoId: id, data: l.data, valor: Math.abs(Number(l.valor)), descricao: l.descricao || l.memo };
     if (!ehTarifa(l)) {
-      out.recusadas.push({ ...base, motivo: 'Não é tarifa / encargo / IOF / custas.' });
+      out.recusadas.push({ ...base, motivo: `${motivoNaoTarifa(l)} não vira duplicata de tarifa.` });
       continue;
     }
     const { data: jaConc } = await supabase.from('fluxo_caixa_conciliacoes').select('id').eq('chave', l.chave).maybeSingle();
@@ -248,4 +320,4 @@ export async function criarDuplicatasTarifas({ lancamentoIds, usuario = null, si
   return out;
 }
 
-export default { criarDuplicatasTarifas, ehTarifa, FORNECEDOR_BANCO, DESPESA_TARIFA };
+export default { criarDuplicatasTarifas, ehTarifa, saidasPendentes, FORNECEDOR_BANCO, DESPESA_TARIFA };

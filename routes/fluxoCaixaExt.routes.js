@@ -344,6 +344,22 @@ router.post(
 // Tarifas/encargos do extrato → duplicata no TOTVS (nome do banco da conta,
 // despesa 7008) + Solicitação Crosby + conciliação (João, 09/11/2026).
 // body: { lancamentoIds: [..], simular? }
+// Saídas pendentes de TODAS as contas no período (janela "Saídas pendentes")
+router.get(
+  '/conciliacao/saidas-pendentes',
+  asyncHandler(async (req, res) => {
+    try {
+      const { de, ate } = req.query;
+      if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
+      const { saidasPendentes } = await import('../services/tarifasConciliacao.js');
+      const itens = await saidasPendentes({ de: String(de), ate: String(ate), escopo });
+      return successResponse(res, { itens, elegiveis: itens.filter((i) => i.elegivel).length });
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.post(
   '/conciliacao/tarifas',
   asyncHandler(async (req, res) => {
