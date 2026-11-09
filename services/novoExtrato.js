@@ -15,7 +15,7 @@
 // ============================================================
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
-import { lerExtratoCaixaOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoCaixaOfx, lerExtratoBbOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
@@ -161,7 +161,7 @@ function detectarBanco(nome, buffer) {
   const cab = buffer.subarray(0, 4);
   if (cab.toString('latin1') === '%PDF') return /\bBNB\b|NORDESTE/.test(n) ? 'BNB' : /BRADESCO/.test(n) ? 'BRADESCO' : /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred, Bradesco ou BNB) ou OFX (Caixa ou Santander).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred, Bradesco ou BNB) ou OFX (Caixa, Santander ou Banco do Brasil).');
 }
 
 /**
@@ -175,10 +175,13 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
   if (leitura) {
     // uma das contas de um extrato com várias contas (BNB consolidado), já lida
   } else if (banco === 'OFX') {
-    // OFX: o banco vem do BANKID (104 Caixa, 033 Santander); outro banco dá erro claro
+    // OFX: o banco vem do BANKID (104 Caixa, 033 Santander, 001 BB); outro banco dá erro claro
     if (ehOfxSantander(buffer)) {
       leitura = lerExtratoSantanderOfx(buffer);
       banco = 'SANTANDER';
+    } else if (bancoDoOfx(buffer) === 1) {
+      leitura = lerExtratoBbOfx(buffer);
+      banco = 'BB';
     } else {
       leitura = lerExtratoCaixaOfx(buffer);
       banco = 'CAIXA';

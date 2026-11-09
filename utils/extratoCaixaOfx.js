@@ -44,6 +44,17 @@ export const CONTAS_CAIXA = {
   '0005781364591': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
   '0005781366357': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
 };
+// Banco do Brasil (BANKID 001): mesmo OFX, usado quando o PDF do mês é só imagem (ex.: Fabio jun/2025).
+// Titulares como o leitor do PDF do BB grava (sem agência para Fabio/Irmãos).
+export const CONTAS_BB = {
+  '587117': { titular: 'CROSBY D CONFECCAO LTDA', cnpj: '17177680000116', agencia: '1533-4' },
+  '369608': { titular: 'FABIO F LIMA AZEVEDO', cnpj: '27728810000115', agencia: null },
+  '370517': { titular: 'IRMAOS C V LTDA', cnpj: '33592092000103', agencia: null },
+};
+const BANCOS_OFX = {
+  104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA },
+  1: { banco: 'BB', nome: 'do Banco do Brasil', contas: CONTAS_BB },
+};
 
 // Históricos da Caixa → o que são (para a tela e para o casamento de transferências)
 const HISTORICOS = {
@@ -89,16 +100,29 @@ export function ehOfx(buffer) {
  * @param {Buffer} buffer
  */
 export function lerExtratoCaixaOfx(buffer) {
+  return lerOfxBanco(buffer, 104);
+}
+export function lerExtratoBbOfx(buffer) {
+  return lerOfxBanco(buffer, 1);
+}
+/** Código do banco (BANKID) de um OFX, como número; null se não achar. */
+export function bancoDoOfx(buffer) {
+  const t = Buffer.isBuffer(buffer) ? buffer.subarray(0, 8000).toString('latin1') : String(buffer).slice(0, 8000);
+  const b = (campo(t, 'BANKID') || '').replace(/\D/g, '');
+  return b ? Number(b) : null;
+}
+function lerOfxBanco(buffer, esperado) {
   const texto = Buffer.isBuffer(buffer) ? buffer.toString('latin1') : String(buffer);
   if (!ehOfx(texto)) throw new Error('O arquivo não é um OFX.');
+  const def = BANCOS_OFX[esperado];
   const bankId = (campo(texto, 'BANKID') || '').replace(/\D/g, '');
-  if (bankId && Number(bankId) !== 104) throw new Error(`Este OFX é do banco ${bankId}, não da Caixa (104).`);
+  if (bankId && Number(bankId) !== esperado) throw new Error(`Este OFX é do banco ${bankId}, não ${def.nome} (${String(esperado).padStart(3, '0')}).`);
   const acctId = (campo(texto, 'ACCTID') || '').replace(/\D/g, '');
   if (!acctId) throw new Error('OFX sem o número da conta (ACCTID).');
-  const agencia = (campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null;
+  const conhecida = def.contas[acctId] || null;
+  const agencia = conhecida && 'agencia' in conhecida ? conhecida.agencia : (campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null;
   const conta = acctId.slice(0, -1);
   const contaDv = acctId.slice(-1);
-  const conhecida = CONTAS_CAIXA[acctId] || null;
 
   const lista = (texto.match(/<BANKTRANLIST>([\s\S]*?)<\/BANKTRANLIST>/i) || [])[1] || texto;
   const blocos = [...lista.matchAll(/<STMTTRN>([\s\S]*?)<\/STMTTRN>/gi)].map((m) => m[1]);
@@ -144,9 +168,13 @@ export function lerExtratoCaixaOfx(buffer) {
   const d2 = dataOfx(campo(lista, 'DTEND'));
   const datasArq = [d1, d2].filter(Boolean).sort();
   const datasLanc = lanc.map((l) => l.data).sort();
-  // mês de referência = mês do início do período (o arquivo pode avançar até o 1º dia útil do mês seguinte)
+  // mês de referência = mês com mais lançamentos (Caixa avança até o 1º dia útil do mês seguinte; o BB começa
+  // o DTSTART no último dia útil do mês anterior). Sem lançamentos: Caixa pelo DTSTART, BB pelo DTEND.
+  const freq = {};
+  for (const d of datasLanc) freq[d.slice(0, 7)] = (freq[d.slice(0, 7)] || 0) + 1;
+  const maisFrequente = Object.entries(freq).sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))[0]?.[0] || null;
   const inicio = datasArq[0] || datasLanc[0] || null;
-  const mesRef = inicio ? inicio.slice(0, 7) : null;
+  const mesRef = maisFrequente || (def.banco === 'BB' ? (d2 || d1 || inicio) : inicio)?.slice(0, 7) || null;
   const fim = datasLanc.at(-1) && datasArq.at(-1) ? (datasLanc.at(-1) > datasArq.at(-1) ? datasLanc.at(-1) : datasArq.at(-1)) : datasArq.at(-1) || datasLanc.at(-1) || (mesRef ? ultimoDiaMes(mesRef) : null);
 
   const totalCreditos = round2(lanc.filter((l) => l.valor > 0).reduce((s, l) => s + l.valor, 0));
@@ -159,8 +187,8 @@ export function lerExtratoCaixaOfx(buffer) {
   }
 
   return {
-    banco: 'CAIXA',
-    bancoCodigo: '104',
+    banco: def.banco,
+    bancoCodigo: String(esperado).padStart(3, '0'),
     formato: 'ofx',
     agencia,
     conta,
@@ -190,4 +218,4 @@ export function lerExtratoCaixaOfx(buffer) {
   };
 }
 
-export default { lerExtratoCaixaOfx, ehOfx, CONTAS_CAIXA };
+export default { lerExtratoCaixaOfx, lerExtratoBbOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB };
