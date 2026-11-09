@@ -709,6 +709,30 @@ export function filtrosBuscaManual({ numero, pessoa, codigo, cnpj, nome, tipoDat
   f.temAlgo = f.temPessoa || f.temPeriodo || !!f.numero || f.valorMin != null || f.valorMax != null;
   return f;
 }
+// Busca só por valor (ou só por nome, no CR) sem período (Titia, 09/11/2026):
+// em vez de exigir 3 informações, usa sozinho o vencimento de 90 dias antes
+// até 30 dias depois da data do lançamento do extrato (ou de hoje). No contas a
+// pagar a janela é menor (vencimento −30/+15 dias + pagos ±7 dias), porque o
+// TOTVS não filtra por valor: tudo da janela é lido e filtrado aqui.
+async function periodoAutomatico(f, lancamentoId, avisos) {
+  let base = null;
+  if (lancamentoId) {
+    try {
+      const { data } = await supabase.from(T.lanc).select('data').eq('id', lancamentoId).maybeSingle();
+      base = data?.data || null;
+    } catch {
+      /* usa hoje */
+    }
+  }
+  const d0 = base ? new Date(`${String(base).slice(0, 10)}T12:00:00Z`) : new Date();
+  const iso = (dias) => new Date(d0.getTime() + dias * 86400000).toISOString().slice(0, 10);
+  f.vencimentoDe = iso(-90);
+  f.vencimentoAte = iso(30);
+  f.temPeriodo = true;
+  f.auto = { vencDe: iso(-30), vencAte: iso(15), pagDe: iso(-7), pagAte: iso(7) };
+  const br = (x) => x.split('-').reverse().join('/');
+  avisos.push(`Sem período informado: procurei vencimentos de ${br(f.vencimentoDe)} a ${br(f.vencimentoAte)} (em volta da data do lançamento).`);
+}
 const filtrarStatus = (lista, status) => (status === 'pago' ? lista.filter((c) => c.pago) : status === 'aberto' ? lista.filter((c) => !c.pago) : lista);
 const porDataDesc = (campo) => (a, b) => String(b[campo] || '').localeCompare(String(a[campo] || ''));
 
@@ -723,7 +747,7 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   if (!fontesSel.size) throw new Error('Escolha pelo menos uma fonte (Contas a Pagar, Liberação ou Solicitações).');
   const f = filtrosBuscaManual({ numero: duplicata, pessoa: fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax });
   if (!f.temAlgo) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, período ou valor).');
-  if (!f.numero && !f.temPessoa && !f.temPeriodo) throw new Error('Para buscar só por valor, informe também o período (vencimento, emissão ou pagamento).');
+  if (!f.numero && !f.temPessoa && !f.temPeriodo) await periodoAutomatico(f, lancamentoId, avisos);
   f.duplicata = f.numero;
   f.de = f.vencimentoDe;
   f.ate = f.vencimentoAte;
@@ -784,11 +808,74 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   }
 
   // nome sem nenhum fornecedor conhecido: no TOTVS não dá para filtrar por nome → não varre tudo
-  const buscarTotvs = fontesSel.has('totvs') && token && (f.duplicata || supplierCodes?.length || (!nomeRe && !docFornecedor && codigoFornecedor == null && f.temPeriodo));
+  // Só valor, sem período (Titia, 09/11/2026): usa a CÓPIA do contas a pagar no
+  // HeadCoach (accounts_payable_duplicates, sync do TOTVS a cada 30 min), que
+  // filtra por valor no banco — instantâneo e sem janela curta. A API do TOTVS
+  // não filtra por valor (teria que ler milhares de parcelas).
+  let espelhoOk = false;
+  if (f.auto && fontesSel.has('totvs')) {
+    try {
+      const base = new Date(`${f.auto.pagDe}T12:00:00Z`).getTime() + 7 * 86400000;
+      const iso = (dias) => new Date(base + dias * 86400000).toISOString().slice(0, 10);
+      const de = iso(-120);
+      const ate = iso(60);
+      const sel = 'branch_code,supplier_code,duplicate_code,installment_code,supplier_cpf_cnpj,issue_date,due_date,settlement_date,status,duplicate_value,paid_value,expense,supplier_name';
+      const faixa = (q, col) => {
+        if (f.valorMin != null) q = q.gte(col, f.valorMin - 0.005);
+        if (f.valorMax != null) q = q.lte(col, f.valorMax + 0.005);
+        return q;
+      };
+      const [r1, r2] = await Promise.all([
+        faixa(supabase.from('accounts_payable_duplicates_v').select(sel).neq('status', 'C').or(`due_date.gte.${de},issue_date.gte.${de}`).lte('due_date', `${ate}T23:59:59`), 'duplicate_value').limit(500),
+        faixa(supabase.from('accounts_payable_duplicates_v').select(sel).neq('status', 'C').gte('settlement_date', de).lte('settlement_date', `${ate}T23:59:59`), 'paid_value').limit(500),
+      ]);
+      if (r1.error) throw r1.error;
+      const vistos = new Set();
+      for (const it of [...(r1.data || []), ...(r2.data || [])]) {
+        const id = `${it.branch_code}|${it.duplicate_code}|${it.installment_code}|${it.supplier_code}`;
+        if (vistos.has(id)) continue;
+        vistos.add(id);
+        const pago = Number(it.paid_value || 0) > 0 || !!it.settlement_date;
+        const exp = Array.isArray(it.expense) ? it.expense : [];
+        out.push({
+          origem: 'TOTVS_CP',
+          id,
+          valor: round2(pago ? it.paid_value || it.duplicate_value : it.duplicate_value),
+          valorDuplicata: round2(it.duplicate_value),
+          data: it.settlement_date ? String(it.settlement_date).slice(0, 10) : null,
+          vencimento: it.due_date ? String(it.due_date).slice(0, 10) : null,
+          emissao: it.issue_date ? String(it.issue_date).slice(0, 10) : null,
+          nome: it.supplier_name || null,
+          doc: soDigitos(it.supplier_cpf_cnpj) || null,
+          empresa: `Empresa ${it.branch_code}`,
+          duplicata: `${it.duplicate_code}|${it.installment_code}`,
+          detalhe: [`dup ${it.duplicate_code}/${it.installment_code}`, exp[0]?.expenseName, pago ? 'liquidada' : 'em aberto'].filter(Boolean).join(' · '),
+          pago,
+          supplierCode: it.supplier_code,
+        });
+      }
+      espelhoOk = true;
+      avisos.splice(0, avisos.length, ...avisos.filter((x) => !/^Sem período informado/.test(x)));
+      const br = (x) => x.split('-').reverse().join('/');
+      avisos.push(`Busca só por valor: procurei no contas a pagar (cópia do TOTVS no HeadCoach, atualizada a cada 30 min) de ${br(de)} a ${br(ate)}.`);
+    } catch (e) {
+      avisos.push(`Cópia do contas a pagar indisponível (${e.message}) — buscando direto no TOTVS.`);
+    }
+  }
+
+  const buscarTotvs = !espelhoOk && fontesSel.has('totvs') && token && (f.duplicata || supplierCodes?.length || (!nomeRe && !docFornecedor && codigoFornecedor == null && f.temPeriodo));
   if (buscarTotvs) {
     try {
       const branchCodeList = await getBranchCodes(token);
       const filter = { branchCodeList };
+      if (f.auto) {
+        // período automático (só valor): vencimento −30/+15 dias da data do lançamento
+        f.de = f.auto.vencDe;
+        f.ate = f.auto.vencAte;
+        avisos.splice(0, avisos.length, ...avisos.filter((a) => !/^Sem período informado/.test(a)));
+        const br = (x) => x.split('-').reverse().join('/');
+        avisos.push(`Sem período informado: procurei vencimentos de ${br(f.auto.vencDe)} a ${br(f.auto.vencAte)} e pagamentos de ${br(f.auto.pagDe)} a ${br(f.auto.pagAte)} (em volta da data do lançamento).`);
+      }
       if (f.duplicata) filter.duplicateCodeList = [Number(f.duplicata)];
       if (supplierCodes?.length) filter.supplierCodeList = supplierCodes.slice(0, 200);
       if (f.de) filter.startExpiredDate = `${f.de}T00:00:00`;
@@ -797,14 +884,46 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
       if (f.emissaoAte) filter.endIssueDate = `${f.emissaoAte}T23:59:59`;
       if (f.pagamentoDe) filter.startSettlementDate = `${f.pagamentoDe}T00:00:00`;
       if (f.pagamentoAte) filter.endSettlementDate = `${f.pagamentoAte}T23:59:59`;
-      if (f.valorMin != null) filter.startDuplicateValue = f.valorMin;
-      if (f.valorMax != null) filter.endDuplicateValue = f.valorMax;
-      const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 60000 });
-      const first = await pedir(1);
-      let itens = [...(first.data?.items || [])];
-      const totalPages = Math.min(Number(first.data?.totalPages) || 1, 10);
-      for (let p = 2; p <= totalPages; p++) itens.push(...((await pedir(p)).data?.items || []));
-      if ((Number(first.data?.totalPages) || 1) > 10) avisos.push('Busca no TOTVS limitada aos primeiros 1.000 títulos; refine os filtros.');
+      // A API NÃO filtra por valor (DuplicateFilterModel não tem campo de valor;
+      // startDuplicateValue era ignorado). Com valor: lê todas as páginas da
+      // janela em paralelo e filtra o valor aqui.
+      const temValor = f.valorMin != null || f.valorMax != null;
+      const bateValor = (it) => {
+        const vs = [Number(it.duplicateValue), Number(it.paidValue)].filter((v) => Number.isFinite(v) && v > 0);
+        return vs.some((v) => (f.valorMin == null || v >= f.valorMin - 0.005) && (f.valorMax == null || v <= f.valorMax + 0.005));
+      };
+      const lerTudo = async (flt) => {
+        const pedir = (page) => axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter: flt, page, pageSize: 100 }, { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 60000 });
+        const first = await pedir(1);
+        const lista = [...(first.data?.items || [])];
+        const total = Number(first.data?.totalPages) || 1;
+        const limite = temValor ? total : Math.min(total, 10);
+        if (!temValor && total > 10) avisos.push('Busca no TOTVS limitada aos primeiros 1.000 títulos; refine os filtros.');
+        const pags = [];
+        for (let p = 2; p <= limite; p++) pags.push(p);
+        for (let i = 0; i < pags.length; i += 6) {
+          const lote = await Promise.all(pags.slice(i, i + 6).map((p) => pedir(p).then((r) => r.data?.items || []).catch(() => [])));
+          for (const it of lote) lista.push(...it);
+        }
+        return lista;
+      };
+      let itens = await lerTudo(filter);
+      if (f.auto) {
+        // + o que foi PAGO perto da data (vencimento pode estar longe)
+        const fPag = { ...filter };
+        delete fPag.startExpiredDate;
+        delete fPag.endExpiredDate;
+        fPag.startSettlementDate = `${f.auto.pagDe}T00:00:00`;
+        fPag.endSettlementDate = `${f.auto.pagAte}T23:59:59`;
+        itens.push(...(await lerTudo(fPag)));
+      }
+      const vistos = new Set();
+      itens = itens.filter((it) => {
+        const k = `${it.branchCode}|${it.duplicateCode}|${it.installmentCode}|${it.supplierCode}`;
+        if (vistos.has(k)) return false;
+        vistos.add(k);
+        return !temValor || bateValor(it);
+      });
       await nomesFornecedores(itens.map((it) => it.supplierCode), token);
       for (const it of itens) {
         const id = `${it.branchCode}|${it.duplicateCode}|${it.installmentCode}|${it.supplierCode}`;
@@ -1120,7 +1239,7 @@ export async function buscarContasReceber({ titulo, cliente, codigo, cnpj, nome,
   const f = filtrosBuscaManual({ numero: titulo, pessoa: cliente, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax });
   if (!f.temAlgo) throw new Error('Informe pelo menos um filtro (título, cliente, período ou valor).');
   // a API não filtra por nome nem por valor: sem período seria varrer tudo
-  if (!f.numero && f.codigo == null && !f.doc && !f.temPeriodo) throw new Error('Para buscar por nome do cliente ou só por valor, informe também o período (vencimento, emissão ou pagamento).');
+  if (!f.numero && f.codigo == null && !f.doc && !f.temPeriodo) await periodoAutomatico(f, lancamentoId, avisos);
   f.titulo = f.numero;
   f.cliente = f.nome || (f.doc ? f.doc : f.codigo != null ? String(f.codigo) : '');
   f.de = f.vencimentoDe;
