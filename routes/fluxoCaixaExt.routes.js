@@ -341,6 +341,24 @@ router.post(
   }),
 );
 
+// Tarifas/encargos do extrato → duplicata no TOTVS (nome do banco da conta,
+// despesa 7008) + Solicitação Crosby + conciliação (João, 09/11/2026).
+// body: { lancamentoIds: [..], simular? }
+router.post(
+  '/conciliacao/tarifas',
+  asyncHandler(async (req, res) => {
+    try {
+      const ids = Array.isArray(req.body?.lancamentoIds) ? req.body.lancamentoIds : [];
+      if (!ids.length) return errorResponse(res, 'Marque pelo menos uma saída.', 400);
+      const { criarDuplicatasTarifas } = await import('../services/tarifasConciliacao.js');
+      const r = await criarDuplicatasTarifas({ lancamentoIds: ids, usuario: usuarioDe(req), simular: !!req.body?.simular });
+      return successResponse(res, r, `${r.criadas.length} duplicata(s) de tarifa ${req.body?.simular ? 'validadas' : 'criadas e conciliadas'}`);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.post(
   '/conciliacao/techfin',
   comUpload([{ name: 'arquivos', maxCount: 60 }, { name: 'arquivo', maxCount: 1 }]),
