@@ -19,6 +19,8 @@ import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoSicred
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
+import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
+import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 
 const RAIZ = process.env.EXTRATOS_2025_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2025';
 const temPasta = fs.existsSync(RAIZ);
@@ -74,7 +76,17 @@ const BANCOS = {
     ofx: lerExtratoSicrediOfx, // BALAMT = saldo do fim do mês (31/12) → dezembro entra pelo OFX
     ilegiveis: ['SICREDI CROSBY DEZEMBRO.pdf', 'SICREDI FABIO DEZEMBRO.pdf', 'SICREDI IRMAOS DEZEMBRO.pdf'], // só imagem
   },
+  SANTANDER: {
+    pdf: lerExtratoSantander, // Internet Banking Empresarial (IBE jan–ago, IBPJ set–dez) e Consolidado Inteligente (Irmãos)
+    ofx: lerExtratoSantanderOfx, // BALAMT na data da exportação (depois do mês) → saldo indefinido, compara só o movimento do mês
+    ilegiveis: ['SANTANDER CROSBY DEZEMBRO.pdf'], // só imagem (dezembro da Crosby entra pelo OFX)
+  },
 };
+// Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo (dias faltando), conhecido e aceito
+const QUEBRAS = [
+  { banco: 'SANTANDER', conta: '13000599', mes: '2025-11', motivo: 'o PDF de novembro começa em 04/11: 03/11 ficou fora (R$ 927,07 de diferença com 31/10)' },
+];
+const quebra = (banco, conta, mes) => QUEBRAS.some((q) => q.banco === banco && q.conta === conta && q.mes === mes);
 // Meses sem nenhum arquivo legível (PDF imagem/errado e sem OFX): o encadeamento pula e o banco pode não ter o mês
 const BURACOS = [
   { banco: 'BB', conta: '36960', meses: ['2025-03', '2025-04'] },
@@ -87,6 +99,8 @@ const BURACOS = [
   { banco: 'CAIXA', conta: '000578136459', meses: ['2025-02', '2025-03'] },
   { banco: 'CAIXA', conta: '000578136635', meses: ['2025-02', '2025-03'] },
   { banco: 'SICREDI', conta: '36734', meses: ['2025-07'] }, // Irmãos: julho não existe na pasta
+  { banco: 'SANTANDER', conta: '13008301', meses: ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-10', '2025-11', '2025-12'] }, // Irmãos: só ago e set na pasta
+  { banco: 'SANTANDER', conta: '29000199', meses: ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-09', '2025-10'] }, // conta vinculada aberta em novembro
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -114,6 +128,12 @@ const FIM_DE_MES = {
   'SICREDI|32693': [5565.68, 623.86, 3133.86, 76377.57, 3457.09, 15877.04, 69.83, 85.78, 83.21, 844.42, -0.38, 20735.23],
   'SICREDI|36733': [3490.01, 8890.32, 62637.18, 2977.57, 233039.52, 30086.64, 342.45, 58.52, 53.43, 7998.09, 722.77, 0.83],
   'SICREDI|36734': [4067.68, -9273.76, 10710.32, 859.1, 711.15, 2579.63, null, -9659.22, -19360.34, -19948.61, -20000, -19987.56],
+  // Santander: saldo impresso no fim do último dia do mês (IBE) ou "Saldo do dia" do último dia (IBPJ); dez da Crosby = nov + movimentos do OFX
+  'SANTANDER|13000599': [729.17, -29509.97, -2861.77, 9824.43, -1464.24, -26398.63, -23789.54, -26010.72, -30886.26, -26101.56, -26139, -37292.11],
+  'SANTANDER|13001128': [-23567.16, -23370.02, 144.72, 708.28, 272.78, -23633.5, -23312.73, -23282.55, -28091.65, -24107.79, -29634.62, -108],
+  'SANTANDER|13006882': [-58921.8, -37027.67, 2783.72, 5034.77, 1237.95, -59591.52, -59768.44, -60245.84, -64603.89, -60380.57, -49583.76, -55315.99],
+  'SANTANDER|13008301': [null, null, null, null, null, null, null, -1168.04, -1286.85, null, null, null],
+  'SANTANDER|29000199': [null, null, null, null, null, null, null, null, null, null, 2574.47, 33756.6],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
 const INICIO_2025 = {
@@ -122,6 +142,7 @@ const INICIO_2025 = {
   'CAIXA|000578136386': 17259, 'CAIXA|000578136459': 2898.77, 'CAIXA|000578136635': 1397.81,
   'ITAU|27061': -42278.76, 'ITAU|33688': 93865.1, 'ITAU|39046': 8244.05, 'ITAU|98073': 2308.86, 'ITAU|98141': 31260.11,
   'SICREDI|32693': 12392.96, 'SICREDI|36733': 4935.25, 'SICREDI|36734': 39776.59,
+  'SANTANDER|13000599': 11141.2, 'SANTANDER|13001128': 1095.23, 'SANTANDER|13006882': 8255.8,
 };
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
@@ -137,8 +158,10 @@ const guardar = (a, r) => {
     if (l.parcial) continue; // mês não coberto até o último dia (ex.: abril até 23/04): não entra nas conferências de mês
     l.arquivo = a.arquivo;
     l.formatoArquivo = a.formato;
-    l.movimento = r2(l.lancamentos.reduce((s, x) => s + x.valor, 0));
     l.saldoIndefinido = a.formato === 'ofx' && !!l.saldoFinalEm && l.saldoFinalEm > l.periodo.fim; // BALAMT de depois do mês
+    // movimento do mês: no OFX com saldo indefinido (Santander) só as linhas do próprio mês (o arquivo traz o 1º dia útil seguinte);
+    // no OFX fechado (Caixa dezembro, BALAMT em 02/01 já com as linhas de janeiro) todas as linhas, como o importador grava
+    l.movimento = r2(l.lancamentos.filter((x) => !l.saldoIndefinido || x.data.slice(0, 7) === l.mesReferencia).reduce((s, x) => s + x.valor, 0));
     leituras.set(`${a.arquivo}#${l.conta}#${l.mesReferencia}`, l);
   }
   return Array.isArray(r) ? r : [r];
@@ -216,6 +239,7 @@ describeSe('extratos 2025 — saldo final de cada mês igual em todo lugar', () 
         }
         const l = referencia(ls);
         if (l.saldoIndefinido) continue; // só OFX com BALAMT de depois do mês: o saldo dele É o encadeamento, nada a conferir aqui
+        if (quebra(banco, numero, mes)) continue; // dias faltando dentro do arquivo: quebra conhecida
         const ant = mesAnterior(mes);
         const esperado = ant ? (meses.get(ant) ? fimDoMes(contas, conta, ant) : buraco(banco, numero, ant) ? null : undefined) : INICIO_2025[conta];
         if (esperado === null) continue; // mês anterior é buraco conhecido: não dá para encadear

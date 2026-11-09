@@ -81,6 +81,7 @@ const FORCADAS = new Set([
   // Caixa 2025: fevereiro e março só em PDF imagem, sem OFX → abril forçado
   'CAIXA|000578136386|2025-04', 'CAIXA|000578136459|2025-04', 'CAIXA|000578136635|2025-04',
   'SICREDI|36734|2025-08', // Irmãos: julho não existe
+  'SANTANDER|13000599|2025-11', // PDF de novembro começa em 04/11 (03/11 ficou fora)
 ]);
 const forcada = (i) => FORCADAS.has(`${i.banco}|${i.conta}|${i.mes_referencia}`);
 
