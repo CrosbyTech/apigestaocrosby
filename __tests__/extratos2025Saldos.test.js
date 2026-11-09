@@ -15,8 +15,10 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoSicrediOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
+import { lerExtratoItau } from '../utils/extratoItauPdf.js';
+import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2025_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2025';
 const temPasta = fs.existsSync(RAIZ);
@@ -62,6 +64,16 @@ const BANCOS = {
       'CAIXA CROSBY OUTUBRO.pdf',
     ],
   },
+  ITAU: {
+    pdf: lerExtratoItau, // jan–ago "lançamentos período" (layout B), set–dez "Lançamentos do período" (layout C); CONSOLIDADO = cópia do mês
+    // sem OFX: o OFX do Itaú traz a aplicação automática misturada (centenas de milhares por mês) e o BALAMT não é o saldo da conta
+    ilegiveis: [],
+  },
+  SICREDI: {
+    pdf: lerExtratoSicredi, // layout clássico (jan–jul, nov) e Internet Banking Sicredi (ago–out)
+    ofx: lerExtratoSicrediOfx, // BALAMT = saldo do fim do mês (31/12) → dezembro entra pelo OFX
+    ilegiveis: ['SICREDI CROSBY DEZEMBRO.pdf', 'SICREDI FABIO DEZEMBRO.pdf', 'SICREDI IRMAOS DEZEMBRO.pdf'], // só imagem
+  },
 };
 // Meses sem nenhum arquivo legível (PDF imagem/errado e sem OFX): o encadeamento pula e o banco pode não ter o mês
 const BURACOS = [
@@ -74,6 +86,7 @@ const BURACOS = [
   { banco: 'CAIXA', conta: '000578136386', meses: ['2025-02', '2025-03'] },
   { banco: 'CAIXA', conta: '000578136459', meses: ['2025-02', '2025-03'] },
   { banco: 'CAIXA', conta: '000578136635', meses: ['2025-02', '2025-03'] },
+  { banco: 'SICREDI', conta: '36734', meses: ['2025-07'] }, // Irmãos: julho não existe na pasta
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -92,17 +105,28 @@ const FIM_DE_MES = {
   'CAIXA|000578136386': [425.2, null, null, 2808.45, 470.41, 1188.34, -7528.14, -9832.13, -9123.4, -9916.05, -7604.92, -11121.77],
   'CAIXA|000578136459': [659.86, null, null, 523.48, 331.09, 124.84, -9927.02, -9737.48, -9368.93, -10801.01, -8843.07, -12709.21],
   'CAIXA|000578136635': [236.49, null, null, 1767.69, 429.73, 809.98, -7953.26, -7583.87, -9985.92, -8866.84, 0, 7056.51],
+  // Itaú: "SALDO TOTAL DISPONÍVEL DIA" do último dia (ou "SALDO TOTAL" quando há cheque bloqueado, fev/2025 do Fabio)
+  'ITAU|27061': [6880.91, -45917.81, 125626.49, 20411.12, 69212.48, -44490.1, -41953.95, -51141.58, -50189.12, -50724.32, -54942.81, -52263.18],
+  'ITAU|33688': [13536.51, -45094.67, 115647.16, 46250.55, 12840.46, -5138.32, -44942.94, -55249.39, -56291.13, -56327.59, -59093.1, -59246.18],
+  'ITAU|39046': [-85527.29, -81952.52, 5152.29, 1914.1, 751.68, -85130.82, -85304.57, -84631.13, -97551.11, -106812.59, -12148.86, 0],
+  'ITAU|98073': [1005.32, 506.77, 890.27, 2990.27, 447.27, 3389.28, 128.43, 820.49, 667.9, 321.19, 1209.83, 688.28],
+  'ITAU|98141': [14017.26, 50.97, 1789.42, 2702.02, 723.94, 821.92, 107.3, 81.4, 69.21, 2097.32, 1351.81, 833.51],
+  'SICREDI|32693': [5565.68, 623.86, 3133.86, 76377.57, 3457.09, 15877.04, 69.83, 85.78, 83.21, 844.42, -0.38, 20735.23],
+  'SICREDI|36733': [3490.01, 8890.32, 62637.18, 2977.57, 233039.52, 30086.64, 342.45, 58.52, 53.43, 7998.09, 722.77, 0.83],
+  'SICREDI|36734': [4067.68, -9273.76, 10710.32, 859.1, 711.15, 2579.63, null, -9659.22, -19360.34, -19948.61, -20000, -19987.56],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
 const INICIO_2025 = {
   'BB|58711': 9436.26, 'BB|37051': 4808.38, 'BB|36960': 4283.34,
   'BNB|69918': 1124.09, 'BNB|69919': 1038.99, 'BNB|69921': 1081.57, 'BNB|69922': 0, 'BNB|69361': 1043.99, 'BNB|69363': 0,
   'CAIXA|000578136386': 17259, 'CAIXA|000578136459': 2898.77, 'CAIXA|000578136635': 1397.81,
+  'ITAU|27061': -42278.76, 'ITAU|33688': 93865.1, 'ITAU|39046': 8244.05, 'ITAU|98073': 2308.86, 'ITAU|98141': 31260.11,
+  'SICREDI|32693': 12392.96, 'SICREDI|36733': 4935.25, 'SICREDI|36734': 39776.59,
 };
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
   ...listar(banco, /\.pdf$/i).filter((f) => !def.ilegiveis.includes(f)).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.pdf, formato: 'pdf' })),
-  ...listar(banco, /\.ofx$/i).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.ofx, formato: 'ofx' })),
+  ...(def.ofx ? listar(banco, /\.ofx$/i).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.ofx, formato: 'ofx' })) : []),
 ]);
 const leituras = new Map(); // "arquivo#conta#mês" → leitura (um arquivo pode trazer várias contas/meses)
 const chave = (l) => `${l.banco}|${l.conta}`;
