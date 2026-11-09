@@ -46,7 +46,7 @@ export const CONTAS_SANTANDER = {
   '1575|13001128-2': { titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA (JOAO PESSOA)', cnpj: null, apelido: 'CROSBY JOAO PESSOA' },
   '4543|13006882-4': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115', apelido: 'FABIO' },
   '1575|29000199-0': { titular: 'CROSBY CR VESTUARIO LTDA (CONTA VINCULADA)', cnpj: '17177680000116', apelido: 'CROSBY VINC' }, // cobrança garantia, 2025
-  '1575|13008301-7': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103', apelido: 'IRMAOS' }, // aberta em 2025
+  '4543|13008301-6': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103', apelido: 'IRMAOS' }, // aberta em 2025
 };
 const SHOPPING_RECIFE = /SHOPPING\s*RECIFE|RECIFE\s*MALL|36\.?569\.?459/i;
 
