@@ -12,6 +12,8 @@
 //   POST /sincronizar                copia agora do Dryland
 //   PUT  /:chave/pagamento           { forma, nsu, autorizacao, obs, por } registro manual
 //   POST /:chave/comprovante         { base64, nome, tipo } foto/PDF anexado no HeadCoach
+//   POST /:chave/faturamentos        registra a transação de venda gerada na tela FATURAMENTO
+//   POST /faturamentos/:id/status    { status } acompanha a transação (1 andamento · 4 atendida · 6 cancelada)
 // ============================================================================
 import express from 'express';
 import supabase from '../config/supabase.js';
@@ -62,10 +64,17 @@ async function lerTudo(tabela, montar) {
   return out;
 }
 
+// Último faturamento (transação gerada no HeadCoach) que não foi cancelado
+const resumoFat = (lista) => {
+  const vivos = (lista || []).filter((f) => f.transacao_status !== 6);
+  const f = vivos[0] || null;
+  return f ? { id: f.id, transacao: f.transacao_code, status: f.transacao_status, em: f.criado_em, qtd: f.qtd_conferida, total: Number(f.total) } : null;
+};
+
 const resumoSep = (p) => (p ? { status: p.status, qtd_pecas: p.qtd_pecas, qtd_separada: p.qtd_separada, separado_em: p.separado_em } : null);
 
 // Linha da tela a partir do card da fila (+ separação do pedido do site)
-function linhaDoCard(c, sep, anexo) {
+function linhaDoCard(c, sep, anexo, fats) {
   return {
     chave: c.id,
     fonte: 'fila',
@@ -92,11 +101,12 @@ function linhaDoCard(c, sep, anexo) {
     criado_em: c.criado_em,
     sumiu_do_dryland_em: c.sumiu_do_dryland_em,
     separacao: resumoSep(sep),
+    faturamento: resumoFat(fats),
   };
 }
 
 // Pedido do site que ainda não tem card na fila (aguardando separação)
-function linhaDaSeparacao(p, anexo) {
+function linhaDaSeparacao(p, anexo, fats) {
   return {
     chave: `SEP:${p.ref}`,
     fonte: 'separacao',
@@ -123,6 +133,7 @@ function linhaDaSeparacao(p, anexo) {
     criado_em: p.criado_em,
     sumiu_do_dryland_em: p.sumiu_do_dryland_em,
     separacao: resumoSep(p),
+    faturamento: resumoFat(fats),
   };
 }
 
@@ -135,7 +146,7 @@ router.get(
     const deIso = de ? `${String(de).slice(0, 10)}T00:00:00-03:00` : null;
     const ateIso = ate ? `${String(ate).slice(0, 10)}T23:59:59.999-03:00` : null;
     try {
-      const [cards, seps, anexos] = await Promise.all([
+      const [cards, seps, anexos, fats] = await Promise.all([
         lerTudo('pedidos_venda_fila', (q) => {
           let x = q
             .select(
@@ -148,19 +159,27 @@ router.get(
         }),
         lerTudo('pedidos_venda_dryland', (q) => q.select('*').order('ref')),
         lerTudo('pedidos_venda_anexos', (q) => q.select('chave, pagamento_manual, comprovante_url').order('chave')),
+        lerTudo('pedidos_venda_faturamentos', (q) =>
+          q.select('id, chave, transacao_code, transacao_status, qtd_conferida, total, criado_em').order('criado_em', { ascending: false }),
+        ).catch(() => []),
       ]);
+      const fatsPor = new Map();
+      for (const f of fats) {
+        if (!fatsPor.has(f.chave)) fatsPor.set(f.chave, []);
+        fatsPor.get(f.chave).push(f);
+      }
       const sepPorRef = new Map(seps.map((p) => [p.ref, p]));
       const anexoPor = new Map(anexos.map((a) => [a.chave, a]));
       const comCard = new Set();
       let linhas = cards.map((c) => {
         if (c.numero_site) comCard.add(c.numero_site);
-        return linhaDoCard(c, c.numero_site ? sepPorRef.get(c.numero_site) : null, anexoPor.get(c.id));
+        return linhaDoCard(c, c.numero_site ? sepPorRef.get(c.numero_site) : null, anexoPor.get(c.id), fatsPor.get(c.id));
       });
       for (const p of seps) {
         if (comCard.has(p.ref)) continue;
         if (deIso && p.criado_em && p.criado_em < new Date(deIso).toISOString()) continue;
         if (ateIso && p.criado_em && p.criado_em > new Date(ateIso).toISOString()) continue;
-        linhas.push(linhaDaSeparacao(p, anexoPor.get(`SEP:${p.ref}`)));
+        linhas.push(linhaDaSeparacao(p, anexoPor.get(`SEP:${p.ref}`), fatsPor.get(`SEP:${p.ref}`)));
       }
       if (!comTransf) linhas = linhas.filter((l) => l.eh_venda);
       if (canal) linhas = linhas.filter((l) => l.canal === canal);
@@ -191,6 +210,7 @@ router.get(
             aFaturar: conta((l) => /^a faturar$/i.test(l.status_fat || '')),
             faturados: conta((l) => /faturad|enviado|conclu/i.test(l.status_fat || '')),
             comComprovante: conta((l) => l.comprovantes > 0),
+            faturadosHeadcoach: conta((l) => !!l.faturamento),
           },
           statusFat: [...new Set(linhas.map((l) => l.status_fat).filter(Boolean))].sort(),
           sincronizacao: ultima,
@@ -230,10 +250,11 @@ router.get(
         card = data;
         ref = data.numero_site;
       }
-      const [sep, itens, anexo] = await Promise.all([
+      const [sep, itens, anexo, fats] = await Promise.all([
         ref ? supabase.from('pedidos_venda_dryland').select('*').eq('ref', ref).maybeSingle() : Promise.resolve({ data: null }),
         ref ? supabase.from('pedidos_venda_dryland_itens').select('*').eq('ref', ref).order('descricao') : Promise.resolve({ data: [] }),
         supabase.from('pedidos_venda_anexos').select('*').eq('chave', chave).maybeSingle(),
+        supabase.from('pedidos_venda_faturamentos').select('*').eq('chave', chave).order('criado_em', { ascending: false }),
       ]);
       if (!card && !sep.data) return errorResponse(res, 'Pedido não encontrado', 404, 'NOT_FOUND');
       return successResponse(
@@ -244,6 +265,7 @@ router.get(
           separacao: sep.data || null,
           itens: itens.data || [],
           anexo: anexo.data || null,
+          faturamentos: fats.data || [],
         },
         'Pedido',
       );
@@ -273,6 +295,86 @@ router.post(
       return successResponse(res, a, 'Comprovante salvo');
     } catch (err) {
       return errorResponse(res, err.message, 400, 'COMPROVANTE_INVALIDO');
+    }
+  }),
+);
+
+// ─── FATURAMENTO (tela /expedicao/faturamento) ──────────────────────────────
+const inteiro = (v) => {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : null;
+};
+const lista = (v) => (Array.isArray(v) ? v : []);
+
+router.post(
+  '/:chave/faturamentos',
+  asyncHandler(async (req, res) => {
+    const chave = String(req.params.chave);
+    const b = req.body || {};
+    const empresa = inteiro(b.empresa);
+    const trx = inteiro(b.transactionCode);
+    if (!empresa || !trx) return errorResponse(res, 'empresa e transactionCode são obrigatórios', 400, 'DADOS_INVALIDOS');
+    const conferidos = lista(b.conferidos);
+    const faltando = lista(b.faltando);
+    const sobrando = lista(b.sobrando);
+    const soma = (l) => l.reduce((s, i) => s + (Number(i.quantidade) || 0), 0);
+    try {
+      const { data, error } = await supabase
+        .from('pedidos_venda_faturamentos')
+        .upsert(
+          {
+            chave,
+            numero_site: b.numeroSite || null,
+            empresa,
+            transacao_code: trx,
+            transacao_date: b.transactionDate ? String(b.transactionDate).slice(0, 10) : null,
+            transacao_status: inteiro(b.status) || 1,
+            operacao: inteiro(b.operacao),
+            cfop: inteiro(b.cfop),
+            total: Number(b.total) || 0,
+            cliente_code: inteiro(b.clienteCode),
+            cliente_nome: b.clienteNome || null,
+            vendedor_code: inteiro(b.vendedorCode),
+            qtd_pedido: inteiro(b.qtdPedido) || soma(conferidos) + soma(faltando),
+            qtd_conferida: soma(conferidos),
+            qtd_faltando: soma(faltando),
+            qtd_sobrando: soma(sobrando),
+            conferidos,
+            faltando,
+            sobrando,
+            criado_por: b.por || null,
+            atualizado_em: new Date().toISOString(),
+          },
+          { onConflict: 'empresa,transacao_code' },
+        )
+        .select()
+        .single();
+      if (error) throw error;
+      return successResponse(res, data, 'Faturamento registrado');
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/faturamentos/:id/status',
+  asyncHandler(async (req, res) => {
+    const st = inteiro(req.body?.status);
+    if (!st) return errorResponse(res, 'status obrigatório', 400, 'DADOS_INVALIDOS');
+    try {
+      const agora = new Date().toISOString();
+      const { data, error } = await supabase
+        .from('pedidos_venda_faturamentos')
+        .update({ transacao_status: st, atualizado_em: agora, ...(st === 4 ? { atendida_em: agora } : {}) })
+        .eq('id', inteiro(req.params.id))
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return errorResponse(res, 'Faturamento não encontrado', 404, 'NOT_FOUND');
+      return successResponse(res, data, 'Status atualizado');
+    } catch (err) {
+      return responder(res, err);
     }
   }),
 );
