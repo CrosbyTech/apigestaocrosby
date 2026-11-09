@@ -61,8 +61,10 @@ function traduzirErroTotvs(err) {
   const lista = Array.isArray(d) ? d : d ? [d] : [];
   const codes = lista.map((x) => x.code).filter(Boolean);
   const msgs = lista.map((x) => x.message || x.detailedMessage).filter(Boolean);
+  // texto original do TOTVS junto: sem ele não dá para saber o que a validação conferiu
+  const original = lista.map((x) => [x.code, x.message, x.detailedMessage].filter(Boolean).join(' — ')).filter(Boolean).join(' | ');
   if (codes.includes('CashOutClosed')) {
-    return { code: 'CAIXA_FECHADO', message: 'O TOTVS não tem caixa aberto para esse terminal hoje — abra o caixa no TOTVS e tente de novo.' };
+    return { code: 'CAIXA_FECHADO', message: `O TOTVS recusou o recebimento: caixa não aberto para o terminal/data da transação. Resposta do TOTVS: ${original}` };
   }
   if (codes.includes('TerminalInvalid')) {
     return { code: 'TERMINAL_INVALIDO', message: 'Terminal não cadastrado no TOTVS para esta empresa — ajuste o "terminal" na configuração fiscal.' };
@@ -175,7 +177,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   }
 
   const operacao = venda.operacao_doc_interno || cfg?.operacao_doc_interno || DOC_INTERNO_PADRAO.operacao;
-  const terminal = cfg?.terminal_totvs || DOC_INTERNO_PADRAO.terminal;
+  const terminal = Number(venda.pedido_info?.terminal) || cfg?.terminal_totvs || DOC_INTERNO_PADRAO.terminal;
   const customerCode = venda.cliente_code || cfg?.cliente_balcao_totvs || null;
   if (!customerCode) {
     const e = new EspelhoError('Venda sem cliente e empresa sem "cliente balcão" configurado (Fiscal PDV)', 'CLIENTE_BALCAO_NAO_CONFIGURADO');

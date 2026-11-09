@@ -75,7 +75,7 @@ router.post(
   '/vendas/:vendaId/reprocessar',
   asyncHandler(async (req, res) => {
     try {
-      const r = await processarFaturamento(parseInt(req.params.vendaId, 10));
+      const r = await processarFaturamento(parseInt(req.params.vendaId, 10), null, { terminal: req.body?.terminal });
       const ok = r.fiscal.ok && r.totvs.ok;
       return successResponse(res, r, ok ? 'Faturamento concluído' : r.fiscal.ok ? `TOTVS: ${r.totvs.mensagem}` : `NF-e: ${r.fiscal.mensagem}`, ok ? 200 : 207);
     } catch (err) {

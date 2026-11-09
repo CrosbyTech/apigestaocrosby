@@ -397,7 +397,7 @@ export async function faturar(body) {
     transporte,
     cobranca,
     comprovantes: Array.isArray(b.comprovantes) ? b.comprovantes : [],
-    pedido_info: { ...(b.pedidoInfo || {}), consumidorFinal: !!b.consumidorFinal },
+    pedido_info: { ...(b.pedidoInfo || {}), consumidorFinal: !!b.consumidorFinal, terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
   if (error) throw new FaturamentoError(error.message, 'DB_ERROR', 500);
@@ -443,7 +443,12 @@ export async function faturar(body) {
 
 // Emite (se ainda não autorizada) e espelha no TOTVS (se ainda não espelhado).
 // Também serve para "tentar de novo" depois de rejeição ou caixa fechado.
-export async function processarFaturamento(vendaId, faturamentoId = null) {
+// opcoes.terminal: troca o terminal do recebimento antes de tentar de novo
+export async function processarFaturamento(vendaId, faturamentoId = null, opcoes = {}) {
+  if (Number(opcoes.terminal) > 0) {
+    const { data: atual } = await supabase.from('pdv_vendas').select('pedido_info').eq('id', vendaId).maybeSingle();
+    await supabase.from('pdv_vendas').update({ pedido_info: { ...(atual?.pedido_info || {}), terminal: Number(opcoes.terminal) } }).eq('id', vendaId);
+  }
   let fatId = faturamentoId;
   if (!fatId) {
     const { data } = await supabase.from('pedidos_venda_faturamentos').select('id').eq('venda_id', vendaId).maybeSingle();
