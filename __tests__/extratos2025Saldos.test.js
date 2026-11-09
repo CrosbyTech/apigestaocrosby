@@ -15,12 +15,13 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoSicrediOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoSicrediOfx, lerExtratoUnicredOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
+import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2025_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2025';
 const temPasta = fs.existsSync(RAIZ);
@@ -81,6 +82,11 @@ const BANCOS = {
     ofx: lerExtratoSantanderOfx, // BALAMT na data da exportação (depois do mês) → saldo indefinido, compara só o movimento do mês
     ilegiveis: ['SANTANDER CROSBY DEZEMBRO.pdf'], // só imagem (dezembro da Crosby entra pelo OFX)
   },
+  UNICRED: {
+    pdf: lerExtratoUnicred, // layout A o ano todo; "Lançamentos futuros" (agendados) no fim do PDF ficam de fora
+    ofx: lerExtratoUnicredOfx, // BALAMT = saldo do fim do mês
+    ilegiveis: [],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo (dias faltando), conhecido e aceito
 const QUEBRAS = [
@@ -134,6 +140,8 @@ const FIM_DE_MES = {
   'SANTANDER|13006882': [-58921.8, -37027.67, 2783.72, 5034.77, 1237.95, -59591.52, -59768.44, -60245.84, -64603.89, -60380.57, -49583.76, -55315.99],
   'SANTANDER|13008301': [null, null, null, null, null, null, null, -1168.04, -1286.85, null, null, null],
   'SANTANDER|29000199': [null, null, null, null, null, null, null, null, null, null, 2574.47, 33756.6],
+  'UNICRED|6850': [817, 2044.43, 757.07, 2421.96, 143.98, 319.76, -4687.9, -4635.37, -4983.06, -5320.42, -4818.78, -5479.02],
+  'UNICRED|7098': [4548.6, 2299.1, 4777.2, 11688.05, 4236.73, 831.23, 1010.64, -4648.33, -4986.24, -4345.7, -2151.22, -5345.94],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
 const INICIO_2025 = {
@@ -143,6 +151,7 @@ const INICIO_2025 = {
   'ITAU|27061': -42278.76, 'ITAU|33688': 93865.1, 'ITAU|39046': 8244.05, 'ITAU|98073': 2308.86, 'ITAU|98141': 31260.11,
   'SICREDI|32693': 12392.96, 'SICREDI|36733': 4935.25, 'SICREDI|36734': 39776.59,
   'SANTANDER|13000599': 11141.2, 'SANTANDER|13001128': 1095.23, 'SANTANDER|13006882': 8255.8,
+  'UNICRED|6850': 369.19, 'UNICRED|7098': 848.05,
 };
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
