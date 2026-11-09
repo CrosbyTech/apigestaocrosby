@@ -94,7 +94,7 @@ const NOME_MIN = 0.6; // fração de tokens do fornecedor que precisam aparecer 
 const JANELA_ANTES = 7;
 
 // rótulo de banco_pagamento (convenção da Liberação) a partir da conta do extrato
-function labelBanco(conta) {
+export function labelBanco(conta) {
   if (!conta) return null;
   const raiz = soDig(conta.titular_cnpj).slice(0, 8);
   if (conta.banco === 'SICREDI') {

@@ -367,16 +367,24 @@ const conciliacaoSaquePagarme = (l, pg) => ({
 
 // ─── leitura das conciliações gravadas ────────────────────────
 export async function listarConciliacoes({ de, ate, contaIds } = {}) {
-  let q = supabase.from(T.conc).select('*');
-  if (de) q = q.gte('data', de);
-  if (ate) q = q.lte('data', ate);
-  if (contaIds?.length) q = q.in('conta_id', contaIds);
-  const { data, error } = await q;
-  if (error) {
-    if (/does not exist|schema cache/i.test(error.message || '')) return [];
-    throw new Error(error.message);
+  // paginado: o PostgREST devolve no máx. 1000 linhas por consulta — sem isso
+  // usadosTotais() via só parte das conciliações e uma duplicata já usada
+  // podia ser casada de novo (achado em 09/11/2026: JJI de 26/10)
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    let q = supabase.from(T.conc).select('*').order('data').order('chave').range(from, from + 999);
+    if (de) q = q.gte('data', de);
+    if (ate) q = q.lte('data', ate);
+    if (contaIds?.length) q = q.in('conta_id', contaIds);
+    const { data, error } = await q;
+    if (error) {
+      if (/does not exist|schema cache/i.test(error.message || '')) return [];
+      throw new Error(error.message);
+    }
+    out.push(...(data || []));
+    if (!data || data.length < 1000) break;
   }
-  return data || [];
+  return out;
 }
 
 /**
@@ -1720,7 +1728,7 @@ export async function usadosTotais() {
 export const marcarUso = (usados, origem, id, valor) => usados.set(`${origem}:${id}`, round2((usados.get(`${origem}:${id}`) || 0) + Math.abs(valor)));
 
 // ─── gravação ─────────────────────────────────────────────────
-async function lancamentoComChave(lancamentoId) {
+export async function lancamentoComChave(lancamentoId) {
   const { data: l, error } = await supabase.from(T.lanc).select('*').eq('id', lancamentoId).maybeSingle();
   lancar(error);
   if (!l) throw new Error('Lançamento não encontrado.');
@@ -1841,6 +1849,14 @@ async function gravarConciliacaoRow(row) {
   } catch (e) {
     console.error('[conciliacao] comprovante → solicitação falhou:', e.message);
     data.avisoComprovante = e.message;
+  }
+  // Saída conciliada = duplicata paga: "PAGO VIA CONCILIAÇÃO" na Consulta do
+  // contas a pagar e APROVADO → PAGO na Liberação (Yago, 09/11/2026)
+  try {
+    const { propagarConciliacao } = await import('./conciliacaoPropagacao.js');
+    data.propagacao = await propagarConciliacao(data);
+  } catch (e) {
+    console.error('[conciliacao] propagação CP/Liberação falhou:', e.message);
   }
   return data;
 }
@@ -2135,6 +2151,12 @@ export async function atualizarJustificativa(id, justificativa, usuario) {
 export async function excluirConciliacao(id) {
   const { error } = await supabase.from(T.conc).delete().eq('id', id);
   lancar(error);
+  try {
+    const { removerPagosDaConciliacao } = await import('./conciliacaoPropagacao.js');
+    await removerPagosDaConciliacao(id);
+  } catch (e) {
+    console.error('[conciliacao] limpar PAGO VIA CONCILIAÇÃO falhou:', e.message);
+  }
   return { id };
 }
 

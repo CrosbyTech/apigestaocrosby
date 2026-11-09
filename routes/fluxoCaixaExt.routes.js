@@ -350,6 +350,36 @@ router.post(
   }),
 );
 
+// Liberação marcada PAGO → concilia a saída do extrato sozinho (Yago, 09/11/2026).
+// body: { ids?: [id da pagamentos_liberacao], dias? }  (sem ids: PAGOS dos últimos `dias`)
+router.post(
+  '/conciliacao/liberacao-pagos',
+  asyncHandler(async (req, res) => {
+    try {
+      const { conciliarLiberacaoPagos } = await import('../services/conciliacaoPropagacao.js');
+      const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : null;
+      const r = await conciliarLiberacaoPagos({ ids, dias: Number(req.body?.dias) || 15, usuario: `Liberação PAGO (${usuarioDe(req) || 'tela'})` });
+      return successResponse(res, r, `${r.conciliados.length} saída(s) conciliada(s) a partir da Liberação`);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// Recalcula "PAGO VIA CONCILIAÇÃO" (Consulta do CP) e APROVADO→PAGO a partir de todas as conciliações
+router.post(
+  '/conciliacao/sincronizar-contas-pagar',
+  asyncHandler(async (req, res) => {
+    try {
+      const { sincronizarTodas } = await import('../services/conciliacaoPropagacao.js');
+      const r = await sincronizarTodas({ de: req.body?.de || '2026-01-01' });
+      return successResponse(res, r, `${r.duplicatas} duplicata(s) marcadas como pagas via conciliação`);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.post(
   '/conciliacao',
   asyncHandler(async (req, res) => {

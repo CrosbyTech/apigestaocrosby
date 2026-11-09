@@ -41,6 +41,17 @@ export async function rodarConciliacaoAprovados({ saidaDe, saidaAte, dataSaida, 
     if (!dryRun) ultimo = { em: new Date().toISOString(), periodo: { de, ate }, pagos: r.pagos, total: r.total, erro: null };
     if (r.pagos) console.log(`[conciliacao-aprovados] ${resumoTexto(r)}`);
     else console.log(`[conciliacao-aprovados] ${de} a ${ate}: nenhum aprovado novo casou com saída.`);
+    // Títulos marcados PAGO à mão na Liberação → concilia a saída do extrato (Yago, 09/11/2026)
+    if (!dryRun) {
+      try {
+        const { conciliarLiberacaoPagos } = await import('../services/conciliacaoPropagacao.js');
+        const rl = await conciliarLiberacaoPagos({ dias: 15, usuario: 'Liberação PAGO → conciliação (job diário)' });
+        r.liberacaoPagos = { conciliados: rl.conciliados.length, ambiguos: rl.ambiguos.length };
+        if (rl.conciliados.length) console.log(`[conciliacao-aprovados] Liberação PAGO: ${rl.conciliados.length} saída(s) conciliada(s).`);
+      } catch (e) {
+        console.error('[conciliacao-aprovados] Liberação PAGO → conciliação:', e.message);
+      }
+    }
     // Setor PATRIMONIO (PRODUTO pago no cartão): mesma rodada, depois dos extratos do dia.
     try {
       const rp = await conciliarPatrimonio({ dryRun, usuario: 'Conciliação de patrimônio (job diário)' });

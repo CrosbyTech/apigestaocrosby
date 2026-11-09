@@ -177,6 +177,16 @@ export async function finalizarExecucao(id, { status = 'concluido', resumo = nul
         registrarLog(id, { nivel: 'erro', msg: `Baixa dos aprovados falhou: ${e.message}` }).catch(() => {});
       });
   }
+  // extrato novo importado → títulos marcados PAGO na Liberação ganham a
+  // conciliação da saída correspondente (Yago, 09/11/2026)
+  if (ok === 'concluido') {
+    import('./conciliacaoPropagacao.js')
+      .then((m) => m.conciliarLiberacaoPagos({ dias: 15, usuario: 'Liberação PAGO → conciliação (bot Stone)' }))
+      .then((r) => {
+        if (r?.conciliados?.length) registrarLog(id, { nivel: 'ok', msg: `Liberação PAGO: ${r.conciliados.length} saída(s) conciliada(s) automaticamente.` }).catch(() => {});
+      })
+      .catch((e) => console.error('[stone-bot] Liberação PAGO → conciliação:', e.message));
+  }
   return data;
 }
 
