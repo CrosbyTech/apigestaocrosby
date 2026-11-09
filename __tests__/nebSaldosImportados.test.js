@@ -72,7 +72,9 @@ const FIM_2024 = [
 ];
 // Importações aceitas com "forçar", com motivo conhecido: o saldo não encadeia com o mês vizinho
 // (Bradesco set/2024 veio no "Extrato Mensal", cujo saldo soma o Invest Fácil; os outros meses são só conta corrente)
-const FORCADAS = new Set(['BRADESCO|249374|2024-09', 'BRADESCO|249374|2024-10', 'BRADESCO|249286|2024-09', 'BRADESCO|249286|2024-10']);
+// Bradesco set/out 2024: "Extrato Mensal" com Invest Fácil no saldo. BB 36960 mai/2025: março e abril só existem em PDF imagem (sem OFX),
+// então maio foi importado com forcar e não encadeia com fevereiro (diferença 471,45) até os dois meses chegarem.
+const FORCADAS = new Set(['BRADESCO|249374|2024-09', 'BRADESCO|249374|2024-10', 'BRADESCO|249286|2024-09', 'BRADESCO|249286|2024-10', 'BB|36960|2025-05']);
 const forcada = (i) => FORCADAS.has(`${i.banco}|${i.conta}|${i.mes_referencia}`);
 
 describeSe('New Extrato — saldos gravados no banco', () => {
