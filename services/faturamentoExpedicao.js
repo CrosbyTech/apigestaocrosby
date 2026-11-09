@@ -272,7 +272,11 @@ export async function faturar(body) {
   for (const it of b.itens) {
     const q = Number(it.quantidade);
     const vUn = round2(it.valorUnit);
+    // desconto por unidade (rateio do desconto do pedido / Pix); a tela agrupa
+    // as unidades por (preço, desconto), então q × desconto é exato
+    const dUn = round2(it.descontoUnit || 0);
     if (!(q > 0) || !(vUn > 0)) throw new FaturamentoError(`Item ${it.productCode}: quantidade/valor inválidos`);
+    if (dUn < 0 || dUn >= vUn) throw new FaturamentoError(`Item ${it.productCode}: desconto inválido`);
     const pf = await buscarProdutoFiscal(it.productCode, empresa);
     itens.push({
       seq: seq++,
@@ -286,8 +290,8 @@ export async function faturar(body) {
       unidade: pf.unidade,
       quantidade: q,
       valor_unit: vUn,
-      desconto_unit: 0,
-      total: round2(q * vUn),
+      desconto_unit: dUn,
+      total: round2(q * (vUn - dUn)),
       epcs: Array.isArray(it.epcs) ? it.epcs : [],
     });
   }
@@ -296,7 +300,9 @@ export async function faturar(body) {
     it.tipo_fiscal = tipos.get(it.product_code) || 'producao';
     it.cfop = cfopExpedicao(cen.chave, it.tipo_fiscal);
   }
-  const subtotal = round2(itens.reduce((s, i) => s + i.total, 0));
+  const subtotal = round2(itens.reduce((s, i) => s + i.quantidade * i.valor_unit, 0));
+  const descontoTotal = round2(itens.reduce((s, i) => s + i.quantidade * i.desconto_unit, 0));
+  const liquido = round2(subtotal - descontoTotal);
   const qtd = itens.reduce((s, i) => s + i.quantidade, 0);
 
   // Transporte
@@ -323,7 +329,7 @@ export async function faturar(body) {
   } else if (frete > 0) {
     throw new FaturamentoError('Frete informado sem transportadora');
   }
-  const total = round2(subtotal + frete);
+  const total = round2(liquido + frete);
 
   // Pagamentos (fecham com produtos + frete)
   const pagamentos = [];
@@ -346,7 +352,10 @@ export async function faturar(body) {
   if (!pagamentos.length) throw new FaturamentoError('Informe o pagamento');
   const somaPag = round2(pagamentos.reduce((s, p) => s + p.valor, 0));
   if (Math.abs(somaPag - total) > 0.01) {
-    throw new FaturamentoError(`Pagamentos (R$ ${somaPag.toFixed(2)}) não fecham com o total (R$ ${total.toFixed(2)} = produtos ${subtotal.toFixed(2)} + frete ${frete.toFixed(2)})`, 'PAYMENT_MISMATCH');
+    throw new FaturamentoError(
+      `Pagamentos (R$ ${somaPag.toFixed(2)}) não fecham com o total (R$ ${total.toFixed(2)} = produtos ${subtotal.toFixed(2)} − desconto ${descontoTotal.toFixed(2)} + frete ${frete.toFixed(2)})`,
+      'PAYMENT_MISMATCH',
+    );
   }
   let cobranca = null;
   const pBol = pagamentos.find((p) => p.forma === 'boleto');
@@ -372,7 +381,7 @@ export async function faturar(body) {
     vendedor_nome: b.vendedorNome || null,
     qtd_pecas: qtd,
     subtotal,
-    desconto: 0,
+    desconto: descontoTotal,
     cashback_usado: 0,
     total,
     status: 'registrada',
@@ -420,7 +429,7 @@ export async function faturar(body) {
       qtd_conferida: qtd,
       qtd_faltando: (b.faltando || []).reduce((s, x) => s + (Number(x.quantidade) || 0), 0),
       qtd_sobrando: (b.sobrando || []).reduce((s, x) => s + (Number(x.quantidade) || 0), 0),
-      conferidos: itens.map((i) => ({ productCode: i.product_code, name: i.nome, quantidade: i.quantidade, unit: i.valor_unit, total: i.total, cfop: i.cfop, epcs: i.epcs })),
+      conferidos: itens.map((i) => ({ productCode: i.product_code, name: i.nome, quantidade: i.quantidade, unit: i.valor_unit, desconto: i.desconto_unit, total: i.total, cfop: i.cfop, epcs: i.epcs })),
       faltando: b.faltando || [],
       sobrando: b.sobrando || [],
       criado_por: b.por || null,
