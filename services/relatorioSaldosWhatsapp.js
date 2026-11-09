@@ -113,17 +113,17 @@ function grupoDe(p) {
   const texto = semAcento(`${p.despesa || ''} ${p.fornecedor || ''}`).toUpperCase();
   return GRUPOS_FIXOS.find((g) => (cod && g.codigos.includes(cod)) || g.re.test(texto)) || null;
 }
-/** @returns [{ rotulo, valor, vencimento, vencimentoAte, qtd, agrupado }] em ordem de vencimento */
+/** @returns [{ rotulo, despesa, valor, vencimento, vencimentoAte, qtd, agrupado }] em ordem de vencimento */
 export function agruparProgramacao(programacao) {
   const grupos = new Map();
   const itens = [];
   for (const p of programacao) {
     const g = grupoDe(p);
     if (!g) {
-      itens.push({ rotulo: p.fornecedor, valor: round2(p.valor), vencimento: p.vencimento, vencimentoAte: p.vencimento, qtd: 1, agrupado: false });
+      itens.push({ rotulo: p.fornecedor, despesa: p.despesa || null, valor: round2(p.valor), vencimento: p.vencimento, vencimentoAte: p.vencimento, qtd: 1, agrupado: false });
       continue;
     }
-    if (!grupos.has(g.rotulo)) grupos.set(g.rotulo, { rotulo: g.rotulo, valor: 0, vencimento: p.vencimento, vencimentoAte: p.vencimento, qtd: 0, agrupado: true });
+    if (!grupos.has(g.rotulo)) grupos.set(g.rotulo, { rotulo: g.rotulo, despesa: p.despesa || g.rotulo, valor: 0, vencimento: p.vencimento, vencimentoAte: p.vencimento, qtd: 0, agrupado: true });
     const x = grupos.get(g.rotulo);
     x.valor = round2(x.valor + p.valor);
     x.qtd += 1;
@@ -201,18 +201,97 @@ async function abrirNavegador() {
   throw new Error(`não consegui abrir o Chrome (${erros.join(' | ')})`);
 }
 
-export async function gerarImagem(dados) {
+// HTML → PNG do elemento .card, um por página, no mesmo Chrome
+async function renderizar(htmls) {
   const browser = await abrirNavegador();
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 760, height: 600, deviceScaleFactor: 2 });
-    await page.setContent(htmlDoCard(dados), { waitUntil: 'load' });
-    const el = await page.$('.card');
-    const png = await (el || page).screenshot({ type: 'png' });
-    return Buffer.from(png);
+    const pngs = [];
+    for (const html of htmls) {
+      await page.setContent(html, { waitUntil: 'load' });
+      const el = await page.$('.card');
+      pngs.push(Buffer.from(await (el || page).screenshot({ type: 'png' })));
+    }
+    return pngs;
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+export async function gerarImagem(dados) {
+  return (await renderizar([htmlDoCard(dados)]))[0];
+}
+
+// ─── previsão da semana em imagem (Yago 09/11/2026) ───────────
+// Só o que está vencido e o que vence até o domingo da semana corrente; a
+// próxima semana fica de fora. Lista longa vira várias imagens em sequência.
+const LINHAS_POR_IMAGEM = 18;
+
+export function previsaoDaSemana(d, hoje = hojeBr()) {
+  const { de, ate } = semanaDe(hoje);
+  const doPeriodo = (d.programacao || [])
+    .map((p) => ({ ...p, vencimento: p.vencimento ? String(p.vencimento).slice(0, 10) : null }))
+    .filter((p) => p.vencimento && p.vencimento <= ate);
+  const itens = agruparProgramacao(doPeriodo);
+  const vencidos = itens.filter((it) => it.vencimentoAte < hoje);
+  const paginas = [];
+  for (let i = 0; i < itens.length; i += LINHAS_POR_IMAGEM) paginas.push(itens.slice(i, i + LINHAS_POR_IMAGEM));
+  return {
+    hoje,
+    de,
+    ate,
+    itens,
+    total: round2(itens.reduce((a, it) => a + it.valor, 0)),
+    qtdVencidos: vencidos.length,
+    totalVencido: round2(vencidos.reduce((a, it) => a + it.valor, 0)),
+    paginas,
+  };
+}
+
+function htmlPrevisao(pr, pagina, n) {
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const quando = (it) => (it.agrupado && it.vencimento !== it.vencimentoAte ? `${fmtDiaMes(it.vencimento)} a ${fmtDiaMes(it.vencimentoAte)}` : fmtDiaMes(it.vencimento));
+  const linha = (it) => {
+    const vencido = it.vencimentoAte < pr.hoje;
+    const parteVencida = !vencido && it.vencimento < pr.hoje; // grupo (energia, internet…) com conta já vencida
+    const despesa = String(it.despesa || '—').replace(/^\d+\s*—\s*/, '');
+    const forn = it.agrupado && it.qtd > 1 ? `${it.rotulo} <small>(${it.qtd} contas)</small>` : esc(it.rotulo);
+    return `<tr class="${vencido ? 'venc' : ''}"><td class="forn">${forn}</td><td class="desp">${esc(despesa)}</td><td class="data">${quando(it)}${vencido ? '<span class="tag">vencido</span>' : parteVencida ? '<span class="tag">tem vencido</span>' : ''}</td><td class="val">${fmt(it.valor)}</td></tr>`;
+  };
+  const ultima = n === pr.paginas.length - 1;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><style>
+  *{box-sizing:border-box;margin:0;padding:0} body{width:760px;background:#f3f4f6;font-family:Inter,Segoe UI,Arial,sans-serif;color:#1f2937;padding:18px}
+  .card{background:#fff;border:1px solid #fde68a;border-radius:14px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:18px}
+  .head{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:12px}
+  .t1{font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#b45309}
+  .t2{font-size:12px;color:#6b7280;margin-top:2px}
+  .total{font-size:26px;font-weight:800;color:#111827;text-align:right;line-height:1.1}
+  .sub{font-size:11px;color:#b91c1c;font-weight:700;text-align:right}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;text-align:left;padding:6px 6px;border-bottom:1px solid #e5e7eb}
+  th.val,td.val{text-align:right;white-space:nowrap}
+  td{padding:6px 6px;border-bottom:1px solid #f3f4f6;vertical-align:top}
+  td.forn{font-weight:700;color:#111827}td.forn small{color:#6b7280;font-weight:500}
+  td.desp{color:#4b5563}td.data{white-space:nowrap;color:#374151}td.val{font-weight:700;color:#111827}
+  tr.venc td.data{color:#b91c1c;font-weight:700}
+  .tag{margin-left:6px;font-size:9px;font-weight:800;text-transform:uppercase;color:#fff;background:#dc2626;border-radius:4px;padding:1px 4px}
+  .rodape{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:11px;color:#6b7280}
+  .rodape b{font-size:14px;color:#111827}
+  </style></head><body><div class="card">
+    <div class="head">
+      <div><div class="t1">Previsão de pagamentos</div><div class="t2">Vencidos + semana de ${fmtDiaMes(pr.de)} a ${fmtDiaMes(pr.ate)} · ${pr.itens.length} item(ns)${pr.paginas.length > 1 ? ` · imagem ${n + 1} de ${pr.paginas.length}` : ''}</div></div>
+      <div><div class="total">${fmt(pr.total)}</div>${pr.qtdVencidos ? `<div class="sub">${fmt(pr.totalVencido)} vencido</div>` : ''}</div>
+    </div>
+    <table><thead><tr><th>Fornecedor</th><th>Despesa</th><th>Vencimento</th><th class="val">Valor</th></tr></thead><tbody>${pagina.map(linha).join('')}</tbody></table>
+    <div class="rodape"><span>HeadCoach · ${esc(agoraBr())}</span>${ultima ? `<span>Total: <b>${fmt(pr.total)}</b></span>` : '<span>continua na próxima imagem</span>'}</div>
+  </div></body></html>`;
+}
+
+export async function gerarImagensPrevisao(dados) {
+  const pr = previsaoDaSemana(dados);
+  if (!pr.paginas.length) return { pr, pngs: [] };
+  return { pr, pngs: await renderizar(pr.paginas.map((pg, i) => htmlPrevisao(pr, pg, i))) };
 }
 
 // ─── textos ───────────────────────────────────────────────────
@@ -272,8 +351,28 @@ export async function enviarRelatorio({ motivo = 'manual', soTexto = false, soIm
       }
     }
     if (!soImagem) {
-      const r2 = await wa.enviarTexto({ number: grupo, text: textoProgramacao(dados), trackId: TRACK_ID });
-      out.texto = r2?.resposta?.id || true;
+      // previsão da semana em imagem(ns); se o Chrome falhar, vai o texto com a mesma lista
+      let prev = { pr: previsaoDaSemana(dados), pngs: [] };
+      if (!soTexto) {
+        try {
+          prev = await gerarImagensPrevisao(dados);
+        } catch (e) {
+          out.previsaoErro = e.message;
+          console.warn(`[relatorio-saldos] imagem da previsão falhou (${e.message}) — mando texto`);
+        }
+      }
+      if (prev.pngs.length) {
+        for (const [i, png] of prev.pngs.entries()) {
+          await wa.enviarMidia({ number: grupo, type: 'image', file: `data:image/png;base64,${png.toString('base64')}`, text: i === 0 ? `Previsão de pagamentos · vencidos + semana até ${fmtDiaMes(prev.pr.ate)}` : '', trackId: TRACK_ID });
+        }
+        out.previsao = prev.pngs.length;
+      } else {
+        const texto = prev.pr.itens.length
+          ? textoProgramacao({ ...dados, itensSemana: prev.pr.itens, totalProgramacao: prev.pr.total })
+          : `*Previsão de pagamentos*: nada vencido nem vencendo até ${fmtDiaMes(prev.pr.ate)}.\n\n${ASSINATURA}`;
+        const r2 = await wa.enviarTexto({ number: grupo, text: texto, trackId: TRACK_ID });
+        out.texto = r2?.resposta?.id || true;
+      }
     }
     out.ok = true;
     ultimoEnvio = { em: Date.now(), motivo, ok: true, erro: null };
@@ -328,4 +427,4 @@ export function iniciarRelatorioSaldos() {
   console.log(`[relatorio-saldos] fallback agendado (${exprs.join(' | ')} America/Sao_Paulo) · grupo "${GRUPO_NOME}" · marca ${MENCIONAR}`);
 }
 
-export default { montarDados, gerarImagem, textoProgramacao, enviarRelatorio, aposExecucaoBot, iniciarRelatorioSaldos, statusRelatorio, semanaDe };
+export default { montarDados, gerarImagem, gerarImagensPrevisao, previsaoDaSemana, textoProgramacao, enviarRelatorio, aposExecucaoBot, iniciarRelatorioSaldos, statusRelatorio, semanaDe };
