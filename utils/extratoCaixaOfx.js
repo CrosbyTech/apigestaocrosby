@@ -51,9 +51,21 @@ export const CONTAS_BB = {
   '369608': { titular: 'FABIO F LIMA AZEVEDO', cnpj: '27728810000115', agencia: null },
   '370517': { titular: 'IRMAOS C V LTDA', cnpj: '33592092000103', agencia: null },
 };
+// BNB (BANKID 004): ACCTID "699181" = 69918-1; agência sempre 035 (Natal Tirol). PEGADINHA: o LEDGERBAL/BALAMT do OFX do BNB
+// é o saldo do INÍCIO do período (= "Saldo Anterior" do PDF), não o do fim; DTASOF é a data da exportação. Vários PDFs
+// "no período" de 2025 vieram vazios ("Nenhuma movimentação") em meses com movimento → o OFX é a fonte certa nesses meses.
+export const CONTAS_BNB = {
+  '699181': { titular: 'CROSBY CR VESTUARIO LTDA', cnpj: '17177680000116' },
+  '699190': { titular: 'CROSBY CR VESTUARIO LTDA', cnpj: '17177680000116' },
+  '699211': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+  '699220': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+  '693612': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+  '693639': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+};
 const BANCOS_OFX = {
   104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA },
   1: { banco: 'BB', nome: 'do Banco do Brasil', contas: CONTAS_BB },
+  4: { banco: 'BNB', nome: 'do Banco do Nordeste', contas: CONTAS_BNB, agencia: '035', balamtInicial: true },
 };
 
 // Históricos da Caixa → o que são (para a tela e para o casamento de transferências)
@@ -105,6 +117,9 @@ export function lerExtratoCaixaOfx(buffer) {
 export function lerExtratoBbOfx(buffer) {
   return lerOfxBanco(buffer, 1);
 }
+export function lerExtratoBnbOfx(buffer) {
+  return lerOfxBanco(buffer, 4);
+}
 /** Código do banco (BANKID) de um OFX, como número; null se não achar. */
 export function bancoDoOfx(buffer) {
   const t = Buffer.isBuffer(buffer) ? buffer.subarray(0, 8000).toString('latin1') : String(buffer).slice(0, 8000);
@@ -120,7 +135,7 @@ function lerOfxBanco(buffer, esperado) {
   const acctId = (campo(texto, 'ACCTID') || '').replace(/\D/g, '');
   if (!acctId) throw new Error('OFX sem o número da conta (ACCTID).');
   const conhecida = def.contas[acctId] || null;
-  const agencia = conhecida && 'agencia' in conhecida ? conhecida.agencia : (campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null;
+  const agencia = def.agencia ?? (conhecida && 'agencia' in conhecida ? conhecida.agencia : (campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null);
   const conta = acctId.slice(0, -1);
   const contaDv = acctId.slice(-1);
 
@@ -131,7 +146,14 @@ function lerOfxBanco(buffer, esperado) {
     const valor = round2(Number(String(campo(b, 'TRNAMT') || '').replace(',', '.')));
     const data = dataOfx(campo(b, 'DTPOSTED'));
     if (!Number.isFinite(valor) || !data) continue;
-    const nome = campo(b, 'NAME') || campo(b, 'MEMO') || '';
+    let nome = campo(b, 'NAME') || campo(b, 'MEMO') || '';
+    let contraparteNome = null;
+    if (def.banco === 'BNB') {
+      // "RECEBIMENTO VIA PIX      -CROSBY D CONFECCAO LTDA ::26/9/2025" → tipo + contraparte
+      const m = nome.match(/^(.*?)\s+-\s*(.+?)\s*(::\S+)?$/);
+      if (m) { nome = `${limpar(m[1])} · ${limpar(m[2])}`; contraparteNome = limpar(m[2]) || null; }
+      else nome = limpar(nome.replace(/::\S+$/, ''));
+    }
     const fitid = campo(b, 'FITID');
     const checknum = campo(b, 'CHECKNUM');
     const doc = [fitid, checknum].find((d) => d && !/^0+$/.test(d) && d !== '1') || null;
@@ -143,7 +165,7 @@ function lerOfxBanco(buffer, esperado) {
       historicoBase: nome,
       historicoDescricao: HISTORICOS[nome] || null,
       documento: doc,
-      contraparteNome: null,
+      contraparteNome,
       contraparteDoc: null,
       hora: null,
       tipoOfx: (campo(b, 'TRNTYPE') || '').toUpperCase(),
@@ -162,8 +184,7 @@ function lerOfxBanco(buffer, esperado) {
 
   const balAmt = Number(String(campo(texto, 'BALAMT') || '').replace(',', '.'));
   if (!Number.isFinite(balAmt)) throw new Error('OFX sem o saldo final (LEDGERBAL/BALAMT).');
-  const saldoFinal = round2(balAmt);
-  const dtAsOf = dataOfx(campo(texto, 'DTASOF'));
+  const dtAsOf0 = dataOfx(campo(texto, 'DTASOF'));
   const d1 = dataOfx(campo(lista, 'DTSTART'));
   const d2 = dataOfx(campo(lista, 'DTEND'));
   const datasArq = [d1, d2].filter(Boolean).sort();
@@ -179,7 +200,10 @@ function lerOfxBanco(buffer, esperado) {
 
   const totalCreditos = round2(lanc.filter((l) => l.valor > 0).reduce((s, l) => s + l.valor, 0));
   const totalDebitos = round2(lanc.filter((l) => l.valor < 0).reduce((s, l) => s - l.valor, 0));
-  const saldoInicial = round2(saldoFinal - totalCreditos + totalDebitos);
+  // BNB: BALAMT é o saldo inicial; nos outros é o saldo final (na data DTASOF)
+  const saldoInicial = def.balamtInicial ? round2(balAmt) : round2(round2(balAmt) - totalCreditos + totalDebitos);
+  const saldoFinal = def.balamtInicial ? round2(saldoInicial + totalCreditos - totalDebitos) : round2(balAmt);
+  const dtAsOf = def.balamtInicial ? null : dtAsOf0;
   let corrente = saldoInicial;
   for (const l of lanc) {
     corrente = round2(corrente + l.valor);
@@ -202,7 +226,7 @@ function lerOfxBanco(buffer, esperado) {
     saldoFinalEm: dtAsOf,
     lancamentos: lanc,
     conferencia: {
-      fonte: 'OFX (saldo final do banco; saldo inicial = final − movimentos; conferido pelo encadeamento com o mês anterior)',
+      fonte: def.balamtInicial ? 'OFX (BALAMT = saldo inicial do período; saldo final = inicial + movimentos; conferido pelo encadeamento com o mês anterior)' : 'OFX (saldo final do banco; saldo inicial = final − movimentos; conferido pelo encadeamento com o mês anterior)',
       saldoInicial,
       totalCreditos,
       totalDebitos,
@@ -218,4 +242,4 @@ function lerOfxBanco(buffer, esperado) {
   };
 }
 
-export default { lerExtratoCaixaOfx, lerExtratoBbOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB };
+export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB };

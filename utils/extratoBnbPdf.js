@@ -120,7 +120,7 @@ export function contraparteBnb(tipoLinha, textoLinha) {
   return out;
 }
 
-function montar({ layout, agencia, conta, contaDv, titular, periodo, saldoAnterior, lanc, buffer, paginas }) {
+function montar({ layout, agencia, conta, contaDv, titular, periodo, saldoAnterior, lanc, buffer, paginas, hashExtra = '' }) {
   const cnpj = cnpjDe(titular);
   if (SHOPPING_RECIFE.test(`${titular || ''} ${cnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const mesRef = periodo.inicio.slice(0, 7);
@@ -156,7 +156,7 @@ function montar({ layout, agencia, conta, contaDv, titular, periodo, saldoAnteri
     saldoFinal,
     lancamentos: lanc,
     conferencia: {
-      fonte: layout === 'periodo' ? 'PDF Extrato de Conta Corrente - no período: Saldo Anterior e saldo em cada linha' : 'PDF Extrato Consolidado: SALDO ANTERIOR e saldo em cada linha do demonstrativo',
+      fonte: layout === 'periodo' ? 'PDF Extrato de Conta Corrente - no período: Saldo Anterior e saldo em cada linha' : layout === 'conta-corrente' ? 'PDF Extrato de Conta Corrente (2025): Saldo anterior + lançamentos com C/D, conferido com o "Saldo atual" do arquivo' : 'PDF Extrato Consolidado: SALDO ANTERIOR e saldo em cada linha do demonstrativo',
       saldoInicial: round2(saldoAnterior),
       totalCreditos,
       totalDebitos,
@@ -168,8 +168,89 @@ function montar({ layout, agencia, conta, contaDv, titular, periodo, saldoAnteri
       bate,
     },
     paginas: paginas.length,
-    hash: crypto.createHash('sha1').update(Buffer.concat([buffer, Buffer.from(`${agencia}|${conta}-${contaDv}`)])).digest('hex'),
+    hash: crypto.createHash('sha1').update(Buffer.concat([buffer, Buffer.from(`${agencia}|${conta}-${contaDv}${hashExtra ? '|' + hashExtra : ''}`)])).digest('hex'),
   };
+}
+
+// ─── C) "Extrato de Conta Corrente" (internet banking 2025) ───
+// TITULAR: … / AGÊNCIA:35 / CONTA:69361-2 / Período: 01/03/2025 até 23/04/2025 / "Saldo anterior 569,58 C";
+// seções por mês ("março/2025") com Data | Histórico | Documento | Valor R$ ("105,00 D", "4.800,00 C"), SEM saldo por linha;
+// Pix em 3 linhas: tipo ("RECEBIMENTO VIA PIX") em cima, data+documento+valor no meio, contraparte "NOME ::18/3/2025" embaixo;
+// "Saldo atual 0,00 C" no fim. Pode abranger mais de um mês → devolve UMA leitura por mês; mês não coberto até o
+// último dia vem com `parcial: true` (quem importa pula).
+function lerContaCorrente(todas, todoTexto, buffer, paginas) {
+  const mTit = todoTexto.match(/TITULAR:\s*(.+)/);
+  const mConta = todoTexto.match(/AG[ÊE]NCIA:\s*(\d+)\s*\/\s*CONTA:\s*([\d.]+)-(\d)/i);
+  const mPer = todoTexto.match(/Per[íi]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*at[ée]\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  if (!mConta || !mPer) throw new Error('Não achei "AGÊNCIA:35 / CONTA:69361-2" e "Período: … até …" no Extrato de Conta Corrente.');
+  const titular = limpar(mTit?.[1] || '') || null;
+  const periodo = { inicio: `${mPer[3]}-${mPer[2]}-${mPer[1]}`, fim: `${mPer[6]}-${mPer[5]}-${mPer[4]}` };
+  const saldoCD = (re) => {
+    const m = todoTexto.match(re);
+    if (!m) return null;
+    const v = numBr(m[1]);
+    return /D/i.test(m[2]) ? -Math.abs(v) : Math.abs(v);
+  };
+  const saldoAnterior = saldoCD(/Saldo anterior\s+(-?[\d.]+,\d{2})\s*([CD])/i);
+  const saldoAtual = saldoCD(/Saldo atual\s+(-?[\d.]+,\d{2})\s*([CD])/i);
+  if (saldoAnterior == null) throw new Error('Não achei "Saldo anterior … C/D" no Extrato de Conta Corrente.');
+  const RE_DATA = /^\d{2}\/\d{2}\/\d{4}$/;
+  const RE_VAL = /^-?\d{1,3}(\.\d{3})*,\d{2}$/;
+  const lanc = [];
+  let pendente = null; // linha só com o tipo (ex.: "RECEBIMENTO VIA PIX") que vem ANTES da linha com valor
+  for (const l of todas) {
+    const its = l.itens;
+    const t = texto(its);
+    if (!its.length || /^(Data|Saldo anterior|Saldo atual|Per[íi]odo|TITULAR|AG[ÊE]NCIA|Extrato|N[ãa]o constam)/i.test(t)) { pendente = null; continue; }
+    if (/^[a-zç]+\/\d{4}$/i.test(t)) { pendente = null; continue; } // "março/2025"
+    const iCD = its.findIndex((x, i) => /^[CD]$/.test(x.s) && i > 0 && RE_VAL.test(its[i - 1].s));
+    const temValor = iCD > 0 || its.some((x) => /^-?\d{1,3}(\.\d{3})*,\d{2}\s*[CD]$/.test(x.s));
+    if (!RE_DATA.test(its[0].s) || !temValor) {
+      // sem data+valor: ou é o tipo do Pix (antes) ou a contraparte "NOME ::d/m/aaaa" (depois)
+      if (/::\d{1,2}\/\d{1,2}\/\d{4}/.test(t) && lanc.length) {
+        const ult = lanc.at(-1);
+        const cp = contraparteBnb(ult.historico, t.replace(/::\S+$/, ''));
+        ult.contraparteNome = cp.nome;
+        ult.contraparteDoc = cp.doc;
+        ult.historico = `${ult.historico} · ${limpar(t.replace(/::\S+$/, ''))}`;
+      } else if (/[A-Za-z]{3}/.test(t)) pendente = t;
+      continue;
+    }
+    // valor + C/D: ou em dois itens ("105,00" "D") ou num só ("105,00 D")
+    let valorStr, cd, usados;
+    if (iCD > 0) { valorStr = its[iCD - 1].s; cd = its[iCD].s; usados = new Set([iCD - 1, iCD]); }
+    else { const i = its.findIndex((x) => /^-?\d{1,3}(\.\d{3})*,\d{2}\s*[CD]$/.test(x.s)); [valorStr, cd] = its[i].s.split(/\s+/); usados = new Set([i]); }
+    const meio = its.filter((x, i) => i > 0 && !usados.has(i));
+    const documento = meio.length && /^\d+$/.test(meio.at(-1).s) ? meio.at(-1).s : null;
+    const historicoLinha = limpar(meio.filter((x) => x.s !== documento).map((x) => x.s).join(' '));
+    const historico = historicoLinha || pendente || 'LANÇAMENTO';
+    const valor = (/D/i.test(cd) ? -1 : 1) * Math.abs(numBr(valorStr));
+    const cp = contraparteBnb(null, historico);
+    const [d, m, a] = its[0].s.split('/');
+    lanc.push({ pagina: l.pagina, data: `${a}-${m}-${d}`, historico, historicoBase: historico, documento: documento && documento !== '0' ? documento : null, valor, saldoInformado: null, contraparteNome: null, contraparteDoc: null, hint: cp.hint });
+    pendente = null;
+  }
+  // saldo por linha não existe: o recalculado vira o "informado" e a conferência do arquivo é contra o "Saldo atual"
+  let corrente = round2(saldoAnterior);
+  for (const x of lanc) { corrente = round2(corrente + x.valor); x.saldoInformado = corrente; }
+  const bateArquivo = saldoAtual == null || Math.abs(corrente - saldoAtual) <= 0.005;
+  // uma leitura por mês do período
+  const meses = [];
+  for (let m = periodo.inicio.slice(0, 7); m <= periodo.fim.slice(0, 7); ) { meses.push(m); const [a, mm] = m.split('-').map(Number); m = `${mm === 12 ? a + 1 : a}-${String(mm === 12 ? 1 : mm + 1).padStart(2, '0')}`; }
+  const out = [];
+  let anterior = saldoAnterior;
+  for (const mes of meses) {
+    const doMes = lanc.filter((x) => x.data.slice(0, 7) === mes);
+    const fimMes = ultimoDiaMes(mes);
+    const parcial = periodo.inicio > `${mes}-01` || periodo.fim < fimMes;
+    const leitura = montar({ layout: 'conta-corrente', agencia: normAgencia(mConta[1]), conta: normConta(mConta[2]), contaDv: mConta[3], titular, periodo: { inicio: periodo.inicio > `${mes}-01` ? periodo.inicio : `${mes}-01`, fim: periodo.fim < fimMes ? periodo.fim : fimMes }, saldoAnterior: anterior, lanc: doMes, buffer, paginas, hashExtra: mes });
+    leitura.parcial = parcial;
+    leitura.saldoAtualArquivo = saldoAtual;
+    if (!bateArquivo) { leitura.conferencia.bate = false; leitura.conferencia.divergencias.push({ seq: 0, data: periodo.fim, historico: 'Saldo atual do arquivo', saldoCalculado: corrente, saldoInformado: saldoAtual, diferenca: round2(saldoAtual - corrente) }); }
+    out.push(leitura);
+    anterior = leitura.saldoFinal;
+  }
+  return out.length === 1 ? out[0] : out;
 }
 
 // ─── A) "no período" ───
@@ -289,8 +370,9 @@ export async function lerExtratoBnb(buffer) {
   const todoTexto = todas.map((l) => texto(l.itens)).join('\n');
   if (SHOPPING_RECIFE.test(todoTexto)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   if (/Extrato de Conta Corrente - no per[íi]odo/i.test(todoTexto)) return lerPeriodo(todas, todoTexto, buffer, paginas);
+  if (/Extrato de Conta Corrente/i.test(todoTexto) && /TITULAR:/.test(todoTexto) && /AG[ÊE]NCIA:\s*\d+\s*\/\s*CONTA:/i.test(todoTexto)) return lerContaCorrente(todas, todoTexto, buffer, paginas);
   if (/Extrato Consolidado/.test(todoTexto) && /Internet Banking BNB|AGENCIA:\s*\d+\s+CONTA/.test(todoTexto)) return lerConsolidado(todas, todoTexto, buffer, paginas);
-  throw new Error('Este PDF não parece ser um extrato do BNB ("Extrato de Conta Corrente - no período" ou "Extrato Consolidado").');
+  throw new Error('Este PDF não parece ser um extrato do BNB ("Extrato de Conta Corrente" / "- no período" ou "Extrato Consolidado").');
 }
 
 export default { lerExtratoBnb, contraparteBnb };
