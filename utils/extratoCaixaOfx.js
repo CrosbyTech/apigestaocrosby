@@ -67,8 +67,13 @@ export const CONTAS_SICREDI_OFX = {
   '326933': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
   '367346': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
 };
+export const CONTAS_UNICRED_OFX = {
+  '68500': { titular: 'CROSBY D CONFECCAO LTDA', cnpj: '17177680000116' },
+  '70980': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+};
 const BANCOS_OFX = {
   104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA },
+  136: { banco: 'UNICRED', nome: 'da Unicred', contas: CONTAS_UNICRED_OFX, agencia: '6012' }, // ACCTID 68500 = 6850-0; BALAMT = saldo do fim do mês
   748: { banco: 'SICREDI', nome: 'do Sicredi', contas: CONTAS_SICREDI_OFX, agencia: '2207', normalizarConta: (a) => a.replace(/^2207/, '').replace(/^0+/, '') },
   1: { banco: 'BB', nome: 'do Banco do Brasil', contas: CONTAS_BB },
   4: { banco: 'BNB', nome: 'do Banco do Nordeste', contas: CONTAS_BNB, agencia: '035', balamtInicial: true },
@@ -144,6 +149,9 @@ export function lerExtratoBnbOfx(buffer) {
 }
 export function lerExtratoSicrediOfx(buffer) {
   return lerOfxBanco(buffer, 748);
+}
+export function lerExtratoUnicredOfx(buffer) {
+  return lerOfxBanco(buffer, 136);
 }
 /** Código do banco (BANKID) de um OFX, como número; null se não achar. */
 export function bancoDoOfx(buffer) {
@@ -268,4 +276,4 @@ function lerOfxBanco(buffer, esperado) {
   };
 }
 
-export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoSicrediOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB, CONTAS_SICREDI_OFX };
+export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoSicrediOfx, lerExtratoUnicredOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB, CONTAS_SICREDI_OFX, CONTAS_UNICRED_OFX };

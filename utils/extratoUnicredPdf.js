@@ -227,6 +227,8 @@ export async function lerExtratoUnicred(buffer) {
   const lanc = [];
   for (const l of todas) {
     const its = l.itens;
+    // "Lançamentos futuros" (2025): débitos agendados depois do período, sem saldo → não são do extrato
+    if (/^Lan[çc]amentos futuros/i.test(texto(its))) break;
     const dataIt = its.find((i) => i.x < 40 && /^\d{2}\/\d{2}\/\d{4}$/.test(i.s));
     const vals = its.filter((i) => RE_VAL.test(i.s));
     if (!dataIt) {
