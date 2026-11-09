@@ -118,7 +118,8 @@ export async function lerExtratoBradesco(buffer) {
   const titular = mTit ? limpar(mTit[1]) : null;
   let cnpj = mTit ? mTit[2].replace(/\D/g, '') : null;
   if (cnpj && cnpj.length === 15 && cnpj.startsWith('0')) cnpj = cnpj.slice(1);
-  const mConta = todoTexto.match(/Extrato de:\s*Ag:\s*(\d+)\s*\|\s*CC:\s*([\d.]+)-(\d)\s*\|\s*Entre\s*(\d{2}\/\d{2}\/\d{4})\s*e\s*(\d{2}\/\d{2}\/\d{4})/);
+  // 2025: "CC: 0249374 - 8" vem com espaços em volta do hífen
+  const mConta = todoTexto.match(/Extrato de:\s*Ag:\s*(\d+)\s*\|\s*CC:\s*([\d.]+)\s*-\s*(\d)\s*\|\s*Entre\s*(\d{2}\/\d{2}\/\d{4})\s*e\s*(\d{2}\/\d{2}\/\d{4})/);
   if (!mConta) throw new Error('Não achei "Extrato de: Ag: … | CC: … | Entre … e …".');
   const agencia = mConta[1];
   const conta = mConta[2].replace(/\D/g, '').replace(/^0+/, '');
@@ -134,38 +135,44 @@ export async function lerExtratoBradesco(buffer) {
   let dataAtual = null;
   let nomePendente = '';
   const lanc = [];
-  const ehTexto = (its) => its.every((i) => !RE_NUM.test(i.s) || i.x < 250) && its.some((i) => i.x >= 95 && i.x < 250) && !its.some((i) => i.x >= 500 && RE_NUM.test(i.s));
-  const ehValor = (its) => its.some((i) => i.x >= 500 && RE_NUM.test(i.s));
+  // colunas: a tabela pode vir deslocada (jul/out/nov 2025: 33 pt mais à esquerda) → desloca os limites pelo x do cabeçalho "Lançamento" (104 no layout de referência)
+  let off = 0;
+  const ehTexto = (its) => its.every((i) => !RE_NUM.test(i.s) || i.x < 250 + off) && its.some((i) => i.x >= 95 + off && i.x < 250 + off) && !its.some((i) => i.x >= 500 + off && RE_NUM.test(i.s));
+  const ehValor = (its) => its.some((i) => i.x >= 500 + off && RE_NUM.test(i.s));
   for (let i = 0; i < todas.length && !fim; i++) {
     const its = todas[i].itens;
     const t = texto(its);
     const tUp = semAcento(t).toUpperCase();
     if (!dentro) {
-      if (/^DATA LANCAMENTO DCTO/.test(tUp)) dentro = true;
+      if (/^DATA LANCAMENTO DCTO/.test(tUp)) {
+        dentro = true;
+        const hLanc = its.find((x) => /^Lan[çc]amento$/i.test(x.s));
+        if (hLanc) off = Math.round(hLanc.x - 104);
+      }
       continue;
     }
     if (/^EXTRATO CONSOLIDADO|^FOLHA \d|^NOME DO USUARIO|^DATA DA OPERACAO|\| CNPJ:|^DATA LANCAMENTO DCTO/.test(tUp)) continue; // cabeçalhos repetidos
-    const dataIt = its.find((x) => x.x < 60 && /^\d{2}\/\d{2}\/\d{4}$/.test(x.s));
-    if (/^SALDO ANTERIOR/.test(semAcento(texto(its.filter((x) => x.x >= 95))).toUpperCase())) {
-      const n = its.filter((x) => x.x >= 500 && RE_NUM.test(x.s)).at(-1);
+    const dataIt = its.find((x) => x.x < 60 + off && /^\d{2}\/\d{2}\/\d{4}$/.test(x.s));
+    if (/^SALDO ANTERIOR/.test(semAcento(texto(its.filter((x) => x.x >= 95 + off))).toUpperCase())) {
+      const n = its.filter((x) => x.x >= 500 + off && RE_NUM.test(x.s)).at(-1);
       if (!n) throw new Error('"SALDO ANTERIOR" sem valor.');
       saldoAnterior = numBr(n.s);
       continue;
     }
-    if (/^TOTAL\b/.test(tUp) && its[0].x < 60) {
+    if (/^TOTAL\b/.test(tUp) && its[0].x < 60 + off) {
       fim = true;
       break;
     }
     if (saldoAnterior == null) continue;
     if (dataIt) dataAtual = dataIso(dataIt.s);
     if (ehValor(its)) {
-      const saldoIt = its.filter((x) => x.x >= 500 && RE_NUM.test(x.s)).at(-1);
-      const vals = its.filter((x) => x !== saldoIt && RE_NUM.test(x.s) && x.x >= 330);
+      const saldoIt = its.filter((x) => x.x >= 500 + off && RE_NUM.test(x.s)).at(-1);
+      const vals = its.filter((x) => x !== saldoIt && RE_NUM.test(x.s) && x.x >= 330 + off);
       const valIt = vals.at(-1);
       if (!valIt) throw new Error(`Linha sem valor: "${t}"`);
-      const valor = valIt.s.startsWith('-') || valIt.x >= 420 ? -Math.abs(numBr(valIt.s)) : Math.abs(numBr(valIt.s));
-      const nomeAqui = texto(its.filter((x) => x.x >= 95 && x.x < 250));
-      const documento = texto(its.filter((x) => x.x >= 250 && x.x < 330)) || null;
+      const valor = valIt.s.startsWith('-') || valIt.x >= 420 + off ? -Math.abs(numBr(valIt.s)) : Math.abs(numBr(valIt.s));
+      const nomeAqui = texto(its.filter((x) => x.x >= 95 + off && x.x < 250 + off));
+      const documento = texto(its.filter((x) => x.x >= 250 + off && x.x < 330 + off)) || null;
       const descricao = limpar(nomeAqui || nomePendente);
       nomePendente = '';
       if (!dataAtual) throw new Error(`Lançamento sem data: "${t}"`);
@@ -173,9 +180,9 @@ export async function lerExtratoBradesco(buffer) {
       continue;
     }
     if (ehTexto(its)) {
-      const frag = texto(its.filter((x) => x.x >= 95));
+      const frag = texto(its.filter((x) => x.x >= 95 + off));
       const prox = todas[i + 1]?.itens || [];
-      const proxEhValorSemNome = ehValor(prox) && !prox.some((x) => x.x >= 95 && x.x < 250 && !RE_NUM.test(x.s));
+      const proxEhValorSemNome = ehValor(prox) && !prox.some((x) => x.x >= 95 + off && x.x < 250 + off && !RE_NUM.test(x.s));
       if (proxEhValorSemNome || !lanc.length) nomePendente = limpar(`${nomePendente} ${frag}`);
       else {
         const ult = lanc.at(-1);
