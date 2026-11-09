@@ -74,6 +74,9 @@ export const CONTAS_UNICRED_OFX = {
 const BANCOS_OFX = {
   104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA },
   136: { banco: 'UNICRED', nome: 'da Unicred', contas: CONTAS_UNICRED_OFX, agencia: '6012' }, // ACCTID 68500 = 6850-0; BALAMT = saldo do fim do mês
+  // Daycoval: ACCTID 0015165800; BALAMT em DTASOF = último dia do mês; titular não vem no OFX (conta da Crosby CR Vestuário: o Pix
+  // que sai dela chega no Sicredi 36733 com o CNPJ 17.177.680/0001-16). Arquivo diz CHARSET 1252 mas é UTF-8.
+  707: { banco: 'DAYCOVAL', nome: 'do Daycoval', contas: { '0015165800': { titular: 'CROSBY CR VESTUARIO LTDA', cnpj: '17177680000116' } }, agencia: null },
   748: { banco: 'SICREDI', nome: 'do Sicredi', contas: CONTAS_SICREDI_OFX, agencia: '2207', normalizarConta: (a) => a.replace(/^2207/, '').replace(/^0+/, '') },
   1: { banco: 'BB', nome: 'do Banco do Brasil', contas: CONTAS_BB },
   4: { banco: 'BNB', nome: 'do Banco do Nordeste', contas: CONTAS_BNB, agencia: '035', balamtInicial: true },
@@ -153,14 +156,27 @@ export function lerExtratoSicrediOfx(buffer) {
 export function lerExtratoUnicredOfx(buffer) {
   return lerOfxBanco(buffer, 136);
 }
+export function lerExtratoDaycovalOfx(buffer) {
+  return lerOfxBanco(buffer, 707);
+}
 /** Código do banco (BANKID) de um OFX, como número; null se não achar. */
 export function bancoDoOfx(buffer) {
   const t = Buffer.isBuffer(buffer) ? buffer.subarray(0, 8000).toString('latin1') : String(buffer).slice(0, 8000);
   const b = (campo(t, 'BANKID') || '').replace(/\D/g, '');
   return b ? Number(b) : null;
 }
+// OFX costuma ser latin1 (CHARSET:1252), mas alguns bancos gravam UTF-8 mesmo dizendo 1252 (Daycoval) → se os bytes
+// formam UTF-8 válido com acentos, decodifica como UTF-8
+function textoOfx(buffer) {
+  if (!Buffer.isBuffer(buffer)) return String(buffer);
+  try {
+    const t = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    if (/[\u00C0-\u00FF]/.test(t)) return t;
+  } catch { /* não é UTF-8 válido */ }
+  return buffer.toString('latin1');
+}
 function lerOfxBanco(buffer, esperado) {
-  const texto = Buffer.isBuffer(buffer) ? buffer.toString('latin1') : String(buffer);
+  const texto = textoOfx(buffer);
   if (!ehOfx(texto)) throw new Error('O arquivo não é um OFX.');
   const def = BANCOS_OFX[esperado];
   const bankId = (campo(texto, 'BANKID') || '').replace(/\D/g, '');
@@ -276,4 +292,4 @@ function lerOfxBanco(buffer, esperado) {
   };
 }
 
-export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoSicrediOfx, lerExtratoUnicredOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB, CONTAS_SICREDI_OFX, CONTAS_UNICRED_OFX };
+export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoSicrediOfx, lerExtratoUnicredOfx, lerExtratoDaycovalOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB, CONTAS_SICREDI_OFX, CONTAS_UNICRED_OFX };
