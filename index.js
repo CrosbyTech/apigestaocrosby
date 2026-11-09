@@ -43,6 +43,7 @@ import vagasRoutes from './routes/vagas.routes.js';
 import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
 import transferenciasRoutes from './routes/transferencias.routes.js';
+import pedidosVendaRoutes from './routes/pedidosVenda.routes.js';
 import balancoRfidRoutes from './routes/balancoRfid.routes.js';
 import erpRoutes from './routes/erp.routes.js';
 import { iniciarJobErpSync } from './jobs/erp-sync.job.js';
@@ -146,6 +147,7 @@ import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
 import { iniciarJobDevolucoesSync } from './jobs/devolucoes-sync.job.js';
+import { iniciarJobPedidosVendaSync } from './jobs/pedidos-venda-sync.job.js';
 import { iniciarJobPagarmeBoletosRetorno } from './jobs/pagarme-boletos-retorno.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
@@ -241,6 +243,7 @@ app.use('/api/vagas', vagasRoutes); // RH — Banco de Talentos (vagas + inscri�
 app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede (ponte Supabase, sem tocar no Dryland)
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
 app.use('/api/transferencias', transferenciasRoutes); // Transferências de mercadoria entre empresas — regra do POP (7272/7273/7280), página /transferencias-mercadoria
+app.use('/api/pedidos-venda', pedidosVendaRoutes); // Pedidos de venda do Dryland (separação → pedido), página /expedicao/pedidos-venda
 app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos de contagem do app Android (Urovo)
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
@@ -333,6 +336,7 @@ app.listen(PORT, async () => {
   iniciarJobPrevisao(); // snapshot semanal fixo da Previsão de Recebimento (João, 27/10/2026)
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
+  iniciarJobPedidosVendaSync();
   iniciarJobPagarmeBoletosRetorno();
   iniciarJobErpSync();
   iniciarJobIntegracaoOutbox();
