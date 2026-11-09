@@ -62,8 +62,14 @@ export const CONTAS_BNB = {
   '693612': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
   '693639': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
 };
+export const CONTAS_SICREDI_OFX = {
+  '367338': { titular: 'CROSBY CR VESTUARIO LTDA', cnpj: '17177680000116' },
+  '326933': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
+  '367346': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+};
 const BANCOS_OFX = {
   104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA },
+  748: { banco: 'SICREDI', nome: 'do Sicredi', contas: CONTAS_SICREDI_OFX, agencia: '2207', normalizarConta: (a) => a.replace(/^2207/, '').replace(/^0+/, '') },
   1: { banco: 'BB', nome: 'do Banco do Brasil', contas: CONTAS_BB },
   4: { banco: 'BNB', nome: 'do Banco do Nordeste', contas: CONTAS_BNB, agencia: '035', balamtInicial: true },
 };
@@ -136,6 +142,9 @@ export function lerExtratoBbOfx(buffer) {
 export function lerExtratoBnbOfx(buffer) {
   return lerOfxBanco(buffer, 4);
 }
+export function lerExtratoSicrediOfx(buffer) {
+  return lerOfxBanco(buffer, 748);
+}
 /** Código do banco (BANKID) de um OFX, como número; null se não achar. */
 export function bancoDoOfx(buffer) {
   const t = Buffer.isBuffer(buffer) ? buffer.subarray(0, 8000).toString('latin1') : String(buffer).slice(0, 8000);
@@ -148,8 +157,9 @@ function lerOfxBanco(buffer, esperado) {
   const def = BANCOS_OFX[esperado];
   const bankId = (campo(texto, 'BANKID') || '').replace(/\D/g, '');
   if (bankId && Number(bankId) !== esperado) throw new Error(`Este OFX é do banco ${bankId}, não ${def.nome} (${String(esperado).padStart(3, '0')}).`);
-  const acctId = (campo(texto, 'ACCTID') || '').replace(/\D/g, '');
-  if (!acctId) throw new Error('OFX sem o número da conta (ACCTID).');
+  const acctIdBruto = (campo(texto, 'ACCTID') || '').replace(/\D/g, '');
+  if (!acctIdBruto) throw new Error('OFX sem o número da conta (ACCTID).');
+  const acctId = def.normalizarConta ? def.normalizarConta(acctIdBruto) : acctIdBruto;
   const conhecida = def.contas[acctId] || null;
   const agencia = def.agencia ?? (conhecida && 'agencia' in conhecida ? conhecida.agencia : (campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null);
   const conta = acctId.slice(0, -1);
@@ -258,4 +268,4 @@ function lerOfxBanco(buffer, esperado) {
   };
 }
 
-export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB };
+export default { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoSicrediOfx, bancoDoOfx, ehOfx, CONTAS_CAIXA, CONTAS_BB, CONTAS_BNB, CONTAS_SICREDI_OFX };

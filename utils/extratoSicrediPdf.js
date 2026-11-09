@@ -117,16 +117,19 @@ export async function lerExtratoSicredi(buffer) {
   const paginas = await paginasDo(buffer);
   const todas = paginas.flatMap((p) => linhasDe(p.itens).map((l) => ({ ...l, pagina: p.numero })));
   const todoTexto = todas.map((l) => texto(l.itens)).join('\n');
-  if (SHOPPING_RECIFE.test(todoTexto)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
-  if (!/Associado:/.test(todoTexto) || !/Cooperativa:/.test(todoTexto) || !/SALDO ANTERIOR/.test(todoTexto)) throw new Error('Este PDF não parece ser um extrato do Sicredi (sem "Associado:", "Cooperativa:" e "SALDO ANTERIOR").');
+  // Shopping Recife só pelo TITULAR/CNPJ (mais abaixo): um Pix pago à "CROSBY RECIFE MALL" no meio do extrato da Crosby não é motivo para barrar
+  // Dois layouts: o antigo ("Extrato (Período de … a …)", "SALDO ANTERIOR …") e o do Internet Banking Sicredi (2025: "Conta Corrente: 36733-8",
+  // "Dados referentes ao período 01/08/2025 a 31/08/2025", 1ª linha "SALDO 342,45" = saldo anterior; mesmas colunas Data | Descrição | Documento | Valor | Saldo)
+  const layout = /Internet Banking Sicredi|Dados referentes ao per[íi]odo/i.test(todoTexto) ? 'ib' : 'classico';
+  if (!/Associado:/.test(todoTexto) || !/Cooperativa:/.test(todoTexto) || !(/SALDO ANTERIOR/.test(todoTexto) || layout === 'ib')) throw new Error('Este PDF não parece ser um extrato do Sicredi (sem "Associado:", "Cooperativa:" e "SALDO ANTERIOR").');
 
   const titular = limpar((todoTexto.match(/Associado:\s*(.+)/) || [])[1] || '') || null;
   const cooperativa = (todoTexto.match(/Cooperativa:\s*(\d+)/) || [])[1] || null;
-  const mConta = todoTexto.match(/Conta:\s*(\d+)-(\d)/) || todoTexto.match(/(\d{4,})-(\d)\s+Conta:/);
+  const mConta = todoTexto.match(/Conta(?: Corrente)?:\s*(\d+)-(\d)/) || todoTexto.match(/(\d{4,})-(\d)\s+Conta:/);
   if (!mConta) throw new Error('Não achei o número da conta ("Conta: 99999-9").');
   const conta = mConta[1];
   const contaDv = mConta[2];
-  const mPer = todoTexto.match(/Per[íi]odo de (\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/);
+  const mPer = todoTexto.match(/Per[íi]odo de (\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/) || todoTexto.match(/Dados referentes ao per[íi]odo\s*(\d{2}\/\d{2}\/\d{4})\s*a\s*(\d{2}\/\d{2}\/\d{4})/i);
   if (!mPer) throw new Error('Não achei o período do extrato.');
   const periodo = { inicio: dataIso(mPer[1]), fim: dataIso(mPer[2]) };
   const mesRef = periodo.inicio.slice(0, 7);
@@ -147,16 +150,18 @@ export async function lerExtratoSicredi(buffer) {
       break;
     }
     const nums = its.filter((i) => RE_NUM.test(i.s));
-    if (/^SALDO ANTERIOR/.test(tUp)) {
+    if (/^SALDO ANTERIOR/.test(tUp) || (layout === 'ib' && saldoAnterior == null && /^SALDO\s+-?[\d.]+,\d{2}$/.test(tUp))) {
       if (!nums.length) throw new Error('"SALDO ANTERIOR" sem valor.');
       saldoAnterior = numBr(nums.at(-1).s);
       continue;
     }
     if (saldoAnterior == null) continue; // cabeçalho
-    const dataIt = its.find((i) => i.x < 70 && /^\d{2}\/\d{2}\/\d{4}$/.test(i.s));
+    const dataIt = its.find((i) => i.x < 90 && /^\d{2}\/\d{2}\/\d{4}$/.test(i.s));
     if (!dataIt) continue; // rodapé, textos soltos
-    const saldoIt = its.filter((i) => RE_NUM.test(i.s) && i.x >= 500).at(-1);
-    const valorIt = its.filter((i) => RE_NUM.test(i.s) && i.x >= 420 && i.x < 500).at(-1);
+    // Valor e Saldo são os dois últimos números da linha (as colunas mudam de posição entre os layouts)
+    const numsDir = its.filter((i) => RE_NUM.test(i.s) && i.x >= 420);
+    const saldoIt = numsDir.at(-1);
+    const valorIt = numsDir.length >= 2 ? numsDir.at(-2) : null;
     if (!saldoIt || !valorIt) throw new Error(`Linha de ${dataIt.s} sem valor ou saldo: "${t}"`);
     const descricao = texto(its.filter((i) => i !== dataIt && i !== saldoIt && i !== valorIt && i.x < 300));
     const documento = texto(its.filter((i) => i !== dataIt && i !== saldoIt && i !== valorIt && i.x >= 300 && i.x < 420)) || null;
@@ -187,6 +192,7 @@ export async function lerExtratoSicredi(buffer) {
     banco: 'SICREDI',
     bancoCodigo: '748',
     formato: 'pdf',
+    layout,
     agencia: cooperativa,
     conta,
     contaDv,
@@ -198,7 +204,7 @@ export async function lerExtratoSicredi(buffer) {
     saldoFinal,
     lancamentos: lanc,
     conferencia: {
-      fonte: 'PDF do Sicredi: SALDO ANTERIOR e saldo impresso em cada linha',
+      fonte: layout === 'ib' ? 'PDF do Internet Banking Sicredi: "SALDO" inicial e saldo impresso em cada linha' : 'PDF do Sicredi: SALDO ANTERIOR e saldo impresso em cada linha',
       saldoInicial: round2(saldoAnterior),
       totalCreditos,
       totalDebitos,
