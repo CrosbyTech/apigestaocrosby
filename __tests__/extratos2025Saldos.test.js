@@ -22,6 +22,7 @@ import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
+import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2025_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2025';
 const temPasta = fs.existsSync(RAIZ);
@@ -87,10 +88,18 @@ const BANCOS = {
     ofx: lerExtratoUnicredOfx, // BALAMT = saldo do fim do mês
     ilegiveis: [],
   },
+  BRADESCO: {
+    pdf: lerExtratoBradesco, // "Extrato Mensal / Por Período" jan–nov (saldo = conta corrente + Invest Fácil); em jul/out/nov a tabela vem deslocada
+    // sem OFX: BALAMT fixo e sem data (DTASOF zerado), com linhas de outros meses
+    // CONSOLIDADO de maio: mesmo mês na base só conta corrente (1 → 1) — não se compara com o Mensal
+    ilegiveis: ['BRADESCO CROSBY CONSOLIDADO MAIO.pdf', 'BRADESCO FABIO CONSOLIDADO MAIO.pdf'],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo (dias faltando), conhecido e aceito
 const QUEBRAS = [
   { banco: 'SANTANDER', conta: '13000599', mes: '2025-11', motivo: 'o PDF de novembro começa em 04/11: 03/11 ficou fora (R$ 927,07 de diferença com 31/10)' },
+  { banco: 'BRADESCO', conta: '249374', mes: '2025-01', motivo: 'dez/2024 gravado na base só conta corrente (1,00); 2025 inteiro na base c/c + Invest Fácil do Extrato Mensal' },
+  { banco: 'BRADESCO', conta: '249286', mes: '2025-01', motivo: 'idem' },
 ];
 const quebra = (banco, conta, mes) => QUEBRAS.some((q) => q.banco === banco && q.conta === conta && q.mes === mes);
 // Meses sem nenhum arquivo legível (PDF imagem/errado e sem OFX): o encadeamento pula e o banco pode não ter o mês
@@ -107,6 +116,8 @@ const BURACOS = [
   { banco: 'SICREDI', conta: '36734', meses: ['2025-07'] }, // Irmãos: julho não existe na pasta
   { banco: 'SANTANDER', conta: '13008301', meses: ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-10', '2025-11', '2025-12'] }, // Irmãos: só ago e set na pasta
   { banco: 'SANTANDER', conta: '29000199', meses: ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-09', '2025-10'] }, // conta vinculada aberta em novembro
+  { banco: 'BRADESCO', conta: '249374', meses: ['2025-12'] }, // dezembro não existe na pasta
+  { banco: 'BRADESCO', conta: '249286', meses: ['2025-12'] },
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -142,6 +153,9 @@ const FIM_DE_MES = {
   'SANTANDER|29000199': [null, null, null, null, null, null, null, null, null, null, 2574.47, 33756.6],
   'UNICRED|6850': [817, 2044.43, 757.07, 2421.96, 143.98, 319.76, -4687.9, -4635.37, -4983.06, -5320.42, -4818.78, -5479.02],
   'UNICRED|7098': [4548.6, 2299.1, 4777.2, 11688.05, 4236.73, 831.23, 1010.64, -4648.33, -4986.24, -4345.7, -2151.22, -5345.94],
+  // Bradesco: saldo do Extrato Mensal (conta corrente + Invest Fácil)
+  'BRADESCO|249374': [419.62, 7713.27, 9254.88, 1083.64, 149.14, 612.86, 228.19, 284.38, 0, 57.84, 10.08, null],
+  'BRADESCO|249286': [353.24, -28397, 173.54, 1838.4, 191.9, 123.76, -29235.62, -29454.6, -30000, -29958.23, -29579.26, null],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
 const INICIO_2025 = {
@@ -152,6 +166,7 @@ const INICIO_2025 = {
   'SICREDI|32693': 12392.96, 'SICREDI|36733': 4935.25, 'SICREDI|36734': 39776.59,
   'SANTANDER|13000599': 11141.2, 'SANTANDER|13001128': 1095.23, 'SANTANDER|13006882': 8255.8,
   'UNICRED|6850': 369.19, 'UNICRED|7098': 848.05,
+  'BRADESCO|249374': 1, 'BRADESCO|249286': 1, // base só c/c (o resto estava no Invest Fácil): janeiro está em QUEBRAS
 };
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
