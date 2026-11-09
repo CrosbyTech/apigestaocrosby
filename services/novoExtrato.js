@@ -665,6 +665,13 @@ export async function listarLancamentos({ de, ate, bancos = [], contas = [], tip
     pares.push(...(data || []));
   }
   const porId = new Map(rows.map((l) => [l.id, l]));
+  // a outra ponta do par pode estar numa conta fora do filtro (ex.: filtro por empresa): busca essas linhas para mostrar os dois lados
+  const faltam = [...new Set(pares.flatMap((t) => [t.origem_lancamento_id, t.destino_lancamento_id]).filter((id) => id && !porId.has(id)))];
+  for (let i = 0; i < faltam.length; i += 300) {
+    const { data, error } = await supabase.from(T.lanc).select('id,conta,conta_dv,banco,titular,historico,contraparte_nome,data,valor').in('id', faltam.slice(i, i + 300));
+    if (error) throw new Error(error.message);
+    for (const l of data || []) porId.set(l.id, { ...l, foraDoFiltro: true });
+  }
   const transferencias = pares
     .map((t) => {
       const o = porId.get(t.origem_lancamento_id);
