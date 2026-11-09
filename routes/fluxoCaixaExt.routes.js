@@ -322,6 +322,25 @@ router.get(
   }),
 );
 
+// Entradas pendentes de uma conta × CSV do extrato Stone (antecipações,
+// recebíveis de cartão, Pix) → concilia o que bater data + valor (João, 09/11/2026)
+router.post(
+  '/conciliacao/entradas-csv',
+  comUpload([{ name: 'arquivos', maxCount: 1 }, { name: 'arquivo', maxCount: 1 }]),
+  asyncHandler(async (req, res) => {
+    try {
+      const contaId = Number(req.body?.contaId || req.query?.contaId);
+      if (!contaId) return errorResponse(res, 'Informe contaId.', 400);
+      const simular = ['1', 'true'].includes(String(req.query?.simular ?? req.body?.simular ?? ''));
+      const { conciliarEntradasPorCsv } = await import('../services/conciliacaoEntradasCsv.js');
+      const r = await conciliarEntradasPorCsv({ contaId, buffer: req.arquivos[0].buffer, usuario: usuarioDe(req), simular });
+      return successResponse(res, r, `${r.conciliadas.length} de ${r.pendentes} entrada(s) ${simular ? 'batem' : 'conciliadas'} pelo CSV`);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 router.post(
   '/conciliacao/techfin',
   comUpload([{ name: 'arquivos', maxCount: 60 }, { name: 'arquivo', maxCount: 1 }]),

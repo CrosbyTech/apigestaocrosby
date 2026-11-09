@@ -239,3 +239,37 @@ export function lerExtratoStoneCsv(buffer, { nomeArquivo } = {}) {
     { nomeArquivo: nomeArquivo || null, paginas: 0 },
   );
 }
+
+/**
+ * Linhas cruas do CSV da Stone (para conciliar entradas pela planilha — João,
+ * 09/11/2026): [{ credito, valor, data, horario, tipo, situacao, origem,
+ * origemDoc, origemInst, destino, destinoDoc, destinoConta, contaPropria }].
+ */
+export function linhasExtratoStoneCsv(buffer) {
+  const linhas = parseCsv(textoDoBuffer(buffer));
+  if (linhas.length < 2) return [];
+  const cab = linhas[0].map((h) => semAcento(h).toLowerCase().trim());
+  const ix = (n) => cab.indexOf(n);
+  const g = (l, n) => (ix(n) >= 0 ? l[ix(n)] ?? '' : '');
+  return linhas.slice(1).map((l) => {
+    const valor = valorBr(g(l, 'valor'));
+    const credito = valor >= 0 && !/^d[eé]bito/i.test(g(l, 'movimentacao'));
+    const [d, hm] = String(g(l, 'data')).trim().split(/\s+/);
+    const [dd, mm, yy] = String(d || '').split('/');
+    return {
+      credito,
+      valor: round2(valor),
+      data: yy && mm && dd ? `${yy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}` : null,
+      hora: (hm || '').slice(0, 5) || null,
+      horario: String(g(l, 'horario') || hm || ''),
+      tipo: limpar(g(l, 'tipo')),
+      situacao: limpar(g(l, 'situacao')),
+      origem: limpar(g(l, 'origem')),
+      origemDoc: soDigitos(g(l, 'origem documento')),
+      origemInst: limpar(g(l, 'origem instituicao')),
+      destino: limpar(g(l, 'destino')),
+      destinoDoc: soDigitos(g(l, 'destino documento')),
+      contaPropria: soDigitos(credito ? g(l, 'destino conta') : g(l, 'origem conta')),
+    };
+  }).filter((r) => r.data && r.valor !== 0);
+}
