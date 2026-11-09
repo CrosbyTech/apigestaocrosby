@@ -351,9 +351,24 @@ router.get(
     try {
       const { de, ate } = req.query;
       if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
-      const { saidasPendentes } = await import('../services/tarifasConciliacao.js');
-      const itens = await saidasPendentes({ de: String(de), ate: String(ate), escopo });
+      const { saidasPendentesComSugestao } = await import('../services/tarifasConciliacao.js');
+      const itens = await saidasPendentesComSugestao({ de: String(de), ate: String(ate), escopo });
       return successResponse(res, { itens, elegiveis: itens.filter((i) => i.elegivel).length });
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+// Nome do fornecedor TOTVS pelo código (campo editável da janela de saídas pendentes)
+router.get(
+  '/conciliacao/fornecedor/:codigo',
+  asyncHandler(async (req, res) => {
+    try {
+      const { fornecedorPorCodigo } = await import('../services/tarifasConciliacao.js');
+      const p = await fornecedorPorCodigo(req.params.codigo);
+      if (!p) return errorResponse(res, 'Fornecedor não encontrado no TOTVS.', 404);
+      return successResponse(res, p);
     } catch (e) {
       return tratar(res, e);
     }
@@ -365,9 +380,10 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const ids = Array.isArray(req.body?.lancamentoIds) ? req.body.lancamentoIds : [];
-      if (!ids.length) return errorResponse(res, 'Marque pelo menos uma saída.', 400);
+      const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
+      if (!ids.length && !itens.length) return errorResponse(res, 'Marque pelo menos uma saída.', 400);
       const { criarDuplicatasTarifas } = await import('../services/tarifasConciliacao.js');
-      const r = await criarDuplicatasTarifas({ lancamentoIds: ids, usuario: usuarioDe(req), simular: !!req.body?.simular });
+      const r = await criarDuplicatasTarifas({ lancamentoIds: ids, itens, usuario: usuarioDe(req), simular: !!req.body?.simular });
       return successResponse(res, r, `${r.criadas.length} duplicata(s) de tarifa ${req.body?.simular ? 'validadas' : 'criadas e conciliadas'}`);
     } catch (e) {
       return tratar(res, e);
