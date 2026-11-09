@@ -283,8 +283,13 @@ function lerLayoutB(paginas, todoTexto) {
         continue;
       }
       if (/^SALDO/.test(descUp)) {
-        // SALDO TOTAL DISPONÍVEL DIA / SALDO APLIC AUT MAIS…: informação, não lançamento
-        if (/DISPON/.test(descUp) && saldoIt) {
+        // SALDO TOTAL DISPONÍVEL DIA / SALDO APLIC AUT MAIS…: informação, não lançamento.
+        // Com cheque bloqueado o dia traz "SALDO TOTAL" (saldo contábil) e depois "SALDO TOTAL DISPONÍVEL DIA"
+        // (sem o bloqueado) + "SALDO BLOQUEADO": o saldo da conta é o TOTAL.
+        if (/^SALDO TOTAL$/.test(descUp) && saldoIt) {
+          saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s), total: true });
+          saldoFinal = numBr(saldoIt.s);
+        } else if (/DISPON/.test(descUp) && saldoIt && !(saldosDia.at(-1)?.total && saldosDia.at(-1).apos === lanc.length - 1)) {
           saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s) });
           saldoFinal = numBr(saldoIt.s);
         }
@@ -305,14 +310,90 @@ function lerLayoutB(paginas, todoTexto) {
   return { agencia, conta, contaDv, cnpj, titular, mesRef, periodo: { inicio: dataIni, fim: dataFim }, saldoAnterior, saldoFinal, lanc, saldosDia, aplicacoes, resumo: null, layout: 'B' };
 }
 
+// ─── layout C: "Lançamentos do período" (internet banking, set/2025+) ──────────
+// Cabeçalho "CROSBY CNPJ 17.177.680/0001-16 Agência 6530 Conta 0027061-7"; "Lançamentos do período: 01/09/2025 até 30/09/2025";
+// colunas Data (dd/mm/aaaa) | Lançamentos | Razão Social | CNPJ/CPF | Valor (R$) | Saldo (R$) (só nas linhas de saldo);
+// "SALDO ANTERIOR" na 1ª linha e "SALDO TOTAL DISPONÍVEL DIA" no fim de cada dia (= saldo conferido dia a dia).
+// A razão social comprida quebra em linhas sem data, uma acima e outra abaixo da linha do lançamento.
+function lerLayoutC(paginas, todoTexto) {
+  const mCab = todoTexto.match(/CNPJ\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})\s+Ag[êe]ncia\s+(\d{4})\s+Conta\s+0*(\d+)-(\d)/i);
+  if (!mCab) throw new Error('Extrato do Itaú (lançamentos do período) sem "CNPJ … Agência … Conta …" no cabeçalho.');
+  const cnpj = mCab[1].replace(/\D/g, '');
+  const agencia = mCab[2];
+  const conta = mCab[3];
+  const contaDv = mCab[4];
+  const mPer = todoTexto.match(/Lan[çc]amentos do per[íi]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s+at[ée]\s+(\d{2})\/(\d{2})\/(\d{4})/i);
+  if (!mPer) throw new Error('Extrato do Itaú sem "Lançamentos do período: dd/mm/aaaa até dd/mm/aaaa".');
+  const dataIni = `${mPer[3]}-${mPer[2]}-${mPer[1]}`;
+  const dataFim = `${mPer[6]}-${mPer[5]}-${mPer[4]}`;
+  const mesRef = dataIni.slice(0, 7);
+  const RE_DATA = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+  const RE_DOC = /^(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|[\d*]{3}\.[\d*]{3}\.[\d*]{3}-[\d*]{2})$/;
+  const lanc = [];
+  const saldosDia = [];
+  const aplicacoes = [];
+  let saldoAnterior = null;
+  let saldoFinal = null;
+  let razaoAntes = [];
+  for (const pg of paginas) {
+    for (const l of linhasDe(pg.itens)) {
+      const its = l.itens;
+      const t = texto(its);
+      if (!t) continue;
+      const dataIt = its.find((i) => RE_DATA.test(i.s) && i.x < 70);
+      if (!dataIt) {
+        // linha sem data: pedaço da razão social (coluna x≈227) — acima vai para a próxima linha, abaixo para a anterior
+        const pedaco = texto(its.filter((i) => i.x >= 220 && i.x < 360));
+        if (pedaco && !/^(aviso|atualizado|Em caso|novos lan)/i.test(t) && !/Saldo total|Limite da conta|Lan[çc]amentos do per|Data\s+Lan/i.test(t)) {
+          const ult = lanc.at(-1);
+          if (ult && ult.razaoAberta) { ult.contraparteNome = limpar(`${ult.contraparteNome || ''} ${pedaco}`); ult.razaoAberta = false; }
+          else razaoAntes.push(pedaco);
+        }
+        continue;
+      }
+      const m = dataIt.s.match(RE_DATA);
+      const data = `${m[3]}-${m[2]}-${m[1]}`;
+      // Valor (R$) alinhado à direita em x≈505 (começa em 440–500); Saldo (R$) começa em x≈515+
+      const nums = its.filter((i) => RE_NUM.test(i.s) && i.x > 440);
+      const saldoIt = nums.find((i) => i.x >= 515);
+      const valorIt = nums.find((i) => i.x < 515);
+      const desc = texto(its.filter((i) => i !== dataIt && i.x >= 85 && i.x < 220));
+      const descUp = semAcento(desc).toUpperCase();
+      const razao = texto(its.filter((i) => i.x >= 220 && i.x < 360));
+      const docIt = its.find((i) => i.x >= 360 && i.x < 440 && RE_DOC.test(i.s));
+      if (/^SALDO ANTERIOR/.test(descUp)) { if (saldoIt) saldoAnterior = numBr(saldoIt.s); razaoAntes = []; continue; }
+      if (/^SALDO/.test(descUp)) {
+        if (/^SALDO TOTAL$/.test(descUp) && saldoIt) { saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s), total: true }); saldoFinal = numBr(saldoIt.s); }
+        else if (/DISPON/.test(descUp) && saldoIt && !(saldosDia.at(-1)?.total && saldosDia.at(-1).apos === lanc.length - 1)) { saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s) }); saldoFinal = numBr(saldoIt.s); }
+        razaoAntes = [];
+        continue;
+      }
+      if (!valorIt) { razaoAntes = []; continue; }
+      const valor = numBr(valorIt.s);
+      if (/^(APL|RES|APLIC|RESG)\w* APLIC AUT/.test(descUp)) { aplicacoes.push({ data, descricao: desc, valor }); razaoAntes = []; continue; }
+      const cp = contraparteDaDescricao(desc);
+      const nome = limpar([...razaoAntes, razao].filter(Boolean).join(' ')) || cp.nome;
+      const doc = docIt && !/\*/.test(docIt.s) ? docIt.s.replace(/\D/g, '') : cp.doc;
+      lanc.push({ pagina: pg.numero, data, descricao: desc, valor, saldoInformado: null, contraparteNome: nome || null, contraparteDoc: doc || null, hint: cp.hint, razaoAberta: !!razaoAntes.length || !!razao });
+      razaoAntes = [];
+    }
+  }
+  for (const l of lanc) delete l.razaoAberta;
+  if (saldoAnterior == null) throw new Error('Não achei a linha "SALDO ANTERIOR".');
+  if (saldoFinal == null) saldoFinal = lanc.length ? null : saldoAnterior;
+  if (saldoFinal == null) throw new Error('Não achei nenhum "SALDO TOTAL DISPONÍVEL DIA" (saldo final).');
+  return { agencia, conta, contaDv, cnpj, titular: null, mesRef, periodo: { inicio: dataIni, fim: dataFim }, saldoAnterior, saldoFinal, lanc, saldosDia, aplicacoes, resumo: null, layout: 'C' };
+}
+
 export async function lerExtratoItau(buffer) {
   const paginas = await paginasDo(buffer);
   const todoTexto = paginas.map((p) => linhasDe(p.itens).map((l) => texto(l.itens)).join('\n')).join('\n');
   if (SHOPPING_RECIFE.test(todoTexto)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   let r;
   if (/saldo em \d{2}\/\d{2}\/\d{2}/i.test(todoTexto) && /extrato\s+mensal/i.test(todoTexto)) r = lerLayoutA(paginas, todoTexto);
+  else if (/Lan[çc]amentos do per[íi]odo:/i.test(todoTexto) && /SALDO ANTERIOR/i.test(todoTexto)) r = lerLayoutC(paginas, todoTexto);
   else if (/saldo dispon[íi]vel em conta/i.test(todoTexto) && /SALDO ANTERIOR/i.test(todoTexto)) r = lerLayoutB(paginas, todoTexto);
-  else throw new Error('Este PDF não parece ser um extrato do Itaú (nem "extrato mensal" nem "lançamentos período").');
+  else throw new Error('Este PDF não parece ser um extrato do Itaú (nem "extrato mensal", nem "lançamentos período", nem "Lançamentos do período" 2025).');
   if (SHOPPING_RECIFE.test(`${r.conta}-${r.contaDv} ${r.cnpj || ''} ${r.titular || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const conhecida = CONTAS_ITAU[`${r.agencia}|${r.conta}-${r.contaDv}`] || null;
   const titular = r.titular || conhecida?.titular || null;
@@ -351,7 +432,7 @@ export async function lerExtratoItau(buffer) {
     saldoFinal: round2(r.saldoFinal),
     lancamentos: lanc,
     conferencia: {
-      fonte: r.layout === 'A' ? 'PDF extrato mensal: saldo anterior, saldos de fim de dia e saldo final impressos' : 'PDF lançamentos período: SALDO ANTERIOR e SALDO TOTAL DISPONÍVEL DIA impressos',
+      fonte: r.layout === 'A' ? 'PDF extrato mensal: saldo anterior, saldos de fim de dia e saldo final impressos' : r.layout === 'C' ? 'PDF "Lançamentos do período" (2025): SALDO ANTERIOR e SALDO TOTAL DISPONÍVEL DIA impressos, contraparte nas colunas Razão Social e CNPJ/CPF' : 'PDF lançamentos período: SALDO ANTERIOR e SALDO TOTAL DISPONÍVEL DIA impressos',
       saldoInicial: round2(r.saldoAnterior),
       totalCreditos,
       totalDebitos,
