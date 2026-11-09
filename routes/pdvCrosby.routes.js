@@ -1037,6 +1037,8 @@ router.post(
           })
           .eq('id', ctx.nota.id);
         await supabase.from('pdv_vendas').update({ status: 'cancelada' }).eq('id', ctx.nota.venda_id);
+        // venda da expedição: o registro do faturamento acompanha (libera faturar de novo)
+        await supabase.from('pedidos_venda_faturamentos').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', ctx.nota.venda_id);
         const vendaCancelada = await carregarVenda(ctx.nota.venda_id);
         if (vendaCancelada) {
           await registrarEpcs({ venda: vendaCancelada, itens: vendaCancelada.itens, tipo: 'estorno', nota: ctx.nota });
