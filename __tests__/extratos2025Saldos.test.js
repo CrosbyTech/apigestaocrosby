@@ -14,7 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
-import { lerExtratoBbOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx } from '../utils/extratoCaixaOfx.js';
 
 const RAIZ = process.env.EXTRATOS_2025_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2025';
 const temPasta = fs.existsSync(RAIZ);
@@ -34,9 +35,29 @@ const BANCOS = {
     // PDFs que são só imagem (o BB exportou como figura): não dá para ler; junho entrou pelo OFX
     ilegiveis: ['BB FABIO MARÇO.pdf', 'BB FABIO ABRIL.pdf', 'BB FABIO JUNHO.pdf'],
   },
+  BNB: {
+    pdf: lerExtratoBnb, // "no período", "Extrato de Conta Corrente" (2025, pode trazer mais de um mês → array) e consolidado (array)
+    ofx: lerExtratoBnbOfx, // BALAMT = saldo INICIAL do período
+    ilegiveis: [
+      // só imagem
+      'BNB CROSBY 069918-1 DEZEMBRO.pdf', 'BNB FABIO 069921-1 DEZEMBRO.pdf',
+      'BNB IRMAOS 069361-2 AGOSTO.pdf', 'BNB IRMAOS 069361-2 OUTUBRO.pdf', 'BNB IRMAOS 069363-9 AGOSTO.pdf', 'BNB IRMAOS 069363-9 OUTUBRO.pdf',
+      // PDFs "no período" ERRADOS: dizem "Nenhuma movimentação" em mês com movimento (o OFX do mês e o saldo do mês seguinte provam)
+      'BNB CROSBY 069918-1 FEVEREIRO.pdf', 'BNB CROSBY 069918-1 SETEMBRO.pdf', 'BNB CROSBY 069918-1 OUTUBRO.pdf',
+      'BNB FABIO 069921-1 FEVEREIRO.pdf', 'BNB FABIO 069921-1 SETEMBRO.pdf', 'BNB FABIO 069921-1 OUTUBRO.pdf',
+      'BNB CROSBY 069919-0 OUTUBRO.pdf',
+    ],
+  },
 };
-// Meses sem nenhum arquivo legível (PDF imagem e sem OFX): o encadeamento pula e o banco pode não ter o mês
-const BURACOS = [{ banco: 'BB', conta: '36960', meses: ['2025-03', '2025-04'] }];
+// Meses sem nenhum arquivo legível (PDF imagem/errado e sem OFX): o encadeamento pula e o banco pode não ter o mês
+const BURACOS = [
+  { banco: 'BB', conta: '36960', meses: ['2025-03', '2025-04'] },
+  { banco: 'BNB', conta: '69918', meses: ['2025-02'] },
+  { banco: 'BNB', conta: '69921', meses: ['2025-02'] },
+  { banco: 'BNB', conta: '69922', meses: ['2025-08'] },
+  { banco: 'BNB', conta: '69361', meses: ['2025-02', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-10', '2025-12'] }, // abril só até 23/04 (parcial)
+  { banco: 'BNB', conta: '69363', meses: ['2025-02', '2025-03', '2025-04', '2025-05', '2025-07', '2025-08', '2025-09', '2025-10', '2025-12'] },
+];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
 // Saldo FINAL impresso em cada extrato (conta sem dígito → mês → saldo). null = mês sem arquivo legível.
@@ -44,16 +65,36 @@ const FIM_DE_MES = {
   'BB|58711': [613.4, 15901.05, 3070.93, 4476.94, 7327.38, 787.87, 714.29, 49848.6, 9320.89, 440.54, -1027.61, -247.22],
   'BB|37051': [2612.93, 389.58, 3060.69, 899.73, 709.54, 2198.98, 2030.1, 7589.31, 5228.13, 3055.72, 885.13, 0],
   'BB|36960': [12323.91, 2308.41, null, null, 46948.75, 4566.17, 393.61, 1834.01, 0, 699.6, 0, 0],
+  'BNB|69918': [82.17, null, 229.12, 463.07, 418.31, 408.55, 180.93, 7.5, 2280.33, 0, 0, 0],
+  'BNB|69919': [1218.99, 1218.99, 1218.99, 1218.99, 1218.99, 1218.99, 1218.99, 1208.99, 1208.99, 2557.87, 2557.87, 2557.87],
+  'BNB|69921': [220148.07, null, 682.04, 356.87, 395.29, 320.03, 472.53, 367.53, 177.43, 0, 0, 0],
+  'BNB|69922': [0, 0, 0, 0, 0, 0, 0, null, 0, 0, 0, 0],
+  'BNB|69361': [259.04, null, 73.56, null, null, null, null, null, 110.14, null, 0, null],
+  'BNB|69363': [0, null, null, null, null, 0, null, null, null, null, 0, null],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
-const INICIO_2025 = { 'BB|58711': 9436.26, 'BB|37051': 4808.38, 'BB|36960': 4283.34 };
+const INICIO_2025 = {
+  'BB|58711': 9436.26, 'BB|37051': 4808.38, 'BB|36960': 4283.34,
+  'BNB|69918': 1124.09, 'BNB|69919': 1038.99, 'BNB|69921': 1081.57, 'BNB|69922': 0, 'BNB|69361': 1043.99, 'BNB|69363': 0,
+};
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
   ...listar(banco, /\.pdf$/i).filter((f) => !def.ilegiveis.includes(f)).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.pdf, formato: 'pdf' })),
   ...listar(banco, /\.ofx$/i).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.ofx, formato: 'ofx' })),
 ]);
-const leituras = new Map(); // arquivo → leitura
+const leituras = new Map(); // "arquivo#conta#mês" → leitura (um arquivo pode trazer várias contas/meses)
 const chave = (l) => `${l.banco}|${l.conta}`;
+const lidos = new Set(); // arquivos já lidos
+const guardar = (a, r) => {
+  lidos.add(a.arquivo);
+  for (const l of Array.isArray(r) ? r : [r]) {
+    if (l.parcial) continue; // mês não coberto até o último dia (ex.: abril até 23/04): não entra nas conferências de mês
+    l.arquivo = a.arquivo;
+    l.formatoArquivo = a.formato;
+    leituras.set(`${a.arquivo}#${l.conta}#${l.mesReferencia}`, l);
+  }
+  return Array.isArray(r) ? r : [r];
+};
 
 // conta → mês → leituras (PDF e OFX)
 const porContaMes = () => {
@@ -74,18 +115,16 @@ describeSe('extratos 2025 — saldo final de cada mês igual em todo lugar', () 
   });
 
   test.each(ARQUIVOS.map((a) => [a.banco, a.arquivo, a]))('%s %s: saldo recalculado = saldo do extrato', async (_b, _f, a) => {
-    const l = await a.ler(fs.readFileSync(a.caminho));
-    l.arquivo = a.arquivo;
-    l.formatoArquivo = a.formato;
-    leituras.set(a.arquivo, l);
-    expect(l.banco).toBe(a.banco);
-    expect(l.mesReferencia).toMatch(/^2025-\d{2}$/);
-    expect({ arquivo: a.arquivo, bate: l.conferencia.bate, divergencias: l.conferencia.divergencias || [] }).toEqual({ arquivo: a.arquivo, bate: true, divergencias: [] });
-    expect({ arquivo: a.arquivo, saldoFinal: r2(l.saldoInicial + l.lancamentos.reduce((s, x) => s + x.valor, 0)) }).toEqual({ arquivo: a.arquivo, saldoFinal: r2(l.saldoFinal) });
+    for (const l of guardar(a, await a.ler(fs.readFileSync(a.caminho)))) {
+      expect(l.banco).toBe(a.banco);
+      expect(l.mesReferencia).toMatch(/^2025-\d{2}$/);
+      expect({ arquivo: a.arquivo, conta: l.conta, bate: l.conferencia.bate, divergencias: l.conferencia.divergencias || [] }).toEqual({ arquivo: a.arquivo, conta: l.conta, bate: true, divergencias: [] });
+      expect({ arquivo: a.arquivo, conta: l.conta, saldoFinal: r2(l.saldoInicial + l.lancamentos.reduce((s, x) => s + x.valor, 0)) }).toEqual({ arquivo: a.arquivo, conta: l.conta, saldoFinal: r2(l.saldoFinal) });
+    }
   }, TIMEOUT);
 
   test('todos os arquivos foram lidos', () => {
-    expect(leituras.size).toBe(ARQUIVOS.length);
+    expect(lidos.size).toBe(ARQUIVOS.length);
   });
 
   test('PDF e OFX do mesmo mês têm o mesmo saldo inicial e final', () => {
@@ -145,7 +184,7 @@ describeBanco('extratos 2025 — saldos gravados no banco = saldos dos arquivos'
     if (error) throw new Error(error.message);
     imps = data || [];
     // garante as leituras mesmo se só este describe rodar
-    for (const a of ARQUIVOS) if (!leituras.has(a.arquivo)) leituras.set(a.arquivo, Object.assign(await a.ler(fs.readFileSync(a.caminho)), { arquivo: a.arquivo }));
+    for (const a of ARQUIVOS) if (!lidos.has(a.arquivo)) guardar(a, await a.ler(fs.readFileSync(a.caminho)));
   }, TIMEOUT);
 
   test('cada mês com arquivo legível está importado uma vez, com os saldos do arquivo', () => {
