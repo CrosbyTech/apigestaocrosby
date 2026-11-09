@@ -133,6 +133,11 @@ const msgTotvs = (e) => {
   if (d?.message) return d.message;
   return e?.message || String(e);
 };
+const diaAntes = (iso) => {
+  const x = new Date(`${String(iso).slice(0, 10)}T00:00:00Z`);
+  x.setUTCDate(x.getUTCDate() - 1);
+  return x.toISOString().slice(0, 10);
+};
 // a TOTVS recusa emissão/chegada = hoje: recua para ontem
 const dataPassada = (iso) => {
   const hoje = new Date().toISOString().slice(0, 10);
@@ -159,8 +164,11 @@ async function criarNoTotvs({ branchCnpj, supplierCpfCnpj, valor, data, observac
         {
           installmentCode: 1,
           bearerCode: DESPESA_TARIFA.portador,
-          issueDate: dataPassada(data),
-          arrivalDate: dataPassada(data),
+          // TOTVS: "Invalid DueDate" quando vencimento = emissão (09/11/2026, todas
+          // as 96 duplicatas aceitas tinham vencimento > emissão). Emissão/chegada
+          // 1 dia antes da saída; vencimento = data da saída.
+          issueDate: dataPassada(diaAntes(data)),
+          arrivalDate: dataPassada(diaAntes(data)),
           dueDate: `${String(data).slice(0, 10)}T15:00:00.000Z`,
           duplicateValue: valor,
           expenses: [{ expenseCode: DESPESA_TARIFA.codigo, costCenterCode: DESPESA_TARIFA.centroCusto, proratedPercentage: 100 }],
@@ -193,6 +201,8 @@ async function criarNoTotvs({ branchCnpj, supplierCpfCnpj, valor, data, observac
       return { duplicateCode, payload, resposta: resp.data ?? null };
     } catch (e) {
       ultimo = e;
+      // falha também fica no espelho (accounts_payable_commands) para diagnóstico
+      registrarComandoAP({ command: 'create', payload, sucesso: false, http_status: e.response?.status ?? null, resposta: e.response?.data ?? null, erro: e.message, origem_tabela: 'conciliacao-tarifas', origem_id: null }).catch(() => {});
       if (ehCodigoDuplicado(e)) continue; // sorteia outro número
       throw new Error(`TOTVS recusou a duplicata: ${msgTotvs(e)}`);
     }
