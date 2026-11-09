@@ -40,6 +40,21 @@ const GRUPO = {
   // 36.569.459 (Crosby Recife Mall / Shopping Recife) NÃO entra: regra do Yago (06/11/2026), nada da Shopping Recife em nenhum banco
 };
 const SHOPPING_RECIFE = /SHOPPING\s*RECIFE|RECIFE\s*MALL|36\.?569\.?459/i;
+// Nome de cada empresa (raiz do CNPJ) para a tela: filtro "CNPJ do titular" e cabeçalhos
+export const NOMES_GRUPO = {
+  17177680: 'CROSBY (Ferreira Comércio e Confecções)',
+  27728810: 'FA MODA (Fabio Ferreira de Lima Azevedo)',
+  33592092: 'AZ VESTUÁRIO (Irmãos CR Vestuário)',
+  53661116: 'IRMÃOS VAREJO COMERCIAL',
+};
+// CNPJ do titular quando o extrato não traz (PDF do BB, consolidado do Santander): banco|conta → CNPJ
+const CNPJ_CONTA = {
+  'BB|58711': '17177680000116', // CROSBY D CONFECCAO LTDA
+  'BB|37051': '33592092000103', // IRMAOS C V LTDA
+  'BB|36960': '27728810000115', // FABIO F LIMA AZEVEDO
+  'SANTANDER|13008301': '33592092000103', // IRMAOS CR VESTUARIO LTDA (ag. 4543)
+};
+const cnpjDoTitular = (banco, conta, titular, cnpjLido) => cnpjLido || CNPJ_CONTA[`${banco}|${conta}`] || null;
 const PARTICULAS = new Set(['DE', 'DA', 'DO', 'DAS', 'DOS', 'E']);
 const tokens = (v) => normNome(v).split(' ').filter((t) => t && !PARTICULAS.has(t));
 // nome curto/truncado do extrato bate com o nome completo quando cada pedaço é prefixo do pedaço correspondente
@@ -318,7 +333,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
       conta: leitura.conta,
       conta_dv: leitura.contaDv,
       titular: leitura.titular,
-      titular_cnpj: leitura.titularCnpj || null,
+      titular_cnpj: cnpjDoTitular(banco, leitura.conta, leitura.titular, leitura.titularCnpj),
       formato: leitura.formato || 'pdf',
       mes_referencia: leitura.mesReferencia,
       periodo_inicio: leitura.lancamentos.length && leitura.lancamentos.map((l) => l.data).sort()[0] < leitura.periodo.inicio ? leitura.lancamentos.map((l) => l.data).sort()[0] : leitura.periodo.inicio,
@@ -346,7 +361,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     conta: leitura.conta,
     conta_dv: leitura.contaDv,
     titular: leitura.titular,
-    titular_cnpj: leitura.titularCnpj || null,
+    titular_cnpj: cnpjDoTitular(banco, leitura.conta, leitura.titular, leitura.titularCnpj),
     historico_descricao: l.historicoDescricao || null,
     data: l.data,
     data_balancete: l.dataBalancete,
@@ -572,15 +587,22 @@ export async function casarTransferencias() {
 
 export async function listarContas() {
   await garantirTabelas();
-  const imps = await todos(() => supabase.from(T.imp).select('id,banco,agencia,conta,conta_dv,titular,mes_referencia,periodo_inicio,periodo_fim,saldo_inicial,saldo_final,bate,qtd,arquivo_nome,criado_em').order('banco').order('conta').order('periodo_inicio'));
+  const imps = await todos(() => supabase.from(T.imp).select('id,banco,agencia,conta,conta_dv,titular,titular_cnpj,mes_referencia,periodo_inicio,periodo_fim,saldo_inicial,saldo_final,bate,qtd,arquivo_nome,criado_em').order('banco').order('conta').order('periodo_inicio'));
   const porConta = new Map();
   for (const i of imps) {
     const k = `${i.banco}|${i.conta}`;
-    if (!porConta.has(k)) porConta.set(k, { chave: k, banco: i.banco, agencia: i.agencia, conta: i.conta, contaDv: i.conta_dv, titular: i.titular, importacoes: [], periodoInicio: i.periodo_inicio, periodoFim: i.periodo_fim });
+    if (!porConta.has(k)) porConta.set(k, { chave: k, banco: i.banco, agencia: i.agencia, conta: i.conta, contaDv: i.conta_dv, titular: i.titular, titularCnpj: null, importacoes: [], periodoInicio: i.periodo_inicio, periodoFim: i.periodo_fim });
     const c = porConta.get(k);
     c.importacoes.push(i);
+    if (!c.titularCnpj && i.titular_cnpj) c.titularCnpj = i.titular_cnpj;
     if (i.periodo_inicio < c.periodoInicio) c.periodoInicio = i.periodo_inicio;
     if (i.periodo_fim > c.periodoFim) c.periodoFim = i.periodo_fim;
+  }
+  // CNPJ (do extrato ou da tabela de contas conhecidas), raiz e nome da empresa para o filtro da tela
+  for (const c of porConta.values()) {
+    c.titularCnpj = cnpjDoTitular(c.banco, c.conta, c.titular, c.titularCnpj);
+    c.cnpjRaiz = c.titularCnpj ? soDigitos(c.titularCnpj).slice(0, 8) : raizDoGrupo(c.titular, null);
+    c.grupoNome = c.cnpjRaiz ? NOMES_GRUPO[c.cnpjRaiz] || null : null;
   }
   return [...porConta.values()];
 }
