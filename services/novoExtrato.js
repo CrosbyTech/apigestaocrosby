@@ -16,6 +16,7 @@
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoCaixaOfx, lerExtratoBbOfx, lerExtratoBnbOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
@@ -159,9 +160,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') === '%PDF') return /\bBNB\b|NORDESTE/.test(n) ? 'BNB' : /BRADESCO/.test(n) ? 'BRADESCO' : /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
+  if (cab.toString('latin1') === '%PDF') return /\bBNB\b|NORDESTE/.test(n) ? 'BNB' : /CAIXA/.test(n) ? 'CAIXA' : /BRADESCO/.test(n) ? 'BRADESCO' : /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred, Bradesco ou BNB) ou OFX (Caixa, Santander, Banco do Brasil ou BNB).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred, Bradesco, BNB ou Caixa 2025+) ou OFX (Caixa, Santander, Banco do Brasil ou BNB).');
 }
 
 /**
@@ -191,7 +192,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     }
   } else {
     // PDF: tenta primeiro o leitor sugerido pelo nome do arquivo e depois o outro
-    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander, UNICRED: lerExtratoUnicred, BRADESCO: lerExtratoBradesco, BNB: lerExtratoBnb };
+    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander, UNICRED: lerExtratoUnicred, BRADESCO: lerExtratoBradesco, BNB: lerExtratoBnb, CAIXA: lerExtratoCaixaPdf };
     const ordem = [banco, ...Object.keys(LEITORES)].filter((b, i, a) => LEITORES[b] && a.indexOf(b) === i);
     const erros = [];
     for (const b of ordem) {

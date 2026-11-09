@@ -68,8 +68,22 @@ const BANCOS_OFX = {
   4: { banco: 'BNB', nome: 'do Banco do Nordeste', contas: CONTAS_BNB, agencia: '035', balamtInicial: true },
 };
 
-// Históricos da Caixa → o que são (para a tela e para o casamento de transferências)
-const HISTORICOS = {
+// Históricos da Caixa → o que são (para a tela e para o casamento de transferências). Usado também pelo leitor do PDF 2025.
+export const HISTORICOS_CAIXA = {
+  'DEPOSITO DINH LOTERICO': 'Depósito em dinheiro (lotérica)',
+  'PIX RECEBIDO': 'Pix recebido',
+  'DEB PIX CHAVE': 'Pix enviado',
+  'TAR PIX': 'Tarifa Pix',
+  'DEBITO PRESTACAO CDC': 'Prestação de empréstimo (CDC)',
+  'DEB PREST CDC': 'Prestação de empréstimo (CDC)',
+  'DEBITO PRESTA SIEMP': 'Prestação de empréstimo',
+  'DEB PREST EMPRS SIAPI': 'Prestação de empréstimo',
+  'DEBITO DE IOF': 'IOF',
+  'COBRANCA DE JUROS': 'Juros cheque especial',
+  'DEB JUROS DE MORA': 'Juros de mora',
+  'MENSALIDADE CESTA SERVICO': 'Tarifa cesta de serviços',
+  'DEBITO VR BENEFICIOS': 'Vale-refeição',
+  'DEB TARIF MANUTENCAO': 'Tarifa de manutenção',
   'CRED PIX': 'Pix recebido',
   'ENVIO PIX': 'Pix enviado',
   'DEB PIX CH': 'Pix enviado',
@@ -101,6 +115,8 @@ const HISTORICOS = {
   'VIDA PREVI': 'Seguro/previdência',
   'DEB.AUTOR.': 'Débito autorizado',
 };
+
+const HISTORICOS = HISTORICOS_CAIXA;
 
 export function ehOfx(buffer) {
   const t = Buffer.isBuffer(buffer) ? buffer.subarray(0, 4000).toString('latin1') : String(buffer).slice(0, 4000);
