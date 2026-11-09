@@ -15,7 +15,7 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoSicrediOfx, lerExtratoUnicredOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoSicrediOfx, lerExtratoUnicredOfx, lerExtratoDaycovalOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
@@ -94,6 +94,10 @@ const BANCOS = {
     // CONSOLIDADO de maio: mesmo mês na base só conta corrente (1 → 1) — não se compara com o Mensal
     ilegiveis: ['BRADESCO CROSBY CONSOLIDADO MAIO.pdf', 'BRADESCO FABIO CONSOLIDADO MAIO.pdf'],
   },
+  DAYCOVAL: {
+    ofx: lerExtratoDaycovalOfx, // só dezembro/2025; BALAMT em 31/12; PDF é imagem
+    ilegiveis: ['DAYCOVAL CROSBY DEZEMBRO.pdf'],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo (dias faltando), conhecido e aceito
 const QUEBRAS = [
@@ -118,6 +122,7 @@ const BURACOS = [
   { banco: 'SANTANDER', conta: '29000199', meses: ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-09', '2025-10'] }, // conta vinculada aberta em novembro
   { banco: 'BRADESCO', conta: '249374', meses: ['2025-12'] }, // dezembro não existe na pasta
   { banco: 'BRADESCO', conta: '249286', meses: ['2025-12'] },
+  { banco: 'DAYCOVAL', conta: '001516580', meses: ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-09', '2025-10', '2025-11'] }, // só dezembro na pasta
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -156,6 +161,7 @@ const FIM_DE_MES = {
   // Bradesco: saldo do Extrato Mensal (conta corrente + Invest Fácil)
   'BRADESCO|249374': [419.62, 7713.27, 9254.88, 1083.64, 149.14, 612.86, 228.19, 284.38, 0, 57.84, 10.08, null],
   'BRADESCO|249286': [353.24, -28397, 173.54, 1838.4, 191.9, 123.76, -29235.62, -29454.6, -30000, -29958.23, -29579.26, null],
+  'DAYCOVAL|001516580': [null, null, null, null, null, null, null, null, null, null, null, 821],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
 const INICIO_2025 = {
@@ -170,7 +176,7 @@ const INICIO_2025 = {
 };
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
-  ...listar(banco, /\.pdf$/i).filter((f) => !def.ilegiveis.includes(f)).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.pdf, formato: 'pdf' })),
+  ...(def.pdf ? listar(banco, /\.pdf$/i).filter((f) => !def.ilegiveis.includes(f)).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.pdf, formato: 'pdf' })) : []),
   ...(def.ofx ? listar(banco, /\.ofx$/i).map((f) => ({ banco, arquivo: f, caminho: path.join(RAIZ, banco, f), ler: def.ofx, formato: 'ofx' })) : []),
 ]);
 const leituras = new Map(); // "arquivo#conta#mês" → leitura (um arquivo pode trazer várias contas/meses)
