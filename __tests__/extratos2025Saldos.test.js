@@ -15,7 +15,8 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2025_DIR || 'C:/Users/yagom/Desktop/EXTRATOS MENSAIS 2025';
 const temPasta = fs.existsSync(RAIZ);
@@ -48,6 +49,19 @@ const BANCOS = {
       'BNB CROSBY 069919-0 OUTUBRO.pdf',
     ],
   },
+  CAIXA: {
+    pdf: lerExtratoCaixaPdf, // PDF com texto (2025): layouts "Lançamentos de", "Extrato no período" (app) e "Extrato por período" (Gerenciador)
+    ofx: lerExtratoCaixaOfx, // BALAMT costuma ser de DEPOIS do fim do mês (data da exportação) → saldo indefinido no arquivo, fecha pelo encadeamento
+    ilegiveis: [
+      // só imagem (Gerenciador CAIXA antigo)
+      'CAIXA CROSBY JANEIRO.pdf', 'CAIXA CROSBY FEVEREIRO.pdf', 'CAIXA CROSBY MARÇO.pdf', 'CAIXA CROSBY DEZEMBRO.pdf',
+      'CAIXA FABIO JANEIRO.pdf', 'CAIXA FABIO FEVEREIRO.pdf', 'CAIXA FABIO MARÇO.pdf', 'CAIXA FABIO DEZEMBRO.pdf',
+      'CAIXA IRMAOS JANEIRO.pdf', 'CAIXA IRMAOS FEVEREIRO.pdf', 'CAIXA IRMAOS MARÇO.pdf', 'CAIXA IRMAOS DEZEMBRO.pdf',
+      // PDF do app usa data de PROCESSAMENTO: a TAR EXT EL de 28/10 (0,20) só aparece no PDF de novembro → saldo final do PDF de outubro
+      // não é o do fim do mês (o OFX e o "Saldo anterior" do PDF de novembro provam: -9.916,05)
+      'CAIXA CROSBY OUTUBRO.pdf',
+    ],
+  },
 };
 // Meses sem nenhum arquivo legível (PDF imagem/errado e sem OFX): o encadeamento pula e o banco pode não ter o mês
 const BURACOS = [
@@ -57,6 +71,9 @@ const BURACOS = [
   { banco: 'BNB', conta: '69922', meses: ['2025-08'] },
   { banco: 'BNB', conta: '69361', meses: ['2025-02', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-10', '2025-12'] }, // abril só até 23/04 (parcial)
   { banco: 'BNB', conta: '69363', meses: ['2025-02', '2025-03', '2025-04', '2025-05', '2025-07', '2025-08', '2025-09', '2025-10', '2025-12'] },
+  { banco: 'CAIXA', conta: '000578136386', meses: ['2025-02', '2025-03'] },
+  { banco: 'CAIXA', conta: '000578136459', meses: ['2025-02', '2025-03'] },
+  { banco: 'CAIXA', conta: '000578136635', meses: ['2025-02', '2025-03'] },
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -71,11 +88,16 @@ const FIM_DE_MES = {
   'BNB|69922': [0, 0, 0, 0, 0, 0, 0, null, 0, 0, 0, 0],
   'BNB|69361': [259.04, null, 73.56, null, null, null, null, null, 110.14, null, 0, null],
   'BNB|69363': [0, null, null, null, null, 0, null, null, null, null, 0, null],
+  // Caixa: jan e ago–dez só pelo OFX (saldo pelo encadeamento); dez inclui o 1º dia útil de janeiro/2026 (BALAMT em 02/01), como em 2024
+  'CAIXA|000578136386': [425.2, null, null, 2808.45, 470.41, 1188.34, -7528.14, -9832.13, -9123.4, -9916.05, -7604.92, -11121.77],
+  'CAIXA|000578136459': [659.86, null, null, 523.48, 331.09, 124.84, -9927.02, -9737.48, -9368.93, -10801.01, -8843.07, -12709.21],
+  'CAIXA|000578136635': [236.49, null, null, 1767.69, 429.73, 809.98, -7953.26, -7583.87, -9985.92, -8866.84, 0, 7056.51],
 };
 // Saldo em 31/12/2024 (fim do ano anterior) → saldo inicial de janeiro
 const INICIO_2025 = {
   'BB|58711': 9436.26, 'BB|37051': 4808.38, 'BB|36960': 4283.34,
   'BNB|69918': 1124.09, 'BNB|69919': 1038.99, 'BNB|69921': 1081.57, 'BNB|69922': 0, 'BNB|69361': 1043.99, 'BNB|69363': 0,
+  'CAIXA|000578136386': 17259, 'CAIXA|000578136459': 2898.77, 'CAIXA|000578136635': 1397.81,
 };
 
 const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) => [
@@ -91,9 +113,23 @@ const guardar = (a, r) => {
     if (l.parcial) continue; // mês não coberto até o último dia (ex.: abril até 23/04): não entra nas conferências de mês
     l.arquivo = a.arquivo;
     l.formatoArquivo = a.formato;
+    l.movimento = r2(l.lancamentos.reduce((s, x) => s + x.valor, 0));
+    l.saldoIndefinido = a.formato === 'ofx' && !!l.saldoFinalEm && l.saldoFinalEm > l.periodo.fim; // BALAMT de depois do mês
     leituras.set(`${a.arquivo}#${l.conta}#${l.mesReferencia}`, l);
   }
   return Array.isArray(r) ? r : [r];
+};
+// leitura "de referência" do mês: a primeira com saldo definido (PDF ou OFX fechado), senão a indefinida
+const referencia = (ls) => ls.find((l) => !l.saldoIndefinido) || ls[0];
+// saldo no fim do mês: da leitura definida; se só há OFX indefinido, saldo do fim do mês anterior + movimentos
+const fimDoMes = (contas, conta, mes) => {
+  const ls = contas.get(conta)?.get(mes);
+  if (!ls) return undefined; // sem arquivo
+  const ref = referencia(ls);
+  if (!ref.saldoIndefinido) return r2(ref.saldoFinal);
+  const ant = mesAnterior(mes);
+  const base = ant ? fimDoMes(contas, conta, ant) : INICIO_2025[conta];
+  return base == null ? null : r2(base + ref.movimento);
 };
 
 // conta → mês → leituras (PDF e OFX)
@@ -132,7 +168,10 @@ describeSe('extratos 2025 — saldo final de cada mês igual em todo lugar', () 
     for (const [conta, meses] of porContaMes()) {
       for (const [mes, ls] of meses) {
         for (const l of ls.slice(1)) {
-          expect({ conta, mes, arquivo: l.arquivo, saldoInicial: r2(l.saldoInicial), saldoFinal: r2(l.saldoFinal) }).toEqual({ conta, mes, arquivo: l.arquivo, saldoInicial: r2(ls[0].saldoInicial), saldoFinal: r2(ls[0].saldoFinal) });
+          if (l.saldoIndefinido || ls[0].saldoIndefinido) {
+            // um dos lados não tem saldo do fim do mês: compara o movimento (a quantidade pode diferir por linha de valor zero no OFX)
+            expect({ conta, mes, arquivo: l.arquivo, movimento: l.movimento }).toEqual({ conta, mes, arquivo: l.arquivo, movimento: ls[0].movimento });
+          } else expect({ conta, mes, arquivo: l.arquivo, saldoInicial: r2(l.saldoInicial), saldoFinal: r2(l.saldoFinal) }).toEqual({ conta, mes, arquivo: l.arquivo, saldoInicial: r2(ls[0].saldoInicial), saldoFinal: r2(ls[0].saldoFinal) });
           comparados++;
         }
       }
@@ -142,16 +181,19 @@ describeSe('extratos 2025 — saldo final de cada mês igual em todo lugar', () 
 
   test('encadeamento: saldo inicial do mês = saldo final do mês anterior', () => {
     const verificados = [];
-    for (const [conta, meses] of porContaMes()) {
+    const contas = porContaMes();
+    for (const [conta, meses] of contas) {
       const [banco, numero] = conta.split('|');
       for (const mes of MESES) {
-        const l = meses.get(mes)?.[0];
-        if (!l) {
+        const ls = meses.get(mes);
+        if (!ls) {
           expect({ conta, mes, temArquivo: false, buracoConhecido: buraco(banco, numero, mes) }).toEqual({ conta, mes, temArquivo: false, buracoConhecido: true });
           continue;
         }
+        const l = referencia(ls);
+        if (l.saldoIndefinido) continue; // só OFX com BALAMT de depois do mês: o saldo dele É o encadeamento, nada a conferir aqui
         const ant = mesAnterior(mes);
-        const esperado = ant ? (meses.get(ant)?.[0]?.saldoFinal ?? (buraco(banco, numero, ant) ? null : undefined)) : INICIO_2025[conta];
+        const esperado = ant ? (meses.get(ant) ? fimDoMes(contas, conta, ant) : buraco(banco, numero, ant) ? null : undefined) : INICIO_2025[conta];
         if (esperado === null) continue; // mês anterior é buraco conhecido: não dá para encadear
         expect({ conta, mes, saldoInicial: r2(l.saldoInicial) }).toEqual({ conta, mes, saldoInicial: r2(esperado) });
         verificados.push(`${conta} ${mes}`);
@@ -171,7 +213,7 @@ describeSe('extratos 2025 — saldo final de cada mês igual em todo lugar', () 
           expect({ conta, mes, arquivo: l?.arquivo ?? null }).toEqual({ conta, mes, arquivo: null });
           return;
         }
-        expect({ conta, mes, saldoFinal: l ? r2(l.saldoFinal) : null }).toEqual({ conta, mes, saldoFinal: saldo });
+        expect({ conta, mes, saldoFinal: l ? fimDoMes(contas, conta, mes) : null }).toEqual({ conta, mes, saldoFinal: saldo });
       });
     }
   });
@@ -188,17 +230,22 @@ describeBanco('extratos 2025 — saldos gravados no banco = saldos dos arquivos'
   }, TIMEOUT);
 
   test('cada mês com arquivo legível está importado uma vez, com os saldos do arquivo', () => {
-    for (const [conta, meses] of porContaMes()) {
+    const contas = porContaMes();
+    for (const [conta, meses] of contas) {
       const [banco, numero] = conta.split('|');
       for (const mes of MESES) {
-        const l = meses.get(mes)?.[0];
+        const ls = meses.get(mes);
         const gravadas = imps.filter((i) => i.banco === banco && i.conta === numero && i.mes_referencia === mes);
-        if (!l) {
+        if (!ls) {
           expect({ conta, mes, importacoes: gravadas.length, buracoConhecido: buraco(banco, numero, mes) }).toEqual({ conta, mes, importacoes: 0, buracoConhecido: true });
           continue;
         }
+        const l = referencia(ls);
         expect({ conta, mes, importacoes: gravadas.length }).toEqual({ conta, mes, importacoes: 1 });
-        expect({ conta, mes, saldoInicial: r2(gravadas[0].saldo_inicial), saldoFinal: r2(gravadas[0].saldo_final) }).toEqual({ conta, mes, saldoInicial: r2(l.saldoInicial), saldoFinal: r2(l.saldoFinal) });
+        // saldo final do mês: do arquivo ou, no OFX com BALAMT de depois do mês, pelo encadeamento
+        const fim = fimDoMes(contas, conta, mes);
+        const ini = r2(fim - l.movimento);
+        expect({ conta, mes, saldoInicial: r2(gravadas[0].saldo_inicial), saldoFinal: r2(gravadas[0].saldo_final) }).toEqual({ conta, mes, saldoInicial: ini, saldoFinal: fim });
       }
     }
   });
