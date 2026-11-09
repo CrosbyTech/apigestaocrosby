@@ -1048,7 +1048,8 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
         const usado = usados.get(`${c.origem}:${c.id}`) || 0;
         const restante = round2((c.valorDuplicata ?? c.valor) - usado);
         // título já todo usado em outra conciliação continua na lista (foi pesquisado), só não pode ser escolhido
-        return { ...c, usado, restante, esgotada: restante <= VALOR_TOL, motivos: [], score: null };
+        // esgotada = não sobra nem 1 centavo (com a tolerância de 0,011 uma duplicata de R$ 0,01 nunca usada ficava bloqueada — Titia, 09/11/2026)
+        return { ...c, usado, restante, esgotada: restante < 0.005, motivos: [], score: null };
       }),
     f.status,
   );
@@ -1302,7 +1303,7 @@ export async function buscarContasReceber({ titulo, cliente, codigo, cnpj, nome,
         const capacidade = c.valorPago ?? c.valor; // o que entra na conta
         const usado = usados.get(`${c.origem}:${c.id}`) || 0;
         const restante = round2(capacidade - usado);
-        return { ...c, valorDuplicata: capacidade, pago: c.valorPago != null, usado: round2(usado), restante, esgotada: restante <= VALOR_TOL, motivos: [], score: null, ...(proprias.includes(c.branch) ? { empresaDaConta: true } : {}) };
+        return { ...c, valorDuplicata: capacidade, pago: c.valorPago != null, usado: round2(usado), restante, esgotada: restante < 0.005, motivos: [], score: null, ...(proprias.includes(c.branch) ? { empresaDaConta: true } : {}) };
       }),
     f.status,
   );
@@ -1767,7 +1768,7 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
       const valorDup = Number(it.valorDuplicata ?? it.valor);
       const jaUsado = usados.get(`${it.origem}:${it.id}`) || 0;
       const disponivel = round2(valorDup - jaUsado);
-      if (disponivel <= VALOR_TOL) throw new Error(`A duplicata ${it.duplicata || it.id} (R$ ${valorDup.toFixed(2)}) já foi totalmente usada em outras saídas.`);
+      if (disponivel < 0.005) throw new Error(`A duplicata ${it.duplicata || it.id} (R$ ${valorDup.toFixed(2)}) já foi totalmente usada em outras saídas.`);
       const usar = round2(Math.min(disponivel, restante));
       restante = round2(restante - usar);
       alocados.push({ origem: it.origem, id: it.id, nome: it.nome, doc: it.doc, duplicata: it.duplicata, vencimento: it.vencimento, data: it.data, empresa: it.empresa, detalhe: it.detalhe, valorDuplicata: valorDup, valorUsado: usar, parcial: usar < disponivel - VALOR_TOL || jaUsado > VALOR_TOL, ...(it.cr ? { cr: it.cr } : {}), ...(it.techfin ? { techfin: it.techfin } : {}) });
