@@ -44,6 +44,7 @@ import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
 import transferenciasRoutes from './routes/transferencias.routes.js';
 import pedidosVendaRoutes from './routes/pedidosVenda.routes.js';
+import faturamentoExpedicaoRoutes from './routes/faturamentoExpedicao.routes.js';
 import balancoRfidRoutes from './routes/balancoRfid.routes.js';
 import erpRoutes from './routes/erp.routes.js';
 import { iniciarJobErpSync } from './jobs/erp-sync.job.js';
@@ -244,6 +245,7 @@ app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede 
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
 app.use('/api/transferencias', transferenciasRoutes); // Transferências de mercadoria entre empresas — regra do POP (7272/7273/7280), página /transferencias-mercadoria
 app.use('/api/pedidos-venda', pedidosVendaRoutes); // Pedidos de venda do Dryland (separação → pedido), página /expedicao/pedidos-venda
+app.use('/api/faturamento-expedicao', faturamentoExpedicaoRoutes); // FATURAR da expedição: NF-e pelo HeadCoach (empresa 99) + documento interno e contas a receber no TOTVS
 app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos de contagem do app Android (Urovo)
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations

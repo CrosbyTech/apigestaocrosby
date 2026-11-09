@@ -8,6 +8,11 @@
 // Cópia feita pelo job pedidos-venda-sync (services/pedidosVendaDryland.js).
 //
 //   GET  /?canal=&status=&separacao=&transferencias=1&de=&ate=&busca=   lista + resumo
+//   GET  /painel?dias=&forcar=1      Painel da expedição (cópia do PAINEL do /frete do Dryland, só leitura)
+//   GET  /painel/concluidos?q=       busca de concluídos fora dos 500 cards do painel
+//   GET  /painel/duplicatas          lista completa das duplicatas do boleto
+//   GET  /painel/expedicao?q=        consulta de expedição (rastreio por transação/NF/cliente)
+//   POST /painel/rastreio-correios   { codigo } rastreio Correios ao vivo
 //   GET  /:chave                     detalhe (chave = id do card ou SEP:<ref>)
 //   POST /sincronizar                copia agora do Dryland
 //   PUT  /:chave/pagamento           { forma, nsu, autorizacao, obs, por } registro manual
@@ -18,6 +23,13 @@
 import express from 'express';
 import supabase from '../config/supabase.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import {
+  montarPainel,
+  buscarConcluidos,
+  listarDuplicatas,
+  consultarExpedicao,
+  rastreioCorreios,
+} from '../services/painelExpedicaoDryland.js';
 import {
   sincronizarPedidosDryland,
   registrarPagamentoManual,
@@ -66,9 +78,12 @@ async function lerTudo(tabela, montar) {
 
 // Último faturamento (transação gerada no HeadCoach) que não foi cancelado
 const resumoFat = (lista) => {
-  const vivos = (lista || []).filter((f) => f.transacao_status !== 6);
+  // NF-e pelo HeadCoach: só conta a autorizada; fluxo antigo: transação não cancelada
+  const vivos = (lista || []).filter((f) => (f.venda_id ? f.nf_status === 'autorizada' : f.transacao_status !== 6));
   const f = vivos[0] || null;
-  return f ? { id: f.id, transacao: f.transacao_code, status: f.transacao_status, em: f.criado_em, qtd: f.qtd_conferida, total: Number(f.total) } : null;
+  return f
+    ? { id: f.id, transacao: f.transacao_code, nf: f.nf_numero, status: f.transacao_status, em: f.criado_em, qtd: f.qtd_conferida, total: Number(f.total) }
+    : null;
 };
 
 const resumoSep = (p) => (p ? { status: p.status, qtd_pecas: p.qtd_pecas, qtd_separada: p.qtd_separada, separado_em: p.separado_em } : null);
@@ -160,7 +175,7 @@ router.get(
         lerTudo('pedidos_venda_dryland', (q) => q.select('*').order('ref')),
         lerTudo('pedidos_venda_anexos', (q) => q.select('chave, pagamento_manual, comprovante_url').order('chave')),
         lerTudo('pedidos_venda_faturamentos', (q) =>
-          q.select('id, chave, transacao_code, transacao_status, qtd_conferida, total, criado_em').order('criado_em', { ascending: false }),
+          q.select('id, chave, venda_id, nf_numero, nf_status, transacao_code, transacao_status, qtd_conferida, total, criado_em').order('criado_em', { ascending: false }),
         ).catch(() => []),
       ]);
       const fatsPor = new Map();
@@ -231,6 +246,69 @@ router.post(
       return successResponse(res, r, `${r.fila?.cards ?? 0} venda(s) da fila e ${r.pedidos} pedido(s) da separação atualizados`);
     } catch (err) {
       return errorResponse(res, `Não consegui ler o Dryland: ${err.message}`, 502, 'DRYLAND_ERROR');
+    }
+  }),
+);
+
+// ─── PAINEL DA EXPEDIÇÃO (antes do /:chave, senão "painel" vira chave) ───────
+const falhaDryland = (res, err) => errorResponse(res, `Não consegui ler o Dryland: ${err.message}`, 502, 'DRYLAND_ERROR');
+
+router.get(
+  '/painel',
+  asyncHandler(async (req, res) => {
+    try {
+      const p = await montarPainel({ diasVarejo: req.query.dias, forcar: req.query.forcar === '1' });
+      return successResponse(res, p, `${p.cards.length} card(s) do painel`);
+    } catch (err) {
+      return falhaDryland(res, err);
+    }
+  }),
+);
+
+router.get(
+  '/painel/concluidos',
+  asyncHandler(async (req, res) => {
+    try {
+      const l = await buscarConcluidos(req.query.q);
+      return successResponse(res, l, `${l.length} concluído(s)`);
+    } catch (err) {
+      return falhaDryland(res, err);
+    }
+  }),
+);
+
+router.get(
+  '/painel/duplicatas',
+  asyncHandler(async (req, res) => {
+    try {
+      const l = await listarDuplicatas({ forcar: req.query.forcar === '1' });
+      return successResponse(res, l, `${l.length} card(s) no boleto`);
+    } catch (err) {
+      return falhaDryland(res, err);
+    }
+  }),
+);
+
+router.get(
+  '/painel/expedicao',
+  asyncHandler(async (req, res) => {
+    try {
+      const l = await consultarExpedicao(req.query.q);
+      return successResponse(res, l, `${l.length} envio(s)`);
+    } catch (err) {
+      return falhaDryland(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/painel/rastreio-correios',
+  asyncHandler(async (req, res) => {
+    try {
+      const j = await rastreioCorreios(req.body?.codigo);
+      return successResponse(res, j, 'Rastreio');
+    } catch (err) {
+      return errorResponse(res, err.message, 400, 'RASTREIO_ERRO');
     }
   }),
 );

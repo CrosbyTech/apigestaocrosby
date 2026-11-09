@@ -20,8 +20,8 @@
 // ============================================================================
 import supabase from '../config/supabase.js';
 
-const DRYLAND_URL = process.env.DRYLAND_SUPABASE_URL || 'https://umhczriycvtagjqjnrzm.supabase.co';
-const DRYLAND_KEY =
+export const DRYLAND_URL = process.env.DRYLAND_SUPABASE_URL || 'https://umhczriycvtagjqjnrzm.supabase.co';
+export const DRYLAND_KEY =
   process.env.DRYLAND_SUPABASE_ANON_KEY ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVtaGN6cml5Y3Z0YWdqcWpucnptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2NTAyOTEsImV4cCI6MjA5MzIyNjI5MX0.SVWG6_7DZNv-Tz4AgRwQ1791lAEWgpcEv15k9rERlwI';
 
@@ -230,6 +230,18 @@ async function capturarPagamentos() {
 }
 
 // ─── Fila de faturamento (Painel do /frete) ──────────────────────────────────
+// Chamada de leitura a uma RPC do Dryland (chave anon, a mesma do bundle do Dryland)
+export async function drylandRpc(fn, body = {}) {
+  const r = await fetch(`${DRYLAND_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { apikey: DRYLAND_KEY, Authorization: `Bearer ${DRYLAND_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!r.ok) throw new Error(`Dryland ${fn} HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return r.json();
+}
+
 export const CANAIS_FILA = ['varejo', 'revenda', 'franquias', 'mtm'];
 export const COMPROVANTE_URL = (path) => `${DRYLAND_URL}/storage/v1/object/public/missao-nfs/${path}`;
 

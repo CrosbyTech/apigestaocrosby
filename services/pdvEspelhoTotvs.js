@@ -25,7 +25,7 @@ import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelpe
 export const DOC_INTERNO_PADRAO = { operacao: 511, terminal: 1, cfop: 5102, paymentConditionCode: 1 };
 
 // forma do HeadCoach → tipo de documento do recebimento TOTVS
-const TIPO_DOC_TOTVS = { dinheiro: 3, pix: 26, credito: 4, debito: 5, credito_loja: 20 };
+const TIPO_DOC_TOTVS = { dinheiro: 3, pix: 26, credito: 4, debito: 5, credito_loja: 20, boleto: 1 };
 
 export class EspelhoError extends Error {
   constructor(message, code = 'ESPELHO_TOTVS', status = 400, details = null) {
@@ -89,9 +89,22 @@ async function gravar(vendaId, patch) {
 }
 
 // Recebimentos do TOTVS a partir dos pagamentos da venda
-function montarRecebimentos(pagamentos, transactionCode, data) {
+function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null } = {}) {
   const receipts = [];
   for (const p of pagamentos) {
+    if (p.forma === 'boleto') {
+      if (!parcelasBoleto.length) throw new EspelhoError('Boleto sem parcelas/vencimentos', 'BOLETO_SEM_PARCELAS');
+      parcelasBoleto.forEach((d, i) =>
+        receipts.push({
+          documentType: TIPO_DOC_TOTVS.boleto,
+          documentNumber: Number(documento) || transactionCode,
+          installmentNumber: i + 1,
+          dueDate: String(d.vencimento).slice(0, 10),
+          documentAmount: round2(d.valor),
+        }),
+      );
+      continue;
+    }
     const tipo = TIPO_DOC_TOTVS[p.forma];
     if (!tipo) throw new EspelhoError(`Forma de pagamento "${p.forma}" não tem equivalente no recebimento do TOTVS`, 'FORMA_SEM_EQUIVALENTE');
     const liquido = round2(Number(p.valor) - Number(p.troco || 0));
@@ -157,7 +170,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     return { transactionCode: venda.totvs_transacao_code, transactionDate: venda.totvs_transacao_date, status: 4, docInternoSeq: venda.totvs_doc_interno_seq, jaEstava: true };
   }
 
-  const operacao = cfg?.operacao_doc_interno || DOC_INTERNO_PADRAO.operacao;
+  const operacao = venda.operacao_doc_interno || cfg?.operacao_doc_interno || DOC_INTERNO_PADRAO.operacao;
   const terminal = cfg?.terminal_totvs || DOC_INTERNO_PADRAO.terminal;
   const customerCode = venda.cliente_code || cfg?.cliente_balcao_totvs || null;
   if (!customerCode) {
@@ -178,18 +191,35 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
         quantity: Number(i.quantidade),
         value: round2(i.valor_unit),
         ...(desconto > 0 ? { discountValue: desconto } : {}),
-        cfop: DOC_INTERNO_PADRAO.cfop,
+        cfop: Number(i.cfop) || DOC_INTERNO_PADRAO.cfop,
       };
     });
+    // Expedição: o documento interno não tem campo de frete e o recebimento
+    // exige total = total da transação. O frete entra no valor de UMA peça
+    // (separada em linha própria de 1 unidade) para o contas a receber bater
+    // com o total da NF-e (produtos + frete).
+    const frete = round2(venda.frete || 0);
+    if (frete > 0 && items.length) {
+      const k = items.reduce((m, it, idx) => (it.quantity * it.value > items[m].quantity * items[m].value ? idx : m), 0);
+      const alvo = items[k];
+      if (alvo.quantity > 1) {
+        items.splice(k, 1, { ...alvo, quantity: alvo.quantity - 1 }, { ...alvo, quantity: 1, value: round2(alvo.value + frete) });
+      } else {
+        items[k] = { ...alvo, value: round2(alvo.value + frete) };
+      }
+    }
     const total = Number(items.reduce((s, it) => s + it.quantity * (it.value - (it.discountValue || 0)), 0).toFixed(3));
     const nota = notas.find((n) => n.status === 'autorizada') || notas[0];
     const observations = [
+      ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
       { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+      ...(round2(venda.frete || 0) > 0 ? [{ observation: `FRETE R$ ${round2(venda.frete).toFixed(2)} INCLUSO NO VALOR DOS ITENS`.slice(0, 80) }] : []),
       ...(nota ? [{ observation: `${Number(nota.modelo) === 65 ? 'NFC-E' : 'NF-E'} ${nota.numero}/${nota.serie} ${nota.status.toUpperCase()}`.slice(0, 80) }] : []),
       ...(nota?.chave ? [{ observation: `CHAVE ${nota.chave}`.slice(0, 80) }] : []),
     ];
     const payload = {
       branchCode: venda.empresa,
+      ...(venda.data_caixa ? { transactionDate: String(venda.data_caixa).slice(0, 10) } : {}),
       customerCode: Number(customerCode),
       sellerCode: Number(venda.vendedor_code),
       operationCode: Number(operacao),
@@ -215,7 +245,11 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   }
 
   // 2) Recebimento → ATENDIDA (exige caixa aberto no terminal)
-  const receipts = montarRecebimentos(pagamentos, transactionCode, transactionDate);
+  const notaOk = notas.find((n) => n.status === 'autorizada');
+  const receipts = montarRecebimentos(pagamentos, transactionCode, transactionDate, {
+    parcelasBoleto: venda.cobranca?.parcelas || [],
+    documento: notaOk?.numero || null,
+  });
   const totalAmount = round2(receipts.reduce((s, r) => s + r.documentAmount, 0));
   try {
     await callTotvs('post', `${TOTVS_BASE_URL}/general/v2/transaction-receiving`, {

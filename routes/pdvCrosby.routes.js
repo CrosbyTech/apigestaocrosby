@@ -89,7 +89,7 @@ function operacaoDa(cfg, empresa, tipoVenda) {
 
 // Grava a movimentação de cada etiqueta RFID da venda. Nunca derruba a venda:
 // falha aqui é registrada em log e a venda segue.
-async function registrarEpcs({ venda, itens, tipo, nota = null }) {
+export async function registrarEpcs({ venda, itens, tipo, nota = null }) {
   const linhas = [];
   for (const item of itens) {
     const epcs = Array.isArray(item.epcs) ? item.epcs : [];
@@ -430,7 +430,7 @@ router.get(
 );
 
 // ─── Vendas ──────────────────────────────────────────────────────────────────
-async function carregarVenda(id) {
+export async function carregarVenda(id) {
   const { data: venda, error } = await supabase.from('pdv_vendas').select('*').eq('id', id).maybeSingle();
   if (error) throw new Error(error.message);
   if (!venda) return null;
@@ -782,121 +782,136 @@ router.post(
 // ─── Emissão ─────────────────────────────────────────────────────────────────
 const emitindo = new Set(); // trava por venda (evita duplo clique)
 
+// Emite a NF-e/NFC-e de uma venda registrada. Usada pela rota abaixo e pelo
+// FATURAR da expedição (routes/pedidosVenda.routes.js). Devolve
+// { status, mensagem, dados } ou lança FiscalError.
+export async function emitirVendaPdv(id) {
+  if (emitindo.has(id)) throw new FiscalError('Emissão já em andamento para esta venda', 'EMIT_IN_PROGRESS');
+  emitindo.add(id);
+  try {
+    const venda = await carregarVenda(id);
+    if (!venda) throw new FiscalError('Venda não encontrada', 'NOT_FOUND');
+    if (venda.status === 'cancelada') throw new FiscalError('Venda cancelada', 'SALE_CANCELED');
+    const autorizada = venda.notas.find((n) => n.status === 'autorizada');
+    if (autorizada) return { status: 200, mensagem: 'Nota já autorizada', dados: { venda, nota: autorizada, jaAutorizada: true } };
+
+    const cfg = await buscarConfig(venda.empresa);
+    const emit = await buscarEmitente(venda.empresa);
+    const cert = certificadoPara(emit.cnpj);
+    const cliente = venda.cliente_code ? await buscarClienteFiscal(venda.cliente_code) : null;
+    if (venda.cliente_code && !cliente) throw new FiscalError(`Cliente ${venda.cliente_code} não encontrado no TOTVS`, 'DEST_NOT_FOUND');
+
+    const modelo = venda.tipo_venda === 'nfce' ? 65 : 55;
+    const serie = modelo === 65 ? cfg.serie_nfce : cfg.serie_nfe;
+
+    // Reaproveita a numeração de uma tentativa rejeitada/erro da mesma venda
+    const reaproveitar = venda.notas.find(
+      (n) => (n.status === 'rejeitada' || n.status === 'erro' || n.status === 'gerada') && n.modelo === modelo && n.serie === serie && n.ambiente === cfg.ambiente,
+    );
+    let numero;
+    if (reaproveitar) {
+      numero = reaproveitar.numero;
+    } else {
+      const { data: n, error } = await supabase.rpc('pdv_fiscal_proximo_numero', { p_empresa: venda.empresa, p_modelo: modelo });
+      if (error) throw new FiscalError(`Falha ao obter numeração: ${error.message}`, 'NUMBERING_ERROR');
+      numero = Number(n);
+    }
+
+    await supabase.from('pdv_vendas').update({ status: 'emitindo' }).eq('id', id);
+
+    // Grava a nota ANTES de montar o XML: se a montagem falhar (NCM, endereço,
+    // CSC…), a linha fica como "erro" e o mesmo número é reaproveitado depois.
+    const base = {
+      venda_id: id,
+      empresa: venda.empresa,
+      cnpj_emitente: emit.cnpj,
+      modelo,
+      serie,
+      numero,
+      chave: null,
+      ambiente: cfg.ambiente,
+      status: 'gerada',
+      dh_emissao: null,
+      cstat: null,
+      xmotivo: null,
+      protocolo: null,
+      erro: null,
+    };
+    let notaId = reaproveitar?.id;
+    if (notaId) {
+      await supabase.from('pdv_notas_fiscais').update(base).eq('id', notaId);
+    } else {
+      const { data: nova, error } = await supabase.from('pdv_notas_fiscais').insert(base).select('id').single();
+      if (error) throw new FiscalError(`Falha ao gravar a nota: ${error.message}`, 'DB_ERROR');
+      notaId = nova.id;
+    }
+
+    let montado;
+    try {
+      montado = await montarXml({ venda, itens: venda.itens, pagamentos: venda.pagamentos, cfg, emit, cliente, numero });
+    } catch (err) {
+      await supabase.from('pdv_notas_fiscais').update({ status: 'erro', erro: err.message }).eq('id', notaId);
+      throw err;
+    }
+    await supabase.from('pdv_notas_fiscais').update({ chave: montado.chave, dh_emissao: montado.dhEmi }).eq('id', notaId);
+
+    let envio;
+    try {
+      envio = await assinarEEnviar({ xml: montado.xml, modelo, emit, cfg, cert });
+    } catch (err) {
+      await supabase.from('pdv_notas_fiscais').update({ status: 'erro', erro: err.message, xml_assinado: err.details?.xmlAssinado || null }).eq('id', notaId);
+      await supabase.from('pdv_vendas').update({ status: 'rejeitada' }).eq('id', id);
+      throw err;
+    }
+
+    const patch = {
+      status: envio.autorizada ? 'autorizada' : 'rejeitada',
+      cstat: envio.cStat,
+      xmotivo: envio.xMotivo,
+      protocolo: envio.nProt,
+      dh_autorizacao: envio.autorizada ? envio.dhRecbto : null,
+      xml_assinado: envio.xmlAssinado,
+      xml_proc: envio.xmlProc,
+      qr_code: envio.qrCode,
+      url_chave: envio.urlChave,
+      erro: envio.autorizada ? null : `${envio.cStat} - ${envio.xMotivo}`,
+    };
+    await supabase.from('pdv_notas_fiscais').update(patch).eq('id', notaId);
+    await supabase.from('pdv_vendas').update({ status: envio.autorizada ? 'autorizada' : 'rejeitada' }).eq('id', id);
+    console.log(
+      `${envio.autorizada ? '✅' : '❌'} [PDV Crosby] Venda ${id} → ${modelo === 65 ? 'NFC-e' : 'NF-e'} ${serie}/${numero} ${envio.cStat} ${envio.xMotivo} (amb ${cfg.ambiente})`,
+    );
+    const { data: nota } = await supabase.from('pdv_notas_fiscais').select('*').eq('id', notaId).single();
+    const qrDataUrl = nota?.qr_code ? await QRCode.toDataURL(nota.qr_code, { margin: 1, width: 240 }) : null;
+    return {
+      status: envio.autorizada ? 200 : 422,
+      mensagem: envio.autorizada ? 'Nota autorizada' : `Nota rejeitada: ${envio.cStat} ${envio.xMotivo}`,
+      dados: { venda: await carregarVenda(id), nota: { ...nota, xml_assinado: undefined, qrDataUrl }, emitente: emit },
+    };
+  } catch (err) {
+    if (err instanceof FiscalError && !['NOT_FOUND', 'SALE_CANCELED', 'EMIT_IN_PROGRESS'].includes(err.code)) {
+      await supabase.from('pdv_vendas').update({ status: 'rejeitada' }).eq('id', id);
+    }
+    throw err;
+  } finally {
+    emitindo.delete(id);
+  }
+}
+
 router.post(
   '/vendas/:id/emitir',
   asyncHandler(async (req, res) => {
     const id = parseInt(req.params.id, 10);
-    if (emitindo.has(id)) return errorResponse(res, 'Emissão já em andamento para esta venda', 409, 'EMIT_IN_PROGRESS');
-    emitindo.add(id);
     try {
-      const venda = await carregarVenda(id);
-      if (!venda) return errorResponse(res, 'Venda não encontrada', 404, 'NOT_FOUND');
-      if (venda.status === 'cancelada') return errorResponse(res, 'Venda cancelada', 409, 'SALE_CANCELED');
-      const autorizada = venda.notas.find((n) => n.status === 'autorizada');
-      if (autorizada) return successResponse(res, { venda, nota: autorizada, jaAutorizada: true }, 'Nota já autorizada');
-
-      const cfg = await buscarConfig(venda.empresa);
-      const emit = await buscarEmitente(venda.empresa);
-      const cert = certificadoPara(emit.cnpj);
-      const cliente = venda.cliente_code ? await buscarClienteFiscal(venda.cliente_code) : null;
-      if (venda.cliente_code && !cliente) throw new FiscalError(`Cliente ${venda.cliente_code} não encontrado no TOTVS`, 'DEST_NOT_FOUND');
-
-      const modelo = venda.tipo_venda === 'nfce' ? 65 : 55;
-      const serie = modelo === 65 ? cfg.serie_nfce : cfg.serie_nfe;
-
-      // Reaproveita a numeração de uma tentativa rejeitada/erro da mesma venda
-      const reaproveitar = venda.notas.find(
-        (n) => (n.status === 'rejeitada' || n.status === 'erro' || n.status === 'gerada') && n.modelo === modelo && n.serie === serie && n.ambiente === cfg.ambiente,
-      );
-      let numero;
-      if (reaproveitar) {
-        numero = reaproveitar.numero;
-      } else {
-        const { data: n, error } = await supabase.rpc('pdv_fiscal_proximo_numero', { p_empresa: venda.empresa, p_modelo: modelo });
-        if (error) throw new FiscalError(`Falha ao obter numeração: ${error.message}`, 'NUMBERING_ERROR');
-        numero = Number(n);
-      }
-
-      await supabase.from('pdv_vendas').update({ status: 'emitindo' }).eq('id', id);
-
-      // Grava a nota ANTES de montar o XML: se a montagem falhar (NCM, endereço,
-      // CSC…), a linha fica como "erro" e o mesmo número é reaproveitado depois.
-      const base = {
-        venda_id: id,
-        empresa: venda.empresa,
-        cnpj_emitente: emit.cnpj,
-        modelo,
-        serie,
-        numero,
-        chave: null,
-        ambiente: cfg.ambiente,
-        status: 'gerada',
-        dh_emissao: null,
-        cstat: null,
-        xmotivo: null,
-        protocolo: null,
-        erro: null,
-      };
-      let notaId = reaproveitar?.id;
-      if (notaId) {
-        await supabase.from('pdv_notas_fiscais').update(base).eq('id', notaId);
-      } else {
-        const { data: nova, error } = await supabase.from('pdv_notas_fiscais').insert(base).select('id').single();
-        if (error) throw new FiscalError(`Falha ao gravar a nota: ${error.message}`, 'DB_ERROR');
-        notaId = nova.id;
-      }
-
-      let montado;
-      try {
-        montado = await montarXml({ venda, itens: venda.itens, pagamentos: venda.pagamentos, cfg, emit, cliente, numero });
-      } catch (err) {
-        await supabase.from('pdv_notas_fiscais').update({ status: 'erro', erro: err.message }).eq('id', notaId);
-        throw err;
-      }
-      await supabase.from('pdv_notas_fiscais').update({ chave: montado.chave, dh_emissao: montado.dhEmi }).eq('id', notaId);
-
-      let envio;
-      try {
-        envio = await assinarEEnviar({ xml: montado.xml, modelo, emit, cfg, cert });
-      } catch (err) {
-        await supabase.from('pdv_notas_fiscais').update({ status: 'erro', erro: err.message, xml_assinado: err.details?.xmlAssinado || null }).eq('id', notaId);
-        await supabase.from('pdv_vendas').update({ status: 'rejeitada' }).eq('id', id);
-        throw err;
-      }
-
-      const patch = {
-        status: envio.autorizada ? 'autorizada' : 'rejeitada',
-        cstat: envio.cStat,
-        xmotivo: envio.xMotivo,
-        protocolo: envio.nProt,
-        dh_autorizacao: envio.autorizada ? envio.dhRecbto : null,
-        xml_assinado: envio.xmlAssinado,
-        xml_proc: envio.xmlProc,
-        qr_code: envio.qrCode,
-        url_chave: envio.urlChave,
-        erro: envio.autorizada ? null : `${envio.cStat} - ${envio.xMotivo}`,
-      };
-      await supabase.from('pdv_notas_fiscais').update(patch).eq('id', notaId);
-      await supabase.from('pdv_vendas').update({ status: envio.autorizada ? 'autorizada' : 'rejeitada' }).eq('id', id);
-      console.log(
-        `${envio.autorizada ? '✅' : '❌'} [PDV Crosby] Venda ${id} → ${modelo === 65 ? 'NFC-e' : 'NF-e'} ${serie}/${numero} ${envio.cStat} ${envio.xMotivo} (amb ${cfg.ambiente})`,
-      );
-      const { data: nota } = await supabase.from('pdv_notas_fiscais').select('*').eq('id', notaId).single();
-      const qrDataUrl = nota?.qr_code ? await QRCode.toDataURL(nota.qr_code, { margin: 1, width: 240 }) : null;
-      return successResponse(
-        res,
-        { venda: await carregarVenda(id), nota: { ...nota, xml_assinado: undefined, qrDataUrl }, emitente: emit },
-        envio.autorizada ? 'Nota autorizada' : `Nota rejeitada: ${envio.cStat} ${envio.xMotivo}`,
-        envio.autorizada ? 200 : 422,
-      );
+      const r = await emitirVendaPdv(id);
+      return successResponse(res, r.dados, r.mensagem, r.status);
     } catch (err) {
       if (err instanceof FiscalError) {
-        await supabase.from('pdv_vendas').update({ status: 'rejeitada' }).eq('id', id);
+        if (err.code === 'NOT_FOUND') return errorResponse(res, err.message, 404, err.code);
+        if (err.code === 'SALE_CANCELED' || err.code === 'EMIT_IN_PROGRESS') return errorResponse(res, err.message, 409, err.code);
         return errorResponse(res, err.message, 422, err.code, err.details && { ...err.details, xmlAssinado: undefined });
       }
       throw err;
-    } finally {
-      emitindo.delete(id);
     }
   }),
 );

@@ -350,6 +350,7 @@ export function calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo }) 
 // venda: linha de pdv_vendas + itens[] + pagamentos[]
 // Retorna { xml (não assinado), numero, serie, modelo, chaveParcial }
 export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, numero }) {
+  if (venda.origem === 'expedicao') return montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente, numero });
   const modelo = venda.tipo_venda === 'nfce' ? 65 : 55;
   const regra = venda.tipo_venda === 'troca' ? REGRAS.devolucao : REGRAS.venda;
   const serie = modelo === 65 ? cfg.serie_nfce : cfg.serie_nfe;
@@ -523,6 +524,357 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
   const xml = nfe.xml();
   const chave = xml.match(/Id="NFe(\d{44})"/)?.[1] || null;
   return { xml, modelo, serie, numero, chave, tpAmb, aliqIcms, dhEmi, totais: tot };
+}
+
+// ─── FATURAMENTO DA EXPEDIÇÃO (NF-e 55, empresa 99) ──────────────────────────
+// Gabarito copiado de 1.544 NF-e autorizadas do TOTVS na empresa 99
+// (ops 7234/7235/7236/7254/7299, ago–nov/2026):
+//   natOp "VENDA DE PRODUCAO DO ESTABELECIMENTO" (+ ", DESTINADAS A NAO CONTR")
+//   item de produção própria 5101 / 6101 / 6107; adquirido 5102 / 6102 / 6108
+//     (dentro do RN / fora com IE / fora sem IE — consumidor final)
+//   ICMS00 20% no RN, 12% interestadual (4% se origem importada 1/2/3/8)
+//   frete rateado nos itens (prod.vFrete) e SOMADO à base do ICMS, IBS e CBS
+//   PIS 01 0,65% / COFINS 01 3% sobre (base − ICMS); IPI IPINT 53
+//   DIFAL (ICMSUFDest) só fora do RN e sem IE: base cheia, FCP 0, partilha 100%
+//   transp: modFrete 1 (cliente paga) / 0 (Crosby paga) com transporta + vol;
+//           sem transportadora modFrete 9
+//   boleto: cobr/fat + dup (001…), pagamento a prazo
+//   indPres 9, indIntermed 0, indFinal 1 sem IE / 0 com IE
+// Alíquota interna da UF de destino usada no DIFAL — SÓ as conferidas nas notas
+// do TOTVS (pICMSUFDest, FCP 0). UF fora da lista é recusada em vez de chutar.
+export const ICMS_DIFAL_UF_CONFERIDA = { AL: 19, BA: 20.5, CE: 20, ES: 17, MA: 23, PA: 19, PB: 20, PE: 20.5, PI: 22.5, SE: 19, TO: 20 };
+const NATOP_PRODUCAO = 'VENDA DE PRODUCAO DO ESTABELECIMENTO';
+const NATOP_ADQUIRIDA = 'VENDA DE MERCADORIA ADQUIRIDA OU RECEBIDA DE TERCEIROS';
+const SUFIXO_NAO_CONTRIB = ', DESTINADAS A NAO CONTRIBUINTE';
+const CFOP_EXPEDICAO = {
+  interna: { producao: 5101, adquirido: 5102 },
+  interContrib: { producao: 6101, adquirido: 6102 },
+  interNaoContrib: { producao: 6107, adquirido: 6108 },
+};
+const TPAG_EXPEDICAO = { ...TPAG, boleto: '15' };
+const f3 = (v) => (Number(v) || 0).toFixed(3);
+const brl = (v) => round2(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Cenário fiscal de uma venda da expedição (também usado na tela antes de emitir)
+// consumidorFinal: o operador marca quando o cliente tem IE mas o TOTVS o trata
+// como consumidor final (ex.: MEI) — vira não contribuinte, com DIFAL
+export function cenarioExpedicao({ emitUf, cliente, consumidorFinal = false }) {
+  const destUf = cliente?.endereco?.UF || null;
+  const contribuinte = !consumidorFinal && !!(cliente?.cnpj && cliente?.ie);
+  const interestadual = !!destUf && destUf !== emitUf;
+  const chave = !interestadual ? 'interna' : contribuinte ? 'interContrib' : 'interNaoContrib';
+  return { destUf, contribuinte, interestadual, chave, difal: chave === 'interNaoContrib' };
+}
+export function cfopExpedicao(chave, tipo) {
+  return CFOP_EXPEDICAO[chave]?.[tipo === 'adquirido' ? 'adquirido' : 'producao'] ?? null;
+}
+
+// Transportadora (pessoa do TOTVS) no formato do <transporta>
+export async function buscarTransportadora(code) {
+  return cached(`transp:${code}`, async () => {
+    const payload = { filter: { personCodeList: [Number(code)] }, expand: 'addresses', page: 1, pageSize: 1 };
+    const [pj, pf] = await Promise.allSettled([
+      callTotvs('post', `${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { data: payload }),
+      callTotvs('post', `${TOTVS_BASE_URL}/person/v2/individuals/search`, { data: payload }),
+    ]);
+    const leg = pj.status === 'fulfilled' ? pj.value.data?.items?.[0] : null;
+    const ind = pf.status === 'fulfilled' ? pf.value.data?.items?.[0] : null;
+    const item = leg || ind;
+    if (!item) throw new FiscalError(`Transportadora ${code} não encontrada no TOTVS`, 'CARRIER_NOT_FOUND');
+    const addr = enderecoDe(item.addresses?.[0]);
+    return {
+      code: Number(code),
+      nome: semAcento(item.name).slice(0, 60),
+      cnpj: leg ? digits(leg.cnpj) : null,
+      cpf: ind ? digits(ind.cpf) : null,
+      ie: leg ? digits(leg.numberStateRegistration) || null : null,
+      xEnder: addr ? semAcento([addr.xLgr, addr.nro && !/^(S\/N|0+)$/i.test(addr.nro) ? addr.nro : ''].filter(Boolean).join(' ')).slice(0, 60) : null,
+      xMun: addr?.xMun || null,
+      uf: addr?.UF || null,
+    };
+  });
+}
+
+// Produção própria × adquirido por produto, aprendido das notas do TOTVS
+// (fiscal_produto_tipo). Sem histórico: maioria dos produtos da mesma
+// referência (nome começa igual); sem nada, produção.
+export async function tiposFiscais(empresa, itens) {
+  const codes = [...new Set(itens.map((i) => Number(i.product_code ?? i.productCode)))];
+  const { data } = await supabase.from('fiscal_produto_tipo').select('product_code, tipo').eq('empresa', Number(empresa)).in('product_code', codes);
+  const mapa = new Map((data || []).map((r) => [Number(r.product_code), r.tipo]));
+  for (const it of itens) {
+    const code = Number(it.product_code ?? it.productCode);
+    if (mapa.has(code)) continue;
+    const ref = semAcento(it.referencia || '').toUpperCase();
+    let tipo = 'producao';
+    if (ref.length >= 6) {
+      const { data: irmaos } = await supabase.from('fiscal_produto_tipo').select('tipo').eq('empresa', Number(empresa)).ilike('nome', `${ref}%`).limit(200);
+      const adq = (irmaos || []).filter((r) => r.tipo === 'adquirido').length;
+      if (irmaos?.length && adq > irmaos.length / 2) tipo = 'adquirido';
+    }
+    mapa.set(code, tipo);
+  }
+  return mapa;
+}
+
+async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente, numero }) {
+  const serie = cfg.serie_nfe;
+  const tpAmb = Number(cfg.ambiente);
+  if (!cliente) throw new FiscalError('NF-e exige cliente identificado', 'DEST_REQUIRED');
+  if (!cliente.endereco?.cMun || !cliente.endereco?.UF) throw new FiscalError(`Cliente ${cliente.nome} sem endereço completo no TOTVS — NF-e exige o endereço do destinatário`, 'DEST_NO_ADDRESS');
+  if (!cliente.cpf && !cliente.cnpj) throw new FiscalError(`Cliente ${cliente.nome} sem CPF/CNPJ no TOTVS`, 'DEST_NO_DOC');
+
+  const cen = cenarioExpedicao({ emitUf: emit.uf, cliente, consumidorFinal: !!venda.pedido_info?.consumidorFinal });
+  const aliqInterna = cfg.aliq_icms != null ? Number(cfg.aliq_icms) : ICMS_ALIQ_UF[emit.uf];
+  const pDifal = cen.difal ? ICMS_DIFAL_UF_CONFERIDA[cen.destUf] : null;
+  if (cen.difal && pDifal == null) {
+    throw new FiscalError(
+      `Venda para consumidor final em ${cen.destUf}: a alíquota do DIFAL de ${cen.destUf} ainda não foi conferida em nota do TOTVS — fature esta pelo TOTVS ou confirme a alíquota antes`,
+      'DIFAL_UF_NAO_CONFERIDA',
+    );
+  }
+
+  // frete rateado pelo valor líquido de cada item (arredondado por item); a
+  // sobra de centavos vai no item de MAIOR valor — igual ao TOTVS (NF 16082)
+  const frete = round2(venda.frete || 0);
+  const liq = itens.map((it) => round2(Number(it.quantidade) * round2(it.valor_unit) - Number(it.quantidade) * Number(it.desconto_unit || 0)));
+  const somaLiq = liq.reduce((s, v) => s + v, 0);
+  const fretes = liq.map((v) => (frete > 0 && somaLiq > 0 ? round2((frete * v) / somaLiq) : 0));
+  if (frete > 0 && somaLiq > 0) {
+    const sobra = round2(frete - fretes.reduce((s, v) => s + v, 0));
+    if (sobra !== 0) {
+      const iMaior = liq.indexOf(Math.max(...liq));
+      fretes[iMaior] = round2(fretes[iMaior] + sobra);
+    }
+  }
+
+  const tipos = itens.map((it) => it.tipo_fiscal || 'producao');
+  // natureza pelo PRIMEIRO item, como o TOTVS (NF 15921: 1º item adquirido)
+  let natOp = tipos[0] === 'adquirido' ? NATOP_ADQUIRIDA : NATOP_PRODUCAO;
+  if (cen.chave === 'interNaoContrib') natOp = `${natOp}${SUFIXO_NAO_CONTRIB}`;
+  natOp = natOp.slice(0, 60);
+
+  const dhEmi = agoraBrasil();
+  const nfe = new Make();
+  nfe.tagInfNFe({ versao: '4.00' });
+  nfe.tagIde({
+    cUF: String(UF2cUF[emit.uf]),
+    cNF: String(crypto.randomInt(0, 99999999)).padStart(8, '0'),
+    natOp,
+    mod: '55',
+    serie: String(serie),
+    nNF: String(numero),
+    dhEmi,
+    dhSaiEnt: dhEmi,
+    tpNF: '1',
+    idDest: cen.interestadual ? '2' : '1',
+    cMunFG: emit.cMun,
+    tpImp: '1',
+    tpEmis: '1',
+    cDV: '0',
+    tpAmb: String(tpAmb),
+    finNFe: '1',
+    indFinal: cen.contribuinte ? '0' : '1',
+    indPres: '9',
+    indIntermed: '0',
+    procEmi: '0',
+    verProc: VERSAO_APLICACAO,
+  });
+  nfe.tagEmit({ CNPJ: emit.cnpj, xNome: emit.xNome, xFant: emit.xFant, IE: emit.ie, CRT: String(emit.crt) });
+  nfe.tagEnderEmit(limparUndefined(emit.endereco));
+  const dest = cliente.cnpj ? { CNPJ: cliente.cnpj } : { CPF: cliente.cpf };
+  dest.xNome = cliente.nome;
+  dest.indIEDest = cen.contribuinte ? '1' : '9';
+  if (cen.contribuinte) dest.IE = cliente.ie;
+  if (cliente.email) dest.email = cliente.email.slice(0, 60);
+  nfe.tagDest(dest);
+  nfe.tagEnderDest(limparUndefined(cliente.endereco));
+
+  const det = [];
+  const imps = [];
+  const tot = { vBC: 0, vICMS: 0, vICMSUFDest: 0, vProd: 0, vFrete: 0, vDesc: 0, vPIS: 0, vCOFINS: 0, vIBSUF: 0, vCBS: 0, vNF: 0 };
+  const cfops = [];
+  itens.forEach((it, i) => {
+    const q = Number(it.quantidade);
+    const vUn = round2(it.valor_unit);
+    const vProd = round2(q * vUn);
+    const vDesc = round2(q * Number(it.desconto_unit || 0));
+    const vFrete = fretes[i];
+    if (!it.ncm || String(it.ncm).length !== 8) throw new FiscalError(`Produto ${it.product_code} (${it.nome}) sem NCM válido no TOTVS`, 'NCM_MISSING');
+    const cfop = cfopExpedicao(cen.chave, tipos[i]);
+    cfops.push(cfop);
+    const ean = digits(it.sku);
+    const cEAN = [8, 12, 13, 14].includes(ean.length) ? ean : 'SEM GTIN';
+    det.push({
+      cProd: String(it.product_code),
+      cEAN,
+      xProd: semAcento(it.nome).slice(0, 120),
+      NCM: String(it.ncm),
+      ...(it.cest ? { CEST: String(it.cest) } : {}),
+      CFOP: String(cfop),
+      uCom: it.unidade || 'UN',
+      qCom: q,
+      vUnCom: vUn,
+      vProd,
+      cEANTrib: cEAN,
+      uTrib: it.unidade || 'UN',
+      qTrib: q,
+      vUnTrib: vUn,
+      ...(vFrete > 0 ? { vFrete: f2(vFrete) } : {}),
+      ...(vDesc > 0 ? { vDesc } : {}),
+      indTot: '1',
+    });
+    const orig = String(it.origem || '0');
+    const aliq = cen.interestadual ? (['1', '2', '3', '8'].includes(orig) ? 4 : 12) : aliqInterna;
+    const base = round2(vProd - vDesc + vFrete);
+    const vICMS = round2((base * aliq) / 100);
+    const basePC = round2(base - vICMS);
+    const vPIS = round2((basePC * 0.65) / 100);
+    const vCOFINS = round2((basePC * 3) / 100);
+    const vIBSUF = round2((base * IBSCBS.pIBSUF) / 100);
+    const vCBS = round2((base * IBSCBS.pCBS) / 100);
+    const imposto = {
+      ICMS: { ICMS00: { orig, CST: '00', modBC: '3', vBC: f2(base), pICMS: f2(aliq), vICMS: f2(vICMS) } },
+      IPI: { cEnq: '999', IPINT: { CST: '53' } },
+      PIS: { PISAliq: { CST: '01', vBC: f2(basePC), pPIS: f4(0.65), vPIS: f2(vPIS) } },
+      COFINS: { COFINSAliq: { CST: '01', vBC: f2(basePC), pCOFINS: f4(3), vCOFINS: f2(vCOFINS) } },
+    };
+    let vDifal = 0;
+    if (cen.difal) {
+      vDifal = round2((base * (pDifal - aliq)) / 100);
+      imposto.ICMSUFDest = {
+        vBCUFDest: f2(base),
+        vBCFCPUFDest: f2(base),
+        pFCPUFDest: f4(0),
+        pICMSUFDest: f4(pDifal),
+        pICMSInter: f2(aliq),
+        pICMSInterPart: f4(100),
+        vFCPUFDest: '0.00',
+        vICMSUFDest: f2(vDifal),
+        vICMSUFRemet: '0.00',
+      };
+    }
+    imposto.IBSCBS = {
+      CST: IBSCBS.CST,
+      cClassTrib: IBSCBS.cClassTrib,
+      gIBSCBS: {
+        vBC: f2(base),
+        gIBSUF: { pIBSUF: f4(IBSCBS.pIBSUF), vIBSUF: f2(vIBSUF) },
+        gIBSMun: { pIBSMun: f4(IBSCBS.pIBSMun), vIBSMun: '0.00' },
+        vIBS: f2(vIBSUF),
+        gCBS: { pCBS: f4(IBSCBS.pCBS), vCBS: f2(vCBS) },
+      },
+    };
+    imps.push({ imposto, vItem: f2(base) });
+    tot.vBC += base;
+    tot.vICMS += vICMS;
+    tot.vICMSUFDest += vDifal;
+    tot.vProd += vProd;
+    tot.vFrete += vFrete;
+    tot.vDesc += vDesc;
+    tot.vPIS += vPIS;
+    tot.vCOFINS += vCOFINS;
+    tot.vIBSUF += vIBSUF;
+    tot.vCBS += vCBS;
+    tot.vNF += base;
+  });
+  await nfe.tagProd(det);
+  imps.forEach((x, i) => nfe.taginfAdProd(i, x));
+
+  nfe.tagTotal(
+    {
+      ICMSTot: {
+        vBC: f2(tot.vBC), vICMS: f2(tot.vICMS), vICMSDeson: '0.00', vFCPUFDest: '0.00', vICMSUFDest: f2(tot.vICMSUFDest),
+        vICMSUFRemet: '0.00', vFCP: '0.00', vBCST: '0.00', vST: '0.00', vFCPST: '0.00', vFCPSTRet: '0.00',
+        vProd: f2(tot.vProd), vFrete: f2(tot.vFrete), vSeg: '0.00', vDesc: f2(tot.vDesc), vII: '0.00', vIPI: '0.00',
+        vIPIDevol: '0.00', vPIS: f2(tot.vPIS), vCOFINS: f2(tot.vCOFINS), vOutro: '0.00', vNF: f2(tot.vNF),
+      },
+      IBSCBSTot: {
+        vBCIBSCBS: f2(tot.vBC),
+        gIBS: {
+          gIBSUF: { vDif: '0.00', vDevTrib: '0.00', vIBSUF: f2(tot.vIBSUF) },
+          gIBSMun: { vDif: '0.00', vDevTrib: '0.00', vIBSMun: '0.00' },
+          vIBS: f2(tot.vIBSUF), vCredPres: '0.00', vCredPresCondSus: '0.00',
+        },
+        gCBS: { vDif: '0.00', vDevTrib: '0.00', vCBS: f2(tot.vCBS), vCredPres: '0.00', vCredPresCondSus: '0.00' },
+      },
+      vNFTot: f2(tot.vNF),
+    },
+    true,
+  );
+
+  // Transporte
+  const t = venda.transporte || {};
+  const temTransp = !!(t.cnpj || t.cpf);
+  const modFrete = temTransp ? String(t.modFrete ?? (frete > 0 ? 1 : 0)) : '9';
+  nfe.tagTransp({
+    modFrete,
+    ...(temTransp
+      ? {
+          transporta: limparUndefined({
+            ...(t.cnpj ? { CNPJ: t.cnpj } : { CPF: t.cpf }),
+            xNome: semAcento(t.nome).slice(0, 60),
+            IE: t.ie || undefined,
+            xEnder: t.xEnder || undefined,
+            xMun: t.xMun || undefined,
+            UF: t.uf || undefined,
+          }),
+        }
+      : {}),
+    vol: { qVol: String(Number(t.volumes ?? (temTransp ? 1 : 0)) || 0), pesoL: f3(t.pesoL), pesoB: f3(t.pesoB) },
+  });
+
+  // Pagamento
+  const detPag = [];
+  for (const p of pagamentos) {
+    const valor = round2(p.valor);
+    if (!(valor > 0)) continue;
+    const cartao = p.forma === 'credito' || p.forma === 'debito';
+    const d = { indPag: p.forma === 'boleto' || p.forma === 'credito' ? '1' : '0', tPag: TPAG_EXPEDICAO[p.forma] || '99', vPag: f2(valor) };
+    if (cartao) {
+      d.card = { tpIntegra: '2' };
+      if (digits(p.adquirente_cnpj).length === 14) d.card.CNPJ = digits(p.adquirente_cnpj);
+      if (p.bandeira && BANDEIRAS[p.bandeira]) d.card.tBand = BANDEIRAS[p.bandeira];
+      if (p.autorizacao) d.card.cAut = String(p.autorizacao).slice(0, 20);
+    }
+    detPag.push(d);
+  }
+  if (!detPag.length) throw new FiscalError('Venda sem pagamento informado', 'PAYMENT_MISSING');
+  const somaPag = round2(detPag.reduce((s, d) => s + Number(d.vPag), 0));
+  if (Math.abs(somaPag - round2(tot.vNF)) > 0.01) {
+    throw new FiscalError(`Pagamentos (R$ ${brl(somaPag)}) não fecham com o total da nota (R$ ${brl(tot.vNF)}, produtos + frete)`, 'PAYMENT_MISMATCH');
+  }
+  nfe.tagDetPag(detPag);
+
+  // Informações complementares (mesmo começo das notas do TOTVS)
+  const aliqNota = cen.interestadual ? 12 : aliqInterna;
+  const partes = [`CST 000 ICMS ${brl(aliqNota)} ${brl(tot.vBC)} = ${brl(tot.vICMS)}`];
+  if (venda.numero_site) partes.push(`PEDIDO ${semAcento(venda.numero_site)}`);
+  partes.push(`VENDA HEADCOACH ${venda.id}`);
+  if (venda.vendedor_nome) partes.push(`VENDEDOR ${semAcento(venda.vendedor_nome)}`);
+  const pi = venda.pedido_info || {};
+  if (pi.forma) partes.push(`PAGO ${semAcento(pi.forma).toUpperCase()}${pi.nsu ? ` NSU ${pi.nsu}` : ''}${pi.autorizacao ? ` AUT ${pi.autorizacao}` : ''}`);
+  if (cfg.info_complementar) partes.push(semAcento(cfg.info_complementar));
+  nfe.tagInfAdic({ infCpl: partes.join(' ').slice(0, 2000) });
+
+  let xml = nfe.xml();
+  // <cobr> (fatura + duplicatas) entre <transp> e <pag> — a lib não implementa tagFat/tagDup
+  if (pagamentos.some((p) => p.forma === 'boleto')) {
+    const parcelas = venda.cobranca?.parcelas || [];
+    if (!parcelas.length) throw new FiscalError('Boleto sem parcelas/vencimentos', 'BOLETO_SEM_PARCELAS');
+    const somaDup = round2(parcelas.reduce((s, d) => s + Number(d.valor), 0));
+    if (Math.abs(somaDup - round2(tot.vNF)) > 0.01) {
+      throw new FiscalError(`Parcelas do boleto (R$ ${brl(somaDup)}) não fecham com o total da nota (R$ ${brl(tot.vNF)})`, 'BOLETO_MISMATCH');
+    }
+    const dups = parcelas
+      .map((d, i) => `<dup><nDup>${String(i + 1).padStart(3, '0')}</nDup><dVenc>${String(d.vencimento).slice(0, 10)}</dVenc><vDup>${f2(d.valor)}</vDup></dup>`)
+      .join('');
+    const cobr = `<cobr><fat><nFat>${numero}</nFat><vOrig>${f2(tot.vNF)}</vOrig><vDesc>0.00</vDesc><vLiq>${f2(tot.vNF)}</vLiq></fat>${dups}</cobr>`;
+    if (!xml.includes('<pag>')) throw new FiscalError('XML sem grupo <pag> para inserir a cobrança', 'XML_COBR');
+    xml = xml.replace('<pag>', `${cobr}<pag>`);
+  }
+  const chave = xml.match(/Id="NFe(\d{44})"/)?.[1] || null;
+  return { xml, modelo: 55, serie, numero, chave, tpAmb, aliqIcms: aliqNota, dhEmi, totais: tot, cfops, cenario: cen };
 }
 
 function limparUndefined(obj) {
