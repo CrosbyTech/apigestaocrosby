@@ -110,7 +110,11 @@ function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto 
     const liquido = round2(Number(p.valor) - Number(p.troco || 0));
     if (liquido <= 0) continue;
     const cartao = p.forma === 'credito' || p.forma === 'debito';
-    const nsuNumerico = p.nsu && /^\d+$/.test(String(p.nsu)) ? Number(p.nsu) : null;
+    // documentNumber é Int32 no TOTVS: NSU maior que 2.147.483.647 (ex.: Pagar.me
+    // 4645872422) quebra o recebimento — nesse caso vai o número da transação e
+    // o NSU segue só em nsuNumber
+    const nsuInt = p.nsu && /^\d+$/.test(String(p.nsu)) ? Number(p.nsu) : null;
+    const nsuNumerico = nsuInt && nsuInt <= 2147483647 ? nsuInt : null;
     const base = {
       documentType: tipo,
       documentNumber: nsuNumerico || transactionCode,
