@@ -209,7 +209,8 @@ export async function saidasPendentes({ de, ate, escopo = 'crosby', sentido = 'S
   const { anexarConciliacoes } = await import('./fluxoCaixaConciliacao.js');
   const { data: contas, error: eC } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome,titular_cnpj,escopo,ativo');
   if (eC) throw new Error(eC.message);
-  const contasEsc = (contas || []).filter((c) => (c.escopo || 'crosby') === escopo && c.ativo !== false);
+  // Pagar.me é adquirente e fica fora da tela da Conciliação (BANCOS_FORA no front) — mesma regra aqui
+  const contasEsc = (contas || []).filter((c) => (c.escopo || 'crosby') === escopo && c.ativo !== false && String(c.banco || '').toUpperCase() !== 'PAGARME');
   const contaDe = new Map(contasEsc.map((c) => [c.id, c]));
   const todos = [];
   for (let from = 0; ; from += 1000) {
