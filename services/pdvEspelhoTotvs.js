@@ -255,6 +255,9 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     const dv = String(venda.pedido_info?.dataVenda || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
     const observations = [
       ...(dv ? [{ observation: `VENDA DO DIA ${dv[3]}/${dv[2]}/${dv[1]}` }] : []),
+      ...((venda.pedido_info?.transacoesAnteriores || []).length
+        ? [{ observation: `SUBSTITUI A TRANSACAO ${venda.pedido_info.transacoesAnteriores.map((t) => t.code).join(', ')} (CANCELAR)`.slice(0, 80) }]
+        : []),
       ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
       { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
       ...(round2(venda.frete || 0) > 0 ? [{ observation: `FRETE R$ ${round2(venda.frete).toFixed(2)} INCLUSO NO VALOR DOS ITENS`.slice(0, 80) }] : []),

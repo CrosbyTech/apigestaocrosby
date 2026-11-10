@@ -470,6 +470,23 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
     const { data } = await supabase.from('pedidos_venda_faturamentos').select('id').eq('venda_id', vendaId).maybeSingle();
     fatId = data?.id || null;
   }
+  // Trocar a operação do documento interno: a API não altera a operação de uma
+  // transação existente, então abre OUTRA transação (data de hoje) para a mesma
+  // venda. A anterior fica "em andamento" no TOTVS, anotada para ser cancelada.
+  const opNova = Number(opcoes.operacaoDocInterno);
+  if (opNova && Object.values(OPERACAO_DOC_INTERNO).includes(opNova)) {
+    const { data: v0 } = await supabase.from('pdv_vendas').select('operacao_doc_interno, totvs_transacao_code, totvs_status, pedido_info').eq('id', vendaId).maybeSingle();
+    if (v0 && v0.totvs_status !== 4 && Number(v0.operacao_doc_interno) !== opNova) {
+      const info = { ...(v0.pedido_info || {}) };
+      if (v0.totvs_transacao_code) info.transacoesAnteriores = [...(info.transacoesAnteriores || []), { code: v0.totvs_transacao_code, operacao: v0.operacao_doc_interno }];
+      await supabase
+        .from('pdv_vendas')
+        .update({ operacao_doc_interno: opNova, totvs_transacao_code: null, totvs_transacao_date: null, totvs_status: null, totvs_erro: null, data_caixa: hojeBrasil(), pedido_info: info })
+        .eq('id', vendaId);
+      if (fatId) await supabase.from('pedidos_venda_faturamentos').update({ operacao: opNova, transacao_code: null, transacao_date: null, transacao_status: 1 }).eq('id', fatId);
+      console.log(`🔁 [Faturamento] venda ${vendaId}: operação do documento interno ${v0.operacao_doc_interno} → ${opNova} (nova transação; anterior ${v0.totvs_transacao_code ?? '—'})`);
+    }
+  }
   const atualizar = async (patch) => {
     if (fatId) await supabase.from('pedidos_venda_faturamentos').update({ ...patch, atualizado_em: new Date().toISOString() }).eq('id', fatId);
   };
