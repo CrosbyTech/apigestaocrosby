@@ -23,6 +23,8 @@ import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 
 export const DOC_INTERNO_PADRAO = { operacao: 511, terminal: 1, cfop: 5102, paymentConditionCode: 1 };
+// Portadores do cartão Pagar.me (vendas do site / expedição)
+export const PORTADORES_PAGARME = { credito: 9902, debito: 9901 };
 
 // forma do HeadCoach → tipo de documento do recebimento TOTVS
 const TIPO_DOC_TOTVS = { dinheiro: 3, pix: 26, credito: 4, debito: 5, credito_loja: 20, boleto: 1 };
@@ -101,6 +103,59 @@ async function gravar(vendaId, patch) {
 }
 
 // Recebimentos do TOTVS a partir dos pagamentos da venda
+// ─── Cartão: cadastro FCXFL002 do TOTVS (payment-cards) ─────────────────────
+// A API do recebimento NÃO aceita portador nem a "Seq." do relacionamento: ela
+// acha a linha por tipo doc + OPERADORA + BANDEIRA + nº de parcelas, comparando
+// o TEXTO das colunas Operadora/Bandeira do relacionamento (ex.: "PAGARME" /
+// "OUTROS"). Mandar código (27448 / 99) ou deixar a linha sem operadora dá
+// "42306 - Histórico auxiliar não cadastrado". Por isso lemos o cadastro do
+// portador da venda e mandamos exatamente o texto que está lá.
+const cacheCartoes = { em: 0, lista: null };
+async function cartoesTotvs() {
+  if (cacheCartoes.lista && Date.now() - cacheCartoes.em < 2 * 60 * 1000) return cacheCartoes.lista;
+  const todos = [];
+  for (let page = 1; page <= 40; page++) {
+    const r = await callTotvs('get', `${TOTVS_BASE_URL}/accounts-receivable/v2/payment-cards`, { params: { IsInactive: false, Page: page, PageSize: 100 }, timeout: 60000 });
+    todos.push(...(r.data?.items || []));
+    if (!r.data?.hasNext) break;
+  }
+  cacheCartoes.em = Date.now();
+  cacheCartoes.lista = todos;
+  return todos;
+}
+// portadores: { credito, debito } → devolve { operadora, bandeira } (texto do cadastro)
+async function resolverCartaoNoCadastro(forma, parcelas, portadores) {
+  const portador = Number(forma === 'debito' ? portadores.debito : portadores.credito);
+  const n = forma === 'debito' ? 1 : Math.max(1, Number(parcelas) || 1);
+  const lista = await cartoesTotvs();
+  const doPortador = lista.filter((c) => Number(c.bearerNumber) === portador);
+  const linha = doPortador.find((c) => Number(c.installmentNumber) === n);
+  const onde = `cartão de ${forma === 'debito' ? 'débito' : 'crédito'} · portador ${portador} · ${n}x`;
+  if (!linha) {
+    throw new EspelhoError(`O TOTVS não tem o relacionamento de ${onde} (FCXFL002). Cadastre a linha de ${n} parcela(s) no portador ${portador} e tente de novo.`, 'CARTAO_SEM_CADASTRO');
+  }
+  if (!linha.operatorName || !linha.brandName) {
+    throw new EspelhoError(
+      `No TOTVS, o relacionamento "${linha.description}" (seq. ${linha.sequenceNumber}, ${onde}) está sem Operadora/Bandeira. A API só acha o cartão por esses dois campos — preencha as colunas Operadora e Bandeira dessa linha e tente de novo.`,
+      'CARTAO_SEM_OPERADORA',
+    );
+  }
+  const iguais = lista.filter(
+    (c) =>
+      Number(c.documentType) === Number(linha.documentType) &&
+      Number(c.installmentNumber) === n &&
+      String(c.operatorName || '').toUpperCase() === String(linha.operatorName).toUpperCase() &&
+      String(c.brandName || '').toUpperCase() === String(linha.brandName).toUpperCase(),
+  );
+  if (iguais.length > 1) {
+    throw new EspelhoError(
+      `No TOTVS a combinação ${linha.operatorName}/${linha.brandName} ${n}x existe em mais de um portador (${[...new Set(iguais.map((c) => c.bearerNumber))].join(', ')}) — a API não sabe qual usar. Deixe essa combinação só no portador ${portador}.`,
+      'CARTAO_AMBIGUO',
+    );
+  }
+  return { operadora: String(linha.operatorName).slice(0, 60), bandeira: String(linha.brandName).slice(0, 60), seq: linha.sequenceNumber };
+}
+
 // comoFatura: todas as formas viram FATURA (documentType 1) — título a prazo no
 // contas a receber, sem movimento de caixa. Cartão em N vezes vira N faturas a
 // cada 30 dias; as demais formas, 1 fatura com vencimento na data da transação.
@@ -160,8 +215,8 @@ function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto 
             // Operadora + bandeira no cadastro do TOTVS: é por elas que ele acha
             // o PORTADOR do título (99: 27448 Pagar.me + 99 OUTROS → 9902 crédito /
             // 9901 débito). Sem operadora o recebimento falha no TOMAS sem mensagem.
-            ...(cartaoTotvs?.operadora ? { cardOperator: String(cartaoTotvs.operadora) } : {}),
-            cardBrand: cartaoTotvs?.bandeira != null ? String(cartaoTotvs.bandeira) : p.bandeira || undefined,
+            ...(p.cartaoCadastro ? { cardOperator: p.cartaoCadastro.operadora } : {}),
+            cardBrand: p.cartaoCadastro ? p.cartaoCadastro.bandeira : p.bandeira || undefined,
             authorizationCode: p.autorizacao || undefined,
             nsuNumber: p.nsu ? String(p.nsu) : undefined,
           }
@@ -170,7 +225,7 @@ function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto 
     const parcelas = p.forma === 'credito' ? Math.max(1, Number(p.parcelas) || 1) : 1;
     if (parcelas === 1) {
       receipts.push({ ...base, documentAmount: liquido, ...(cartao ? { installmentNumber: 1 } : {}) });
-    } else if (cartaoTotvs?.operadora) {
+    } else if (p.cartaoCadastro) {
       // Com operadora informada o TOTVS trata installmentNumber como a QUANTIDADE
       // de parcelas do cartão (acha o histórico auxiliar por tipo + operadora +
       // bandeira + nº de parcelas e ele mesmo divide). Duas linhas "parcela 1" e
@@ -328,6 +383,20 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
 
   // 2) Recebimento → ATENDIDA (exige caixa aberto no terminal)
   const notaOk = notas.find((n) => n.status === 'autorizada');
+  // Vendas com portador de cartão definido (expedição = Pagar.me): operadora e
+  // bandeira saem do cadastro do TOTVS, no texto exato
+  const portadoresCartao = venda.pedido_info?.cartaoTotvs?.portadores || (venda.pedido_info?.cartaoTotvs ? PORTADORES_PAGARME : null);
+  if (portadoresCartao && !venda.pedido_info?.receberComoFatura) {
+    for (const p of pagamentos) {
+      if (p.forma !== 'credito' && p.forma !== 'debito') continue;
+      try {
+        p.cartaoCadastro = await resolverCartaoNoCadastro(p.forma, p.parcelas, portadoresCartao);
+      } catch (err) {
+        await gravar(vendaId, { totvs_erro: `recebimento: ${err.message}` });
+        throw err;
+      }
+    }
+  }
   const receipts = montarRecebimentos(pagamentos, transactionCode, transactionDate, {
     parcelasBoleto: venda.cobranca?.parcelas || [],
     documento: notaOk?.numero || null,

@@ -39,11 +39,11 @@ export const OPERACAO_DOC_INTERNO = { varejo: 511, franquias: 7807, mtm: 7808, r
 // Operação "oficial" de referência (só informativa na venda do HeadCoach)
 const OPERACAO_VENDA = { varejo: 545, franquias: 7234, mtm: 7235, revenda: 7236 };
 
-// Cartão das vendas do site/expedição no TOTVS: operadora 27448 (PAGARME
-// INSTITUICAO DE PAGAMENTO SA) + bandeira 99 (OUTROS) — é como estão os 897
-// pagamentos em cartão da 99 (out–nov/2026); por eles o TOTVS acha o portador
-// 9902 PAGARME CREDITO / 9901 PAGARME DEBITO.
-export const CARTAO_TOTVS_EXPEDICAO = { operadora: 27448, bandeira: 99 };
+// Cartão das vendas do site/expedição no TOTVS = Pagar.me: portador 9902
+// (crédito) e 9901 (débito). A operadora e a bandeira que a API exige são lidas
+// do cadastro desses portadores (FCXFL002), no texto exato — ver
+// resolverCartaoNoCadastro em pdvEspelhoTotvs.js.
+export const CARTAO_TOTVS_EXPEDICAO = { portadores: { credito: 9902, debito: 9901 } };
 
 // Transportadoras (código da pessoa no TOTVS, conferido nas NF-e da 99)
 export const TRANSPORTADORAS = [
