@@ -58,3 +58,8 @@ CREATE INDEX IF NOT EXISTS idx_pvfat_venda ON pedidos_venda_faturamentos (venda_
 
 -- Cartão escolhido na tela (Operadora + Parcelamento do cadastro FCXFL002 do TOTVS)
 ALTER TABLE pdv_venda_pagamentos ADD COLUMN IF NOT EXISTS cartao_totvs JSONB; -- { seq, descricao, portador, operadora, bandeira, parcelas }
+
+-- 10/11/2026: forma de pagamento ADIANTAMENTO (saldo do cliente no TOTVS, tipo de documento 10)
+ALTER TABLE pdv_venda_pagamentos DROP CONSTRAINT IF EXISTS pdv_venda_pagamentos_forma_check;
+ALTER TABLE pdv_venda_pagamentos ADD CONSTRAINT pdv_venda_pagamentos_forma_check
+  CHECK (forma IN ('dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'vale_troca', 'boleto', 'adiantamento'));

@@ -551,7 +551,7 @@ const CFOP_EXPEDICAO = {
   interContrib: { producao: 6101, adquirido: 6102 },
   interNaoContrib: { producao: 6107, adquirido: 6108 },
 };
-const TPAG_EXPEDICAO = { ...TPAG, boleto: '15' };
+const TPAG_EXPEDICAO = { ...TPAG, boleto: '15', adiantamento: TPAG.credito_loja };
 const f3 = (v) => (Number(v) || 0).toFixed(3);
 const brl = (v) => round2(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 

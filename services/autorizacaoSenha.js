@@ -16,7 +16,8 @@ export class AutorizacaoError extends Error {
   }
 }
 
-const NOMES_ROLE = { manager: 'gerente', admin: 'admin', owner: 'owner' };
+// no HeadCoach o perfil "user" é o Financeiro (ROLE_CONFIG do front)
+const NOMES_ROLE = { manager: 'gerente', admin: 'admin', owner: 'owner', user: 'financeiro' };
 const tentativas = new Map(); // email -> [timestamps]
 
 export async function verificarSenhaAutorizador(email, senha, roles) {

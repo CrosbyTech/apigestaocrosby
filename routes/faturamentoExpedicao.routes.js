@@ -5,6 +5,7 @@
 //
 //   GET  /preparar/:chave             sugestões do pedido (cliente, transporte, pagamento, comprovantes)
 //   POST /previa                      { clienteCode, consumidorFinal, itens[] } cenário fiscal + CFOP por item
+//   POST /autorizar-desconto          senha de owner/admin/financeiro libera desconto acima de 20%
 //   POST /faturar                     registra a venda, emite a NF-e e espelha no TOTVS
 //   POST /vendas/:vendaId/reprocessar tenta de novo o que faltou (NF-e rejeitada / caixa fechado)
 //   GET  /transacoes?de=&ate=&busca=  aba Transações
@@ -23,6 +24,7 @@ import {
   FaturamentoError,
 } from '../services/faturamentoExpedicao.js';
 import { FiscalError } from '../services/pdvFiscal.js';
+import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
 
 const router = express.Router();
 
@@ -51,6 +53,23 @@ router.get(
       return successResponse(res, await listarCartoes(), 'Cartões do TOTVS');
     } catch (err) {
       return falha(res, err);
+    }
+  }),
+);
+
+// Desconto no faturamento acima do limite livre (20%): owner, admin ou
+// financeiro digita e-mail + senha do HeadCoach para liberar
+router.post(
+  '/autorizar-desconto',
+  asyncHandler(async (req, res) => {
+    const { email, senha, pct, pedido, por } = req.body || {};
+    try {
+      const autorizador = await verificarSenhaAutorizador(email, senha, ['owner', 'admin', 'user']);
+      console.log(`🔓 [Faturamento] desconto de ${pct ?? '?'}% liberado por ${autorizador.email} (${autorizador.role}) para ${por || '?'} no pedido ${pedido ?? '?'}`);
+      return successResponse(res, autorizador, 'Desconto liberado');
+    } catch (err) {
+      if (err instanceof AutorizacaoError) return errorResponse(res, err.message, err.status, err.code);
+      throw err;
     }
   }),
 );

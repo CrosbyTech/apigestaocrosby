@@ -27,7 +27,8 @@ export const DOC_INTERNO_PADRAO = { operacao: 511, terminal: 1, cfop: 5102, paym
 export const PORTADORES_PAGARME = { credito: 9902, debito: 9901 };
 
 // forma do HeadCoach → tipo de documento do recebimento TOTVS
-const TIPO_DOC_TOTVS = { dinheiro: 3, pix: 26, credito: 4, debito: 5, credito_loja: 20, boleto: 1 };
+// credito_loja = CREDEV (20) e adiantamento (10): consomem o saldo do cliente
+const TIPO_DOC_TOTVS = { dinheiro: 3, pix: 26, credito: 4, debito: 5, credito_loja: 20, adiantamento: 10, boleto: 1 };
 
 export class EspelhoError extends Error {
   constructor(message, code = 'ESPELHO_TOTVS', status = 400, details = null) {
@@ -330,6 +331,17 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
         : []),
       ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
       { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+      ...(Number(venda.pedido_info?.descontoFaturamento?.pct) > 0
+        ? [
+            {
+              observation: `DESCONTO ${String(venda.pedido_info.descontoFaturamento.pct).replace('.', ',')}% NO FATURAMENTO${
+                venda.pedido_info.descontoFaturamento.liberadoPor ? ` - LIBERADO POR ${venda.pedido_info.descontoFaturamento.liberadoPor}` : ''
+              }`
+                .toUpperCase()
+                .slice(0, 80),
+            },
+          ]
+        : []),
       ...(round2(venda.frete || 0) > 0 ? [{ observation: `FRETE R$ ${round2(venda.frete).toFixed(2)} INCLUSO NO VALOR DOS ITENS`.slice(0, 80) }] : []),
       ...(nota ? [{ observation: `${Number(nota.modelo) === 65 ? 'NFC-E' : 'NF-E'} ${nota.numero}/${nota.serie} ${nota.status.toUpperCase()}`.slice(0, 80) }] : []),
       ...(nota?.chave ? [{ observation: `CHAVE ${nota.chave}`.slice(0, 80) }] : []),

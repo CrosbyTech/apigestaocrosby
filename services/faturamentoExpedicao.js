@@ -381,7 +381,7 @@ export async function faturar(body) {
   for (const p of b.pagamentos || []) {
     const forma = String(p.forma || '').toLowerCase();
     const valor = round2(p.valor);
-    if (!['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'boleto'].includes(forma)) throw new FaturamentoError(`Forma de pagamento inválida: ${p.forma}`);
+    if (!['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'boleto'].includes(forma)) throw new FaturamentoError(`Forma de pagamento inválida: ${p.forma}`);
     if (!(valor > 0)) continue;
     pagamentos.push({
       forma,
@@ -459,6 +459,11 @@ export async function faturar(body) {
     pedido_info: {
       ...(b.pedidoInfo || {}),
       consumidorFinal: !!b.consumidorFinal,
+      // desconto dado na tela de faturamento (já está no valor de cada peça):
+      // até 20% livre; acima, liberado por owner/admin/financeiro
+      ...(Number(b.descontoFaturamento?.pct) > 0
+        ? { descontoFaturamento: { pct: round2(b.descontoFaturamento.pct), liberadoPor: b.descontoFaturamento.liberadoPor || null } }
+        : {}),
       terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null,
       receberComoFatura: !!b.receberComoFatura,
       dataVenda,
