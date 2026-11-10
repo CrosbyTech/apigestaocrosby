@@ -109,7 +109,7 @@ const maisDias = (iso, dias) => {
   d.setUTCDate(d.getUTCDate() + dias);
   return d.toISOString().slice(0, 10);
 };
-function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null, comoFatura = false } = {}) {
+function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null, comoFatura = false, cartaoTotvs = null } = {}) {
   const receipts = [];
   for (const p of pagamentos) {
     if (comoFatura && p.forma !== 'boleto') {
@@ -157,7 +157,11 @@ function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto 
       dueDate: data,
       ...(cartao
         ? {
-            cardBrand: p.bandeira || undefined,
+            // Operadora + bandeira no cadastro do TOTVS: é por elas que ele acha
+            // o PORTADOR do título (99: 27448 Pagar.me + 99 OUTROS → 9902 crédito /
+            // 9901 débito). Sem operadora o recebimento falha no TOMAS sem mensagem.
+            ...(cartaoTotvs?.operadora ? { cardOperator: String(cartaoTotvs.operadora) } : {}),
+            cardBrand: cartaoTotvs?.bandeira != null ? String(cartaoTotvs.bandeira) : p.bandeira || undefined,
             authorizationCode: p.autorizacao || undefined,
             nsuNumber: p.nsu ? String(p.nsu) : undefined,
           }
@@ -291,12 +295,38 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     }
   }
 
+  // A transação pode ter sido encerrada/recebida na mão no TOTVS (TRAFP005):
+  // nesse caso não há o que receber, só registrar que está ATENDIDA.
+  if (venda.totvs_transacao_code) {
+    try {
+      const r = await callTotvs('get', `${TOTVS_BASE_URL}/general/v2/transactions/search`, {
+        params: { BranchCodeList: venda.empresa, TransactionCodeList: transactionCode, TransactionDate: transactionDate, Page: 1, PageSize: 1 },
+        timeout: 60000,
+      });
+      const st = r.data?.items?.[0]?.status;
+      if (st === 4) {
+        const seq = await buscarDocInterno(venda.empresa, transactionCode, transactionDate);
+        await gravar(vendaId, { totvs_status: 4, totvs_doc_interno_seq: seq, totvs_espelhado_em: new Date().toISOString(), totvs_erro: null });
+        console.log(`✅ [Espelho TOTVS] venda ${venda.id}: transação ${transactionCode} já estava ATENDIDA no TOTVS (fechada por lá)`);
+        return { transactionCode, transactionDate, status: 4, docInternoSeq: seq, jaEstava: true, fechadaNoTotvs: true };
+      }
+      if (st === 6) {
+        await gravar(vendaId, { totvs_status: 6, totvs_erro: 'transação cancelada no TOTVS' });
+        throw new EspelhoError(`A transação ${transactionCode} foi cancelada no TOTVS — troque a operação no "Tentar de novo" para abrir outra`, 'TRANSACAO_CANCELADA');
+      }
+    } catch (err) {
+      if (err instanceof EspelhoError) throw err;
+      /* consulta falhou: segue para o recebimento */
+    }
+  }
+
   // 2) Recebimento → ATENDIDA (exige caixa aberto no terminal)
   const notaOk = notas.find((n) => n.status === 'autorizada');
   const receipts = montarRecebimentos(pagamentos, transactionCode, transactionDate, {
     parcelasBoleto: venda.cobranca?.parcelas || [],
     documento: notaOk?.numero || null,
     comoFatura: !!venda.pedido_info?.receberComoFatura,
+    cartaoTotvs: venda.pedido_info?.cartaoTotvs || null,
   });
   const totalAmount = round2(receipts.reduce((s, r) => s + r.documentAmount, 0));
   try {

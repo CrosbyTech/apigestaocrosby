@@ -39,6 +39,12 @@ export const OPERACAO_DOC_INTERNO = { varejo: 511, franquias: 7807, mtm: 7808, r
 // Operação "oficial" de referência (só informativa na venda do HeadCoach)
 const OPERACAO_VENDA = { varejo: 545, franquias: 7234, mtm: 7235, revenda: 7236 };
 
+// Cartão das vendas do site/expedição no TOTVS: operadora 27448 (PAGARME
+// INSTITUICAO DE PAGAMENTO SA) + bandeira 99 (OUTROS) — é como estão os 897
+// pagamentos em cartão da 99 (out–nov/2026); por eles o TOTVS acha o portador
+// 9902 PAGARME CREDITO / 9901 PAGARME DEBITO.
+export const CARTAO_TOTVS_EXPEDICAO = { operadora: 27448, bandeira: 99 };
+
 // Transportadoras (código da pessoa no TOTVS, conferido nas NF-e da 99)
 export const TRANSPORTADORAS = [
   { id: 'CORREIOS', code: 6568, label: 'Correios' },
@@ -410,6 +416,7 @@ export async function faturar(body) {
       terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null,
       receberComoFatura: !!b.receberComoFatura,
       dataVenda,
+      cartaoTotvs: CARTAO_TOTVS_EXPEDICAO,
     },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
