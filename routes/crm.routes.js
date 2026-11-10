@@ -1600,6 +1600,94 @@ router.get(
 );
 
 // =============================================================================
+// GET /api/crm/fiscal-movement-itens
+// Lista os ITENS (por transação/produto) do fiscal-movement de uma ou mais
+// filiais num período, opcionalmente filtrando por operações. Read-only.
+// Devolve os itens crus (passthrough) + as chaves do 1º item, para montar
+// relatórios por transação (cliente, produto, qtd, valor). Cap de segurança.
+// Query: branches (obrig.) · ops (ex.: 512) · datemin,datemax · limit (20000)
+// =============================================================================
+router.get(
+  '/fiscal-movement-itens',
+  asyncHandler(async (req, res) => {
+    const branches = String(req.query.branches || '')
+      .split(',')
+      .map((n) => parseInt(n, 10))
+      .filter(Boolean);
+    if (branches.length === 0) {
+      return errorResponse(res, 'Informe ?branches=', 400, 'MISSING_BRANCHES');
+    }
+    const ops = new Set(
+      String(req.query.ops || '')
+        .split(',')
+        .map((n) => parseInt(n, 10))
+        .filter(Boolean),
+    );
+    const cap = parseInt(req.query.limit, 10) || 20000;
+    const ymd = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? s : null);
+    const isoD = (d) => d.toISOString().slice(0, 10);
+    const hoje = new Date();
+    const dmax = ymd(req.query.datemax) || isoD(hoje);
+    const dmin = ymd(req.query.datemin) || isoD(new Date(hoje.getTime() - 30 * 86400000));
+
+    let tokenData = await getToken();
+    if (!tokenData?.access_token) {
+      return errorResponse(res, 'Token TOTVS indisponível', 503, 'TOKEN_UNAVAILABLE');
+    }
+    let token = tokenData.access_token;
+    const FM_URL = `${TOTVS_BASE_URL}/analytics/v2/fiscal-movement/search`;
+    const itens = [];
+    const opsVistas = {};
+    for (let pg = 1; pg <= 500 && itens.length < cap; pg++) {
+      let data = null;
+      for (let t = 0; t < 3 && !data; t++) {
+        try {
+          const r = await axios.post(
+            FM_URL,
+            {
+              filter: { branchCodeList: branches, startMovementDate: dmin, endMovementDate: dmax },
+              page: pg,
+              pageSize: 1000,
+            },
+            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 120000 },
+          );
+          data = r.data;
+        } catch (err) {
+          if (err.response?.status === 401) {
+            try { token = (await getToken(true)).access_token; } catch {}
+          } else {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        }
+      }
+      if (!data) break;
+      for (const it of data.items || []) {
+        const op = Number(it.operationCode);
+        opsVistas[op] = (opsVistas[op] || 0) + 1;
+        if (ops.size && !ops.has(op)) continue;
+        itens.push(it);
+        if (itens.length >= cap) break;
+      }
+      if (!data.hasNext) break;
+    }
+
+    return successResponse(
+      res,
+      {
+        periodo: { datemin: dmin, datemax: dmax },
+        branches,
+        ops: [...ops],
+        total: itens.length,
+        chaves: itens[0] ? Object.keys(itens[0]) : [],
+        ops_vistas_no_periodo: opsVistas,
+        itens,
+      },
+      `${itens.length} itens`,
+    );
+  }),
+);
+
+// =============================================================================
 // POST /api/crm/franquia-cashback-creditar
 // CREDITA (escreve!) o cashback das vendas de franquia no TOTVS
 // (person/v2/bonus-due-date, tipo 14, validade 90 dias). Credita por
