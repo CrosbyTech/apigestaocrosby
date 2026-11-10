@@ -19,6 +19,7 @@ export async function listarAdiantamentos({ de = null, ate = null, escopo = 'cro
       .select('id,conta_id,lancamento_id,data,valor,origem,referencia,justificativa,usuario,criado_em')
       .eq('referencia->>tipo', TIPO_ADIANTAMENTO)
       .order('data', { ascending: false })
+      .order('id')
       .range(from, from + 999);
     if (de) q = q.gte('data', de);
     if (ate) q = q.lte('data', ate);

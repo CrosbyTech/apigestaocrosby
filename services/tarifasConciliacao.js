@@ -223,6 +223,7 @@ export async function saidasPendentes({ de, ate, escopo = 'crosby', sentido = 'S
       .order('conta_id')
       .order('data')
       .order('seq')
+      .order('id')
       .range(from, from + 999);
     if (error) throw new Error(error.message);
     todos.push(...(data || []));

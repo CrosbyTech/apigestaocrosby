@@ -676,7 +676,8 @@ export async function casarTransferencias({ de, ate, escopo }) {
       .lte('data', ateM)
       .in('categoria', ['pix', 'transferencia', 'outros'])
       .is('transferencia_id', null)
-      .order('data'),
+      .order('data')
+      .order('id'), // desempate: paginar só por data pula/repete linhas do mesmo dia entre páginas
   );
   // "outros" só entra quando o histórico é claramente TED/transferência (Sicredi 2024 classificou a TED recebida como outros)
   // linha já conciliada com contas a pagar/Liberação/Solicitação/CR não é transferência (a conciliação é prova)
@@ -832,7 +833,7 @@ export async function painel(f) {
   }
 
   const brutos = await buscarTodos(() => {
-    let q = supabase.from(T.lanc).select('*').gte('data', f.de).lte('data', f.ate).order('data').order('conta_id').order('seq');
+    let q = supabase.from(T.lanc).select('*').gte('data', f.de).lte('data', f.ate).order('data').order('conta_id').order('seq').order('id');
     if (contaIds) q = q.in('conta_id', contaIds);
     return q;
   });
@@ -840,7 +841,7 @@ export async function painel(f) {
   const raizesGrupo = new Set(contas.map((c) => (c.titular_cnpj || '').slice(0, 8)).filter((r) => r.length === 8));
   const docsGrupo = new Set(contas.map((c) => c.titular_cnpj).filter(Boolean));
 
-  const transfRows = await buscarTodos(() => supabase.from(T.transf).select('*').in('origem_conta_id', idsEscopo.length ? idsEscopo : [-1]).gte('data', addDias(f.de, -1)).lte('data', f.ate).order('data'));
+  const transfRows = await buscarTodos(() => supabase.from(T.transf).select('*').in('origem_conta_id', idsEscopo.length ? idsEscopo : [-1]).gte('data', addDias(f.de, -1)).lte('data', f.ate).order('data').order('id'));
   const transfPorId = new Map(transfRows.map((t) => [t.id, t]));
 
   // enriquece com a conta e a "outra ponta" da transferência
