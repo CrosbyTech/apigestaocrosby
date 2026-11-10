@@ -16,7 +16,7 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoUnicredOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoUnicredOfx, lerExtratoSicrediOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { leiturasCaixaTranscritas } from '../utils/extratoCaixaTranscrito.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
@@ -25,6 +25,8 @@ import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
+import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
+import { leiturasSicrediTranscritas } from '../utils/extratoSicrediTranscrito.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -114,7 +116,19 @@ const BANCOS = {
     ofxFechado: true,
     ilegiveis: ['FA MODAS/UNICRED/01/Unicred Fabio Fev (1).pdf'], // cópia do PDF de fevereiro na pasta de janeiro
   },
+  SICREDI: {
+    pasta: 'SICREDI',
+    // só dezembro/2023 (contas abertas no fim do ano). Crosby 36733: extrato "Não há lançamentos no período selecionado" (saldo 0,00).
+    pdf: lerExtratoSicredi,
+    ofx: lerExtratoSicrediOfx, // BALAMT = saldo de 31/12
+    bankId: 748,
+    ofxFechado: true,
+    // Irmãos Varejo 39355-0: PDF só desenho (sem texto), saldo 0,00 e nenhum lançamento → entra pela transcrição
+    ilegiveis: ['IRMAOS/SICREDI/12/FLAVIO FERREIRA EXTRATO DEZ 2023.pdf'],
+    extras: () => leiturasSicrediTranscritas().map((l) => ({ arquivo: `IRMAOS/SICREDI/${l.mesReferencia.slice(5)}/${l.arquivo} (transcrito)`, leitura: l })),
+  },
 };
+const JAN_A_NOV = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11'].map((m) => `2023-${m}`);
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
 const QUEBRAS = [];
 const quebra = (banco, conta, mes) => QUEBRAS.some((q) => q.banco === banco && q.conta === conta && q.mes === mes);
@@ -125,6 +139,9 @@ const BURACOS = [
   { banco: 'BNB', conta: '3228', meses: ['2023-04'] }, // conta sem movimento o ano todo; abril não veio
   { banco: 'CAIXA', conta: '000578136386', meses: ['2023-08', '2023-09'] }, // Crosby: agosto e setembro não vieram (jul termina 2.426,06 e out começa 13.207,69)
   { banco: 'SANTANDER', conta: '13001128', meses: ['2023-02', '2023-08', '2023-09', '2023-11'] }, // João Pessoa: fev, ago, set e nov não vieram
+  // Sicredi: só dezembro em todas as contas
+  { banco: 'SICREDI', conta: '36733', meses: JAN_A_NOV }, { banco: 'SICREDI', conta: '32693', meses: JAN_A_NOV },
+  { banco: 'SICREDI', conta: '36734', meses: JAN_A_NOV }, { banco: 'SICREDI', conta: '39355', meses: JAN_A_NOV },
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -151,6 +168,10 @@ const FIM_DE_MES = {
   'BRADESCO|249286': [1, 9.89, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
   'UNICRED|6850': [14583.56, 6028.65, 1648.84, 3742.69, 6698.79, 11797.24, 24387.65, 21328.76, 22006.97, 8505.88, 22079.73, 2022.86],
   'UNICRED|7098': [17441.83, 69.94, 3.3, 20.01, 66522.62, 329.77, 5233.29, 3230.05, 1331.55, 11855.77, 2945.96, 1335.44],
+  'SICREDI|36733': [null, null, null, null, null, null, null, null, null, null, null, 0],
+  'SICREDI|32693': [null, null, null, null, null, null, null, null, null, null, null, 786.59],
+  'SICREDI|36734': [null, null, null, null, null, null, null, null, null, null, null, 14700.16],
+  'SICREDI|39355': [null, null, null, null, null, null, null, null, null, null, null, 0],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {

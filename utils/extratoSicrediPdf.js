@@ -121,7 +121,9 @@ export async function lerExtratoSicredi(buffer) {
   // Dois layouts: o antigo ("Extrato (Período de … a …)", "SALDO ANTERIOR …") e o do Internet Banking Sicredi (2025: "Conta Corrente: 36733-8",
   // "Dados referentes ao período 01/08/2025 a 31/08/2025", 1ª linha "SALDO 342,45" = saldo anterior; mesmas colunas Data | Descrição | Documento | Valor | Saldo)
   const layout = /Internet Banking Sicredi|Dados referentes ao per[íi]odo/i.test(todoTexto) ? 'ib' : 'classico';
-  if (!/Associado:/.test(todoTexto) || !/Cooperativa:/.test(todoTexto) || !(/SALDO ANTERIOR/.test(todoTexto) || layout === 'ib')) throw new Error('Este PDF não parece ser um extrato do Sicredi (sem "Associado:", "Cooperativa:" e "SALDO ANTERIOR").');
+  // extrato de um período sem movimento: não traz a tabela nem o "SALDO ANTERIOR", só "Não há lançamentos no período selecionado." e o "Saldo Atual"
+  const semLancamentos = /N[ãa]o h[áa] lan[çc]amentos no per[íi]odo selecionado/i.test(todoTexto);
+  if (!/Associado:/.test(todoTexto) || !/Cooperativa:/.test(todoTexto) || !(/SALDO ANTERIOR/.test(todoTexto) || layout === 'ib' || semLancamentos)) throw new Error('Este PDF não parece ser um extrato do Sicredi (sem "Associado:", "Cooperativa:" e "SALDO ANTERIOR").');
 
   const titular = limpar((todoTexto.match(/Associado:\s*(.+)/) || [])[1] || '') || null;
   const cooperativa = (todoTexto.match(/Cooperativa:\s*(\d+)/) || [])[1] || null;
@@ -133,6 +135,11 @@ export async function lerExtratoSicredi(buffer) {
   if (!mPer) throw new Error('Não achei o período do extrato.');
   const periodo = { inicio: dataIso(mPer[1]), fim: dataIso(mPer[2]) };
   const mesRef = periodo.inicio.slice(0, 7);
+  if (semLancamentos && periodo.fim.slice(0, 7) !== mesRef) {
+    // "Período de 01/12/2023 a 02/01/2024" sem nenhum lançamento: vale como o mês de início
+    const [a, m] = mesRef.split('-').map(Number);
+    periodo.fim = `${mesRef}-${String(new Date(Date.UTC(a, m, 0)).getUTCDate()).padStart(2, '0')}`;
+  }
   const conhecida = CONTAS_SICREDI[`${cooperativa}|${conta}-${contaDv}`] || null;
   const cnpj = conhecida?.cnpj || null;
   if (SHOPPING_RECIFE.test(`${titular} ${cnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
@@ -167,6 +174,12 @@ export async function lerExtratoSicredi(buffer) {
     const documento = texto(its.filter((i) => i !== dataIt && i !== saldoIt && i !== valorIt && i.x >= 300 && i.x < 420)) || null;
     const cp = contraparteDaDescricao(descricao);
     lanc.push({ pagina: l.pagina, data: dataIso(dataIt.s), descricao, documento, valor: numBr(valorIt.s), saldoInformado: numBr(saldoIt.s), contraparteNome: cp.nome, contraparteDoc: cp.doc, historicoBase: cp.base, hint: cp.hint });
+  }
+  if (saldoAnterior == null && semLancamentos) {
+    // sem movimento no período: o saldo do começo é o "Saldo Atual" impresso
+    const mAtual = todoTexto.match(/Saldo Atual\s+R\$\s*(-?[\d.]+,\d{2})/);
+    if (!mAtual) throw new Error('Extrato do Sicredi sem lançamentos e sem o "Saldo Atual".');
+    saldoAnterior = numBr(mAtual[1]);
   }
   if (saldoAnterior == null) throw new Error('Não achei a linha "SALDO ANTERIOR".');
 
