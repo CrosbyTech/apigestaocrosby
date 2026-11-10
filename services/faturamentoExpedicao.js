@@ -44,8 +44,11 @@ export const TRANSPORTADORAS = [
   { id: 'CORREIOS', code: 6568, label: 'Correios' },
   { id: 'LATAM', code: 5786, label: 'LATAM' },
   { id: 'AZUL', code: 20171, label: 'Azul' },
-  { id: 'BEE', code: 15926, label: 'BEE' },
-  { id: 'TAXISTA', code: null, label: 'Taxista (pesquisar)' },
+  { id: 'BEE', code: 15926, label: 'BEE Tecnologia' }, // 15926 conferido no cadastro (5926 é outra pessoa)
+  { id: 'BARAUNAS', code: 27773, label: 'Baraúnas Entregas' },
+  { id: 'TANCREDO', code: 71042, label: 'Taxista Tancredo Lucio' },
+  { id: 'JACKSON', code: 33861, label: 'Taxista Jackson Luis' },
+  { id: 'TAXISTA', code: null, label: 'Outro (pesquisar no TOTVS)' },
   { id: 'RETIRADA', code: null, label: 'Retirada (sem transportadora)' },
 ];
 
