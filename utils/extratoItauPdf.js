@@ -282,11 +282,26 @@ function lerLayoutB(paginas, todoTexto) {
         if (saldoIt) saldoAnterior = numBr(saldoIt.s);
         continue;
       }
+      if (/^SDO CTA\/APL AUTOMATICAS$/.test(descUp)) {
+        // 2023, conta com aplicação automática: o dia fecha com "SDO CTA/APL AUTOMATICAS" (conta + aplicação), sem as linhas APL/RES
+        if (saldoIt) {
+          if (saldosDia.at(-1)?.apos === lanc.length - 1) saldosDia.pop();
+          saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s), total: true });
+          saldoFinal = numBr(saldoIt.s);
+        }
+        continue;
+      }
       if (/^SALDO/.test(descUp)) {
         // SALDO TOTAL DISPONÍVEL DIA / SALDO APLIC AUT MAIS…: informação, não lançamento.
         // Com cheque bloqueado o dia traz "SALDO TOTAL" (saldo contábil) e depois "SALDO TOTAL DISPONÍVEL DIA"
         // (sem o bloqueado) + "SALDO BLOQUEADO": o saldo da conta é o TOTAL.
         if (/^SALDO TOTAL$/.test(descUp) && saldoIt) {
+          saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s), total: true });
+          saldoFinal = numBr(saldoIt.s);
+        } else if (/^SALDO DO DIA$/.test(descUp) && saldoIt) {
+          // 2023: o dia fecha com "SALDO DO DIA" (saldo contábil). Quando há valor a liberar o extrato imprime antes
+          // "(-) SALDO A LIBERAR" e "SALDO FINAL DISPONIVEL"/"SALDO FINAL DEVEDOR" (sem o valor a liberar): vale o DO DIA.
+          if (saldosDia.at(-1)?.apos === lanc.length - 1) saldosDia.pop();
           saldosDia.push({ apos: lanc.length - 1, valor: numBr(saldoIt.s), total: true });
           saldoFinal = numBr(saldoIt.s);
         } else if (/DISPON/.test(descUp) && saldoIt && !(saldosDia.at(-1)?.total && saldosDia.at(-1).apos === lanc.length - 1)) {
@@ -396,7 +411,8 @@ export async function lerExtratoItau(buffer) {
   else throw new Error('Este PDF não parece ser um extrato do Itaú (nem "extrato mensal", nem "lançamentos período", nem "Lançamentos do período" 2025).');
   if (SHOPPING_RECIFE.test(`${r.conta}-${r.contaDv} ${r.cnpj || ''} ${r.titular || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
   const conhecida = CONTAS_ITAU[`${r.agencia}|${r.conta}-${r.contaDv}`] || null;
-  const titular = r.titular || conhecida?.titular || null;
+  // 2023: o cabeçalho traz a razão social antiga com o CPF do titular no fim → fica o nome cadastrado da conta
+  const titular = (/\b\d{11}\b/.test(r.titular || '') && conhecida?.titular) || r.titular || conhecida?.titular || null;
   const cnpj = r.cnpj || conhecida?.cnpj || null;
 
   // ordem: as linhas vêm na ordem do extrato (cronológica); numera

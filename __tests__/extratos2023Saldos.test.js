@@ -16,7 +16,11 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
+import { leiturasCaixaTranscritas } from '../utils/extratoCaixaTranscrito.js';
+import { lerExtratoItau } from '../utils/extratoItauPdf.js';
+import { lerExtratoItauOfx } from '../utils/extratoItauOfx.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -46,6 +50,36 @@ const BANCOS = {
     bankId: 4,
     ilegiveis: [],
   },
+  CAIXA: {
+    pasta: 'CEF',
+    // contas antigas (2044 | 003 | 4609-4 Crosby e 4737-6 Fabio) = as de 2024 (000578136386-2 e 000578136459-1), gravadas com o número novo.
+    // jan–jul: "Extrato por período" do Internet Banking, texto com espaços no meio das palavras; out–dez: Gerenciador CAIXA.
+    // Na pasta da FA Modas há cópias de arquivos da Crosby com nome de "FB/FABIO" (mar, mai, jun, jul): contam como leitura da conta da Crosby.
+    pdf: lerExtratoCaixaPdf,
+    // BALAMT é o saldo na data da exportação (às vezes com o limite junto) → do OFX só se compara o movimento do mês
+    ofx: lerExtratoCaixaOfx,
+    bankId: 104,
+    ofxSoMovimento: true,
+    // só imagem (Gerenciador CAIXA emitido em 02/01/2025): mar/ago/set entram pela transcrição (utils/extratoCaixaTranscrito.js); mai e jul pelo OFX
+    ilegiveis: ['FA MODAS/CEF/03/caixa_mar23.pdf', 'FA MODAS/CEF/05/caixa_mai23.pdf', 'FA MODAS/CEF/07/caixa_jul23.pdf', 'FA MODAS/CEF/08/caixa_ago23.pdf', 'FA MODAS/CEF/09/caixa_set23.pdf'],
+    // leituras que não vêm de um leitor de arquivo: meses transcritos do PDF-imagem
+    extras: () => leiturasCaixaTranscritas().map((l) => ({ arquivo: `FA MODAS/CEF/${l.mesReferencia.slice(5)}/${l.arquivo} (transcrito)`, leitura: l })),
+  },
+  ITAU: {
+    pasta: 'ITAU',
+    // "lançamentos período" de 2023: o dia fecha com "SALDO DO DIA" ou, na conta com aplicação automática (39046), "SDO CTA/APL AUTOMATICAS"
+    pdf: lerExtratoItau,
+    // o OFX de 2023 traz as linhas de saldo (SALDO ANTERIOR, saldo de cada dia) e se confere sozinho; bate com o PDF centavo a centavo
+    ofx: lerExtratoItauOfx,
+    bankId: 341,
+    ofxFechado: true,
+    ilegiveis: [
+      'AZ/ITAU/02/Extrato_6530-390464-02-01-2024.pdf', // reemitido em 2024, sem saldo do dia no PDF: fevereiro entra pelo OFX
+      'FA MODAS/ITAU/01/ITAU FB JAN OFX.ofx', // OFX sem as linhas de saldo: janeiro entra pelo PDF
+      'FERREIRA/ITAU/10/ITAU CROSBY PDF OUTUBRO.pdf', // o arquivo é de 01 a 08/11 (parcial): outubro entra pelo OFX
+      'AZ/ITAU/11/ITAU FL OFX SETEMBRO.ofx', 'AZ/ITAU/11/ITAU FL SETEMBRO.pdf', // cópias de setembro na pasta de novembro
+    ],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
 const QUEBRAS = [];
@@ -55,6 +89,7 @@ const BURACOS = [
   { banco: 'BNB', conta: '2286', meses: ['2023-10'] }, // outubro não veio (set termina 976,59 e nov começa 4.071,59)
   { banco: 'BNB', conta: '2287', meses: ['2023-01', '2023-02', '2023-04', '2023-05', '2023-06', '2023-07', '2023-08', '2023-09', '2023-10', '2023-11', '2023-12'] }, // só o OFX de março (sem movimento)
   { banco: 'BNB', conta: '3228', meses: ['2023-04'] }, // conta sem movimento o ano todo; abril não veio
+  { banco: 'CAIXA', conta: '000578136386', meses: ['2023-08', '2023-09'] }, // Crosby: agosto e setembro não vieram (jul termina 2.426,06 e out começa 13.207,69)
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -65,11 +100,20 @@ const FIM_DE_MES = {
   'BNB|2287': [null, null, 0, null, null, null, null, null, null, null, null, null],
   'BNB|2824': [2980.17, 1058.76, 79.46, 177.88, 361.26, 323.51, 78.98, 585.65, 588.63, 653.29, 1592.64, 2640.93],
   'BNB|3228': [0, 0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0],
+  'CAIXA|000578136386': [1443.42, 656.23, 16.85, -3163.15, 11489.14, 9000.85, 2426.06, null, null, 7550.35, 11611, 9451.68],
+  // Fabio: mar/ago/set transcritos do PDF-imagem; mai e jul pelo OFX (saldo pelo encadeamento, igual ao do PDF-imagem do mês)
+  'CAIXA|000578136459': [189.4, 0, 0, 30.86, 559.97, 1326.35, 43.51, 1444.96, 6217.66, 1327.83, -9729.12, -7944.03],
+  // Itaú: "SALDO DO DIA" do último dia (39046: conta + aplicação automática)
+  'ITAU|27061': [2316.09, 8833.86, 8718.49, -17098.18, -5235.44, 20478.19, 14551.85, 92861.78, 28144.47, 71405.32, 15908.62, 112683.02],
+  'ITAU|33688': [40.92, 3160.23, 7037.73, -5813.88, -27867.85, 4192.36, 22168.85, 13824.87, 18361.01, 34475.43, 14808.8, 85261.05],
+  'ITAU|39046': [55.78, 670.59, 177.69, -1998.43, 18708.97, 198.24, 932.54, 8066.06, 1948.53, 7061.07, 4498.61, 189111.37],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {
   'BB|58711': 59708.73,
   'BNB|2286': 791.49, 'BNB|2824': 4820.55, 'BNB|3228': 0,
+  'CAIXA|000578136386': 23340.95, 'CAIXA|000578136459': 23118.8,
+  'ITAU|27061': 4286.53, 'ITAU|33688': 4988.17, 'ITAU|39046': 6214.35,
 };
 
 // arquivos: RAIZ/<EMPRESA>/<pasta do banco>/<MÊS>/arquivo (o nome se repete entre meses → a chave é o caminho relativo)
@@ -88,8 +132,9 @@ const ARQUIVOS = Object.entries(BANCOS).flatMap(([banco, def]) =>
         return { banco, arquivo, caminho, ler: def.ofx, formato: 'ofx' };
       })
       .filter(Boolean),
-  ),
+  ).concat((def.extras ? def.extras() : []).map((e) => ({ banco, arquivo: e.arquivo, caminho: null, ler: async () => e.leitura, formato: 'pdf' }))),
 );
+const lerArquivo = (a) => a.ler(a.caminho ? fs.readFileSync(a.caminho) : null);
 const leituras = new Map(); // "arquivo#conta#mês" → leitura
 const chave = (l) => `${l.banco}|${l.conta}`;
 const lidos = new Set();
@@ -100,13 +145,15 @@ const guardar = (a, r) => {
     l.arquivo = a.arquivo;
     l.formatoArquivo = a.formato;
     // OFX com BALAMT de depois do mês: saldo indefinido no arquivo, salvo nos bancos em que o BALAMT é o do fim do período (ofxFechado)
-    l.saldoIndefinido = a.formato === 'ofx' && !BANCOS[a.banco].ofxFechado && !!l.saldoFinalEm && l.saldoFinalEm > l.periodo.fim;
+    // (ofxSoMovimento: o BALAMT nunca serve como saldo do fim do mês)
+    l.saldoIndefinido = a.formato === 'ofx' && (!!BANCOS[a.banco].ofxSoMovimento || (!BANCOS[a.banco].ofxFechado && !!l.saldoFinalEm && l.saldoFinalEm > l.periodo.fim));
     l.movimento = r2(l.lancamentos.filter((x) => !l.saldoIndefinido || x.data.slice(0, 7) === l.mesReferencia).reduce((s, x) => s + x.valor, 0));
     leituras.set(`${a.arquivo}#${l.conta}#${l.mesReferencia}`, l);
   }
   return Array.isArray(r) ? r : [r];
 };
-const referencia = (ls) => ls.find((l) => !l.saldoIndefinido) || ls[0];
+// leitura de referência do mês: PDF com saldo definido (é o que se importa quando existe), senão OFX fechado, senão a indefinida
+const referencia = (ls) => ls.find((l) => !l.saldoIndefinido && l.formatoArquivo === 'pdf') || ls.find((l) => !l.saldoIndefinido) || ls[0];
 const fimDoMes = (contas, conta, mes) => {
   const ls = contas.get(conta)?.get(mes);
   if (!ls) return undefined;
@@ -138,7 +185,7 @@ describeSe('extratos 2023 — saldo final de cada mês igual em todo lugar', () 
   });
 
   test.each(ARQUIVOS.map((a) => [a.banco, a.arquivo, a]))('%s %s: saldo recalculado = saldo do extrato', async (_b, _f, a) => {
-    for (const l of guardar(a, await a.ler(fs.readFileSync(a.caminho)))) {
+    for (const l of guardar(a, await lerArquivo(a))) {
       expect(l.banco).toBe(a.banco);
       expect(l.mesReferencia).toMatch(/^2023-\d{2}$/);
       expect(l.mesReferencia.slice(5)).toBe(a.arquivo.split('/')[2]); // o mês lido é o da pasta do mês
@@ -228,7 +275,7 @@ describeBanco('extratos 2023 — saldos gravados no banco = saldos dos arquivos'
       lancs.push(...p.data);
       if (p.data.length < 1000) break;
     }
-    for (const a of ARQUIVOS) if (!lidos.has(a.arquivo)) guardar(a, await a.ler(fs.readFileSync(a.caminho)));
+    for (const a of ARQUIVOS) if (!lidos.has(a.arquivo)) guardar(a, await lerArquivo(a));
   }, TIMEOUT);
 
   test('cada mês com arquivo legível está importado uma vez, com os saldos do arquivo', () => {

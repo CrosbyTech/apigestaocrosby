@@ -21,6 +21,7 @@ import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx, ehOfxSantander } from '../utils/extratoSantanderOfx.js';
+import { lerExtratoItauOfx, ehOfxItau } from '../utils/extratoItauOfx.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
@@ -183,7 +184,8 @@ function detectarBanco(nome, buffer) {
 /**
  * Importa um extrato (PDF). Devolve a leitura + o que foi gravado.
  */
-export async function importarExtrato({ buffer, nome, usuario = null, forcar = false, leitura: leituraPronta = null }) {
+// `casar: false` pula o recasamento das transferências (carga em lote: chamar casarTransferencias() uma vez no fim)
+export async function importarExtrato({ buffer, nome, usuario = null, forcar = false, leitura: leituraPronta = null, casar = true }) {
   await garantirTabelas();
   let banco = leituraPronta ? leituraPronta.banco : detectarBanco(nome, buffer);
   let leitura = leituraPronta;
@@ -210,6 +212,10 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     } else if (bancoDoOfx(buffer) === 707) {
       leitura = lerExtratoDaycovalOfx(buffer);
       banco = 'DAYCOVAL';
+    } else if (ehOfxItau(buffer)) {
+      // Itaú 2023: o OFX traz as linhas de saldo do dia e se confere sozinho (2024+ não traz → erro pedindo o PDF)
+      leitura = lerExtratoItauOfx(buffer);
+      banco = 'ITAU';
     } else {
       leitura = lerExtratoCaixaOfx(buffer);
       banco = 'CAIXA';
@@ -234,7 +240,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
   if (Array.isArray(leitura)) {
     // extrato com VÁRIAS contas (BNB "Extrato Consolidado"): importa uma por uma
     const resultados = [];
-    for (const l of leitura) resultados.push(await importarExtrato({ buffer, nome, usuario, forcar, leitura: l }));
+    for (const l of leitura) resultados.push(await importarExtrato({ buffer, nome, usuario, forcar, leitura: l, casar }));
     return { multiplas: resultados.length, banco, conta: resultados.map((r) => `${r.conta}-${r.contaDv}`).join(', '), mesReferencia: resultados[0]?.mesReferencia || null, qtd: resultados.reduce((s, r) => s + (r.qtd || 0), 0), conferencia: { bate: resultados.every((r) => r.conferencia?.bate) }, encadeamento: null, resultados };
   }
   if (SHOPPING_RECIFE.test(`${leitura.titular || ''} ${leitura.titularCnpj || ''}`)) throw new Error('Extrato da Shopping Recife: não entra em nenhum banco (regra do Yago).');
@@ -390,7 +396,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
     const { error } = await supabase.from(T.lanc).insert(rows.slice(i, i + 500));
     if (error) throw new Error(error.message || JSON.stringify(error));
   }
-  const transferencias = await casarTransferencias().catch((e) => ({ erro: e.message }));
+  const transferencias = casar ? await casarTransferencias().catch((e) => ({ erro: e.message })) : { adiado: true };
   return {
     transferencias,
     importacao: imp,
