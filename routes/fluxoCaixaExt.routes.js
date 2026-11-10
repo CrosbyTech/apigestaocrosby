@@ -360,6 +360,21 @@ router.get(
   }),
 );
 
+// Entrada pendente → fatura no contas a receber do TOTVS, já baixada em conta corrente (Inefável, 10/11/2026)
+router.post(
+  '/conciliacao/faturas-entradas',
+  asyncHandler(async (req, res) => {
+    try {
+      const { itens, simular } = req.body || {};
+      const { criarFaturasEntradas } = await import('../services/faturasEntradasConciliacao.js');
+      const r = await criarFaturasEntradas({ itens, simular: !!simular, usuario: usuarioDe(req) });
+      return successResponse(res, r);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Entradas pendentes de todas as contas (Inefável, 10/11/2026)
 router.get(
   '/conciliacao/entradas-pendentes',
