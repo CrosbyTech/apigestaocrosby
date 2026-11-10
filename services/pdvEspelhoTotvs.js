@@ -69,7 +69,17 @@ function traduzirErroTotvs(err) {
   if (codes.includes('TerminalInvalid')) {
     return { code: 'TERMINAL_INVALIDO', message: 'Terminal não cadastrado no TOTVS para esta empresa — ajuste o "terminal" na configuração fiscal.' };
   }
-  return { code: codes[0] || 'TOTVS_ERROR', message: msgs.join('; ') || err.message };
+  // Qualquer outro erro: código + mensagem + detalhe; se o TOTVS não mandou
+  // nada legível (já veio só "."), a resposta crua, para dar para diagnosticar
+  const legivel = msgs.join('; ').replace(/[.\s]/g, '').length > 3;
+  let cru = '';
+  try {
+    cru = typeof d === 'string' ? d : JSON.stringify(d);
+  } catch {
+    cru = String(d);
+  }
+  const detalhe = original && original.replace(/[.\s—|]/g, '').length > 3 ? original : `HTTP ${err.response?.status ?? '?'} ${String(cru || err.message).slice(0, 600)}`;
+  return { code: codes[0] || 'TOTVS_ERROR', message: legivel ? `${msgs.join('; ')} (${detalhe})` : detalhe };
 }
 
 async function carregar(vendaId) {
