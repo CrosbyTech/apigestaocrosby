@@ -55,3 +55,6 @@ ALTER TABLE pedidos_venda_faturamentos ADD COLUMN IF NOT EXISTS totvs_erro TEXT;
 ALTER TABLE pedidos_venda_faturamentos ADD COLUMN IF NOT EXISTS frete NUMERIC(14, 2) NOT NULL DEFAULT 0;
 ALTER TABLE pedidos_venda_faturamentos ADD COLUMN IF NOT EXISTS forma_pagamento TEXT;
 CREATE INDEX IF NOT EXISTS idx_pvfat_venda ON pedidos_venda_faturamentos (venda_id);
+
+-- Cartão escolhido na tela (Operadora + Parcelamento do cadastro FCXFL002 do TOTVS)
+ALTER TABLE pdv_venda_pagamentos ADD COLUMN IF NOT EXISTS cartao_totvs JSONB; -- { seq, descricao, portador, operadora, bandeira, parcelas }

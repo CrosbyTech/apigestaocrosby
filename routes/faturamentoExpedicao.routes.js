@@ -1,7 +1,7 @@
 // ============================================================================
 // FATURAMENTO DA EXPEDIÇÃO — montado em /api/faturamento-expedicao
 // NF-e pelo HeadCoach (empresa 99) + documento interno e contas a receber no
-// TOTVS. Ver services/faturamentoExpedicao.js.
+// TOTVS (empresa 990). Ver services/faturamentoExpedicao.js.
 //
 //   GET  /preparar/:chave             sugestões do pedido (cliente, transporte, pagamento, comprovantes)
 //   POST /previa                      { clienteCode, consumidorFinal, itens[] } cenário fiscal + CFOP por item
@@ -19,6 +19,7 @@ import {
   processarFaturamento,
   listarTransacoes,
   detalheTransacao,
+  listarCartoes,
   FaturamentoError,
 } from '../services/faturamentoExpedicao.js';
 import { FiscalError } from '../services/pdvFiscal.js';
@@ -36,6 +37,18 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await prepararFaturamento(String(req.params.chave)), 'Pedido pronto para faturar');
+    } catch (err) {
+      return falha(res, err);
+    }
+  }),
+);
+
+// Operadoras e parcelamentos de cartão do cadastro do TOTVS (para a tela)
+router.get(
+  '/cartoes',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await listarCartoes(), 'Cartões do TOTVS');
     } catch (err) {
       return falha(res, err);
     }

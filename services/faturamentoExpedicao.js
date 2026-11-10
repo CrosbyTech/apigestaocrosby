@@ -9,7 +9,12 @@
 //   3) emite a NF-e (services/pdvFiscal.js, gabarito copiado das notas do TOTVS)
 //   4) espelha no TOTVS como DOCUMENTO INTERNO (511/7807/7808/7809, modelo 35)
 //      + recebimento → contas a receber com as parcelas do pedido
-//      (services/pdvEspelhoTotvs.js; exige caixa aberto no terminal na data)
+//      (services/pdvEspelhoTotvs.js; exige caixa aberto no terminal na data).
+//      A transação do TOTVS vai para a EMPRESA 990, não para a 99: nas empresas
+//      que emitem nota (99, 95, 55) o transaction-receiving da API devolve
+//      "GeneralMessage ." (TOMAS); na 990 a mesma chamada fecha a transação
+//      (testado em 10/11/2026 com a venda real do RV1325 no cartão 2x). A NF-e
+//      continua saindo pela 99.
 //   5) registra tudo em pedidos_venda_faturamentos (aba Transações)
 // ============================================================================
 import axios from 'axios';
@@ -28,11 +33,14 @@ import {
   cfopExpedicao,
   ICMS_DIFAL_UF_CONFERIDA,
 } from './pdvFiscal.js';
-import { espelharVendaNoTotvs } from './pdvEspelhoTotvs.js';
+import { espelharVendaNoTotvs, cartoesTotvs } from './pdvEspelhoTotvs.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
 import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
 
+import { cardBrejinho } from './brejinhoDryland.js';
 export const EMPRESA_FATURAMENTO = 99;
+// Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
+export const EMPRESA_DOC_INTERNO = 990;
 
 // Documento interno no TOTVS (saída, financeira, modelo 35) por canal
 export const OPERACAO_DOC_INTERNO = { varejo: 511, franquias: 7807, mtm: 7808, revenda: 7809 };
@@ -44,6 +52,31 @@ const OPERACAO_VENDA = { varejo: 545, franquias: 7234, mtm: 7235, revenda: 7236 
 // do cadastro desses portadores (FCXFL002), no texto exato — ver
 // resolverCartaoNoCadastro em pdvEspelhoTotvs.js.
 export const CARTAO_TOTVS_EXPEDICAO = { portadores: { credito: 9902, debito: 9901 } };
+
+// Cartões que a API consegue receber: linhas do cadastro do TOTVS (FCXFL002)
+// com Operadora e Bandeira preenchidas, agrupadas como na tela FGRFM003
+// (Operadora → Parcelamento). payment-cards: tipo 4 = crédito, 5 = débito.
+export async function listarCartoes() {
+  const lista = (await cartoesTotvs()).filter((c) => c.operatorName && c.brandName);
+  const grupos = { credito: new Map(), debito: new Map() };
+  for (const c of lista) {
+    const tipo = Number(c.documentType) === 5 ? 'debito' : Number(c.documentType) === 4 ? 'credito' : null;
+    if (!tipo) continue;
+    const chave = `${c.operatorName}|${c.brandName}|${c.bearerNumber}`;
+    if (!grupos[tipo].has(chave)) grupos[tipo].set(chave, { chave, operadora: c.operatorName, bandeira: c.brandName, portador: c.bearerNumber, opcoes: [] });
+    grupos[tipo].get(chave).opcoes.push({ seq: c.sequenceNumber, descricao: c.description, parcelas: Number(c.installmentNumber) || 1 });
+  }
+  const arr = (m) => [...m.values()].map((g) => ({ ...g, opcoes: g.opcoes.sort((a, b) => a.parcelas - b.parcelas) })).sort((a, b) => a.operadora.localeCompare(b.operadora) || a.bandeira.localeCompare(b.bandeira));
+  const credito = arr(grupos.credito);
+  const debito = arr(grupos.debito);
+  const pc = CARTAO_TOTVS_EXPEDICAO.portadores;
+  return {
+    credito,
+    debito,
+    // padrão da expedição: Pagar.me
+    padrao: { credito: credito.find((g) => g.portador === pc.credito)?.chave || null, debito: debito.find((g) => g.portador === pc.debito)?.chave || null },
+  };
+}
 
 // Transportadoras (código da pessoa no TOTVS, conferido nas NF-e da 99)
 export const TRANSPORTADORAS = [
@@ -149,7 +182,10 @@ export function parcelasIguais(total, n, vencimentos) {
 export async function prepararFaturamento(chave) {
   let card = null;
   let ref = null;
-  if (String(chave).startsWith('SEP:')) ref = String(chave).slice(4).toUpperCase();
+  if (/^BRJ:/i.test(String(chave))) {
+    // Expedição Brejinho: card do Dryland /brejinho + peças da transação TOTVS
+    ({ card } = await cardBrejinho(chave));
+  } else if (String(chave).startsWith('SEP:')) ref = String(chave).slice(4).toUpperCase();
   else {
     const { data } = await supabase.from('pedidos_venda_fila').select('*').eq('id', chave).maybeSingle();
     if (!data) throw new FaturamentoError('Pedido não encontrado', 'NOT_FOUND', 404);
@@ -256,7 +292,7 @@ export async function previaFiscal({ clienteCode, consumidorFinal = false, itens
 
 // ─── FATURAR ─────────────────────────────────────────────────────────────────
 // body: { chave, numeroSite, canal, clienteCode, vendedorCode, operacaoDocInterno,
-//   consumidorFinal, dataCaixa, itens:[{ productCode, quantidade, valorUnit, epcs[] }],
+//   consumidorFinal, dataVenda, terminal, itens:[{ productCode, quantidade, valorUnit, epcs[] }],
 //   transporte:{ code, servico, frete, modFrete, volumes, pesoB, pesoL },
 //   pagamentos:[{ forma, valor, parcelas, nsu, autorizacao, bandeira }],
 //   vencimentos:[…] (boleto), comprovantes:[{url,path}], pedidoInfo:{…},
@@ -268,8 +304,8 @@ export async function faturar(body) {
   if (!b.clienteCode) throw new FaturamentoError('Escolha o cliente');
   if (!b.vendedorCode) throw new FaturamentoError('Escolha o vendedor');
   if (!Array.isArray(b.itens) || !b.itens.length) throw new FaturamentoError('Nenhuma peça conferida');
-  const operacaoDocInterno = Number(b.operacaoDocInterno);
-  if (!Object.values(OPERACAO_DOC_INTERNO).includes(operacaoDocInterno)) throw new FaturamentoError('Operação de documento interno inválida');
+  // operação do documento interno: a escolhida na tela ou a do canal
+  const operacaoDocInterno = Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno)) ? Number(b.operacaoDocInterno) : OPERACAO_DOC_INTERNO[b.canal] || 511;
 
   // Itens + dados fiscais + produção/adquirido
   const emit = await buscarEmitente(empresa);
@@ -350,7 +386,17 @@ export async function faturar(body) {
     pagamentos.push({
       forma,
       valor,
-      parcelas: forma === 'credito' || forma === 'boleto' ? Math.max(1, parseInt(p.parcelas, 10) || 1) : 1,
+      parcelas:
+        forma === 'credito' && Number(p.cartao?.parcelas) > 0
+          ? Number(p.cartao.parcelas)
+          : forma === 'credito' || forma === 'boleto'
+            ? Math.max(1, parseInt(p.parcelas, 10) || 1)
+            : 1,
+      // Operadora + Parcelamento escolhidos na tela (linha do cadastro do TOTVS)
+      cartao_totvs:
+        (forma === 'credito' || forma === 'debito') && p.cartao?.operadora && p.cartao?.bandeira
+          ? { seq: p.cartao.seq ?? null, descricao: p.cartao.descricao || null, portador: p.cartao.portador ?? null, operadora: String(p.cartao.operadora), bandeira: String(p.cartao.bandeira), parcelas: Number(p.cartao.parcelas) || 1 }
+          : null,
       bandeira: p.bandeira ? String(p.bandeira).toLowerCase() : null,
       nsu: texto(p.nsu),
       autorizacao: texto(p.autorizacao),
@@ -417,6 +463,7 @@ export async function faturar(body) {
       receberComoFatura: !!b.receberComoFatura,
       dataVenda,
       cartaoTotvs: CARTAO_TOTVS_EXPEDICAO,
+      empresaTotvs: EMPRESA_DOC_INTERNO,
     },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
@@ -477,21 +524,31 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
     const { data } = await supabase.from('pedidos_venda_faturamentos').select('id').eq('venda_id', vendaId).maybeSingle();
     fatId = data?.id || null;
   }
-  // Trocar a operação do documento interno: a API não altera a operação de uma
-  // transação existente, então abre OUTRA transação (data de hoje) para a mesma
-  // venda. A anterior fica "em andamento" no TOTVS, anotada para ser cancelada.
-  const opNova = Number(opcoes.operacaoDocInterno);
-  if (opNova && Object.values(OPERACAO_DOC_INTERNO).includes(opNova)) {
-    const { data: v0 } = await supabase.from('pdv_vendas').select('operacao_doc_interno, totvs_transacao_code, totvs_status, pedido_info').eq('id', vendaId).maybeSingle();
-    if (v0 && v0.totvs_status !== 4 && Number(v0.operacao_doc_interno) !== opNova) {
-      const info = { ...(v0.pedido_info || {}) };
-      if (v0.totvs_transacao_code) info.transacoesAnteriores = [...(info.transacoesAnteriores || []), { code: v0.totvs_transacao_code, operacao: v0.operacao_doc_interno }];
-      await supabase
-        .from('pdv_vendas')
-        .update({ operacao_doc_interno: opNova, totvs_transacao_code: null, totvs_transacao_date: null, totvs_status: null, totvs_erro: null, data_caixa: hojeBrasil(), pedido_info: info })
-        .eq('id', vendaId);
-      if (fatId) await supabase.from('pedidos_venda_faturamentos').update({ operacao: opNova, transacao_code: null, transacao_date: null, transacao_status: 1 }).eq('id', fatId);
-      console.log(`🔁 [Faturamento] venda ${vendaId}: operação do documento interno ${v0.operacao_doc_interno} → ${opNova} (nova transação; anterior ${v0.totvs_transacao_code ?? '—'})`);
+  // Abre OUTRA transação (data de hoje) para a mesma venda quando:
+  //  • a operação do documento interno foi trocada (a API não altera a operação
+  //    de uma transação existente), ou
+  //  • a venda ainda está presa numa transação da 99 (anterior à mudança para a
+  //    990) — "Tentar de novo" leva o documento interno para a 990.
+  // A anterior fica "em andamento" no TOTVS, anotada para ser cancelada.
+  {
+    const { data: v0 } = await supabase.from('pdv_vendas').select('origem, operacao_doc_interno, totvs_transacao_code, totvs_status, pedido_info').eq('id', vendaId).maybeSingle();
+    if (v0 && v0.origem === 'expedicao' && v0.totvs_status !== 4) {
+      const opPedida = Number(opcoes.operacaoDocInterno);
+      const opNova = Object.values(OPERACAO_DOC_INTERNO).includes(opPedida) ? opPedida : null;
+      const empresaAtual = Number(v0.pedido_info?.empresaTotvs) || EMPRESA_FATURAMENTO;
+      const trocaOperacao = !!opNova && Number(v0.operacao_doc_interno) !== opNova;
+      const trocaEmpresa = empresaAtual !== EMPRESA_DOC_INTERNO;
+      if (trocaOperacao || trocaEmpresa) {
+        const info = { ...(v0.pedido_info || {}), empresaTotvs: EMPRESA_DOC_INTERNO };
+        if (v0.totvs_transacao_code) info.transacoesAnteriores = [...(info.transacoesAnteriores || []), { code: v0.totvs_transacao_code, operacao: v0.operacao_doc_interno, empresa: empresaAtual }];
+        const operacao = opNova || Number(v0.operacao_doc_interno) || 511;
+        await supabase
+          .from('pdv_vendas')
+          .update({ operacao_doc_interno: operacao, totvs_transacao_code: null, totvs_transacao_date: null, totvs_status: null, totvs_erro: null, data_caixa: hojeBrasil(), pedido_info: info })
+          .eq('id', vendaId);
+        if (fatId) await supabase.from('pedidos_venda_faturamentos').update({ operacao, transacao_code: null, transacao_date: null, transacao_status: 1 }).eq('id', fatId);
+        console.log(`🔁 [Faturamento] venda ${vendaId}: nova transação no TOTVS (empresa ${empresaAtual} → ${EMPRESA_DOC_INTERNO}, operação ${v0.operacao_doc_interno ?? '—'} → ${operacao}; anterior ${v0.totvs_transacao_code ?? '—'})`);
+      }
     }
   }
   const atualizar = async (patch) => {
@@ -520,7 +577,7 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
     return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs: { ok: false, mensagem: 'aguardando a NF-e ser autorizada' } };
   }
 
-  // 2) Documento interno + contas a receber no TOTVS
+  // 2) Documento interno + contas a receber no TOTVS (empresa 990)
   let totvs;
   try {
     const r = await espelharVendaNoTotvs(vendaId, { forcar: true });

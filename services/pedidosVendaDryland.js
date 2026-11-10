@@ -69,6 +69,19 @@ const chunk = (arr, n) => {
   return out;
 };
 
+// Linha da separação que já não vem do Dryland: só vale a que saiu SEPARADA
+// (expirou pelas 72 h). A que saiu sem separar foi tirada do pedido (não achei,
+// crédito, troca).
+// A tela /separar tira cada linha 72 h depois de criada. Se o HeadCoach só
+// viu a separação depois disso (pedidos anteriores a 06/11/2026 à tarde, quando
+// a cópia começou), as primeiras linhas saíram sem ficar guardadas e o que
+// sobrou é só um pedaço (linha de troca/desdobro criada depois) — não serve de
+// lista de peças; nesses vale o card do pedido.
+export const separacaoIncompleta = (sep, criadoPedido) =>
+  !!(sep?.primeiro_visto_em && criadoPedido && new Date(sep.primeiro_visto_em) - new Date(criadoPedido) > 71.5 * 36e5);
+
+export const linhaSeparadaVale = (x) => !x.sumiu_do_dryland_em || Number(x.separado || 0) >= Number(x.qtd || 0);
+
 export async function sincronizarPedidosDryland() {
   const separacao = await sincronizarSeparacao();
   const fila = await sincronizarFila();
@@ -98,11 +111,35 @@ async function sincronizarSeparacao() {
     if (!data || data.length < 1000) break;
   }
 
+  // A tela /separar do Dryland tira cada LINHA 72 h depois de criada (uma a
+  // uma: a linha de uma troca, criada depois, some depois das outras). Linha que
+  // sumiu JÁ SEPARADA continua fazendo parte do pedido; sem isso o cabeçalho
+  // ficava só com as linhas que sobraram (RV1258: 15 peças viraram "1 peça").
+  const vivas = new Set(linhas.map((l) => l.id));
+  const guardadasPorRef = new Map();
+  const refsVivas = [...porRef.keys()];
+  for (const lote of chunk(refsVivas, 150)) {
+    const { data, error } = await supabase
+      .from('pedidos_venda_dryland_itens')
+      .select('dryland_id, ref, qtd, separado, preco, totvs, criado_em, obs, sumiu_do_dryland_em')
+      .in('ref', lote)
+      .not('sumiu_do_dryland_em', 'is', null)
+      .limit(5000);
+    if (error) throw error;
+    for (const x of data || []) {
+      if (vivas.has(x.dryland_id) || !linhaSeparadaVale(x)) continue;
+      if (!guardadasPorRef.has(x.ref)) guardadasPorRef.set(x.ref, []);
+      guardadasPorRef.get(x.ref).push(x);
+    }
+  }
+
   const cabecalhos = [];
   const itens = [];
-  for (const [ref, ls] of porRef) {
+  for (const [ref, lsVivas] of porRef) {
+    // para as contas do cabeçalho: linhas de agora + as que já saíram separadas
+    const ls = [...lsVivas, ...(guardadasPorRef.get(ref) || [])];
     // a 1ª linha com obs de pedido (algumas linhas trazem só avisos de troca)
-    const base = ls.find((x) => /pedido site|transfer/i.test(x.obs || '')) || ls[0];
+    const base = lsVivas.find((x) => /pedido site|transfer/i.test(x.obs || '')) || lsVivas[0];
     const { pagamento, vendedor_code, vendedor_nome } = lerObs(base.obs);
     const canal = CANAL_POR_TIPO[base.tipo] || base.tipo || null;
     const pecas = ls.reduce((s, x) => s + Number(x.qtd || 0), 0);
@@ -133,7 +170,7 @@ async function sincronizarSeparacao() {
       sumiu_do_dryland_em: null,
       sincronizado_em: agora,
     });
-    for (const x of ls) {
+    for (const x of lsVivas) {
       itens.push({
         dryland_id: x.id,
         ref,
@@ -185,6 +222,52 @@ async function sincronizarSeparacao() {
   const itensSumiram = idsAntes.filter((id) => !idsAgora.has(id));
   for (const lote of chunk(itensSumiram, 500)) {
     await supabase.from('pedidos_venda_dryland_itens').update({ sumiu_do_dryland_em: agora }).in('dryland_id', lote);
+  }
+
+  // Pedidos que já saíram por inteiro da tela do Dryland: o cabeçalho tem que
+  // refletir todas as linhas separadas guardadas (conserta os que ficaram só
+  // com a contagem das últimas linhas vivas). Só os dos últimos 20 dias.
+  try {
+    const desde = new Date(Date.now() - 20 * 864e5).toISOString();
+    const guardadas = [];
+    for (let de = 0; ; de += 1000) {
+      const { data } = await supabase
+        .from('pedidos_venda_dryland_itens')
+        .select('ref, qtd, separado, preco, sumiu_do_dryland_em')
+        .gte('criado_em', desde)
+        .order('dryland_id')
+        .range(de, de + 999);
+      guardadas.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    const conta = new Map();
+    for (const x of guardadas) {
+      if (porRef.has(x.ref) || !linhaSeparadaVale(x)) continue;
+      const c = conta.get(x.ref) || { itens: 0, pecas: 0, separadas: 0, valor: 0 };
+      c.itens += 1;
+      c.pecas += Number(x.qtd || 0);
+      c.separadas += Math.min(Number(x.separado || 0), Number(x.qtd || 0));
+      c.valor += x.preco != null ? Number(x.preco) * Number(x.qtd || 0) : 0;
+      conta.set(x.ref, c);
+    }
+    for (const [ref, c] of conta) {
+      const ant = anteriores.get(ref);
+      if (!ant) continue;
+      const { data: atual } = await supabase.from('pedidos_venda_dryland').select('qtd_pecas, qtd_separada').eq('ref', ref).maybeSingle();
+      if (!atual || (Number(atual.qtd_pecas) === c.pecas && Number(atual.qtd_separada) === c.separadas)) continue;
+      await supabase
+        .from('pedidos_venda_dryland')
+        .update({
+          qtd_itens: c.itens,
+          qtd_pecas: c.pecas,
+          qtd_separada: c.separadas,
+          valor_total: Math.round(c.valor * 100) / 100,
+          status: c.pecas > 0 && c.separadas >= c.pecas ? 'separado' : c.separadas > 0 ? 'em_separacao' : 'aguardando',
+        })
+        .eq('ref', ref);
+    }
+  } catch (e) {
+    console.log(`⚠️ [pedidos-venda] não recalculei os cabeçalhos dos pedidos que saíram do Dryland: ${e.message}`);
   }
 
   const pagamentos = await capturarPagamentos().catch((e) => {

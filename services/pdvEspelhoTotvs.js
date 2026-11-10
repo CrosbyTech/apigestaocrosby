@@ -111,8 +111,9 @@ async function gravar(vendaId, patch) {
 // "42306 - Histórico auxiliar não cadastrado". Por isso lemos o cadastro do
 // portador da venda e mandamos exatamente o texto que está lá.
 const cacheCartoes = { em: 0, lista: null };
-async function cartoesTotvs() {
-  if (cacheCartoes.lista && Date.now() - cacheCartoes.em < 2 * 60 * 1000) return cacheCartoes.lista;
+export async function cartoesTotvs() {
+  // a leitura completa leva ~20 s (dezenas de páginas): guarda por 15 min
+  if (cacheCartoes.lista && Date.now() - cacheCartoes.em < 15 * 60 * 1000) return cacheCartoes.lista;
   const todos = [];
   for (let page = 1; page <= 40; page++) {
     const r = await callTotvs('get', `${TOTVS_BASE_URL}/accounts-receivable/v2/payment-cards`, { params: { IsInactive: false, Page: page, PageSize: 100 }, timeout: 60000 });
@@ -275,6 +276,10 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     return { transactionCode: venda.totvs_transacao_code, transactionDate: venda.totvs_transacao_date, status: 4, docInternoSeq: venda.totvs_doc_interno_seq, jaEstava: true };
   }
 
+  // Empresa do TOTVS que recebe o documento interno. No faturamento da
+  // expedição a NF-e sai pela 99 e a transação vai para a 990, onde o
+  // transaction-receiving da API funciona (pedido_info.empresaTotvs).
+  const empresaTotvs = Number(venda.pedido_info?.empresaTotvs) || venda.empresa;
   const operacao = venda.operacao_doc_interno || cfg?.operacao_doc_interno || DOC_INTERNO_PADRAO.operacao;
   const terminal = Number(venda.pedido_info?.terminal) || cfg?.terminal_totvs || DOC_INTERNO_PADRAO.terminal;
   const customerCode = venda.cliente_code || cfg?.cliente_balcao_totvs || null;
@@ -330,7 +335,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       ...(nota?.chave ? [{ observation: `CHAVE ${nota.chave}`.slice(0, 80) }] : []),
     ];
     const payload = {
-      branchCode: venda.empresa,
+      branchCode: empresaTotvs,
       ...(venda.data_caixa ? { transactionDate: String(venda.data_caixa).slice(0, 10) } : {}),
       customerCode: Number(customerCode),
       sellerCode: Number(venda.vendedor_code),
@@ -348,7 +353,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       transactionDate = String(r.data?.transactionDate || '').slice(0, 10);
       if (!transactionCode) throw new Error('TOTVS não devolveu o número da transação');
       await gravar(vendaId, { totvs_transacao_code: transactionCode, totvs_transacao_date: transactionDate, totvs_status: 1, totvs_erro: null });
-      console.log(`🪞 [Espelho TOTVS] venda ${venda.id} → transação ${venda.empresa}/${transactionCode} (op ${operacao}, doc interno)`);
+      console.log(`🪞 [Espelho TOTVS] venda ${venda.id} → transação ${empresaTotvs}/${transactionCode} (op ${operacao}, doc interno)`);
     } catch (err) {
       const t = traduzirErroTotvs(err);
       await gravar(vendaId, { totvs_erro: `transação: ${t.message}` });
@@ -361,12 +366,12 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   if (venda.totvs_transacao_code) {
     try {
       const r = await callTotvs('get', `${TOTVS_BASE_URL}/general/v2/transactions/search`, {
-        params: { BranchCodeList: venda.empresa, TransactionCodeList: transactionCode, TransactionDate: transactionDate, Page: 1, PageSize: 1 },
+        params: { BranchCodeList: empresaTotvs, TransactionCodeList: transactionCode, TransactionDate: transactionDate, Page: 1, PageSize: 1 },
         timeout: 60000,
       });
       const st = r.data?.items?.[0]?.status;
       if (st === 4) {
-        const seq = await buscarDocInterno(venda.empresa, transactionCode, transactionDate);
+        const seq = await buscarDocInterno(empresaTotvs, transactionCode, transactionDate);
         await gravar(vendaId, { totvs_status: 4, totvs_doc_interno_seq: seq, totvs_espelhado_em: new Date().toISOString(), totvs_erro: null });
         console.log(`✅ [Espelho TOTVS] venda ${venda.id}: transação ${transactionCode} já estava ATENDIDA no TOTVS (fechada por lá)`);
         return { transactionCode, transactionDate, status: 4, docInternoSeq: seq, jaEstava: true, fechadaNoTotvs: true };
@@ -386,9 +391,15 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   // Vendas com portador de cartão definido (expedição = Pagar.me): operadora e
   // bandeira saem do cadastro do TOTVS, no texto exato
   const portadoresCartao = venda.pedido_info?.cartaoTotvs?.portadores || (venda.pedido_info?.cartaoTotvs ? PORTADORES_PAGARME : null);
-  if (portadoresCartao && !venda.pedido_info?.receberComoFatura) {
+  if (!venda.pedido_info?.receberComoFatura) {
     for (const p of pagamentos) {
       if (p.forma !== 'credito' && p.forma !== 'debito') continue;
+      // escolhido na tela (Operadora + Parcelamento do cadastro do TOTVS)
+      if (p.cartao_totvs?.operadora && p.cartao_totvs?.bandeira) {
+        p.cartaoCadastro = { operadora: String(p.cartao_totvs.operadora), bandeira: String(p.cartao_totvs.bandeira), seq: p.cartao_totvs.seq };
+        continue;
+      }
+      if (!portadoresCartao) continue;
       try {
         p.cartaoCadastro = await resolverCartaoNoCadastro(p.forma, p.parcelas, portadoresCartao);
       } catch (err) {
@@ -406,7 +417,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   const totalAmount = round2(receipts.reduce((s, r) => s + r.documentAmount, 0));
   try {
     await callTotvs('post', `${TOTVS_BASE_URL}/general/v2/transaction-receiving`, {
-      data: { branchCode: venda.empresa, transactionCode, transactionDate, totalAmount, terminalCode: terminal, receipts },
+      data: { branchCode: empresaTotvs, transactionCode, transactionDate, totalAmount, terminalCode: terminal, receipts },
       timeout: 180000,
     });
   } catch (err) {
@@ -414,7 +425,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     await gravar(vendaId, { totvs_erro: `recebimento: ${t.message}` });
     throw new EspelhoError(t.message, t.code, err.response?.status || 502, err.response?.data);
   }
-  const docInternoSeq = await buscarDocInterno(venda.empresa, transactionCode, transactionDate);
+  const docInternoSeq = await buscarDocInterno(empresaTotvs, transactionCode, transactionDate);
   await gravar(vendaId, { totvs_status: 4, totvs_doc_interno_seq: docInternoSeq, totvs_espelhado_em: new Date().toISOString(), totvs_erro: null });
   console.log(`✅ [Espelho TOTVS] venda ${venda.id} recebida no TOTVS: transação ${transactionCode} ATENDIDA, doc interno ${docInternoSeq ?? '?'}, R$ ${totalAmount.toFixed(2)}`);
   return { transactionCode, transactionDate, status: 4, docInternoSeq, totalAmount };

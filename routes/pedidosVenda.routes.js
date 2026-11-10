@@ -23,6 +23,7 @@
 import express from 'express';
 import supabase from '../config/supabase.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import { cardBrejinho } from '../services/brejinhoDryland.js';
 import {
   montarPainel,
   buscarConcluidos,
@@ -35,6 +36,8 @@ import {
   registrarPagamentoManual,
   salvarComprovante,
   COMPROVANTE_URL,
+  linhaSeparadaVale,
+  separacaoIncompleta,
 } from '../services/pedidosVendaDryland.js';
 
 const router = express.Router();
@@ -86,7 +89,8 @@ const resumoFat = (lista) => {
     : null;
 };
 
-const resumoSep = (p) => (p ? { status: p.status, qtd_pecas: p.qtd_pecas, qtd_separada: p.qtd_separada, separado_em: p.separado_em } : null);
+const resumoSep = (p, criadoPedido = null) =>
+  p ? { status: p.status, qtd_pecas: p.qtd_pecas, qtd_separada: p.qtd_separada, separado_em: p.separado_em, incompleta: separacaoIncompleta(p, criadoPedido), viva: !p.sumiu_do_dryland_em } : null;
 
 // Linha da tela a partir do card da fila (+ separação do pedido do site)
 function linhaDoCard(c, sep, anexo, fats) {
@@ -115,7 +119,8 @@ function linhaDoCard(c, sep, anexo, fats) {
     comprovantes: (c.comprovantes || []).length + (anexo?.comprovante_url ? 1 : 0),
     criado_em: c.criado_em,
     sumiu_do_dryland_em: c.sumiu_do_dryland_em,
-    separacao: resumoSep(sep),
+    separacao: resumoSep(sep, c.criado_em),
+    pecas_card: c.total_pecas != null ? Number(c.total_pecas) : null,
     faturamento: resumoFat(fats),
   };
 }
@@ -165,7 +170,7 @@ router.get(
         lerTudo('pedidos_venda_fila', (q) => {
           let x = q
             .select(
-              'id, canal, titulo, status, numero_site, pedido_totvs, transacao, eh_venda, cliente, cliente_doc, cliente_telefone, vendedor, loja, forma_pagamento, parcelamento, valor_pedido, nf_numero, cartao_nsu, cartao_autorizacao, pix_e2e, comprovantes, criado_em, sumiu_do_dryland_em',
+              'id, canal, titulo, status, numero_site, pedido_totvs, transacao, eh_venda, cliente, cliente_doc, cliente_telefone, vendedor, loja, forma_pagamento, parcelamento, valor_pedido, nf_numero, cartao_nsu, cartao_autorizacao, pix_e2e, comprovantes, criado_em, sumiu_do_dryland_em, total_pecas',
             )
             .order('criado_em', { ascending: false });
           if (deIso) x = x.gte('criado_em', deIso);
@@ -318,6 +323,19 @@ router.get(
   asyncHandler(async (req, res) => {
     const chave = String(req.params.chave);
     try {
+      // Expedição Brejinho: card montado do Dryland /brejinho + transação TOTVS
+      if (/^BRJ:/i.test(chave)) {
+        const { card } = await cardBrejinho(chave);
+        const [anexo, fats] = await Promise.all([
+          supabase.from('pedidos_venda_anexos').select('*').eq('chave', card.id).maybeSingle(),
+          supabase.from('pedidos_venda_faturamentos').select('*').eq('chave', card.id).order('criado_em', { ascending: false }),
+        ]);
+        return successResponse(
+          res,
+          { chave: card.id, card, separacao: null, itens: [], anexo: anexo.data || null, faturamentos: fats.data || [] },
+          'Pedido do Brejinho',
+        );
+      }
       let card = null;
       let ref = null;
       if (chave.startsWith('SEP:')) ref = chave.slice(4).toUpperCase();
@@ -335,13 +353,29 @@ router.get(
         supabase.from('pedidos_venda_faturamentos').select('*').eq('chave', chave).order('criado_em', { ascending: false }),
       ]);
       if (!card && !sep.data) return errorResponse(res, 'Pedido não encontrado', 404, 'NOT_FOUND');
+      // Peças do pedido = separação do Dryland (tela /separar): as linhas de
+      // agora + as que já saíram da tela separadas (72 h). Linha que saiu sem
+      // separar foi tirada do pedido e não entra.
+      const todosItens = itens.data || [];
+      const itensValidos = todosItens.filter(linhaSeparadaVale);
+      const incompleta = separacaoIncompleta(sep.data, card?.criado_em);
       return successResponse(
         res,
         {
           chave,
           card: card ? { ...card, comprovantes_url: (card.comprovantes || []).map((p) => ({ path: p, url: COMPROVANTE_URL(p) })) } : null,
-          separacao: sep.data || null,
-          itens: itens.data || [],
+          separacao: sep.data
+            ? {
+                ...sep.data,
+                qtd_itens: itensValidos.length || sep.data.qtd_itens,
+                qtd_pecas: itensValidos.reduce((s, i) => s + Number(i.qtd || 0), 0) || sep.data.qtd_pecas,
+                qtd_separada: itensValidos.reduce((s, i) => s + Math.min(Number(i.separado || 0), Number(i.qtd || 0)), 0) || sep.data.qtd_separada,
+              }
+            : null,
+          itens: itensValidos,
+          // separação que o HeadCoach só pegou pela metade: a tela usa as peças do card
+          separacaoIncompleta: incompleta,
+          itensRemovidos: todosItens.filter((i) => !linhaSeparadaVale(i)),
           anexo: anexo.data || null,
           faturamentos: fats.data || [],
         },
