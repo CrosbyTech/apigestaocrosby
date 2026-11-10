@@ -16,7 +16,7 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoUnicredOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { leiturasCaixaTranscritas } from '../utils/extratoCaixaTranscrito.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
@@ -24,6 +24,7 @@ import { lerExtratoItauOfx } from '../utils/extratoItauOfx.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
+import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -103,6 +104,16 @@ const BANCOS = {
     // sem OFX: BALAMT sem data e linhas repetidas (nov/2023 da Crosby traz a aplicação de 7.000,00 duas vezes)
     ilegiveis: [],
   },
+  UNICRED: {
+    pasta: 'UNICRED',
+    // "Extrato de Conta Corrente" (layout B) o ano todo, menos jan do Fabio (layout A). Nos PDFs impressos pelo navegador
+    // (jan–mar) a linha da quebra de página sai nas duas páginas: o leitor reconhece a repetição pelo saldo igual.
+    pdf: lerExtratoUnicred,
+    ofx: lerExtratoUnicredOfx, // BALAMT = saldo do fim do mês
+    bankId: 136,
+    ofxFechado: true,
+    ilegiveis: ['FA MODAS/UNICRED/01/Unicred Fabio Fev (1).pdf'], // cópia do PDF de fevereiro na pasta de janeiro
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
 const QUEBRAS = [];
@@ -138,6 +149,8 @@ const FIM_DE_MES = {
   // Bradesco: saldo da conta corrente (o Invest Fácil fica de fora, como em 2024)
   'BRADESCO|249374': [11.87, 1, 1, 1, 1, 20.58, 1, 1, 1, 1, 1, 1],
   'BRADESCO|249286': [1, 9.89, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  'UNICRED|6850': [14583.56, 6028.65, 1648.84, 3742.69, 6698.79, 11797.24, 24387.65, 21328.76, 22006.97, 8505.88, 22079.73, 2022.86],
+  'UNICRED|7098': [17441.83, 69.94, 3.3, 20.01, 66522.62, 329.77, 5233.29, 3230.05, 1331.55, 11855.77, 2945.96, 1335.44],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {
@@ -147,6 +160,7 @@ const INICIO_2023 = {
   'ITAU|27061': 4286.53, 'ITAU|33688': 4988.17, 'ITAU|39046': 6214.35,
   'SANTANDER|13000599': -14873.5, 'SANTANDER|13001128': 0, 'SANTANDER|13006882': 0,
   'BRADESCO|249374': 1, 'BRADESCO|249286': 1,
+  'UNICRED|6850': 4101.48, 'UNICRED|7098': 613.47,
 };
 
 // arquivos: RAIZ/<EMPRESA>/<pasta do banco>/<MÊS>/arquivo (o nome se repete entre meses → a chave é o caminho relativo)

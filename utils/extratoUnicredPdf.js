@@ -152,7 +152,7 @@ function lerLayoutB(todas, todoTexto) {
     const dataIt = its.find((x) => x.x < 60 && /^\d{2}\/\d{2}\/\d{4}$/.test(x.s));
     const nums = its.filter((x) => RE_N.test(x.s));
     if (!dataIt || nums.length < 2) {
-      if (/^Data\b|^CENTRAL DE RELACIONAMENTO|^Capitais e|^Demais regi|^No exterior|^SAC|^OUVIDORIA/i.test(t)) continue;
+      if (/^Data\b|^CENTRAL DE RELACIONAMENTO|^Capitais e|^Demais regi|^No exterior|^SAC|^OUVIDORIA|^P[áa]gina \d+ de \d+$/i.test(t)) continue;
       const frag = texto(its.filter((x) => x.x >= 100));
       if (!frag) continue;
       const ult = lanc.at(-1);
@@ -166,6 +166,13 @@ function lerLayoutB(todas, todoTexto) {
     if (!saldoIt || !valorIt) throw new Error(`Linha de ${dataIt.s} sem valor ou saldo: "${t}"`);
     const documento = texto(its.filter((x) => x.x >= 100 && x.x < 175)) || null;
     const desc = texto(its.filter((x) => x.x >= 175 && x.x < 400));
+    // PDF impresso pelo navegador (jan–mar/2023): a linha que cai na quebra de página sai nas DUAS páginas (fim de uma e
+    // topo da outra), com o mesmo valor e o mesmo saldo. Um segundo lançamento de verdade mudaria o saldo → é repetição.
+    const ant = lanc.at(-1);
+    if (ant && ant.pagina !== todas[i].pagina && num(valorIt.s) !== 0 && ant.valor === num(valorIt.s) && ant.saldoInformado === num(saldoIt.s) && ant.data === dataIso(dataIt.s)) {
+      pendente = '';
+      continue;
+    }
     lanc.push({ pagina: todas[i].pagina, data: dataIso(dataIt.s), descricao: limpar(`${pendente} ${desc}`), documento: documento && documento !== '0' ? documento : null, detalhe: null, valor: num(valorIt.s), saldoInformado: num(saldoIt.s) });
     pendente = '';
   }
