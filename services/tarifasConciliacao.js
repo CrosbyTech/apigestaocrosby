@@ -205,7 +205,7 @@ export async function fornecedorPorCodigo(codigo) {
 }
 
 /** Saídas PENDENTES de todas as contas no período (mesma regra da tela), com a conta. */
-export async function saidasPendentes({ de, ate, escopo = 'crosby' }) {
+export async function saidasPendentes({ de, ate, escopo = 'crosby', sentido = 'SAIDA' }) {
   const { anexarConciliacoes } = await import('./fluxoCaixaConciliacao.js');
   const { data: contas, error: eC } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome,titular_cnpj,escopo,ativo');
   if (eC) throw new Error(eC.message);
@@ -234,7 +234,7 @@ export async function saidasPendentes({ de, ate, escopo = 'crosby' }) {
   await anexarConciliacoes(lista, { de, ate });
   const mapa = await mapearFiliaisTotvsPorCnpj().catch(() => null);
   return lista
-    .filter((l) => l.valor < 0 && l.pendente && !l.transferencia_id && l.tipo !== 'TRANSFERENCIA')
+    .filter((l) => (sentido === 'ENTRADA' ? l.valor > 0 : l.valor < 0) && l.pendente && !l.transferencia_id && l.tipo !== 'TRANSFERENCIA')
     .map((l) => {
       const c = contaDe.get(l.conta_id);
       const filial = (mapa?.get(soDig(c?.titular_cnpj)) || [])[0] || null;
@@ -261,6 +261,12 @@ export async function saidasPendentes({ de, ate, escopo = 'crosby' }) {
       };
     })
     .sort((a, b) => String(a.empresa).localeCompare(String(b.empresa)) || String(a.banco).localeCompare(String(b.banco)) || a.data.localeCompare(b.data));
+}
+
+/** Entradas PENDENTES de todas as contas (Inefável, 10/11/2026) — mesma regra da tela, sem sugestão de despesa. */
+export async function entradasPendentes(p) {
+  const itens = await saidasPendentes({ ...p, sentido: 'ENTRADA' });
+  return itens.map(({ tarifa, elegivel, motivoBloqueio, ...i }) => i);
 }
 
 /** Saídas pendentes + sugestão de fornecedor/despesa. */
@@ -500,4 +506,4 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
   return out;
 }
 
-export default { criarDuplicatasTarifas, ehTarifa, saidasPendentes, saidasPendentesComSugestao, sugerirFornecedorDespesa, fornecedorPorCodigo, FORNECEDOR_BANCO, DESPESA_TARIFA };
+export default { criarDuplicatasTarifas, ehTarifa, saidasPendentes, entradasPendentes, saidasPendentesComSugestao, sugerirFornecedorDespesa, fornecedorPorCodigo, FORNECEDOR_BANCO, DESPESA_TARIFA };

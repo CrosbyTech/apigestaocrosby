@@ -360,6 +360,22 @@ router.get(
   }),
 );
 
+// Entradas pendentes de todas as contas (Inefável, 10/11/2026)
+router.get(
+  '/conciliacao/entradas-pendentes',
+  asyncHandler(async (req, res) => {
+    try {
+      const { de, ate } = req.query;
+      if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
+      const { entradasPendentes } = await import('../services/tarifasConciliacao.js');
+      const itens = await entradasPendentes({ de: String(de), ate: String(ate), escopo });
+      return successResponse(res, { itens, total: Math.round(itens.reduce((s, i) => s + i.valor, 0) * 100) / 100 });
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Adiantamentos a fornecedor (justificativa tipo ADIANTAMENTO_FORNECEDOR) — Titia, 10/11/2026
 router.get(
   '/conciliacao/adiantamentos',
