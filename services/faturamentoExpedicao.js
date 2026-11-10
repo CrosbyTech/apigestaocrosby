@@ -397,7 +397,12 @@ export async function faturar(body) {
     transporte,
     cobranca,
     comprovantes: Array.isArray(b.comprovantes) ? b.comprovantes : [],
-    pedido_info: { ...(b.pedidoInfo || {}), consumidorFinal: !!b.consumidorFinal, terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null },
+    pedido_info: {
+      ...(b.pedidoInfo || {}),
+      consumidorFinal: !!b.consumidorFinal,
+      terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null,
+      receberComoFatura: !!b.receberComoFatura,
+    },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
   if (error) throw new FaturamentoError(error.message, 'DB_ERROR', 500);
@@ -445,9 +450,12 @@ export async function faturar(body) {
 // Também serve para "tentar de novo" depois de rejeição ou caixa fechado.
 // opcoes.terminal: troca o terminal do recebimento antes de tentar de novo
 export async function processarFaturamento(vendaId, faturamentoId = null, opcoes = {}) {
-  if (Number(opcoes.terminal) > 0) {
+  if (Number(opcoes.terminal) > 0 || typeof opcoes.comoFatura === 'boolean') {
     const { data: atual } = await supabase.from('pdv_vendas').select('pedido_info').eq('id', vendaId).maybeSingle();
-    await supabase.from('pdv_vendas').update({ pedido_info: { ...(atual?.pedido_info || {}), terminal: Number(opcoes.terminal) } }).eq('id', vendaId);
+    const info = { ...(atual?.pedido_info || {}) };
+    if (Number(opcoes.terminal) > 0) info.terminal = Number(opcoes.terminal);
+    if (typeof opcoes.comoFatura === 'boolean') info.receberComoFatura = opcoes.comoFatura;
+    await supabase.from('pdv_vendas').update({ pedido_info: info }).eq('id', vendaId);
   }
   let fatId = faturamentoId;
   if (!fatId) {

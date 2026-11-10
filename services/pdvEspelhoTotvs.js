@@ -91,9 +91,33 @@ async function gravar(vendaId, patch) {
 }
 
 // Recebimentos do TOTVS a partir dos pagamentos da venda
-function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null } = {}) {
+// comoFatura: todas as formas viram FATURA (documentType 1) — título a prazo no
+// contas a receber, sem movimento de caixa. Cartão em N vezes vira N faturas a
+// cada 30 dias; as demais formas, 1 fatura com vencimento na data da transação.
+const maisDias = (iso, dias) => {
+  const d = new Date(`${String(iso).slice(0, 10)}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + dias);
+  return d.toISOString().slice(0, 10);
+};
+function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null, comoFatura = false } = {}) {
   const receipts = [];
   for (const p of pagamentos) {
+    if (comoFatura && p.forma !== 'boleto') {
+      const liq = round2(Number(p.valor) - Number(p.troco || 0));
+      if (liq <= 0) continue;
+      const n = p.forma === 'credito' ? Math.max(1, Number(p.parcelas) || 1) : 1;
+      const parc = round2(liq / n);
+      for (let i = 0; i < n; i++) {
+        receipts.push({
+          documentType: TIPO_DOC_TOTVS.boleto,
+          documentNumber: Number(documento) || transactionCode,
+          installmentNumber: receipts.length + 1,
+          dueDate: p.forma === 'credito' ? maisDias(data, 30 * (i + 1)) : String(data).slice(0, 10),
+          documentAmount: i === n - 1 ? round2(liq - parc * (n - 1)) : parc,
+        });
+      }
+      continue;
+    }
     if (p.forma === 'boleto') {
       if (!parcelasBoleto.length) throw new EspelhoError('Boleto sem parcelas/vencimentos', 'BOLETO_SEM_PARCELAS');
       parcelasBoleto.forEach((d, i) =>
@@ -255,6 +279,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   const receipts = montarRecebimentos(pagamentos, transactionCode, transactionDate, {
     parcelasBoleto: venda.cobranca?.parcelas || [],
     documento: notaOk?.numero || null,
+    comoFatura: !!venda.pedido_info?.receberComoFatura,
   });
   const totalAmount = round2(receipts.reduce((s, r) => s + r.documentAmount, 0));
   try {
