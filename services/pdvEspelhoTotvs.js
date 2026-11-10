@@ -170,6 +170,12 @@ function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto 
     const parcelas = p.forma === 'credito' ? Math.max(1, Number(p.parcelas) || 1) : 1;
     if (parcelas === 1) {
       receipts.push({ ...base, documentAmount: liquido, ...(cartao ? { installmentNumber: 1 } : {}) });
+    } else if (cartaoTotvs?.operadora) {
+      // Com operadora informada o TOTVS trata installmentNumber como a QUANTIDADE
+      // de parcelas do cartão (acha o histórico auxiliar por tipo + operadora +
+      // bandeira + nº de parcelas e ele mesmo divide). Duas linhas "parcela 1" e
+      // "parcela 2" viravam dois cartões de 1x — erro 42306 (10/11/2026).
+      receipts.push({ ...base, installmentNumber: parcelas, documentAmount: liquido });
     } else {
       // parcelas iguais, diferença de centavos na última
       const parcela = round2(liquido / parcelas);
