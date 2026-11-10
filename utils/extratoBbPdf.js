@@ -147,7 +147,8 @@ export async function lerExtratoBb(buffer) {
   for (const pg of paginas) {
     for (const l of agruparLinhas(pg.itens)) {
       const t = texto(l.itens);
-      if (/Dt\.\s*balancete/i.test(t) && /Saldo/i.test(t)) {
+      // 2023 (impresso pelo navegador): "Dt." fica uma linha acima de "balancete"/"movimento" → juntos viram "balancete Dt. movimento Dt. …"
+      if (/balancete/i.test(t) && /Hist[óo]rico/i.test(t) && /Saldo/i.test(t)) {
         const achar = (re) => l.itens.find((i) => re.test(i.s));
         const hist = achar(/Hist[óo]rico/i);
         const docu = achar(/Documento/i);
@@ -176,7 +177,7 @@ export async function lerExtratoBb(buffer) {
   for (const pg of paginas) {
     for (const l of agruparLinhas(pg.itens)) {
       const t = texto(l.itens);
-      if (/^Dt\.\s*balancete/i.test(t)) continue;
+      if (/^Dt\.\s*balancete/i.test(t) || (/balancete/i.test(t) && /Hist[óo]rico/i.test(t))) continue;
       const soNumeros = l.itens.length && l.itens.every((i) => RE_VALOR.test(i.s) || /^[CD]$/.test(i.s));
       const temData = l.itens.some((i) => RE_DATA.test(i.s) && i.x < cols.xMov + 120);
       if (soNumeros && !temData) {
