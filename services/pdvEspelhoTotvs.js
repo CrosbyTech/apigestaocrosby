@@ -240,7 +240,11 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     }
     const total = Number(items.reduce((s, it) => s + it.quantity * (it.value - (it.discountValue || 0)), 0).toFixed(3));
     const nota = notas.find((n) => n.status === 'autorizada') || notas[0];
+    // "Transação com data diferente": a data real da venda vai em linha própria,
+    // sempre no mesmo formato, para os relatórios acharem (VENDA DO DIA dd/mm/aaaa)
+    const dv = String(venda.pedido_info?.dataVenda || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
     const observations = [
+      ...(dv ? [{ observation: `VENDA DO DIA ${dv[3]}/${dv[2]}/${dv[1]}` }] : []),
       ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
       { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
       ...(round2(venda.frete || 0) > 0 ? [{ observation: `FRETE R$ ${round2(venda.frete).toFixed(2)} INCLUSO NO VALOR DOS ITENS`.slice(0, 80) }] : []),

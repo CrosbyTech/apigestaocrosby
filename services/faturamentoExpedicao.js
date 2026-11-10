@@ -367,7 +367,11 @@ export async function faturar(body) {
   }
 
   // Venda do HeadCoach
-  const dataCaixa = /^\d{4}-\d{2}-\d{2}$/.test(String(b.dataCaixa || '')) ? b.dataCaixa : hojeBrasil();
+  // A transação do TOTVS sai SEMPRE com a data de hoje: a API só recebe com
+  // caixa aberto na data corrente. Venda de outro dia ("transação com data
+  // diferente") leva a data real só na observação: VENDA DO DIA dd/mm/aaaa.
+  const dataCaixa = hojeBrasil();
+  const dataVenda = /^\d{4}-\d{2}-\d{2}$/.test(String(b.dataVenda || '')) && b.dataVenda !== dataCaixa ? b.dataVenda : null;
   const cabecalho = {
     empresa,
     empresa_cnpj: emit.cnpj,
@@ -402,6 +406,7 @@ export async function faturar(body) {
       consumidorFinal: !!b.consumidorFinal,
       terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null,
       receberComoFatura: !!b.receberComoFatura,
+      dataVenda,
     },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
@@ -514,7 +519,7 @@ export async function listarTransacoes({ de, ate, busca, limite = 300 } = {}) {
   const ids = lista.map((f) => f.venda_id);
   if (ids.length) {
     const [{ data: vendas }, { data: notas }] = await Promise.all([
-      supabase.from('pdv_vendas').select('id, status, data_caixa, canal, transporte, frete, comprovantes, totvs_status, totvs_transacao_code, totvs_erro, vendedor_nome, criado_por, numero_site').in('id', ids),
+      supabase.from('pdv_vendas').select('id, status, data_caixa, canal, transporte, frete, comprovantes, totvs_status, totvs_transacao_code, totvs_erro, vendedor_nome, criado_por, numero_site, pedido_info').in('id', ids),
       supabase.from('pdv_notas_fiscais').select('id, venda_id, numero, serie, chave, status, protocolo, dh_autorizacao, xmotivo, cstat').in('venda_id', ids).order('id', { ascending: false }),
     ]);
     const vPor = new Map((vendas || []).map((v) => [v.id, v]));
