@@ -199,7 +199,7 @@ export async function fornecedorPorCodigo(codigo) {
   for (const [path, campo] of [['/person/v2/legal-entities/search', 'cnpj'], ['/person/v2/individuals/search', 'cpf']]) {
     const r = await axios.post(`${TOTVS_BASE_URL}${path}`, { filter: { personCodeList: [c] }, page: 1, pageSize: 1 }, { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tk.access_token}` }, httpsAgent, timeout: 30000 }).catch(() => null);
     const it = r?.data?.items?.[0];
-    if (it) return { code: Number(it.code), nome: it.name || it.fantasyName || null, doc: soDig(it[campo] || it.cpfCnpj) };
+    if (it) return { code: Number(it.code), nome: it.name || it.fantasyName || null, doc: soDig(it[campo] || it.cpfCnpj), fornecedor: it.isSupplier !== false };
   }
   return null;
 }
@@ -404,6 +404,12 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
       const p = await fornecedorPorCodigo(esc.fornecedorCodigo).catch(() => null);
       if (!p?.doc) {
         out.recusadas.push({ ...base, motivo: `Fornecedor ${esc.fornecedorCodigo} não encontrado no TOTVS (ou sem CPF/CNPJ).` });
+        continue;
+      }
+      // a pessoa existe mas não é FORNECEDOR no cadastro do TOTVS → o contas a
+      // pagar recusa ("SupplierCpfCnpj not found"). Ex.: 81298 ANTONIO PAULINO, 10/11/2026
+      if (p.fornecedor === false) {
+        out.recusadas.push({ ...base, motivo: `${p.code} ${p.nome} não está marcado como FORNECEDOR no cadastro de pessoas do TOTVS — marque como fornecedor e tente de novo.` });
         continue;
       }
       forn = { cnpj: p.doc, nome: p.nome };

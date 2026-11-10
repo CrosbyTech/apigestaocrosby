@@ -360,6 +360,20 @@ router.get(
   }),
 );
 
+// Adiantamentos a fornecedor (justificativa tipo ADIANTAMENTO_FORNECEDOR) — Titia, 10/11/2026
+router.get(
+  '/conciliacao/adiantamentos',
+  asyncHandler(async (req, res) => {
+    try {
+      const { listarAdiantamentos } = await import('../services/adiantamentosFornecedor.js');
+      const itens = await listarAdiantamentos({ de: req.query.de || null, ate: req.query.ate || null, escopo });
+      return successResponse(res, { itens, total: Math.round(itens.reduce((s, i) => s + i.valor, 0) * 100) / 100 });
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Nome do fornecedor TOTVS pelo código (campo editável da janela de saídas pendentes)
 router.get(
   '/conciliacao/fornecedor/:codigo',
