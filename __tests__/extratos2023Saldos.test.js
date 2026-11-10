@@ -21,6 +21,8 @@ import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { leiturasCaixaTranscritas } from '../utils/extratoCaixaTranscrito.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoItauOfx } from '../utils/extratoItauOfx.js';
+import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
+import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -80,6 +82,17 @@ const BANCOS = {
       'AZ/ITAU/11/ITAU FL OFX SETEMBRO.ofx', 'AZ/ITAU/11/ITAU FL SETEMBRO.pdf', // cópias de setembro na pasta de novembro
     ],
   },
+  SANTANDER: {
+    pasta: 'SANTANDER',
+    // Internet Banking Empresarial (IBE) o ano todo: Crosby 13000599-5, Crosby João Pessoa 13001128-2 e Fabio 13006882-4.
+    // Na pasta da FA Modas o "PDF de julho" é da conta João Pessoa da Crosby: julho do Fabio entra pelo OFX.
+    pdf: lerExtratoSantander,
+    // BALAMT na data da exportação (depois do mês) e, em abr/set/dez, com o 1º dia útil do mês seguinte → só o movimento do mês
+    ofx: lerExtratoSantanderOfx,
+    bankId: 33,
+    ofxSoMovimento: true,
+    ilegiveis: [],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
 const QUEBRAS = [];
@@ -90,6 +103,7 @@ const BURACOS = [
   { banco: 'BNB', conta: '2287', meses: ['2023-01', '2023-02', '2023-04', '2023-05', '2023-06', '2023-07', '2023-08', '2023-09', '2023-10', '2023-11', '2023-12'] }, // só o OFX de março (sem movimento)
   { banco: 'BNB', conta: '3228', meses: ['2023-04'] }, // conta sem movimento o ano todo; abril não veio
   { banco: 'CAIXA', conta: '000578136386', meses: ['2023-08', '2023-09'] }, // Crosby: agosto e setembro não vieram (jul termina 2.426,06 e out começa 13.207,69)
+  { banco: 'SANTANDER', conta: '13001128', meses: ['2023-02', '2023-08', '2023-09', '2023-11'] }, // João Pessoa: fev, ago, set e nov não vieram
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -107,6 +121,10 @@ const FIM_DE_MES = {
   'ITAU|27061': [2316.09, 8833.86, 8718.49, -17098.18, -5235.44, 20478.19, 14551.85, 92861.78, 28144.47, 71405.32, 15908.62, 112683.02],
   'ITAU|33688': [40.92, 3160.23, 7037.73, -5813.88, -27867.85, 4192.36, 22168.85, 13824.87, 18361.01, 34475.43, 14808.8, 85261.05],
   'ITAU|39046': [55.78, 670.59, 177.69, -1998.43, 18708.97, 198.24, 932.54, 8066.06, 1948.53, 7061.07, 4498.61, 189111.37],
+  // Santander: saldo impresso no fim do último dia do mês (IBE); julho do Fabio = junho + movimento do OFX (igual ao início de agosto)
+  'SANTANDER|13000599': [0, 1539.95, 552.63, -16055.19, 0, 316.93, 8242.27, 8485.68, 3559.89, 10654.11, 417.76, 290030.44],
+  'SANTANDER|13001128': [0, null, 0, 0, 0, 5443.37, 6221.45, null, null, 175.95, null, 3100.95],
+  'SANTANDER|13006882': [0, 0, 0, 0, 0, 109.95, 8068.26, 2029.8, 1912.24, 76.11, 8.62, 6549.48],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {
@@ -114,6 +132,7 @@ const INICIO_2023 = {
   'BNB|2286': 791.49, 'BNB|2824': 4820.55, 'BNB|3228': 0,
   'CAIXA|000578136386': 23340.95, 'CAIXA|000578136459': 23118.8,
   'ITAU|27061': 4286.53, 'ITAU|33688': 4988.17, 'ITAU|39046': 6214.35,
+  'SANTANDER|13000599': -14873.5, 'SANTANDER|13001128': 0, 'SANTANDER|13006882': 0,
 };
 
 // arquivos: RAIZ/<EMPRESA>/<pasta do banco>/<MÊS>/arquivo (o nome se repete entre meses → a chave é o caminho relativo)
