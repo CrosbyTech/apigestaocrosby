@@ -44,6 +44,13 @@ export const CONTAS_CAIXA = {
   '0005781364591': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
   '0005781366357': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
 };
+// Contas ANTIGAS da Caixa (agência 2044, operação 003), renumeradas em 2024 para o formato novo (operação 1292).
+// É a mesma conta: o saldo de 31/12/2023 do extrato antigo é o saldo inicial de janeiro/2024 do novo
+// (Crosby 9.451,68; Fabio -7.944,03). Gravadas com o número novo para a cadeia de saldos continuar.
+export const CONTAS_CAIXA_ANTIGAS = {
+  '0000000046094': '0005781363862', // 003 | 00004609-4 → 1292 | 000578136386-2 (Crosby Distribuição)
+  '0000000047376': '0005781364591', // 003 | 00004737-6 → 1292 | 000578136459-1 (Fabio)
+};
 // Banco do Brasil (BANKID 001): mesmo OFX, usado quando o PDF do mês é só imagem (ex.: Fabio jun/2025).
 // Titulares como o leitor do PDF do BB grava (sem agência para Fabio/Irmãos).
 export const CONTAS_BB = {
@@ -77,7 +84,7 @@ export const CONTAS_UNICRED_OFX = {
   '70980': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
 };
 const BANCOS_OFX = {
-  104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA },
+  104: { banco: 'CAIXA', nome: 'da Caixa', contas: CONTAS_CAIXA, normalizarConta: (a) => CONTAS_CAIXA_ANTIGAS[a.padStart(13, '0')] || a },
   136: { banco: 'UNICRED', nome: 'da Unicred', contas: CONTAS_UNICRED_OFX, agencia: '6012' }, // ACCTID 68500 = 6850-0; BALAMT = saldo do fim do mês
   // Daycoval: ACCTID 0015165800; BALAMT em DTASOF = último dia do mês; titular não vem no OFX (conta da Crosby CR Vestuário: o Pix
   // que sai dela chega no Sicredi 36733 com o CNPJ 17.177.680/0001-16). Arquivo diz CHARSET 1252 mas é UTF-8.
@@ -133,6 +140,18 @@ export const HISTORICOS_CAIXA = {
   'DB SEGUROS': 'Seguro',
   'VIDA PREVI': 'Seguro/previdência',
   'DEB.AUTOR.': 'Débito autorizado',
+  // 2023 (conta antiga, operação 003)
+  'COMPRA ELO': 'Compra no cartão de débito (Elo)',
+  'DP DIN ATM': 'Depósito em dinheiro (caixa eletrônico)',
+  'DEP.DINH.': 'Depósito em dinheiro',
+  'DOC/TED PESSOAL': 'Tarifa de TED/DOC',
+  'DOC ELET': 'DOC eletrônico',
+  'PG PREFEIT': 'Pagamento à prefeitura',
+  'PREV CAIXA': 'Previdência Caixa',
+  'RESG AUTOM': 'Resgate automático de aplicação',
+  RESGATE: 'Resgate de aplicação',
+  APLICACAO: 'Aplicação',
+  'TAR E E': 'Tarifa',
 };
 
 const HISTORICOS = HISTORICOS_CAIXA;

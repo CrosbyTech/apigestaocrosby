@@ -25,7 +25,26 @@
 // ============================================================
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
-import { CONTAS_CAIXA, HISTORICOS_CAIXA } from './extratoCaixaOfx.js';
+import { CONTAS_CAIXA, CONTAS_CAIXA_ANTIGAS, HISTORICOS_CAIXA } from './extratoCaixaOfx.js';
+
+// "Extrato por período" do Internet Banking CAIXA de jan–jul/2023: a fonte do PDF faz o texto sair com espaços no
+// meio das palavras ("Mê s:", "Pe ríodo:", "SALDO ANTER IO R", "PR EST EMP", "CO MPR A ELO"). Os rótulos são
+// refeitos e o histórico é reconhecido pelo vocabulário da Caixa comparando sem os espaços.
+const VOCABULARIO = new Map(Object.keys(HISTORICOS_CAIXA).map((h) => [h.replace(/\s+/g, ''), h]));
+const RE_ESPACADO = /^(Clie nte|M[êe] s|Pe r[íi]odo)\s*:?$/;
+function desespacar(s) {
+  const junto = s.replace(/\s+/g, '');
+  if (/^Cliente:?$/i.test(junto)) return 'Cliente:';
+  if (/^M[êe]s:?$/i.test(junto)) return 'Mês:';
+  if (/^Per[íi]odo:?$/i.test(junto)) return 'Período:';
+  if (/^[A-Za-zçÇ]+\/\d{4}$/.test(junto)) return junto; // "Jane iro/2023"
+  if (junto === 'SALDOANTERIOR') return 'SALDO ANTERIOR';
+  if (junto === 'SALDODIA') return 'SALDO DIA';
+  if (VOCABULARIO.has(junto)) return VOCABULARIO.get(junto);
+  // fora do vocabulário: o espaço falso vem depois de R, O e Q
+  if (/^[A-Z][A-Z .\/]*$/.test(s)) return s.replace(/([ROQ]) (?=[A-Z])/g, '$1');
+  return s;
+}
 
 const require = createRequire(import.meta.url);
 let _pdfjs;
@@ -102,7 +121,9 @@ function docEHistorico(tokens) {
  */
 export async function lerExtratoCaixaPdf(buffer) {
   const paginas = await paginasDo(buffer);
-  const todas = paginas.flatMap((p) => linhasDe(p.itens).map((l) => ({ ...l, pagina: p.numero })));
+  const espacado = paginas.some((p) => p.itens.some((i) => RE_ESPACADO.test(i.s)));
+  if (espacado) for (const p of paginas) for (const i of p.itens) i.s = desespacar(i.s);
+  const todas =paginas.flatMap((p) => linhasDe(p.itens).map((l) => ({ ...l, pagina: p.numero })));
   const todoTexto = todas.map((l) => texto(l.itens)).join('\n');
   if (!todoTexto.trim()) throw new Error('Este PDF não tem texto (o Gerenciador CAIXA de 2024 gera só imagem): use o OFX do mesmo mês.');
   if (!/CAIXA|Ag[êe]ncia:\s*0?2044|Conta:\s*0?2044|000578136/i.test(todoTexto)) throw new Error('Este PDF não parece ser um extrato da Caixa.');
@@ -110,13 +131,16 @@ export async function lerExtratoCaixaPdf(buffer) {
   // ── cabeçalho ──
   const mConta = todoTexto.match(/Conta:\s*(\d{6,12})-(\d)/) || todoTexto.match(/Conta:\s*\d{3,5}\s*\|\s*\d{3,5}\s*\|\s*(\d{6,12})-(\d)/);
   if (!mConta) throw new Error('Não achei o número da conta ("Conta: 000578136386-2").');
-  const conta = mConta[1].padStart(12, '0');
-  const contaDv = mConta[2];
+  // conta antiga (operação 003, até 2023) → número novo de 2024: é a mesma conta e o saldo continua
+  const nova = CONTAS_CAIXA_ANTIGAS[`${mConta[1].padStart(12, '0')}${mConta[2]}`] || null;
+  const contaAntiga = nova ? `${mConta[1]}-${mConta[2]}` : null;
+  const conta = nova ? nova.slice(0, -1) : mConta[1].padStart(12, '0');
+  const contaDv = nova ? nova.slice(-1) : mConta[2];
   const mAg = todoTexto.match(/Ag[êe]ncia:\s*(\d{3,5})/) || todoTexto.match(/Conta:\s*(\d{3,5})\s*\|/);
   const agencia = mAg ? mAg[1].padStart(5, '0') : null;
   const conhecida = CONTAS_CAIXA[`${conta}${contaDv}`] || null;
   const mCli = todoTexto.match(/Cliente:\s*(.+)/);
-  const titular = limpar(mCli?.[1] || '') || conhecida?.titular || limpar(texto(todas[0]?.itens || []).replace(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}\s*/, '')) || null;
+  const titular = (espacado && conhecida?.titular) || limpar(mCli?.[1] || '') || conhecida?.titular || limpar(texto(todas[0]?.itens || []).replace(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}\s*/, '')) || null;
   const mCnpj = todoTexto.match(/CNPJ:\s*([\d./-]{14,18})/);
   const titularCnpj = mCnpj ? mCnpj[1].replace(/\D/g, '') : conhecida?.cnpj || null;
   let periodo = null;
@@ -204,7 +228,7 @@ export async function lerExtratoCaixaPdf(buffer) {
       valorPartes: valorTok ? [] : antesValor,
       valorFechado: false,
       saldoInformado: saldoTok.v,
-      contraparteNome: nomePendente,
+      contraparteNome: layout === 'periodo-b2' ? nomePendente : null, // só o B2 traz o nome na linha da data (nos outros é o cabeçalho da página)
       contraparteDoc: null,
     };
     row.aberta = row.valor == null || !row.historicoInline;
@@ -247,6 +271,7 @@ export async function lerExtratoCaixaPdf(buffer) {
     agencia,
     conta,
     contaDv,
+    contaAntiga,
     titular,
     titularCnpj,
     mesReferencia: mesRef,
