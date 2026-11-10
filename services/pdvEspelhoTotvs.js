@@ -331,6 +331,9 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
         : []),
       ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
       { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+      ...(venda.pedido_info?.trocas || []).slice(0, 4).map((t) => ({
+        observation: `TROCA NO FATURAMENTO: ${t.quantidade}X ${t.de} -> ${t.para} (MESMO VALOR)`.slice(0, 80),
+      })),
       ...(Number(venda.pedido_info?.descontoFaturamento?.pct) > 0
         ? [
             {

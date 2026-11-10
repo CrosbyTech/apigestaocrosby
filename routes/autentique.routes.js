@@ -2423,3 +2423,6 @@ router.post(
 );
 
 export default router;
+
+// Usado por services/faturamentoDuplicata.js (duplicata do faturamento da expedição)
+export const autentiqueCredenciais = () => ({ url: AUTENTIQUE_API_URL, chave: AUTENTIQUE_API_KEY });

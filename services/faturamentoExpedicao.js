@@ -35,10 +35,16 @@ import {
 } from './pdvFiscal.js';
 import { espelharVendaNoTotvs, cartoesTotvs } from './pdvEspelhoTotvs.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
+import { enviarDuplicata, gravarNotaNoCard, temBoleto } from './faturamentoDuplicata.js';
+import { logisticaDosFaturamentos } from './faturamentoLogistica.js';
 import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
 
 import { cardBrejinho } from './brejinhoDryland.js';
 export const EMPRESA_FATURAMENTO = 99;
+// Troca de peça NA TELA de faturamento (a que falta sai, a que sobra entra pelo
+// mesmo valor): liberada só em 10/11/2026, para os pedidos cuja separação se
+// perdeu nas 72 h do Dryland e tiveram peça trocada (Yago, 10/11/2026).
+export const TROCA_NO_FATURAMENTO_ATE = '2026-11-10';
 // Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
 export const EMPRESA_DOC_INTERNO = 990;
 
@@ -266,7 +272,12 @@ export async function prepararFaturamento(chave) {
       credev: texto(d.credev) && !/^n(ã|a)o$/i.test(d.credev) ? d.credev : null,
     },
     comprovantes: (card?.comprovantes || []).map((p) => ({ path: p, url: COMPROVANTE_URL(p) })),
-    jaNoTotvs: [d.transacao && `transação ${d.transacao}`, d.pedido_totvs && `pedido ${d.pedido_totvs}`].filter(Boolean),
+    jaNoTotvs: [
+      d.transacao && `transação ${d.transacao}`,
+      d.pedido_totvs && `pedido ${d.pedido_totvs}`,
+      // card que já tem nota emitida fora do HeadCoach: o pedido já foi faturado no TOTVS
+      d.nf_numero && !d.nf_headcoach && `NF ${d.nf_numero} JÁ EMITIDA para este pedido (card "${card?.status || ''}")`,
+    ].filter(Boolean),
     numeracao,
   };
 }
@@ -304,6 +315,12 @@ export async function faturar(body) {
   if (!b.clienteCode) throw new FaturamentoError('Escolha o cliente');
   if (!b.vendedorCode) throw new FaturamentoError('Escolha o vendedor');
   if (!Array.isArray(b.itens) || !b.itens.length) throw new FaturamentoError('Nenhuma peça conferida');
+  const trocas = (Array.isArray(b.trocas) ? b.trocas : [])
+    .filter((t) => t && t.de && t.para)
+    .map((t) => ({ de: String(t.de), deNome: t.deNome || null, para: String(t.para), paraNome: t.paraNome || null, quantidade: Number(t.quantidade) || 1 }));
+  if (trocas.length && hojeBrasil() > TROCA_NO_FATURAMENTO_ATE) {
+    throw new FaturamentoError('A troca de peças no faturamento só foi liberada no dia 10/11/2026', 'TROCA_FORA_DO_PRAZO');
+  }
   // operação do documento interno: a escolhida na tela ou a do canal
   const operacaoDocInterno = Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno)) ? Number(b.operacaoDocInterno) : OPERACAO_DOC_INTERNO[b.canal] || 511;
 
@@ -459,6 +476,8 @@ export async function faturar(body) {
     pedido_info: {
       ...(b.pedidoInfo || {}),
       consumidorFinal: !!b.consumidorFinal,
+      // peças trocadas na tela (entra a que foi lida, pelo valor da que estava no pedido)
+      ...(trocas.length ? { trocas } : {}),
       // desconto dado na tela de faturamento (já está no valor de cada peça):
       // até 20% livre; acima, liberado por owner/admin/financeiro
       ...(Number(b.descontoFaturamento?.pct) > 0
@@ -594,7 +613,27 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
     await atualizar({ totvs_erro: err.message, ...(v?.totvs_transacao_code ? { transacao_code: v.totvs_transacao_code, transacao_date: v.totvs_transacao_date, transacao_status: v.totvs_status || 1 } : {}) });
   }
   venda = await carregarVenda(vendaId);
-  return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs };
+
+  // 3) Dryland: a nota vai para o card da fila (é dela que os robôs de minuta
+  //    precisam) e, se a venda tem boleto, sai a duplicata para o cliente
+  //    assinar. A duplicata roda em segundo plano (gera PDF, Autentique e
+  //    WhatsApp) para não segurar a resposta do faturamento; o andamento
+  //    aparece na aba Transações. Falha aqui não desfaz nota nem TOTVS.
+  let duplicata = null;
+  const notaOk = venda.notas.find((n) => n.status === 'autorizada');
+  if (notaOk && venda.status !== 'cancelada') {
+    if (temBoleto(venda, venda.pagamentos)) {
+      duplicata = { emAndamento: true };
+      setImmediate(() => {
+        enviarDuplicata(vendaId, { por: venda.criado_por || null }).catch((e) => console.warn(`⚠️ [duplicata] venda ${vendaId}: ${e.message}`));
+      });
+    } else {
+      gravarNotaNoCard({ venda, nota: notaOk, fat: { chave: venda.pedido_chave } }, {}, `HeadCoach${venda.criado_por ? ` (${venda.criado_por})` : ''}`).catch((e) =>
+        console.warn(`⚠️ [faturamento] venda ${vendaId}: não gravei a nota no card do Dryland: ${e.message}`),
+      );
+    }
+  }
+  return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs, duplicata };
 }
 
 // ─── Aba Transações ─────────────────────────────────────────────────────────
@@ -622,7 +661,8 @@ export async function listarTransacoes({ de, ate, busca, limite = 300 } = {}) {
       [f.numero_site, f.cliente_nome, f.nf_numero, f.nf_chave, f.transacao_code, f.criado_por, f.forma_pagamento].filter(Boolean).some((v) => String(v).toUpperCase().includes(t)),
     );
   }
-  return lista;
+  // minuta (lida do card do Dryland) e duplicata de cada faturamento
+  return logisticaDosFaturamentos(lista);
 }
 
 export async function detalheTransacao(faturamentoId) {
@@ -632,5 +672,6 @@ export async function detalheTransacao(faturamentoId) {
   const { data: kardex } = fat.venda_id
     ? await supabase.from('pdv_epc_movimentos').select('epc, tipo, product_code, produto_nome, valor_unit, ocorrido_em').eq('venda_id', fat.venda_id).order('product_code')
     : { data: [] };
-  return { faturamento: fat, venda, kardex: kardex || [] };
+  const [logistica] = await logisticaDosFaturamentos([fat]);
+  return { faturamento: fat, venda, kardex: kardex || [], minuta: logistica?.minuta || null, duplicata: logistica?.duplicata || null, temCard: !!logistica?.temCard };
 }

@@ -150,6 +150,7 @@ import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.j
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
 import { iniciarJobDevolucoesSync } from './jobs/devolucoes-sync.job.js';
 import { iniciarJobPedidosVendaSync } from './jobs/pedidos-venda-sync.job.js';
+import { iniciarJobFaturamentoDuplicata } from './jobs/faturamento-duplicata.job.js';
 import { iniciarJobPagarmeBoletosRetorno } from './jobs/pagarme-boletos-retorno.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
@@ -341,6 +342,7 @@ app.listen(PORT, async () => {
   iniciarJobDrylandComercial();
   iniciarJobDevolucoesSync();
   iniciarJobPedidosVendaSync();
+  iniciarJobFaturamentoDuplicata(); // assinatura das duplicatas enviadas pelo HeadCoach
   iniciarJobPagarmeBoletosRetorno();
   iniciarJobErpSync();
   iniciarJobIntegracaoOutbox();

@@ -14,6 +14,7 @@ import {
   getBranchCodes,
 } from './totvsHelper.js';
 import supabaseFiscal from '../config/supabaseFiscal.js';
+import supabasePrincipal from '../config/supabase.js';
 import { espelharEscritaAR } from '../services/erp/contasReceber.js';
 
 const router = express.Router();
@@ -1149,6 +1150,31 @@ router.get(
   '/xml-contents/:accessKey?',
   asyncHandler(async (req, res) => {
     const accessKey = req.params.accessKey || req.query.accessKey;
+
+    // NF-e emitida pelo HeadCoach (faturamento da expedição): o XML está aqui, não
+    // no TOTVS. Os robôs de minuta do Dryland (Correios/LATAM/Azul) buscam o XML
+    // por esta rota e leem data.mainInvoiceXml em base64, o mesmo formato do TOTVS.
+    if (accessKey && /^\d{44}$/.test(String(accessKey))) {
+      try {
+        const { data: propria } = await supabasePrincipal
+          .from('pdv_notas_fiscais')
+          .select('numero, serie, status, xml_proc, xml_assinado')
+          .eq('chave', String(accessKey))
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const xml = propria?.xml_proc || propria?.xml_assinado;
+        if (xml) {
+          return successResponse(
+            res,
+            { mainInvoiceXml: Buffer.from(xml, 'utf8').toString('base64'), origem: 'headcoach', invoiceCode: propria.numero, serialCode: propria.serie, status: propria.status },
+            'XML da nota fiscal (emitida pelo HeadCoach)',
+          );
+        }
+      } catch (e) {
+        console.log('[xml-contents] consulta às notas do HeadCoach falhou, sigo no TOTVS:', e.message);
+      }
+    }
 
     if (!accessKey) {
       return errorResponse(
