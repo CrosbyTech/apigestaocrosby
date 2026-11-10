@@ -23,6 +23,7 @@ import { lerExtratoItau } from '../utils/extratoItauPdf.js';
 import { lerExtratoItauOfx } from '../utils/extratoItauOfx.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx } from '../utils/extratoSantanderOfx.js';
+import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -93,6 +94,15 @@ const BANCOS = {
     ofxSoMovimento: true,
     ilegiveis: [],
   },
+  BRADESCO: {
+    pasta: 'BRADESCO',
+    // "Extrato Mensal / Por Período" de 2023: saldo só da conta corrente (fica em 1,00; o resto vai e volta do Invest Fácil).
+    // A seção "Últimos Lançamentos" entra quando continua a tabela principal (mar/2023 da Crosby: o dia 31/03 só está nela)
+    // e é ignorada quando repete a última linha (mai e nov/2023) ou já é do mês seguinte.
+    pdf: lerExtratoBradesco,
+    // sem OFX: BALAMT sem data e linhas repetidas (nov/2023 da Crosby traz a aplicação de 7.000,00 duas vezes)
+    ilegiveis: [],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
 const QUEBRAS = [];
@@ -125,6 +135,9 @@ const FIM_DE_MES = {
   'SANTANDER|13000599': [0, 1539.95, 552.63, -16055.19, 0, 316.93, 8242.27, 8485.68, 3559.89, 10654.11, 417.76, 290030.44],
   'SANTANDER|13001128': [0, null, 0, 0, 0, 5443.37, 6221.45, null, null, 175.95, null, 3100.95],
   'SANTANDER|13006882': [0, 0, 0, 0, 0, 109.95, 8068.26, 2029.8, 1912.24, 76.11, 8.62, 6549.48],
+  // Bradesco: saldo da conta corrente (o Invest Fácil fica de fora, como em 2024)
+  'BRADESCO|249374': [11.87, 1, 1, 1, 1, 20.58, 1, 1, 1, 1, 1, 1],
+  'BRADESCO|249286': [1, 9.89, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {
@@ -133,6 +146,7 @@ const INICIO_2023 = {
   'CAIXA|000578136386': 23340.95, 'CAIXA|000578136459': 23118.8,
   'ITAU|27061': 4286.53, 'ITAU|33688': 4988.17, 'ITAU|39046': 6214.35,
   'SANTANDER|13000599': -14873.5, 'SANTANDER|13001128': 0, 'SANTANDER|13006882': 0,
+  'BRADESCO|249374': 1, 'BRADESCO|249286': 1,
 };
 
 // arquivos: RAIZ/<EMPRESA>/<pasta do banco>/<MÊS>/arquivo (o nome se repete entre meses → a chave é o caminho relativo)

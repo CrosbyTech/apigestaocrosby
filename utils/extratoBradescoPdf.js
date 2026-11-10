@@ -132,6 +132,10 @@ export async function lerExtratoBradesco(buffer) {
   let saldoAnterior = null;
   let dentro = false;
   let fim = false;
+  // "Últimos Lançamentos": segunda tabela, logo depois do "Total", com o que entrou depois do fechamento da primeira
+  // (mar/2023 da Crosby: o dia 31/03 inteiro está só nela). Entram as linhas com data dentro do período; as do mês
+  // seguinte ficam de fora (vêm no extrato do mês seguinte).
+  let ultimos = false;
   let dataAtual = null;
   let nomePendente = '';
   const lanc = [];
@@ -139,7 +143,8 @@ export async function lerExtratoBradesco(buffer) {
   let off = 0;
   const ehTexto = (its) => its.every((i) => !RE_NUM.test(i.s) || i.x < 250 + off) && its.some((i) => i.x >= 95 + off && i.x < 250 + off) && !its.some((i) => i.x >= 500 + off && RE_NUM.test(i.s));
   const ehValor = (its) => its.some((i) => i.x >= 500 + off && RE_NUM.test(i.s));
-  for (let i = 0; i < todas.length && !fim; i++) {
+  let encerrado = false;
+  for (let i = 0; i < todas.length && !encerrado; i++) {
     const its = todas[i].itens;
     const t = texto(its);
     const tUp = semAcento(t).toUpperCase();
@@ -155,12 +160,32 @@ export async function lerExtratoBradesco(buffer) {
     const dataIt = its.find((x) => x.x < 60 + off && /^\d{2}\/\d{2}\/\d{4}$/.test(x.s));
     if (/^SALDO ANTERIOR/.test(semAcento(texto(its.filter((x) => x.x >= 95 + off))).toUpperCase())) {
       const n = its.filter((x) => x.x >= 500 + off && RE_NUM.test(x.s)).at(-1);
+      if (ultimos) {
+        // o "SALDO ANTERIOR" da segunda tabela não muda o saldo inicial; a data dele vale para as linhas sem data própria.
+        // Só é continuação quando parte do saldo em que a primeira tabela terminou; senão a seção está repetindo
+        // linhas que já estão na primeira (mai e nov/2023: a aplicação do último dia aparece nas duas) → ignorada.
+        const fimPrimeira = lanc.length ? lanc.at(-1).saldoInformado : saldoAnterior;
+        if (!n || Math.abs(numBr(n.s) - fimPrimeira) > 0.005) {
+          encerrado = true;
+          break;
+        }
+        if (dataIt) dataAtual = dataIso(dataIt.s);
+        continue;
+      }
       if (!n) throw new Error('"SALDO ANTERIOR" sem valor.');
       saldoAnterior = numBr(n.s);
       continue;
     }
     if (/^TOTAL\b/.test(tUp) && its[0].x < 60 + off) {
       fim = true;
+      if (!ultimos && todas.slice(i + 1).some((l) => /^ULTIMOS LANCAMENTOS/.test(semAcento(texto(l.itens)).toUpperCase()))) {
+        ultimos = true;
+        dentro = false; // espera o cabeçalho da segunda tabela (as colunas vêm 4 pt deslocadas)
+        dataAtual = null;
+        nomePendente = '';
+        continue;
+      }
+      encerrado = true;
       break;
     }
     if (saldoAnterior == null) continue;
@@ -176,6 +201,12 @@ export async function lerExtratoBradesco(buffer) {
       const descricao = limpar(nomeAqui || nomePendente);
       nomePendente = '';
       if (!dataAtual) throw new Error(`Lançamento sem data: "${t}"`);
+      if (ultimos && dataAtual > periodo.fim) {
+        // "Últimos Lançamentos" já do mês seguinte: não é deste extrato; o detalhe das linhas seguintes também não
+        lanc.foraDoPeriodo = (lanc.foraDoPeriodo || 0) + 1;
+        encerrado = true;
+        break;
+      }
       lanc.push({ pagina: todas[i].pagina, data: dataAtual, descricao, documento, valor, saldoInformado: numBr(saldoIt.s), detalhe: null });
       continue;
     }
