@@ -61,6 +61,11 @@ export const CONTAS_BNB = {
   '699220': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115' },
   '693612': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
   '693639': { titular: 'IRMAOS CR VESTUARIO LTDA', cnpj: '33592092000103' },
+  // contas antigas (agência 185), usadas até 2023/2024
+  '22863': { titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA', cnpj: '17177680000116', agencia: '185' },
+  '22871': { titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA', cnpj: '17177680000116', agencia: '185' },
+  '28241': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115', agencia: '185' },
+  '32281': { titular: 'FABIO FERREIRA DE LIMA AZEVEDO', cnpj: '27728810000115', agencia: '185' },
 };
 export const CONTAS_SICREDI_OFX = {
   '367338': { titular: 'CROSBY CR VESTUARIO LTDA', cnpj: '17177680000116' },
@@ -185,7 +190,7 @@ function lerOfxBanco(buffer, esperado) {
   if (!acctIdBruto) throw new Error('OFX sem o número da conta (ACCTID).');
   const acctId = def.normalizarConta ? def.normalizarConta(acctIdBruto) : acctIdBruto;
   const conhecida = def.contas[acctId] || null;
-  const agencia = def.agencia ?? (conhecida && 'agencia' in conhecida ? conhecida.agencia : (campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null);
+  const agencia = conhecida && 'agencia' in conhecida ? conhecida.agencia : def.agencia ?? ((campo(texto, 'BRANCHID') || '').replace(/\D/g, '') || null);
   const conta = acctId.slice(0, -1);
   const contaDv = acctId.slice(-1);
 
@@ -246,6 +251,18 @@ function lerOfxBanco(buffer, esperado) {
   const maisFrequente = Object.entries(freq).sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))[0]?.[0] || null;
   const inicio = datasArq[0] || datasLanc[0] || null;
   const mesRef = maisFrequente || (def.banco === 'BB' ? (d2 || d1 || inicio) : inicio)?.slice(0, 7) || null;
+  // BNB (BALAMT = saldo INICIAL): o arquivo exportado no dia 1º/2 do mês seguinte traz lançamentos desse mês
+  // (ex.: nov/2023 vai até 01/12 e a tarifa de 01/12 se repete no arquivo de dezembro) → ficam só os do mês de referência
+  if (def.balamtInicial && mesRef) {
+    const limite = ultimoDiaMes(mesRef);
+    const antes = lanc.length;
+    for (let i = lanc.length - 1; i >= 0; i--) if (lanc[i].data > limite) lanc.splice(i, 1);
+    if (lanc.length !== antes) {
+      lanc.forEach((l, i) => (l.seq = i + 1));
+      datasLanc.splice(0, datasLanc.length, ...lanc.map((l) => l.data).sort());
+      for (let i = datasArq.length - 1; i >= 0; i--) if (datasArq[i] > limite) datasArq[i] = limite;
+    }
+  }
   const fim = datasLanc.at(-1) && datasArq.at(-1) ? (datasLanc.at(-1) > datasArq.at(-1) ? datasLanc.at(-1) : datasArq.at(-1)) : datasArq.at(-1) || datasLanc.at(-1) || (mesRef ? ultimoDiaMes(mesRef) : null);
 
   const totalCreditos = round2(lanc.filter((l) => l.valor > 0).reduce((s, l) => s + l.valor, 0));

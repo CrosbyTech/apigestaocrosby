@@ -15,7 +15,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
-import { lerExtratoBbOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -37,21 +38,38 @@ const BANCOS = {
     ofxFechado: true,
     ilegiveis: [],
   },
+  BNB: {
+    pasta: 'BNB',
+    pdf: lerExtratoBnb, // "Extrato de Conta Corrente" das contas antigas (agência 185): 2286/2287 Crosby Distribuição, 2824/3228 Fabio
+    // BALAMT = saldo INICIAL do período; o arquivo de nov/2023 do Fabio vai até 01/12 (a tarifa de 01/12 se repete em dezembro) → o leitor corta no fim do mês
+    ofx: lerExtratoBnbOfx,
+    bankId: 4,
+    ilegiveis: [],
+  },
 };
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
 const QUEBRAS = [];
 const quebra = (banco, conta, mes) => QUEBRAS.some((q) => q.banco === banco && q.conta === conta && q.mes === mes);
 // Meses sem nenhum arquivo legível: o encadeamento pula e o banco pode não ter o mês
-const BURACOS = [];
+const BURACOS = [
+  { banco: 'BNB', conta: '2286', meses: ['2023-10'] }, // outubro não veio (set termina 976,59 e nov começa 4.071,59)
+  { banco: 'BNB', conta: '2287', meses: ['2023-01', '2023-02', '2023-04', '2023-05', '2023-06', '2023-07', '2023-08', '2023-09', '2023-10', '2023-11', '2023-12'] }, // só o OFX de março (sem movimento)
+  { banco: 'BNB', conta: '3228', meses: ['2023-04'] }, // conta sem movimento o ano todo; abril não veio
+];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
 // Saldo FINAL impresso em cada extrato (conta sem dígito → mês → saldo). null = mês sem arquivo legível.
 const FIM_DE_MES = {
   'BB|58711': [4864.72, 5231.91, 9881.72, -536.13, 5654.81, 10959.59, 7598.49, 15696.41, 5229.3, 15895.09, 1359.32, 51259.77],
+  'BNB|2286': [696.67, 612.19, 3418.79, 226.22, 83.07, 646.79, 3165.68, 3999.09, 976.59, null, 2211.39, 2106.39],
+  'BNB|2287': [null, null, 0, null, null, null, null, null, null, null, null, null],
+  'BNB|2824': [2980.17, 1058.76, 79.46, 177.88, 361.26, 323.51, 78.98, 585.65, 588.63, 653.29, 1592.64, 2640.93],
+  'BNB|3228': [0, 0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {
   'BB|58711': 59708.73,
+  'BNB|2286': 791.49, 'BNB|2824': 4820.55, 'BNB|3228': 0,
 };
 
 // arquivos: RAIZ/<EMPRESA>/<pasta do banco>/<MÊS>/arquivo (o nome se repete entre meses → a chave é o caminho relativo)
