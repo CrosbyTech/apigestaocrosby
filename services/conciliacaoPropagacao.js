@@ -75,6 +75,34 @@ async function resolverItens(itens) {
   });
 }
 
+/**
+ * Completa parcela/fornecedor pela cópia do TOTVS (accounts_payable_duplicates)
+ * quando a Liberação/Solicitação não os tem — sem eles a Consulta não consegue
+ * casar e o título seguia EM ABERTO (auditoria da Titia, 11/11/2026). Casa por
+ * empresa + duplicata; com mais de uma parcela, escolhe pelo valor.
+ */
+async function completarPelaCopiaTotvs(resolvidos) {
+  const falta = resolvidos.filter((r) => r.dup?.nr_duplicata && r.dup.nr_parcela == null && r.dup.cd_fornecedor == null);
+  if (!falta.length) return resolvidos;
+  const dups = [...new Set(falta.map((r) => r.dup.nr_duplicata))];
+  const linhas = [];
+  for (let i = 0; i < dups.length; i += 200) {
+    const { data } = await supabase.from('accounts_payable_duplicates').select('branch_code,duplicate_code,installment_code,supplier_code,duplicate_value').in('duplicate_code', dups.slice(i, i + 200));
+    linhas.push(...(data || []));
+  }
+  for (const r of falta) {
+    let cand = linhas.filter((l) => Number(l.duplicate_code) === Number(r.dup.nr_duplicata) && (r.dup.cd_empresa == null || Number(l.branch_code) === Number(r.dup.cd_empresa)));
+    if (cand.length > 1) {
+      const porValor = cand.filter((l) => Math.abs(round2(l.duplicate_value) - round2(r.valor)) <= 0.05);
+      if (porValor.length) cand = porValor;
+    }
+    if (cand.length !== 1) continue;
+    const c = cand[0];
+    r.dup = { ...r.dup, cd_empresa: r.dup.cd_empresa ?? int(c.branch_code), nr_parcela: int(c.installment_code), cd_fornecedor: int(c.supplier_code) };
+  }
+  return resolvidos;
+}
+
 /** APROVADOS da Liberação que são estas duplicatas (pelo id ou pela duplicata). */
 async function aprovadosDe(resolvidos) {
   const porId = resolvidos.map((r) => r.libId).filter(Boolean);
@@ -117,7 +145,7 @@ export async function propagarConciliacao(conc) {
   const res = { conciliacaoId: conc.id, duplicatas: 0, liberacaoPagos: 0 };
   await removerPagosDaConciliacao(conc.id);
   if (!itens.length || Number(conc.valor) >= 0) return res;
-  const resolvidos = await resolverItens(itens);
+  const resolvidos = await completarPelaCopiaTotvs(await resolverItens(itens));
   const { data: conta } = await supabase.from('fluxo_caixa_contas').select('banco,apelido,titular_cnpj').eq('id', conc.conta_id).maybeSingle();
   const banco = labelBanco(conta) || conta?.apelido || conta?.banco || null;
 
