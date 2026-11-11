@@ -103,6 +103,12 @@ export function labelBanco(conta) {
     if (raiz === '53661116') return 'SICREDI FLAVIO';
     return 'SICREDI CROSBY';
   }
+  // outros bancos (PagBank, Itaú, Caixa, Mêntore…): nome do banco + empresa —
+  // antes caía no STONE e a Consulta mostrava "STONE CROSBY" num pago da PagBank
+  if (conta.banco && conta.banco !== 'STONE') {
+    const emp = { 17177680: 'CROSBY', 27728810: 'FÁBIO', 53661116: 'FLAVIO', 33592092: 'IRMÃOS CR' }[raiz];
+    return emp ? `${conta.banco} ${emp}` : conta.banco;
+  }
   // STONE: por raiz do CNPJ do titular
   if (raiz === '17177680') return 'STONE CROSBY';
   if (raiz === '27728810') return 'STONE FABIO';
