@@ -166,7 +166,44 @@ const maisDias = (iso, dias) => {
   d.setUTCDate(d.getUTCDate() + dias);
   return d.toISOString().slice(0, 10);
 };
-function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null, comoFatura = false, cartaoTotvs = null } = {}) {
+// Saldo bônus não existe no TOTVS. O dinheiro dele entrou no pagamento do pedido
+// que gerou o crédito (naquele dia a transação ficou só com as peças que
+// existiam). Então, quando o bônus é usado, o TOTVS recebe cada pedaço na MESMA
+// forma daquele pagamento (Pix, cartão…): fecha com o que entrou no banco.
+// Pix e dinheiro somam na linha da mesma forma, se a venda já tiver uma.
+function expandirSaldoBonus(pagamentos, venda) {
+  if (!pagamentos.some((p) => p.forma === 'saldo_bonus')) return pagamentos;
+  const usos = Array.isArray(venda.pedido_info?.bonusUso) ? venda.pedido_info.bonusUso : [];
+  const saida = pagamentos.filter((p) => p.forma !== 'saldo_bonus').map((p) => ({ ...p }));
+  const totalBonus = round2(pagamentos.filter((p) => p.forma === 'saldo_bonus').reduce((s, p) => s + Number(p.valor || 0), 0));
+  const totalUsos = round2(usos.reduce((s, u) => s + Number(u.valor || 0), 0));
+  if (!usos.length || Math.abs(totalBonus - totalUsos) > 0.01) {
+    throw new EspelhoError(`Venda com saldo bônus (R$ ${totalBonus.toFixed(2)}) sem o registro dos créditos de origem (R$ ${totalUsos.toFixed(2)})`, 'BONUS_SEM_ORIGEM');
+  }
+  for (const u of usos) {
+    const forma = u.origem?.forma || 'pix';
+    const mesma = forma === 'pix' || forma === 'dinheiro' ? saida.find((p) => p.forma === forma) : null;
+    if (mesma) {
+      mesma.valor = round2(Number(mesma.valor) + Number(u.valor));
+      continue;
+    }
+    saida.push({
+      venda_id: venda.id,
+      forma,
+      valor: round2(u.valor),
+      troco: 0,
+      parcelas: Number(u.origem?.parcelas) || 1,
+      cartao_totvs: u.origem?.cartao_totvs || null,
+      bandeira: null,
+      nsu: null,
+      autorizacao: u.origem?.autorizacao || null,
+      bonusDoCredito: u.creditoId,
+    });
+  }
+  return saida;
+}
+
+function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto = [], documento = null, comoFatura = false, cartaoTotvs = null, pixId = null } = {}) {
   const receipts = [];
   for (const p of pagamentos) {
     if (comoFatura && p.forma !== 'boleto') {
@@ -223,6 +260,17 @@ function montarRecebimentos(pagamentos, transactionCode, data, { parcelasBoleto 
             nsuNumber: p.nsu ? String(p.nsu) : undefined,
           }
         : {}),
+      // Pix = "carteira digital" no TOTVS. Sem estes campos o recebimento volta
+      // "40452 - Parâmetro de entrada TP_CARTEIRADIGITAL não informado"; só com o
+      // tipo ele devolve "-35 Error returned by 4GL". O conjunto abaixo foi o que
+      // atendeu a transação 990/903458 em 10/11/2026 (título tipo 26 PIX em aberto,
+      // portador 1020). O id é o E2E do Pix quando o pedido traz; senão, a venda.
+      ...(p.forma === 'pix'
+        ? (() => {
+            const id = String(pixId || p.nsu || `HEADCOACH-${p.venda_id || transactionCode}`).slice(0, 100);
+            return { digitalWalletType: '1', transactionId: id, nsuNumber: id, processorTransactionId: id, paymentStatus: 1, receiptStatus: 1 };
+          })()
+        : {}),
     };
     const parcelas = p.forma === 'credito' ? Math.max(1, Number(p.parcelas) || 1) : 1;
     if (parcelas === 1) {
@@ -269,7 +317,8 @@ async function buscarDocInterno(empresa, transactionCode, data) {
  * @returns {{ ignorado?: boolean, motivo?: string, transactionCode, transactionDate, status, docInternoSeq }}
  */
 export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
-  const { venda, itens, pagamentos, notas, cfg } = await carregar(vendaId);
+  const { venda, itens, pagamentos: pagamentosDaVenda, notas, cfg } = await carregar(vendaId);
+  const pagamentos = expandirSaldoBonus(pagamentosDaVenda, venda);
   if (venda.status === 'cancelada') throw new EspelhoError('Venda cancelada não é espelhada', 'VENDA_CANCELADA');
   if (venda.tipo_venda === 'troca') return { ignorado: true, motivo: 'Troca não é espelhada como documento interno' };
   if (cfg && cfg.espelhar_totvs === false && !forcar) return { ignorado: true, motivo: 'Espelho no TOTVS desligado para esta empresa' };
@@ -344,6 +393,18 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
                 .slice(0, 80),
             },
           ]
+        : []),
+      ...((venda.pedido_info?.bonusUso || []).length
+        ? [
+            {
+              observation: `SALDO BONUS HEADCOACH R$ ${round2(venda.pedido_info.bonusUso.reduce((s, u) => s + Number(u.valor || 0), 0)).toFixed(2)} (CREDITO DA VENDA ${[
+                ...new Set(venda.pedido_info.bonusUso.map((u) => `#${u.vendaOrigem}`)),
+              ].join(' ')})`.slice(0, 80),
+            },
+          ]
+        : []),
+      ...(venda.pedido_info?.creditoFalta?.valor > 0
+        ? [{ observation: `PECA EM FALTA: R$ ${round2(venda.pedido_info.creditoFalta.valor).toFixed(2)} VIROU SALDO BONUS DO CLIENTE`.slice(0, 80) }]
         : []),
       ...(round2(venda.frete || 0) > 0 ? [{ observation: `FRETE R$ ${round2(venda.frete).toFixed(2)} INCLUSO NO VALOR DOS ITENS`.slice(0, 80) }] : []),
       ...(nota ? [{ observation: `${Number(nota.modelo) === 65 ? 'NFC-E' : 'NF-E'} ${nota.numero}/${nota.serie} ${nota.status.toUpperCase()}`.slice(0, 80) }] : []),
@@ -428,6 +489,7 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     documento: notaOk?.numero || null,
     comoFatura: !!venda.pedido_info?.receberComoFatura,
     cartaoTotvs: venda.pedido_info?.cartaoTotvs || null,
+    pixId: venda.pedido_info?.pix || null,
   });
   const totalAmount = round2(receipts.reduce((s, r) => s + r.documentAmount, 0));
   try {

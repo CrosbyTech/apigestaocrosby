@@ -37,14 +37,16 @@ import { espelharVendaNoTotvs, cartoesTotvs } from './pdvEspelhoTotvs.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
 import { enviarDuplicata, gravarNotaNoCard, temBoleto } from './faturamentoDuplicata.js';
 import { logisticaDosFaturamentos } from './faturamentoLogistica.js';
+import { normalizarCreditoFalta, gerarCreditoFalta, CreditoError } from './faturamentoCredito.js';
+import { saldoBonusDoCliente, usarBonus, estornarUsoDasVendas, BonusError } from './saldoBonus.js';
 import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
 
 import { cardBrejinho } from './brejinhoDryland.js';
 export const EMPRESA_FATURAMENTO = 99;
 // Troca de peça NA TELA de faturamento (a que falta sai, a que sobra entra pelo
-// mesmo valor): liberada só em 10/11/2026, para os pedidos cuja separação se
-// perdeu nas 72 h do Dryland e tiveram peça trocada (Yago, 10/11/2026).
-export const TROCA_NO_FATURAMENTO_ATE = '2026-11-10';
+// mesmo valor): liberada até 11/11/2026 (era só 10/11; o Yago estendeu), para os
+// pedidos cuja separação se perdeu nas 72 h do Dryland e tiveram peça trocada.
+export const TROCA_NO_FATURAMENTO_ATE = '2026-11-11';
 // Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
 export const EMPRESA_DOC_INTERNO = 990;
 
@@ -185,6 +187,70 @@ export function parcelasIguais(total, n, vencimentos) {
   }));
 }
 
+// ─── Pedido FATURADO ─────────────────────────────────────────────────────────
+// Regra do Yago (10/11/2026), para o Faturamento e o Faturamento Brejinho: nota
+// emitida = pedido FATURADO, e não se fatura de novo. Só volta a liberar quando
+// a NF-e for cancelada E a transação do TOTVS daquela venda estiver cancelada
+// (ou nunca tiver sido aberta). Devolve { motivo, texto, … } ou null.
+export async function bloqueioDeFaturamento(chave, ref = null) {
+  let q = supabase.from('pedidos_venda_faturamentos').select('id, chave, numero_site, venda_id, criado_em').not('venda_id', 'is', null).order('id', { ascending: false }).limit(50);
+  const r = ref ? String(ref).replace(/[,()]/g, '') : null;
+  q = r ? q.or(`chave.eq.${chave},numero_site.eq.${r}`) : q.eq('chave', chave);
+  const { data: fats, error } = await q;
+  if (error || !(fats || []).length) return null;
+  const ids = fats.map((f) => f.venda_id);
+  const [{ data: vendas }, { data: notas }] = await Promise.all([
+    supabase.from('pdv_vendas').select('id, status, empresa, totvs_status, totvs_transacao_code, totvs_transacao_date, pedido_info').in('id', ids),
+    supabase.from('pdv_notas_fiscais').select('venda_id, numero, serie, status').in('venda_id', ids),
+  ]);
+  const vPor = new Map((vendas || []).map((v) => [v.id, v]));
+  // 1) alguma nota autorizada → faturado
+  for (const f of fats) {
+    const n = (notas || []).find((x) => x.venda_id === f.venda_id && x.status === 'autorizada');
+    const v = vPor.get(f.venda_id);
+    if (n && v && v.status !== 'cancelada') {
+      return {
+        motivo: 'faturado',
+        vendaId: f.venda_id,
+        faturamentoId: f.id,
+        nf: n.numero,
+        serie: n.serie,
+        texto: `Pedido já FATURADO: NF-e ${n.numero}/${n.serie} (transação HeadCoach nº ${f.venda_id}). Para faturar de novo é preciso cancelar a NF-e e a transação do TOTVS.`,
+      };
+    }
+  }
+  // 2) nota cancelada: a transação do TOTVS daquela venda também tem que estar cancelada
+  for (const f of fats) {
+    const v = vPor.get(f.venda_id);
+    if (!v?.totvs_transacao_code || v.totvs_status === 6) continue;
+    const empresaTotvs = Number(v.pedido_info?.empresaTotvs) || v.empresa;
+    let st = v.totvs_status;
+    try {
+      const t = await callTotvs('get', `${TOTVS_BASE_URL}/general/v2/transactions/search`, {
+        params: { BranchCodeList: empresaTotvs, TransactionCodeList: v.totvs_transacao_code, TransactionDate: String(v.totvs_transacao_date || '').slice(0, 10), Page: 1, PageSize: 1 },
+        timeout: 60000,
+      });
+      st = t.data?.items?.[0]?.status ?? st;
+      if (st === 6) {
+        await supabase.from('pdv_vendas').update({ totvs_status: 6 }).eq('id', v.id);
+        await supabase.from('pedidos_venda_faturamentos').update({ transacao_status: 6 }).eq('id', f.id);
+        continue;
+      }
+    } catch {
+      /* TOTVS fora: fica com a situação guardada */
+    }
+    return {
+      motivo: 'transacao_aberta',
+      vendaId: f.venda_id,
+      faturamentoId: f.id,
+      transacao: v.totvs_transacao_code,
+      empresaTotvs,
+      texto: `A NF-e deste pedido foi cancelada, mas a transação ${empresaTotvs}/${v.totvs_transacao_code} do TOTVS ainda está ${st === 4 ? 'atendida' : 'em andamento'}. Cancele-a no TOTVS para liberar o pedido para novo faturamento.`,
+    };
+  }
+  return null;
+}
+
 export async function prepararFaturamento(chave) {
   let card = null;
   let ref = null;
@@ -272,6 +338,8 @@ export async function prepararFaturamento(chave) {
       credev: texto(d.credev) && !/^n(ã|a)o$/i.test(d.credev) ? d.credev : null,
     },
     comprovantes: (card?.comprovantes || []).map((p) => ({ path: p, url: COMPROVANTE_URL(p) })),
+    // pedido já faturado pelo HeadCoach: a tela trava o FATURAR
+    bloqueio: await bloqueioDeFaturamento(chave, ref).catch(() => null),
     jaNoTotvs: [
       d.transacao && `transação ${d.transacao}`,
       d.pedido_totvs && `pedido ${d.pedido_totvs}`,
@@ -315,11 +383,13 @@ export async function faturar(body) {
   if (!b.clienteCode) throw new FaturamentoError('Escolha o cliente');
   if (!b.vendedorCode) throw new FaturamentoError('Escolha o vendedor');
   if (!Array.isArray(b.itens) || !b.itens.length) throw new FaturamentoError('Nenhuma peça conferida');
+  const bloqueio = await bloqueioDeFaturamento(b.chave, b.numeroSite || null);
+  if (bloqueio) throw new FaturamentoError(bloqueio.texto, 'PEDIDO_JA_FATURADO', 409);
   const trocas = (Array.isArray(b.trocas) ? b.trocas : [])
     .filter((t) => t && t.de && t.para)
     .map((t) => ({ de: String(t.de), deNome: t.deNome || null, para: String(t.para), paraNome: t.paraNome || null, quantidade: Number(t.quantidade) || 1 }));
   if (trocas.length && hojeBrasil() > TROCA_NO_FATURAMENTO_ATE) {
-    throw new FaturamentoError('A troca de peças no faturamento só foi liberada no dia 10/11/2026', 'TROCA_FORA_DO_PRAZO');
+    throw new FaturamentoError('A troca de peças no faturamento só foi liberada até 11/11/2026', 'TROCA_FORA_DO_PRAZO');
   }
   // operação do documento interno: a escolhida na tela ou a do canal
   const operacaoDocInterno = Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno)) ? Number(b.operacaoDocInterno) : OPERACAO_DOC_INTERNO[b.canal] || 511;
@@ -398,7 +468,7 @@ export async function faturar(body) {
   for (const p of b.pagamentos || []) {
     const forma = String(p.forma || '').toLowerCase();
     const valor = round2(p.valor);
-    if (!['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'boleto'].includes(forma)) throw new FaturamentoError(`Forma de pagamento inválida: ${p.forma}`);
+    if (!['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'boleto', 'saldo_bonus'].includes(forma)) throw new FaturamentoError(`Forma de pagamento inválida: ${p.forma}`);
     if (!(valor > 0)) continue;
     pagamentos.push({
       forma,
@@ -428,6 +498,34 @@ export async function faturar(body) {
       `Pagamentos (R$ ${somaPag.toFixed(2)}) não fecham com o total (R$ ${total.toFixed(2)} = produtos ${subtotal.toFixed(2)} − desconto ${descontoTotal.toFixed(2)} + frete ${frete.toFixed(2)})`,
       'PAYMENT_MISMATCH',
     );
+  }
+  // Saldo bônus do cliente (crédito de peça em falta de outro faturamento):
+  // confere o saldo antes de gravar a venda. O que uma tentativa anterior deste
+  // mesmo pedido tinha gasto volta primeiro — se chegou aqui, ela não virou nota
+  // (pedido com nota autorizada é barrado lá em cima).
+  const usoBonus = round2(pagamentos.filter((p) => p.forma === 'saldo_bonus').reduce((s, p) => s + p.valor, 0));
+  if (usoBonus > 0) {
+    try {
+      const { data: anteriores } = await supabase.from('pdv_vendas').select('id').eq('pedido_chave', b.chave).eq('origem', 'expedicao');
+      await estornarUsoDasVendas((anteriores || []).map((v) => v.id), 'Pedido faturado de novo: a tentativa anterior não virou nota', b.por || null);
+      const sb = await saldoBonusDoCliente(cliente.code);
+      if (usoBonus > sb.total + 0.005) {
+        throw new FaturamentoError(`Saldo bônus usado (R$ ${usoBonus.toFixed(2)}) é maior que o saldo do cliente (R$ ${sb.total.toFixed(2)})`, 'BONUS_INSUFICIENTE');
+      }
+    } catch (e) {
+      if (e instanceof BonusError) throw new FaturamentoError(e.message, e.code, e.status);
+      throw e;
+    }
+  }
+  // Peça em falta com o cliente ficando com o crédito: a peça já está fora dos
+  // itens (e da nota); o valor dela vira crédito de adiantamento depois da nota
+  // e da transação do TOTVS (services/faturamentoCredito.js)
+  let creditoFalta = null;
+  try {
+    creditoFalta = normalizarCreditoFalta(b.creditoFalta, { pagamentos, por: b.por || null });
+  } catch (e) {
+    if (e instanceof CreditoError) throw new FaturamentoError(e.message, e.code);
+    throw e;
   }
   let cobranca = null;
   const pBol = pagamentos.find((p) => p.forma === 'boleto');
@@ -476,6 +574,8 @@ export async function faturar(body) {
     pedido_info: {
       ...(b.pedidoInfo || {}),
       consumidorFinal: !!b.consumidorFinal,
+      ...(b.pedidoInfo?.pix ? { pix: String(b.pedidoInfo.pix).slice(0, 100) } : {}),
+      ...(creditoFalta ? { creditoFalta } : {}),
       // peças trocadas na tela (entra a que foi lida, pelo valor da que estava no pedido)
       ...(trocas.length ? { trocas } : {}),
       // desconto dado na tela de faturamento (já está no valor de cada peça):
@@ -497,6 +597,20 @@ export async function faturar(body) {
   if (e1 || e2) {
     await supabase.from('pdv_vendas').delete().eq('id', venda.id);
     throw new FaturamentoError((e1 || e2).message, 'DB_ERROR', 500);
+  }
+  // Saldo bônus: sai do cliente já (ninguém gasta o mesmo saldo duas vezes).
+  // Volta sozinho se este pedido for faturado de novo ou se a nota for cancelada.
+  // O consumo guarda a forma do pagamento de origem: é nela que o TOTVS recebe.
+  if (usoBonus > 0) {
+    try {
+      const consumo = await usarBonus({ clienteCode: cliente.code, valor: usoBonus, venda, por: b.por || null });
+      venda.pedido_info = { ...(venda.pedido_info || {}), bonusUso: consumo };
+      await supabase.from('pdv_vendas').update({ pedido_info: venda.pedido_info }).eq('id', venda.id);
+    } catch (e) {
+      await estornarUsoDasVendas([venda.id], 'Falha ao gravar a venda', b.por || null).catch(() => {});
+      await supabase.from('pdv_vendas').delete().eq('id', venda.id);
+      throw new FaturamentoError(e.message, e.code || 'BONUS_ERROR', e.status || 400);
+    }
   }
   await registrarEpcs({ venda, itens: itensGravados || [], tipo: 'venda' });
 
@@ -633,7 +747,20 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
       );
     }
   }
-  return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs, duplicata };
+  // 4) Peça em falta: crédito de adiantamento do cliente + chamado para o
+  //    Financeiro no Dryland. Só com a nota autorizada e a transação atendida.
+  let credito = null;
+  const cred = venda.pedido_info?.creditoFalta;
+  if (cred && Number(cred.valor) > 0 && notaOk && venda.status !== 'cancelada') {
+    if (cred.chamado?.id && cred.status !== 'erro') credito = { ...cred };
+    else if (venda.totvs_status === 4) {
+      credito = { ...cred, emAndamento: true };
+      setImmediate(() => {
+        gerarCreditoFalta(vendaId, { por: venda.criado_por || null }).catch((e) => console.warn(`⚠️ [crédito] venda ${vendaId}: ${e.message}`));
+      });
+    } else credito = { ...cred, aguardandoTotvs: true };
+  }
+  return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs, duplicata, credito };
 }
 
 // ─── Aba Transações ─────────────────────────────────────────────────────────

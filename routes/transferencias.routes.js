@@ -33,6 +33,7 @@ import {
   gerarTransacaoTotvs,
   vincularTransacao,
   registrarTransacao,
+  importarTransferenciasDryland,
 } from '../services/transferenciasMercadoria.js';
 
 const router = express.Router();
@@ -191,6 +192,14 @@ router.get(
     const status = String(req.query.status || '');
     const busca = String(req.query.busca || '').trim();
     const empresa = parseInt(req.query.empresa, 10) || null;
+    // pedidos de transferência entre lojas do Dryland entram aqui como solicitações
+    let dryland = null;
+    try {
+      dryland = await importarTransferenciasDryland({ forcar: req.query.refresh === '1' });
+    } catch (e) {
+      dryland = { erro: e.message };
+      console.warn('[transferências] não importei as solicitações do Dryland:', e.message);
+    }
     let q = supabase.from('transferencias_mercadoria').select('*').order('id', { ascending: false }).limit(500);
     if (status === 'abertas') q = q.in('status', ['aguardando_transferencia', 'em_transferencia']);
     else if (STATUS.includes(status)) q = q.eq('status', status);
@@ -198,7 +207,7 @@ router.get(
     if (busca) {
       q = /^\d+$/.test(busca)
         ? q.or(`id.eq.${busca},empresa_origem.eq.${busca},empresa_destino.eq.${busca},transacao_code.eq.${busca}`)
-        : q.or(`empresa_origem_nome.ilike.%${busca}%,empresa_destino_nome.ilike.%${busca}%,solicitante_nome.ilike.%${busca}%`);
+        : q.or(`empresa_origem_nome.ilike.%${busca}%,empresa_destino_nome.ilike.%${busca}%,solicitante_nome.ilike.%${busca}%,origem_ref.ilike.%${busca}%`);
     }
     const { data, error } = await q;
     if (error) return responder(res, error);
@@ -209,6 +218,7 @@ router.get(
       res,
       {
         items: data || [],
+        dryland,
         resumo: {
           aguardando: conta('aguardando_transferencia'),
           emTransferencia: conta('em_transferencia'),

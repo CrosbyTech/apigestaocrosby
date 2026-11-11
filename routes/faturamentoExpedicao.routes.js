@@ -31,12 +31,14 @@ import { FiscalError } from '../services/pdvFiscal.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
 import { enviarDuplicata, conferirAssinaturas, dadosDaDuplicata, pdfDaDuplicata, textoDaDuplicata, DuplicataError } from '../services/faturamentoDuplicata.js';
 import { pedirMinuta, MinutaError } from '../services/faturamentoLogistica.js';
+import { gerarCreditoFalta, CreditoError } from '../services/faturamentoCredito.js';
+import { saldoBonusDoCliente, BonusError } from '../services/saldoBonus.js';
 
 const router = express.Router();
 
 function falha(res, err) {
   if (err instanceof FaturamentoError) return errorResponse(res, err.message, err.status || 400, err.code);
-  if (err instanceof DuplicataError || err instanceof MinutaError) return errorResponse(res, err.message, err.status || 400, err.code);
+  if (err instanceof DuplicataError || err instanceof MinutaError || err instanceof CreditoError || err instanceof BonusError) return errorResponse(res, err.message, err.status || 400, err.code);
   if (err instanceof FiscalError) return errorResponse(res, err.message, 422, err.code);
   return errorResponse(res, err?.message || 'Erro no faturamento', 500, 'FATURAMENTO_ERROR');
 }
@@ -117,6 +119,41 @@ router.post(
       const r = await processarFaturamento(parseInt(req.params.vendaId, 10), null, { terminal: req.body?.terminal, comoFatura: req.body?.comoFatura, operacaoDocInterno: req.body?.operacaoDocInterno });
       const ok = r.fiscal.ok && r.totvs.ok;
       return successResponse(res, r, ok ? 'Faturamento concluído' : r.fiscal.ok ? `TOTVS: ${r.totvs.mensagem}` : `NF-e: ${r.fiscal.mensagem}`, ok ? 200 : 207);
+    } catch (err) {
+      return falha(res, err);
+    }
+  }),
+);
+
+// ─── Saldo bônus do cliente (crédito de peça em falta, usado como pagamento) ─
+router.get(
+  '/saldo-bonus/:clienteCode',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await saldoBonusDoCliente(parseInt(req.params.clienteCode, 10));
+      return successResponse(res, r, `Saldo bônus: R$ ${r.total.toFixed(2)}`);
+    } catch (err) {
+      return falha(res, err);
+    }
+  }),
+);
+
+// ─── Crédito de peça em falta: saldo bônus do cliente + chamado no Dryland ───
+// (sai sozinho depois do faturamento; aqui é o "gerar de novo" da aba Transações)
+router.post(
+  '/vendas/:vendaId/credito-falta',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await gerarCreditoFalta(parseInt(req.params.vendaId, 10), { por: req.body?.por || null });
+      const c = r.credito;
+      const msg = r.naoSeAplica
+        ? 'Esta venda não tem crédito de peça em falta'
+        : r.emAndamento
+          ? 'O crédito já está sendo gerado'
+          : c?.status === 'gerado'
+            ? `Saldo bônus lançado para o cliente e chamado ${c.chamado?.numero ? `#${c.chamado.numero} ` : ''}aberto para o Financeiro`
+            : c?.erro || 'Não consegui gerar o crédito';
+      return successResponse(res, r, msg);
     } catch (err) {
       return falha(res, err);
     }

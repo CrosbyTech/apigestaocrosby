@@ -73,3 +73,12 @@ CREATE TABLE IF NOT EXISTS transferencias_transacoes (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_transf_trx ON transferencias_transacoes (empresa, transacao_code);
 CREATE INDEX IF NOT EXISTS idx_transf_trx_data ON transferencias_transacoes (criado_em DESC);
+
+-- 10/11/2026: solicitações vindas dos pedidos de transferência entre lojas do Dryland
+-- (cards TR### / TRU-<LOJA>-<BJ|MAX> do canal varejo da fila de faturamento)
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS origem TEXT;            -- dryland | null (aberta no HeadCoach)
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS origem_chave TEXT;      -- id do card na fila do Dryland
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS origem_ref TEXT;        -- TR247, TRU-RECIFE-BJ…
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS valor NUMERIC(14, 2);
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS itens JSONB;            -- [{ cod, descricao, cor, tam, qtd, preco, tr, estoque }]
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transf_origem_chave ON transferencias_mercadoria (origem_chave) WHERE origem_chave IS NOT NULL;

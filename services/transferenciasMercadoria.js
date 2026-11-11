@@ -241,3 +241,132 @@ export async function registrarTransacao(b = {}) {
   if (error) throw error;
   return data;
 }
+
+// ─── Solicitações vindas do Dryland ─────────────────────────────────────────
+// No Dryland os pedidos de TRANSFERÊNCIA ENTRE LOJAS ficam no canal varejo da
+// fila de faturamento (forma "TRANSFERENCIA (sem financeiro)", cards TR### e os
+// unificados TRU-<LOJA>-<BJ|MAX>, que a expedição manda "bipar e fechar no
+// HeadCoach"). Não são venda: aqui viram SOLICITAÇÕES de transferência (Yago,
+// 10/11/2026) em vez de aparecer no Faturamento. Só leitura no Dryland.
+//   destino  = filial cuja pessoa é o codigo_cliente do card
+//   origem   = 99 (Brejinho, de onde a expedição despacha); o estoque de onde a
+//              peça sai (BREJINHO × MAX/CREDEV) vai na observação
+// Um TR que já entrou num unificado (dados.tr_origem) não vira solicitação.
+const EMPRESA_ORIGEM_DRYLAND = 99;
+let ultimaImportacao = 0;
+let importando = null;
+export function importarTransferenciasDryland({ forcar = false } = {}) {
+  if (importando) return importando;
+  if (!forcar && Date.now() - ultimaImportacao < 60 * 1000) return Promise.resolve({ pulou: true });
+  importando = importar().finally(() => {
+    ultimaImportacao = Date.now();
+    importando = null;
+  });
+  return importando;
+}
+
+async function importar() {
+  const { data: cards, error } = await supabase
+    .from('pedidos_venda_fila')
+    .select('id, titulo, status, numero_site, cliente, cliente_codigo, loja, valor_pedido, total_pecas, dados, criado_em, sumiu_do_dryland_em')
+    .eq('canal', 'varejo')
+    .eq('eh_venda', false)
+    .order('criado_em', { ascending: false })
+    .limit(1000);
+  if (error) throw new TransferenciaError(error.message, 'DB_ERROR', 500);
+  const abertos = (cards || []).filter((c) => /^a faturar$/i.test(c.status || '') && !c.sumiu_do_dryland_em);
+  const dentroDeUnificado = new Set(
+    abertos.flatMap((c) => (Array.isArray(c.dados?.tr_origem) ? c.dados.tr_origem : [])).map((t) => String(t).toUpperCase()),
+  );
+  const paraImportar = abertos.filter((c) => !dentroDeUnificado.has(String(c.numero_site || '').toUpperCase()));
+
+  const { data: existentes, error: e0 } = await supabase
+    .from('transferencias_mercadoria')
+    .select('id, origem_chave, status, transacao_code')
+    .eq('origem', 'dryland');
+  if (e0) throw new TransferenciaError(e0.message, 'DB_ERROR', 500);
+  const porChave = new Map((existentes || []).map((e) => [e.origem_chave, e]));
+  const filiais = await listarFiliaisPop().catch(() => []);
+  const porPessoa = new Map(filiais.map((f) => [String(f.personCode), f]));
+  const origem = filiais.find((f) => Number(f.code) === EMPRESA_ORIGEM_DRYLAND) || null;
+
+  let criadas = 0;
+  let atualizadas = 0;
+  for (const c of paraImportar) {
+    const d = c.dados || {};
+    const pessoa = String(d.codigo_cliente ?? c.cliente_codigo ?? '').trim();
+    const destino = porPessoa.get(pessoa) || null;
+    const itens = (Array.isArray(d.itens) ? d.itens : []).map((i) => ({
+      cod: String(i.cod || ''),
+      descricao: i.descricao || '',
+      cor: i.cor || '',
+      tam: i.tam || '',
+      qtd: Number(i.qtd) || 1,
+      preco: Number(i.preco) || 0,
+      tr: i.tr || null,
+      estoque: i.origem || d.origem_estoque || null,
+    }));
+    const pecas = Number(d.total_pecas ?? c.total_pecas) || itens.reduce((t, i) => t + i.qtd, 0);
+    const pop = origem && destino ? operacaoPop(origem.cnpj, destino.cnpj) : null;
+    const estoque = d.origem_estoque === 'bj' ? 'BREJINHO' : d.origem_estoque === 'max' ? 'MAX/CREDEV' : null;
+    const linha = {
+      empresa_origem: EMPRESA_ORIGEM_DRYLAND,
+      empresa_origem_nome: origem?.nome || 'CROSBY BREJINHO',
+      empresa_destino: destino ? Number(destino.code) : 0,
+      empresa_destino_nome: destino?.nome || c.cliente || d.nome_cliente || null,
+      cliente_code: /^\d+$/.test(pessoa) ? Number(pessoa) : null,
+      operacao: pop?.permitido ? pop.operacao : null,
+      solicitante_nome: `Dryland · ${c.numero_site || 'transferência'}`,
+      qtd_pecas: pecas,
+      observacao: [
+        c.titulo,
+        estoque && `Estoque de saída: ${estoque}`,
+        !destino && 'Destino fora das filiais do POP: confira a empresa de destino antes de gerar a transação',
+        destino && pop && !pop.permitido && pop.motivo,
+        d.obs,
+      ]
+        .filter(Boolean)
+        .join(' — ')
+        .slice(0, 2000),
+      origem: 'dryland',
+      origem_chave: c.id,
+      origem_ref: c.numero_site || null,
+      valor: Number(d.valor_pedido ?? c.valor_pedido) || 0,
+      itens,
+      atualizado_em: new Date().toISOString(),
+    };
+    const ja = porChave.get(c.id);
+    if (!ja) {
+      const { error: e1 } = await supabase
+        .from('transferencias_mercadoria')
+        .insert({ ...linha, status: 'aguardando_transferencia', criado_em: c.criado_em || new Date().toISOString() });
+      // índice único em origem_chave: outra instância importou no mesmo instante
+      if (e1 && !/duplicate key/i.test(e1.message)) throw new TransferenciaError(e1.message, 'DB_ERROR', 500);
+      if (!e1) criadas += 1;
+    } else if (ja.status === 'aguardando_transferencia' && !ja.transacao_code) {
+      // ainda não começou: acompanha o que a expedição mudou no pedido
+      await supabase.from('transferencias_mercadoria').update(linha).eq('id', ja.id);
+      atualizadas += 1;
+    }
+  }
+  // pedido que saiu do "a faturar" no Dryland (ou entrou num unificado) e ainda não tinha
+  // sido começado aqui: a solicitação é cancelada, com o motivo (nada é apagado)
+  const vivos = new Set(paraImportar.map((c) => c.id));
+  let canceladas = 0;
+  for (const e of existentes || []) {
+    if (vivos.has(e.origem_chave) || e.status !== 'aguardando_transferencia' || e.transacao_code) continue;
+    await supabase
+      .from('transferencias_mercadoria')
+      .update({
+        status: 'cancelada',
+        motivo_cancelamento: 'Saiu da fila "a faturar" do Dryland (faturada por lá, cancelada ou unificada em outro pedido)',
+        atualizado_em: new Date().toISOString(),
+      })
+      .eq('id', e.id);
+    canceladas += 1;
+  }
+  if (criadas || canceladas) {
+    console.log(`🔁 [transferências] Dryland: ${criadas} solicitação(ões) nova(s), ${atualizadas} atualizada(s), ${canceladas} cancelada(s)`);
+  }
+  return { criadas, atualizadas, canceladas, abertas: paraImportar.length };
+}

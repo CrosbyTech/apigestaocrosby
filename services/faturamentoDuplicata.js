@@ -207,8 +207,22 @@ ${taxa > 0.004 ? `<div class="nota-taxa">Os boletos acima já possuem a taxa de 
 </div></div></body></html>`;
 }
 
+// O Chromium do servidor é extraído em /tmp na primeira vez; se outro processo
+// estiver extraindo/abrindo no mesmo instante o launch volta "spawn ETXTBSY"
+// (visto na venda 36, 10/11/2026). Espera e tenta de novo.
+async function abrirNavegador(tentativas = 4) {
+  for (let i = 1; ; i += 1) {
+    try {
+      return await launchPuppeteer();
+    } catch (e) {
+      if (i >= tentativas || !/ETXTBSY|EBUSY/i.test(String(e?.message || e))) throw e;
+      await new Promise((r) => setTimeout(r, 2500 * i));
+    }
+  }
+}
+
 export async function pdfDaDuplicata(dados) {
-  const { browser } = await launchPuppeteer();
+  const { browser } = await abrirNavegador();
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 794, height: 1123 });
