@@ -83,6 +83,22 @@ function raizDoGrupo(nome, doc) {
   for (const [raiz, nomes] of Object.entries(GRUPO)) if (nomes.some((n) => nomeBate(nome, n) || nomeBate(n, nome))) return raiz;
   return null;
 }
+// "Flavio Ferreira de Lima Azevedo" foi a razão social de DUAS empresas do grupo:
+//   • a AZ (33.592.092): firma individual "FLAVIO F L A <CPF>" até virar Irmãos CR Vestuário — nos extratos aparece como
+//     "Sispag FLAVIO L 0606…", "FLAVIO FERREIRA DE LIMA AZEVEDO 0606…" (o nome seguido dos dígitos do CPF);
+//   • a Irmãos Varejo (53.661.116): aberta em dez/2023, com o primeiro movimento em abr/2024.
+// Sem CNPJ na linha, o nome sozinho cai na Irmãos Varejo (GRUPO). Aqui se desfaz a dúvida: nome seguido de dígitos
+// ou lançamento anterior a abr/2024 = AZ. Com CNPJ na linha vale o CNPJ.
+const INICIO_IRMAOS_VAREJO = '2024-04-01';
+function raizDoLancamento(r) {
+  const raiz = raizDoGrupo(r.contraparte_nome, r.contraparte_doc);
+  if (raiz !== '53661116' || soDigitos(r.contraparte_doc).length === 14) return raiz;
+  if (!/^FLAVIO\b/.test(normNome(r.contraparte_nome))) return raiz;
+  const txt = semAcento(`${r.contraparte_nome || ''} | ${r.historico_base || ''}`).toUpperCase();
+  if (/FLAVIO[A-Z ]*\s\d{6,}/.test(txt)) return '33592092';
+  if (r.data && String(r.data) < INICIO_IRMAOS_VAREJO) return '33592092';
+  return raiz;
+}
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 
 let tabelasOk = null; // v2: colunas de contraparte/tipo/transferência
@@ -454,7 +470,7 @@ export async function casarTransferencias() {
   const chaveConta = (r) => `${r.banco}|${r.conta}`;
   const apontaPara = (r, conta) => {
     // contraparte do lançamento é a conta de destino/origem?
-    const raiz = r.grupo_raiz || raizDoGrupo(r.contraparte_nome, r.contraparte_doc);
+    const raiz = raizDoLancamento(r);
     if (raiz && conta.cnpjRaiz && raiz === conta.cnpjRaiz) return 3;
     if (r.contraparte_nome && conta.titular && (nomeBate(r.contraparte_nome, conta.titular) || nomeBate(conta.titular, r.contraparte_nome))) return 2;
     return 0;
@@ -536,7 +552,7 @@ export async function casarTransferencias() {
   const alocado = new Map(); // id da saída de lote → centavos transferidos para o grupo
   const entradasSemPar = rows.filter((r) => Number(r.valor) > 0 && !usados.has(r.id) && cents(r.valor) >= 100 && r.tipo !== 'APLICACAO').sort((a, b) => a.data.localeCompare(b.data) || cents(b.valor) - cents(a.valor));
   for (const e of entradasSemPar) {
-    const raiz = e.grupo_raiz || raizDoGrupo(e.contraparte_nome, e.contraparte_doc);
+    const raiz = raizDoLancamento(e);
     if (!raiz || !ehPixOuTransf(e)) continue;
     const origens = contasDaRaiz.get(raiz);
     if (!origens) continue;
@@ -576,7 +592,8 @@ export async function casarTransferencias() {
   for (const r of rows) {
     if (r.tipo === 'APLICACAO') continue; // aplicação automática fica como está
     const par = idPar.get(r.id) || null;
-    const raiz = r.grupo_raiz || raizDoGrupo(r.contraparte_nome, r.contraparte_doc);
+    // empresa da contraparte recalculada a cada vez (o que está gravado veio desta mesma regra, que pode ter mudado)
+    const raiz = raizDoLancamento(r);
     // sem par mas a contraparte é empresa do grupo (outra conta não importada) → transferência sem par
     // Regra do Yago (06/11/2026): QUALQUER entrada vinda de um CNPJ do grupo e
     // QUALQUER saída para um CNPJ do grupo é entre contas, mesmo sem a outra
