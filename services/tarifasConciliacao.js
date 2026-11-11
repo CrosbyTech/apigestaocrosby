@@ -498,6 +498,7 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
         justificativa: `${temEscolha ? `${forn.nome} (despesa ${despesaCodigo})` : `Tarifa bancária ${conta.banco}`} — duplicata ${dup.duplicateCode} criada no TOTVS e na Solicitação Crosby pela Conciliação HeadCoach`,
         usuario: usuario || 'Conciliação HeadCoach',
         automatico: false,
+        permitirSolicitacao: true, // duplicata criada aqui mesmo, já enviada ao TOTVS e paga
       });
       out.criadas.push({ ...base, banco: conta.banco, fornecedor: forn.nome, empresa: filial?.code ?? null, duplicata: dup.duplicateCode, solicitacaoId: sol.id });
       out.total = round2(out.total + valor);

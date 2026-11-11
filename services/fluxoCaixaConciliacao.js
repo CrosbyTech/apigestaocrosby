@@ -1740,7 +1740,12 @@ export async function lancamentoComChave(lancamentoId) {
   return { ...l, chave: eu?.chave };
 }
 
-export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null }) {
+export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null, permitirSolicitacao = false }) {
+  // Titia, 11/11/2026: não se concilia com Solicitação — ela só aparece para
+  // consulta; o pagamento é aprovado no Financeiro (Liberação) e aí concilia.
+  // Exceção: duplicata que a própria Conciliação cria (tarifas/saídas pendentes).
+  const usaSolicitacao = origem === 'SOLICITACAO' || (Array.isArray(referencia?.itens) && referencia.itens.some((it) => it?.origem === 'SOLICITACAO'));
+  if (usaSolicitacao && !permitirSolicitacao) throw new Error('Não é possível conciliar com Solicitação: aprove o pagamento no Financeiro (Liberação de Pagamento) e concilie com a Liberação.');
   if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
@@ -2220,7 +2225,9 @@ export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor:
 // iguais à Claro no mesmo dia) não contam como ambiguidade: o 1º é usado e
 // os demais ficam para as próximas linhas iguais.
 const gemeos = (a, b) => a.origem === b.origem && a.data === b.data && Math.abs(a.valor - b.valor) < 0.011 && normNome(a.nome) === normNome(b.nome);
-export function decidir(candidatos) {
+export function decidir(candidatosTodos) {
+  // Solicitação nunca concilia (nem automático) — só consulta (Titia, 11/11/2026)
+  const candidatos = (candidatosTodos || []).filter((c) => c.origem !== 'SOLICITACAO');
   if (!candidatos.length) return { automatico: false, motivo: 'sem candidato' };
   const [a] = candidatos;
   // um pagamento parcial só rivaliza com um candidato exato se pontuar MAIS

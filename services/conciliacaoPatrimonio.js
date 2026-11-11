@@ -191,6 +191,7 @@ export async function candidatosDaSolicitacao(solicitacaoId) {
 async function confirmar(sol, l, conta, { usuario, automatico, pontuacao, motivos }) {
   const valor = round2(sol.valor_total);
   const conc = await salvarConciliacao({
+    permitirSolicitacao: true, // fluxo do Patrimônio: compra no cartão é conciliada com a Solicitação e só então vai ao TOTVS
     lancamentoId: l.id,
     origem: 'SOLICITACAO',
     referencia: {
