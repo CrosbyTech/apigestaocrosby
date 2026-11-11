@@ -518,6 +518,45 @@ async function situacaoDasOrigens(gravadas) {
 // ─── fontes de pagamento (saídas) ─────────────────────────────
 const VALOR_TOL = 0.011;
 
+// Liberação cuja duplicata não está lançada no contas a pagar do TOTVS (cópia
+// accounts_payable_duplicates, sincronizada a cada 30 min) NÃO concilia — ex.:
+// Solicitação aguardando NF que foi aprovada e paga sem ir ao TOTVS (AVIL TEXTIL
+// 99246637). Titia, 11/11/2026. Só consulta, como a Solicitação.
+export const BLOQUEIO_SOLICITACAO = 'Solicitação só para consulta: aprove o pagamento no Financeiro (Liberação de Pagamento) e concilie com a Liberação';
+const bloqueioSemLancamento = (dup) =>
+  dup ? `Duplicata ${dup} ainda não lançada no contas a pagar do TOTVS — lance a duplicata (ou envie a Solicitação ao TOTVS) e concilie depois (a cópia do TOTVS atualiza a cada 30 min)` : 'Liberação sem nº de duplicata do TOTVS — lance a duplicata no contas a pagar antes de conciliar';
+/** ids das Liberações (rows com id, cd_empresa, nr_duplicata) sem duplicata no contas a pagar do TOTVS. */
+export async function liberacoesSemLancamento(rows) {
+  const faltam = new Map();
+  const comDup = [];
+  for (const r of rows || []) {
+    const dup = parseInt(soDigitos(r.nr_duplicata), 10);
+    if (!Number.isFinite(dup)) faltam.set(String(r.id), bloqueioSemLancamento(null));
+    else comDup.push({ ...r, dup });
+  }
+  const dups = [...new Set(comDup.map((r) => r.dup))];
+  const achados = [];
+  for (let i = 0; i < dups.length; i += 200) {
+    const { data, error } = await supabase.from('accounts_payable_duplicates').select('branch_code,duplicate_code').in('duplicate_code', dups.slice(i, i + 200));
+    if (error) return faltam; // sem a cópia, não trava (não dá para saber)
+    achados.push(...(data || []));
+  }
+  for (const r of comDup) {
+    const ok = achados.some((a) => Number(a.duplicate_code) === r.dup && (r.cd_empresa == null || Number(a.branch_code) === Number(r.cd_empresa)));
+    if (!ok) faltam.set(String(r.id), bloqueioSemLancamento(r.nr_duplicata));
+  }
+  return faltam;
+}
+async function marcarBloqueios(cands) {
+  const libs = cands.filter((c) => c.origem === 'LIBERACAO');
+  const faltam = libs.length ? await liberacoesSemLancamento(libs.map((c) => ({ id: c.id, cd_empresa: c.cdEmpresa ?? null, nr_duplicata: c.nrDuplicata ?? null }))) : new Map();
+  for (const c of cands) {
+    if (c.origem === 'SOLICITACAO') c.bloqueio = BLOQUEIO_SOLICITACAO;
+    else if (c.origem === 'LIBERACAO' && faltam.has(String(c.id))) c.bloqueio = faltam.get(String(c.id));
+  }
+  return cands;
+}
+
 async function fonteLiberacao({ de, ate }) {
   const { data, error } = await supabase
     .from(T.lib)
@@ -526,7 +565,7 @@ async function fonteLiberacao({ de, ate }) {
     .gte('dt_pagamento', de)
     .lte('dt_pagamento', ate);
   if (error) throw new Error(`pagamentos_liberacao: ${error.message}`);
-  return (data || []).map((p) => {
+  const lista = (data || []).map((p) => {
     const doc = soDigitos(p.dados_completos?.nr_cpfcnpj_fornecedor) || (soDigitos(p.chave_pix).length === 14 || soDigitos(p.chave_pix).length === 11 ? soDigitos(p.chave_pix) : null);
     return {
       origem: 'LIBERACAO',
@@ -541,8 +580,11 @@ async function fonteLiberacao({ de, ate }) {
       duplicata: p.nr_duplicata ? `${p.nr_duplicata}|${p.nr_parcela ?? ''}` : null,
       vencimento: p.dt_vencimento || null,
       solicitacaoId: p.dados_completos?.solicitacao_id || null,
+      cdEmpresa: p.cd_empresa ?? null,
+      nrDuplicata: p.nr_duplicata ?? null,
     };
   });
+  return marcarBloqueios(lista);
 }
 
 // TODAS as solicitações ainda não pagas (pendente, aprovada, com NF, enviada ao
@@ -571,6 +613,7 @@ async function fonteSolicitacoes() {
     status: s.status,
     liberacaoId: s.pagamento_liberacao_id || null,
     semDataPagamento: true,
+    bloqueio: BLOQUEIO_SOLICITACAO,
   }));
 }
 
@@ -992,6 +1035,8 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
         duplicata: p.nr_duplicata ? `${p.nr_duplicata}|${p.nr_parcela ?? ''}` : null,
         detalhe: [p.ds_despesaitem, p.forma_pagamento, p.banco_pagamento ? `banco ${p.banco_pagamento}` : null, p.status].filter(Boolean).join(' · '),
         pago: p.status === 'PAGO',
+        cdEmpresa: p.cd_empresa ?? null,
+        nrDuplicata: p.nr_duplicata ?? null,
       });
     }
   } catch (e) {
@@ -1055,7 +1100,7 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
   );
   // só o que foi pesquisado, do vencimento mais recente para o mais antigo (sem ranking pelo lançamento)
   lista.sort(porDataDesc('vencimento'));
-  return { candidatos: lista.slice(0, 300), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
+  return { candidatos: await marcarBloqueios(lista.slice(0, 300)), avisos, filtros: f, lancamento: lanc ? { id: lanc.id, data: lanc.data, valor: lanc.valor } : null };
 }
 const limparTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 
@@ -1746,6 +1791,16 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
   // Exceção: duplicata que a própria Conciliação cria (tarifas/saídas pendentes).
   const usaSolicitacao = origem === 'SOLICITACAO' || (Array.isArray(referencia?.itens) && referencia.itens.some((it) => it?.origem === 'SOLICITACAO'));
   if (usaSolicitacao && !permitirSolicitacao) throw new Error('Não é possível conciliar com Solicitação: aprove o pagamento no Financeiro (Liberação de Pagamento) e concilie com a Liberação.');
+  // Liberação só concilia se a duplicata estiver lançada no contas a pagar do TOTVS (Titia, 11/11/2026)
+  const libIds = [...new Set([...(origem === 'LIBERACAO' && referencia?.id != null && !Array.isArray(referencia?.itens) ? [referencia.id] : []), ...(Array.isArray(referencia?.itens) ? referencia.itens.filter((it) => it?.origem === 'LIBERACAO' && it.id != null).map((it) => it.id) : [])].map(String))];
+  if (libIds.length) {
+    const { data: libRows } = await supabase.from(T.lib).select('id,cd_empresa,nr_duplicata,nm_fornecedor').in('id', libIds);
+    const faltam = await liberacoesSemLancamento(libRows || []);
+    if (faltam.size) {
+      const r = (libRows || []).find((x) => faltam.has(String(x.id)));
+      throw new Error(`${r?.nm_fornecedor ? `${r.nm_fornecedor}: ` : ''}${faltam.values().next().value}.`);
+    }
+  }
   if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
@@ -2227,7 +2282,7 @@ export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor:
 const gemeos = (a, b) => a.origem === b.origem && a.data === b.data && Math.abs(a.valor - b.valor) < 0.011 && normNome(a.nome) === normNome(b.nome);
 export function decidir(candidatosTodos) {
   // Solicitação nunca concilia (nem automático) — só consulta (Titia, 11/11/2026)
-  const candidatos = (candidatosTodos || []).filter((c) => c.origem !== 'SOLICITACAO');
+  const candidatos = (candidatosTodos || []).filter((c) => c.origem !== 'SOLICITACAO' && !c.bloqueio);
   if (!candidatos.length) return { automatico: false, motivo: 'sem candidato' };
   const [a] = candidatos;
   // um pagamento parcial só rivaliza com um candidato exato se pontuar MAIS
