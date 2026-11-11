@@ -92,6 +92,9 @@ const BANCOS_OFX = {
   748: { banco: 'SICREDI', nome: 'do Sicredi', contas: CONTAS_SICREDI_OFX, agencia: '2207', normalizarConta: (a) => a.replace(/^2207/, '').replace(/^0+/, '') },
   1: { banco: 'BB', nome: 'do Banco do Brasil', contas: CONTAS_BB },
   4: { banco: 'BNB', nome: 'do Banco do Nordeste', contas: CONTAS_BNB, agencia: '035', balamtInicial: true },
+  // Inter: SÓ para conferir o movimento do mês contra o PDF (testes). O BALAMT é o saldo na exportação (ou zero) e o OFX
+  // de jan/2023 veio incompleto → o importador recusa o OFX do Inter e pede o PDF.
+  77: { banco: 'INTER', nome: 'do Banco Inter', contas: { '46771018': { titular: 'CROSBY DISTRIBUICAO E CONFECCAO LTDA', cnpj: '17177680000116' } }, agencia: '0001' },
 };
 
 // Históricos da Caixa → o que são (para a tela e para o casamento de transferências). Usado também pelo leitor do PDF 2025.
@@ -182,6 +185,10 @@ export function lerExtratoUnicredOfx(buffer) {
 }
 export function lerExtratoDaycovalOfx(buffer) {
   return lerOfxBanco(buffer, 707);
+}
+/** OFX do Inter: serve só para comparar o movimento do mês com o PDF (o saldo do arquivo não é o do fim do mês). */
+export function lerExtratoInterOfx(buffer) {
+  return lerOfxBanco(buffer, 77);
 }
 /** Código do banco (BANKID) de um OFX, como número; null se não achar. */
 export function bancoDoOfx(buffer) {

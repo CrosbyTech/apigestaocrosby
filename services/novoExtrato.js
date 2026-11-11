@@ -22,6 +22,7 @@ import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { lerExtratoSantander } from '../utils/extratoSantanderPdf.js';
 import { lerExtratoSantanderOfx, ehOfxSantander } from '../utils/extratoSantanderOfx.js';
 import { lerExtratoItauOfx, ehOfxItau } from '../utils/extratoItauOfx.js';
+import { lerExtratoInter } from '../utils/extratoInterPdf.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
@@ -176,9 +177,9 @@ create table if not exists ${T.transf} (
 function detectarBanco(nome, buffer) {
   const n = String(nome || '').toUpperCase();
   const cab = buffer.subarray(0, 4);
-  if (cab.toString('latin1') === '%PDF') return /\bBNB\b|NORDESTE/.test(n) ? 'BNB' : /CAIXA/.test(n) ? 'CAIXA' : /BRADESCO/.test(n) ? 'BRADESCO' : /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
+  if (cab.toString('latin1') === '%PDF') return /\bBNB\b|NORDESTE/.test(n) ? 'BNB' : /CAIXA/.test(n) ? 'CAIXA' : /BRADESCO/.test(n) ? 'BRADESCO' : /UNICRED/.test(n) ? 'UNICRED' : /SANTANDER/.test(n) ? 'SANTANDER' : /SICREDI/.test(n) ? 'SICREDI' : /ITAU|ITAÚ/.test(n) ? 'ITAU' : /\bINTER\b/.test(n) ? 'INTER' : /\bBB\b|BANCO DO BRASIL/.test(n) ? 'BB' : 'PDF';
   if (ehOfx(buffer)) return 'OFX';
-  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred, Bradesco, BNB ou Caixa 2025+) ou OFX (Caixa, Santander, Banco do Brasil, BNB, Sicredi, Unicred ou Daycoval).');
+  throw new Error('Envie o extrato em PDF (Banco do Brasil, Itaú, Sicredi, Santander, Unicred, Bradesco, BNB, Inter ou Caixa) ou OFX (Caixa, Santander, Banco do Brasil, BNB, Sicredi, Unicred, Daycoval ou Itaú 2023).');
 }
 
 /**
@@ -216,13 +217,16 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
       // Itaú 2023: o OFX traz as linhas de saldo do dia e se confere sozinho (2024+ não traz → erro pedindo o PDF)
       leitura = lerExtratoItauOfx(buffer);
       banco = 'ITAU';
+    } else if (bancoDoOfx(buffer) === 77) {
+      // Inter: o BALAMT é o saldo na exportação (ou zero) e há OFX incompleto (jan/2023) → só o PDF, que traz o saldo de cada dia
+      throw new Error('O OFX do Banco Inter não traz saldo confiável: envie o PDF do mesmo mês.');
     } else {
       leitura = lerExtratoCaixaOfx(buffer);
       banco = 'CAIXA';
     }
   } else {
     // PDF: tenta primeiro o leitor sugerido pelo nome do arquivo e depois o outro
-    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander, UNICRED: lerExtratoUnicred, BRADESCO: lerExtratoBradesco, BNB: lerExtratoBnb, CAIXA: lerExtratoCaixaPdf };
+    const LEITORES = { BB: lerExtratoBb, ITAU: lerExtratoItau, SICREDI: lerExtratoSicredi, SANTANDER: lerExtratoSantander, UNICRED: lerExtratoUnicred, BRADESCO: lerExtratoBradesco, BNB: lerExtratoBnb, CAIXA: lerExtratoCaixaPdf, INTER: lerExtratoInter };
     const ordem = [banco, ...Object.keys(LEITORES)].filter((b, i, a) => LEITORES[b] && a.indexOf(b) === i);
     const erros = [];
     for (const b of ordem) {
@@ -235,7 +239,7 @@ export async function importarExtrato({ buffer, nome, usuario = null, forcar = f
         erros.push(`${b}: ${e.message}`);
       }
     }
-    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú, do Sicredi, do Santander (consolidado), da Unicred, do Bradesco e do BNB e o OFX da Caixa e do Santander. ${erros.join(' · ')}`);
+    if (!leitura) throw new Error(`Banco não reconhecido no arquivo "${nome}". O New Extrato lê o PDF do Banco do Brasil, do Itaú, do Sicredi, do Santander (consolidado), da Unicred, do Bradesco, do BNB, da Caixa e do Inter e o OFX da Caixa e do Santander. ${erros.join(' · ')}`);
   }
   if (Array.isArray(leitura)) {
     // extrato com VÁRIAS contas (BNB "Extrato Consolidado"): importa uma por uma

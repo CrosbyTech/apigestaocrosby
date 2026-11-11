@@ -16,7 +16,7 @@ import path from 'node:path';
 import supabase from '../config/supabase.js';
 import { lerExtratoBb } from '../utils/extratoBbPdf.js';
 import { lerExtratoBnb } from '../utils/extratoBnbPdf.js';
-import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoUnicredOfx, lerExtratoSicrediOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
+import { lerExtratoBbOfx, lerExtratoBnbOfx, lerExtratoCaixaOfx, lerExtratoUnicredOfx, lerExtratoSicrediOfx, lerExtratoInterOfx, bancoDoOfx, ehOfx } from '../utils/extratoCaixaOfx.js';
 import { lerExtratoCaixaPdf } from '../utils/extratoCaixaPdf.js';
 import { leiturasCaixaTranscritas } from '../utils/extratoCaixaTranscrito.js';
 import { lerExtratoItau } from '../utils/extratoItauPdf.js';
@@ -27,6 +27,8 @@ import { lerExtratoBradesco } from '../utils/extratoBradescoPdf.js';
 import { lerExtratoUnicred } from '../utils/extratoUnicredPdf.js';
 import { lerExtratoSicredi } from '../utils/extratoSicrediPdf.js';
 import { leiturasSicrediTranscritas } from '../utils/extratoSicrediTranscrito.js';
+import { lerExtratoInter } from '../utils/extratoInterPdf.js';
+import { leiturasInterTranscritas } from '../utils/extratoInterTranscrito.js';
 
 const RAIZ = process.env.EXTRATOS_2023_DIR || 'C:/Users/yagom/Desktop/EXTRATOS 2023';
 const temPasta = fs.existsSync(RAIZ);
@@ -127,6 +129,19 @@ const BANCOS = {
     ilegiveis: ['IRMAOS/SICREDI/12/FLAVIO FERREIRA EXTRATO DEZ 2023.pdf'],
     extras: () => leiturasSicrediTranscritas().map((l) => ({ arquivo: `IRMAOS/SICREDI/${l.mesReferencia.slice(5)}/${l.arquivo} (transcrito)`, leitura: l })),
   },
+  INTER: {
+    pasta: 'INTER',
+    // Crosby 0001-9 | 4677101-8. Jan: "Extrato Conta Corrente PJ" (saldo em cada linha, números no formato americano);
+    // mar–mai: extrato por dia com "Saldo do dia" (março do mais novo para o mais antigo). Fevereiro e jul–dez não vieram.
+    pdf: lerExtratoInter,
+    // OFX só para comparar o movimento: o BALAMT é o saldo na exportação (ou zero); o importador recusa o OFX do Inter
+    ofx: lerExtratoInterOfx,
+    bankId: 77,
+    ofxSoMovimento: true,
+    ilegiveis: ['FERREIRA/INTER/01/INTER JAN OFX.txt'], // OFX incompleto: 16 dos 23 lançamentos de janeiro
+    // junho: só o print "Sem resultado para o filtro selecionado" (sem movimento) → mês sem lançamentos, saldo de maio
+    extras: () => leiturasInterTranscritas().map((l) => ({ arquivo: `FERREIRA/INTER/${l.mesReferencia.slice(5)}/${l.arquivo} (transcrito)`, leitura: l })),
+  },
 };
 const JAN_A_NOV = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11'].map((m) => `2023-${m}`);
 // Meses em que o saldo inicial NÃO encadeia com o mês anterior por um buraco DENTRO do arquivo, conhecido e aceito
@@ -142,6 +157,7 @@ const BURACOS = [
   // Sicredi: só dezembro em todas as contas
   { banco: 'SICREDI', conta: '36733', meses: JAN_A_NOV }, { banco: 'SICREDI', conta: '32693', meses: JAN_A_NOV },
   { banco: 'SICREDI', conta: '36734', meses: JAN_A_NOV }, { banco: 'SICREDI', conta: '39355', meses: JAN_A_NOV },
+  { banco: 'INTER', conta: '4677101', meses: ['2023-02', '2023-07', '2023-08', '2023-09', '2023-10', '2023-11', '2023-12'] }, // jan termina 8.660,38 e mar começa 600,36
 ];
 const buraco = (banco, conta, mes) => BURACOS.some((b) => b.banco === banco && b.conta === conta && b.meses.includes(mes));
 
@@ -172,6 +188,7 @@ const FIM_DE_MES = {
   'SICREDI|32693': [null, null, null, null, null, null, null, null, null, null, null, 786.59],
   'SICREDI|36734': [null, null, null, null, null, null, null, null, null, null, null, 14700.16],
   'SICREDI|39355': [null, null, null, null, null, null, null, null, null, null, null, 0],
+  'INTER|4677101': [8660.38, null, 16.6, 1248.19, 56.46, 56.46, null, null, null, null, null, null],
 };
 // Saldo em 31/12/2022 ("Saldo Anterior" do extrato de janeiro/2023) → saldo inicial de janeiro
 const INICIO_2023 = {
@@ -182,6 +199,7 @@ const INICIO_2023 = {
   'SANTANDER|13000599': -14873.5, 'SANTANDER|13001128': 0, 'SANTANDER|13006882': 0,
   'BRADESCO|249374': 1, 'BRADESCO|249286': 1,
   'UNICRED|6850': 4101.48, 'UNICRED|7098': 613.47,
+  'INTER|4677101': 34379.9,
 };
 
 // arquivos: RAIZ/<EMPRESA>/<pasta do banco>/<MÊS>/arquivo (o nome se repete entre meses → a chave é o caminho relativo)

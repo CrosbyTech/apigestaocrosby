@@ -86,6 +86,7 @@ const FORCADAS = new Set([
   'BNB|2286|2023-11', // outubro/2023 não existe na pasta (set termina 976,59 e nov começa 4.071,59)
   'CAIXA|000578136386|2023-10', // agosto e setembro/2023 não existem na pasta (jul termina 2.426,06 e out começa 13.207,69)
   'SANTANDER|13001128|2023-10', 'SANTANDER|13001128|2023-12', // João Pessoa: ago, set e nov/2023 não existem na pasta
+  'INTER|4677101|2023-03', // fevereiro/2023 não existe na pasta (jan termina 8.660,38 e mar começa 600,36)
 ]);
 const forcada = (i) => FORCADAS.has(`${i.banco}|${i.conta}|${i.mes_referencia}`);
 
