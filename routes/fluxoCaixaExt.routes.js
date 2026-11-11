@@ -341,6 +341,26 @@ router.post(
   }),
 );
 
+// Fatura do cartão (PagBank) em PDF → acha as compras no contas a pagar e
+// concilia os pagamentos (antecipados + total) — Titia, 11/11/2026
+router.post(
+  '/conciliacao/fatura-cartao',
+  comUpload([{ name: 'arquivos', maxCount: 1 }, { name: 'arquivo', maxCount: 1 }]),
+  asyncHandler(async (req, res) => {
+    try {
+      const contaId = Number(req.body?.contaId || req.query?.contaId);
+      if (!contaId) return errorResponse(res, 'Informe contaId.', 400);
+      if (!req.arquivos?.[0]?.buffer) return errorResponse(res, 'Envie o PDF da fatura.', 400);
+      const simular = !['0', 'false'].includes(String(req.query?.simular ?? req.body?.simular ?? 'true'));
+      const { importarFaturaCartao } = await import('../services/faturaCartaoConciliacao.js');
+      const r = await importarFaturaCartao({ contaId, buffer: req.arquivos[0].buffer, senha: req.body?.senha || null, usuario: usuarioDe(req), simular });
+      return successResponse(res, r);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Tarifas/encargos do extrato → duplicata no TOTVS (nome do banco da conta,
 // despesa 7008) + Solicitação Crosby + conciliação (João, 09/11/2026).
 // body: { lancamentoIds: [..], simular? }
