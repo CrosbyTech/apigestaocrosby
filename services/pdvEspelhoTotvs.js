@@ -346,31 +346,33 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
 
   // 1) Transação em andamento (documento interno)
   if (!transactionCode) {
-    const items = itens.map((i) => {
-      const desconto = round2(i.desconto_unit || 0);
-      return {
-        productCode: Number(i.product_code),
-        quantity: Number(i.quantidade),
-        value: round2(i.valor_unit),
-        ...(desconto > 0 ? { discountValue: desconto } : {}),
-        cfop: Number(i.cfop) || DOC_INTERNO_PADRAO.cfop,
-      };
-    });
+    const linhas = itens.map((i) => ({
+      productCode: Number(i.product_code),
+      quantity: Number(i.quantidade),
+      value: round2(i.valor_unit),
+      descUnit: round2(i.desconto_unit || 0),
+      cfop: Number(i.cfop) || DOC_INTERNO_PADRAO.cfop,
+    }));
     // Expedição: o documento interno não tem campo de frete e o recebimento
     // exige total = total da transação. O frete entra no valor de UMA peça
     // (separada em linha própria de 1 unidade) para o contas a receber bater
     // com o total da NF-e (produtos + frete).
     const frete = round2(venda.frete || 0);
-    if (frete > 0 && items.length) {
-      const k = items.reduce((m, it, idx) => (it.quantity * it.value > items[m].quantity * items[m].value ? idx : m), 0);
-      const alvo = items[k];
+    if (frete > 0 && linhas.length) {
+      const k = linhas.reduce((m, it, idx) => (it.quantity * it.value > linhas[m].quantity * linhas[m].value ? idx : m), 0);
+      const alvo = linhas[k];
       if (alvo.quantity > 1) {
-        items.splice(k, 1, { ...alvo, quantity: alvo.quantity - 1 }, { ...alvo, quantity: 1, value: round2(alvo.value + frete) });
+        linhas.splice(k, 1, { ...alvo, quantity: alvo.quantity - 1 }, { ...alvo, quantity: 1, value: round2(alvo.value + frete) });
       } else {
-        items[k] = { ...alvo, value: round2(alvo.value + frete) };
+        linhas[k] = { ...alvo, value: round2(alvo.value + frete) };
       }
     }
-    const total = Number(items.reduce((s, it) => s + it.quantity * (it.value - (it.discountValue || 0)), 0).toFixed(3));
+    // discountValue do TOTVS é o desconto DA LINHA (ele abate uma vez só), não o
+    // de cada unidade: com 2+ peças iguais vai multiplicado pela quantidade.
+    // Mandando o unitário, o TOTVS somava um total maior e recusava a transação
+    // ("totalAmountCalculated different of TotalAmountTransaction" — FR1281, 11/11/2026).
+    const items = linhas.map(({ descUnit, ...it }) => ({ ...it, ...(descUnit > 0 ? { discountValue: round2(descUnit * it.quantity) } : {}) }));
+    const total = Number(items.reduce((s, it) => s + it.quantity * it.value - (it.discountValue || 0), 0).toFixed(3));
     const nota = notas.find((n) => n.status === 'autorizada') || notas[0];
     // "Transação com data diferente": a data real da venda vai em linha própria,
     // sempre no mesmo formato, para os relatórios acharem (VENDA DO DIA dd/mm/aaaa)
