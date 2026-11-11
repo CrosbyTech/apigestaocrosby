@@ -1,0 +1,10 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+import { criarDuplicatasTarifas, ehTarifa } from '../../services/tarifasConciliacao.js';
+const { data: c } = await supabase.from('fluxo_caixa_contas').select('id,apelido,banco').ilike('conta', '%47185882%');
+console.log(c);
+const { data: l } = await supabase.from('fluxo_caixa_lancamentos').select('id,data,valor,forma,categoria,descricao,memo,transferencia_id,tipo').eq('conta_id', c[0].id).lt('valor', 0).gte('data', '2026-10-01').lte('data', '2026-10-31');
+for (const x of l) console.log(x.id, x.data, x.valor, x.forma, x.categoria, x.descricao, '| tarifa?', ehTarifa(x));
+const r = await criarDuplicatasTarifas({ lancamentoIds: l.map((x) => x.id), simular: true });
+console.log(JSON.stringify(r, null, 1).slice(0, 2500));
+process.exit(0);

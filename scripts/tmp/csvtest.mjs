@@ -1,0 +1,11 @@
+import 'dotenv/config';
+import fs from 'fs';
+import { lerExtrato } from '../../services/fluxoCaixaExt.js';
+const buf = fs.readFileSync(process.argv[2]);
+const e = await lerExtrato(buf, { nomeArquivo: 'extrato.csv' });
+const { lancamentos, ...rest } = e;
+console.log(JSON.stringify(rest, null, 1).slice(0, 1500));
+console.log('n', lancamentos.length);
+for (const l of lancamentos.filter(l => l.valor > 0 && /ANTECIP|CART/i.test(l.descricao + l.forma))) console.log(l.data, l.hora, l.valor, l.forma, l.descricao, l.saldoApos);
+const formas = {}; for (const l of lancamentos) formas[l.forma] = (formas[l.forma] || 0) + 1; console.log(formas);
+process.exit(0);

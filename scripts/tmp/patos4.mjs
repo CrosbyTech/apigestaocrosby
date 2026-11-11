@@ -1,0 +1,10 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+import { getLojaByStonecode } from '../../config/stoneConciliacao.js';
+import { obterDiaStone } from '../../services/stoneConciliacao.js';
+const { data } = await supabase.from('stone_conciliacao_arquivos').select('data_ref,qtd_transacoes,baixado_em,gerado_em').eq('stonecode', '168851294').eq('data_ref', '2026-10-27');
+console.log('antes', data);
+const dia = await obterDiaStone(getLojaByStonecode('168851294'), '2026-10-27', { force: true });
+console.log('depois tx', dia.transacoes.length, 'gerado', dia.header.geradoEm);
+for (const t of dia.transacoes) console.log(' ', t.nsu, t.dataCaptura, t.bandeira, t.tipoConta, t.parcelas, t.valorBruto, t.codAutorizacao);
+process.exit(0);

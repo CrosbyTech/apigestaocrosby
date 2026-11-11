@@ -485,28 +485,17 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   }
 
   // 2T) TRANSFERÊNCIA (operação 8401/8404: documento interno, não movimenta
-  // financeiro): não há o que receber. O "recebimento" da API é o serviço que
-  // emite o documento interno e deixa a transação ATENDIDA, então vai sem
-  // nenhum recebimento. A documentação diz que ele só aceita modalidade Venda:
-  // se o TOTVS recusar, a transação fica aberta para ser finalizada no TRAFP005
-  // e o erro explica.
+  // financeiro). A API do TOTVS NÃO finaliza transferência: o único serviço que
+  // atende uma transação (transaction-receiving) só aceita operação de modalidade
+  // Venda e exige ao menos um recebimento — com a lista vazia ele responde
+  // "Empty field Receipts" (visto em 11/11/2026, transação 990/903718), e
+  // transferência não tem forma de recebimento. Então a transação fica ABERTA
+  // para ser finalizada no TRAFP005; o "Tentar de novo" cai no bloco acima, vê
+  // que ela já está atendida e registra.
   if (venda.pedido_info?.transferencia) {
-    const totalTransf = round2(itens.reduce((s, i) => s + Number(i.quantidade) * (round2(i.valor_unit) - round2(i.desconto_unit || 0)), 0));
-    try {
-      await callTotvs('post', `${TOTVS_BASE_URL}/general/v2/transaction-receiving`, {
-        data: { branchCode: empresaTotvs, transactionCode, transactionDate, totalAmount: totalTransf, terminalCode: terminal, receipts: [] },
-        timeout: 180000,
-      });
-    } catch (err) {
-      const t = traduzirErroTotvs(err);
-      const msg = `transferência aberta na empresa ${empresaTotvs} (transação ${transactionCode}), mas o TOTVS não a atendeu pela API: ${t.message}. Finalize-a no TRAFP005 da empresa ${empresaTotvs}; depois "Tentar de novo" só confere.`;
-      await gravar(vendaId, { totvs_erro: msg });
-      throw new EspelhoError(msg, 'TRANSFERENCIA_NAO_ATENDIDA', err.response?.status || 502, err.response?.data);
-    }
-    const seqT = await buscarDocInterno(empresaTotvs, transactionCode, transactionDate);
-    await gravar(vendaId, { totvs_status: 4, totvs_doc_interno_seq: seqT, totvs_espelhado_em: new Date().toISOString(), totvs_erro: null });
-    console.log(`✅ [Espelho TOTVS] transferência ${venda.id}: transação ${empresaTotvs}/${transactionCode} ATENDIDA (doc interno ${seqT ?? '?'}, sem financeiro)`);
-    return { transactionCode, transactionDate, status: 4, docInternoSeq: seqT, totalAmount: totalTransf };
+    const msg = `Falta finalizar no TOTVS: transação ${transactionCode} aberta na empresa ${empresaTotvs}. A API do TOTVS só finaliza venda (ela exige forma de recebimento, e transferência não tem). Finalize a transação no TRAFP005 da empresa ${empresaTotvs} e clique em "Tentar de novo" para confirmar.`;
+    await gravar(vendaId, { totvs_erro: msg });
+    throw new EspelhoError(msg, 'TRANSFERENCIA_NAO_ATENDIDA', 409);
   }
 
   // 2) Recebimento → ATENDIDA (exige caixa aberto no terminal)

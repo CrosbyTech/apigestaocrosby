@@ -1,0 +1,10 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+const { data: e } = await supabase.from('fluxo_caixa_lancamentos').select('*').eq('conta_id', 140).gte('data','2026-10-01').lte('data','2026-10-31').gt('valor',0);
+console.log('ENTRADAS conta 140:', JSON.stringify(e.map(l=>({id:l.id,data:l.data,valor:l.valor,tipo:l.tipo,forma:l.forma,cat:l.categoria,desc:l.descricao,memo:l.memo,cp:l.contraparte_nome,doc:l.contraparte_doc,transf:l.transferencia_id})),null,1));
+const { data: s } = await supabase.from('fluxo_caixa_lancamentos').select('id,conta_id,data,valor,tipo,forma,categoria,descricao,memo,contraparte_nome,contraparte_doc,transferencia_id').gte('data','2026-09-25').lte('data','2026-11-05').gte('valor',-2155.46).lte('valor',-2155.44);
+const { data: contas } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome,titular_cnpj');
+const cm = new Map(contas.map(c=>[c.id,c]));
+console.log('SAIDAS -2155.45:', JSON.stringify(s.map(l=>({...l, conta: cm.get(l.conta_id)})),null,1));
+console.log('conta 140', JSON.stringify(cm.get(140)));
+process.exit(0);

@@ -111,22 +111,30 @@ router.get(
     const ate = req.query.ate ? String(req.query.ate).slice(0, 10) : null;
     const empresa = parseInt(req.query.empresa, 10) || null;
     const busca = String(req.query.busca || '').trim();
-    let q = supabase
-      .from('transferencias_transacoes')
-      .select(
-        'id, transferencia_id, empresa, empresa_destino, transacao_code, transacao_date, transacao_status, operacao, cfop, total, qtd_pecas, qtd_epcs, cliente_code, cliente_nome, vendedor_nome, criado_por, criado_em, atendida_em',
-      )
-      .order('id', { ascending: false })
-      .limit(Math.min(parseInt(req.query.limite, 10) || 300, 1000));
-    if (de) q = q.gte('criado_em', `${de}T00:00:00-03:00`);
-    if (ate) q = q.lte('criado_em', `${ate}T23:59:59.999-03:00`);
-    if (empresa) q = q.or(`empresa.eq.${empresa},empresa_destino.eq.${empresa}`);
-    if (busca) {
-      q = /^\d+$/.test(busca)
-        ? q.or(`transacao_code.eq.${busca},empresa.eq.${busca},empresa_destino.eq.${busca},cliente_code.eq.${busca}`)
-        : q.ilike('cliente_nome', `%${busca}%`);
-    }
-    const { data, error } = await q;
+    const COLUNAS =
+      'id, transferencia_id, empresa, empresa_destino, transacao_code, transacao_date, transacao_status, operacao, cfop, total, qtd_pecas, qtd_epcs, cliente_code, cliente_nome, vendedor_nome, criado_por, criado_em, atendida_em';
+    // transferência com nota pelo HeadCoach: a lista precisa destes campos para mostrar a
+    // NF e o "Tentar de novo" (sem eles o botão nunca aparecia na linha)
+    const COLUNAS_NOTA = 'venda_id, empresa_totvs, natureza, nota_id, nf_numero, nf_serie, nf_status, totvs_erro';
+    const consultar = (colunas) => {
+      let q = supabase
+        .from('transferencias_transacoes')
+        .select(colunas)
+        .order('id', { ascending: false })
+        .limit(Math.min(parseInt(req.query.limite, 10) || 300, 1000));
+      if (de) q = q.gte('criado_em', `${de}T00:00:00-03:00`);
+      if (ate) q = q.lte('criado_em', `${ate}T23:59:59.999-03:00`);
+      if (empresa) q = q.or(`empresa.eq.${empresa},empresa_destino.eq.${empresa}`);
+      if (busca) {
+        q = /^\d+$/.test(busca)
+          ? q.or(`transacao_code.eq.${busca},empresa.eq.${busca},empresa_destino.eq.${busca},cliente_code.eq.${busca}`)
+          : q.ilike('cliente_nome', `%${busca}%`);
+      }
+      return q;
+    };
+    let { data, error } = await consultar(`${COLUNAS}, ${COLUNAS_NOTA}`);
+    // banco ainda sem as colunas da nota: lista como antes
+    if (error && /column|does not exist|schema cache/i.test(String(error.message || ''))) ({ data, error } = await consultar(COLUNAS));
     if (error) return responder(res, error);
     const items = data || [];
     const valendo = items.filter((i) => i.transacao_status !== 6);

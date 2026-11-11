@@ -1,0 +1,12 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+const { data: contas } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,titular_nome,titular_cnpj').eq('banco', 'PAGBANK');
+console.log(JSON.stringify(contas));
+const ids = contas.map(c => c.id);
+const { data: ls } = await supabase.from('fluxo_caixa_lancamentos').select('id,conta_id,data,valor,tipo,forma,categoria,descricao,memo,contraparte_nome').in('conta_id', ids).lt('valor', 0).gte('data', '2026-08-01').order('data').order('id');
+const fat = ls.filter(l => /FATURA|CART/i.test(`${l.descricao} ${l.memo}`));
+console.log('saídas', ls.length, 'fatura/cartão', fat.length);
+for (const l of fat) console.log(l.id, l.conta_id, l.data, l.valor, l.descricao, '|', l.memo);
+const outros = [...new Set(ls.map(l => l.descricao))];
+console.log('descrições:', outros.join(' ; '));
+process.exit(0);

@@ -1,0 +1,14 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+import { listarConciliacoes, atribuirChaves } from '../../services/fluxoCaixaConciliacao.js';
+const { data: contas } = await supabase.from('fluxo_caixa_contas').select('id,banco,apelido,agencia,conta,conta_dv,titular_nome,titular_cnpj,escopo').or('conta.eq.21774800,titular_cnpj.eq.33592092000103');
+console.log(contas);
+const c = contas.find((x) => x.conta === '21774800');
+const { data: l } = await supabase.from('fluxo_caixa_lancamentos').select('id,conta_id,data,hora,valor,seq,memo,descricao,forma,contraparte_nome,transferencia_id,tipo').eq('conta_id', c.id).gt('valor', 0).order('data').range(0, 999);
+atribuirChaves(l);
+const concs = await listarConciliacoes({ contaIds: [c.id] });
+const ok = new Set(concs.map((x) => x.chave));
+const pend = l.filter((x) => !ok.has(x.chave) && !x.transferencia_id && x.tipo !== 'TRANSFERENCIA');
+console.log('entradas', l.length, 'pendentes', pend.length, 'soma', pend.reduce((s, x) => s + Number(x.valor), 0).toFixed(2));
+for (const x of pend) console.log(' ', x.data, x.hora, x.valor, x.forma, '|', x.descricao, '|', x.memo?.slice(0, 70));
+process.exit(0);

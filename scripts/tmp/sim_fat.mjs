@@ -1,0 +1,12 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+import { criarFaturasEntradas } from '../../services/faturasEntradasConciliacao.js';
+import { clientePadraoDaLoja } from '../../services/stoneLancarTotvs.js';
+const { data: l } = await supabase.from('fluxo_caixa_lancamentos').select('id,conta_id,data,valor,descricao,memo,contraparte_nome,contraparte_doc').eq('conta_id', 12).eq('valor', 0.01).gte('data','2026-10-01').lte('data','2026-10-31');
+console.log(JSON.stringify(l));
+const { data: c } = await supabase.from('fluxo_caixa_contas').select('titular_cnpj').eq('id', 12).single();
+const cli = await clientePadraoDaLoja(c.titular_cnpj);
+console.log('cliente loja', JSON.stringify(cli));
+const r = await criarFaturasEntradas({ itens: [{ lancamentoId: l[0].id, clienteCodigo: cli.code }], simular: true, usuario: 'teste' });
+console.log(JSON.stringify(r, null, 1));
+setTimeout(()=>process.exit(0),100);

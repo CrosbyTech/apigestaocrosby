@@ -1,0 +1,11 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+import { casarTransferencias } from '../../services/fluxoCaixaExt.js';
+const cnt = async () => (await supabase.from('fluxo_caixa_transferencias').select('id', { count: 'exact', head: true }).gte('data', '2026-09-30').lte('data', '2026-11-01')).count;
+console.log('antes', await cnt());
+const r = await casarTransferencias({ de: '2026-10-01', ate: '2026-10-31', escopo: 'crosby' });
+console.log(JSON.stringify(r));
+console.log('depois', await cnt());
+const { data } = await supabase.from('fluxo_caixa_lancamentos').select('id,tipo,transferencia_id').in('id', [296245, 294622]);
+console.log(JSON.stringify(data));
+setTimeout(() => process.exit(0), 200);

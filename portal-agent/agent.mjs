@@ -281,14 +281,15 @@ async function definirPotencia(antenas) {
     }
   }
   return sessaoDeComando(async () => {
-    const data = [0x02];
+    // UM comando por antena: com várias antenas no mesmo frame há portal que
+    // responde "ok" e grava só a primeira (visto no 192.168.1.156, 11/2026).
     for (const a of lista) {
       const v = Math.round(a.potencia * 100);
-      data.push(a.ant, (v >> 8) & 0xff, v & 0xff, (v >> 8) & 0xff, v & 0xff);
-    }
-    const resp = await enviarComando(0x10, data, 0x11);
-    if (resp[0] !== 0x01) {
-      throw new Error(`o portal recusou a potência (código ${resp[0]})`);
+      const data = [0x02, a.ant, (v >> 8) & 0xff, v & 0xff, (v >> 8) & 0xff, v & 0xff];
+      const resp = await enviarComando(0x10, data, 0x11);
+      if (resp[0] !== 0x01) {
+        throw new Error(`o portal recusou a potência da antena ${a.ant} (código ${resp[0]})`);
+      }
     }
     // confere lendo de volta o que ficou gravado
     const atual = await enviarComando(0x12, [], 0x13);

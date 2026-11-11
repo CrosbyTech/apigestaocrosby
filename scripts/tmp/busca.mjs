@@ -1,0 +1,10 @@
+import 'dotenv/config';
+import supabase from '../../config/supabase.js';
+import { buscarContasPagar } from '../../services/fluxoCaixaConciliacao.js';
+const { data: l } = await supabase.from('fluxo_caixa_lancamentos').select('id,data,valor,descricao,conta_id').eq('data', '2026-10-05').eq('valor', -29.99).limit(3);
+console.log(l);
+const t0 = Date.now();
+const r = await buscarContasPagar({ valorMin: '29,99', valorMax: '29,99', lancamentoId: l?.[0]?.id });
+console.log('ms', Date.now() - t0, 'avisos', r.avisos, 'qtd', (r.candidatos || r.itens || r.resultados || []).length, Object.keys(r));
+for (const c of (r.candidatos || r.itens || r.resultados || []).slice(0, 6)) console.log(JSON.stringify(c).slice(0, 250));
+process.exit(0);
