@@ -9,12 +9,14 @@
 //    seletor no processo principal — sem isso o requestPort() falha)
 //  - popup de impressão (cupom NFC-e / DANFE) liberado como janela filha
 //  - impressoras locais e config da máquina via IPC (window.pdv, preload.js)
+//  - salvar documento (DANFE) em PDF direto na pasta escolhida
 //
 // Sem ./web (ninguém rodou o build) ele cai no protótipo em ./renderer.
 // Em desenvolvimento, HEADCOACH_URL=http://localhost:3000 carrega o Vite dev.
 // ---------------------------------------------------------------------------
 
-const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, session, dialog } = require('electron');
+const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -279,6 +281,44 @@ ipcMain.handle('perifericos:imprimirCupom', async (_e, { impressora, html }) => 
       );
     });
   });
+});
+
+// ------------------------- salvar documento em PDF -------------------------
+// A impressão do Electron não oferece "Salvar como PDF". Aqui o HTML do DANFE é
+// carregado numa janela escondida, vira PDF (com o CSS de impressão dele) e o
+// caixa escolhe a pasta no "Salvar como". O nome já vem pronto da tela
+// ("NF <número> - <cliente>") e a última pasta usada fica lembrada na máquina.
+ipcMain.handle('documentos:salvarPdf', async (_e, { html, nome } = {}) => {
+  if (!html) return { ok: false, erro: 'Documento vazio' };
+  const limpo =
+    String(nome || 'documento')
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120) || 'documento';
+  const cfg = loadConfig();
+  const pasta = cfg.pastaPdf && fs.existsSync(cfg.pastaPdf) ? cfg.pastaPdf : app.getPath('documents');
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Salvar em PDF',
+    defaultPath: path.join(pasta, `${limpo}.pdf`),
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (canceled || !filePath) return { ok: false, cancelado: true };
+  const tmp = path.join(os.tmpdir(), `pdv-doc-${Date.now()}.html`);
+  const win = new BrowserWindow({ show: false, webPreferences: { javascript: false } });
+  try {
+    fs.writeFileSync(tmp, html, 'utf8');
+    await win.loadFile(tmp);
+    const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: 'A4', preferCSSPageSize: true });
+    fs.writeFileSync(filePath, pdf);
+    saveConfig({ ...cfg, pastaPdf: path.dirname(filePath) });
+    return { ok: true, caminho: filePath };
+  } catch (e) {
+    return { ok: false, erro: e.message };
+  } finally {
+    win.destroy();
+    fs.unlink(tmp, () => {});
+  }
 });
 
 // ------------------------ portal RFID (Chainway UR4) -----------------------

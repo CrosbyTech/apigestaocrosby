@@ -28,6 +28,8 @@ export const PORTADORES_PAGARME = { credito: 9902, debito: 9901 };
 
 // forma do HeadCoach → tipo de documento do recebimento TOTVS
 // credito_loja = CREDEV (20) e adiantamento (10): consomem o saldo do cliente
+// tamanho máximo de cada linha de observação que o TOTVS aceita na transação
+const OBS_MAX = 60;
 const TIPO_DOC_TOTVS = { dinheiro: 3, pix: 26, credito: 4, debito: 5, credito_loja: 20, adiantamento: 10, boleto: 1 };
 
 export class EspelhoError extends Error {
@@ -381,13 +383,13 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       ...(venda.pedido_info?.transferencia
         ? [
             {
-              observation: `TRANSFERENCIA${venda.pedido_info.transferencia.ref ? ` ${venda.pedido_info.transferencia.ref}` : ''} EMP ${venda.empresa} -> ${
+              observation: `TRANSF${venda.pedido_info.transferencia.ref ? ` ${venda.pedido_info.transferencia.ref}` : ''} ${venda.empresa}>${
                 venda.pedido_info.transferencia.destinoCode ?? ''
               } ${venda.pedido_info.transferencia.destinoNome || ''}`
                 .toUpperCase()
-                .slice(0, 80),
+                .slice(0, OBS_MAX),
             },
-            { observation: `TRANSFERENCIA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+            { observation: `TRANSF HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, OBS_MAX) },
           ]
         : [
             ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
@@ -423,6 +425,11 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       ...(nota ? [{ observation: `${Number(nota.modelo) === 65 ? 'NFC-E' : 'NF-E'} ${nota.numero}/${nota.serie} ${nota.status.toUpperCase()}`.slice(0, 80) }] : []),
       ...(nota?.chave ? [{ observation: `CHAVE ${nota.chave}`.slice(0, 80) }] : []),
     ];
+    // O TOTVS recusa linha de observação com mais de 60 caracteres, embora a
+    // mensagem dele fale em 80 ("exceed the limit size of 80 characters"): em
+    // 11/11/2026 as transferências 51 (linhas de 60 e 61) e 53 (63 e 61) voltaram
+    // com 1 e 2 erros desse, enquanto as vendas (até 53) sempre passaram.
+    for (const o of observations) o.observation = String(o.observation).slice(0, OBS_MAX);
     const payload = {
       branchCode: empresaTotvs,
       ...(venda.data_caixa ? { transactionDate: String(venda.data_caixa).slice(0, 10) } : {}),

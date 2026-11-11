@@ -388,7 +388,7 @@ export async function faturar(body) {
   const bloqueio = await bloqueioDeFaturamento(b.chave, b.numeroSite || null);
   if (bloqueio) throw new FaturamentoError(bloqueio.texto, 'PEDIDO_JA_FATURADO', 409);
   // Desconto do operador (ajuste) nos pedidos do site: no máximo 15% (Yago, 11/11/2026).
-  // No Brejinho vale a regra de lá (20% livre, acima com senha de owner/admin/financeiro).
+  // No Brejinho vale a regra de lá (25% livre, acima com senha de owner/admin/financeiro).
   if (!String(b.chave).startsWith('BRJ:') && Number(b.descontoFaturamento?.pct) > DESCONTO_OPERADOR_MAXIMO + 0.001) {
     throw new FaturamentoError(`O desconto do operador é de no máximo ${DESCONTO_OPERADOR_MAXIMO}%`, 'DESCONTO_ACIMA_DO_LIMITE');
   }
@@ -586,7 +586,7 @@ export async function faturar(body) {
       // peças trocadas na tela (entra a que foi lida, pelo valor da que estava no pedido)
       ...(trocas.length ? { trocas } : {}),
       // desconto dado na tela de faturamento (já está no valor de cada peça):
-      // até 20% livre; acima, liberado por owner/admin/financeiro
+      // Brejinho: até 25% livre; acima, liberado por owner/admin/financeiro. Pedidos do site: até 15%
       ...(Number(b.descontoFaturamento?.pct) > 0
         ? { descontoFaturamento: { pct: round2(b.descontoFaturamento.pct), liberadoPor: b.descontoFaturamento.liberadoPor || null } }
         : {}),

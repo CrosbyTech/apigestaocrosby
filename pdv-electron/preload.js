@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('pdv', {
   // periféricos locais (a razão de ser do desktop)
   listarImpressoras: () => ipcRenderer.invoke('perifericos:listarImpressoras'),
   imprimirCupom: (payload) => ipcRenderer.invoke('perifericos:imprimirCupom', payload),
+  // DANFE em PDF: abre o "Salvar como" e grava direto ({ html, nome } → { ok, caminho })
+  salvarPdf: (payload) => ipcRenderer.invoke('documentos:salvarPdf', payload),
   rfidConectar: (cfg) => ipcRenderer.invoke('perifericos:rfidConectar', cfg),
   tefConectar: (cfg) => ipcRenderer.invoke('perifericos:tefConectar', cfg),
   tefPagar: (payload) => ipcRenderer.invoke('perifericos:tefPagar', payload),

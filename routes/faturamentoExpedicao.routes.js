@@ -5,7 +5,7 @@
 //
 //   GET  /preparar/:chave             sugestões do pedido (cliente, transporte, pagamento, comprovantes)
 //   POST /previa                      { clienteCode, consumidorFinal, itens[] } cenário fiscal + CFOP por item
-//   POST /autorizar-desconto          senha de owner/admin/financeiro libera desconto acima de 20%
+//   POST /autorizar-desconto          senha de owner/admin/financeiro libera desconto acima de 25% (Brejinho)
 //   POST /faturar                     registra a venda, emite a NF-e e espelha no TOTVS
 //   POST /vendas/:vendaId/reprocessar tenta de novo o que faltou (NF-e rejeitada / caixa fechado)
 //   POST /vendas/:vendaId/duplicata          gera e envia a duplicata (boleto) — { forcar } reenvia
@@ -66,7 +66,7 @@ router.get(
   }),
 );
 
-// Desconto no faturamento acima do limite livre (20%): owner, admin ou
+// Desconto no faturamento do Brejinho acima do limite livre (25%): owner, admin ou
 // financeiro digita e-mail + senha do HeadCoach para liberar
 router.post(
   '/autorizar-desconto',
