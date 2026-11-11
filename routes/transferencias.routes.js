@@ -35,11 +35,14 @@ import {
   registrarTransacao,
   importarTransferenciasDryland,
 } from '../services/transferenciasMercadoria.js';
+import { prepararTransferenciaNota, transferirComNota, processarTransferenciaNota, EMPRESA_ORIGEM_NOTA } from '../services/transferenciaNota.js';
+import { FiscalError } from '../services/pdvFiscal.js';
 
 const router = express.Router();
 
 function responder(res, err) {
   if (err instanceof TransferenciaError) return errorResponse(res, err.message, err.status, err.code, err.details);
+  if (err instanceof FiscalError) return errorResponse(res, err.message, 422, err.code);
   if (/transferencias_/.test(err?.message || '') && /does not exist|schema cache/i.test(err.message)) {
     return errorResponse(res, 'Tabelas de transferência não existem — rode migrations/transferencias_mercadoria.sql', 503, 'MIGRATION_PENDING');
   }
@@ -182,6 +185,53 @@ router.post(
       }).catch(() => {});
     }
     return successResponse(res, data, 'Situação atualizada');
+  }),
+);
+
+// ─── Transferência saindo da 99 com a NF-e pelo HeadCoach ────────────────────
+// (services/transferenciaNota.js) — a nota sai pela 99 e a transação vai para a
+// 990 como documento interno, já atendida
+router.get(
+  '/nota/preparar',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await prepararTransferenciaNota({
+        solicitacaoId: parseInt(req.query.solicitacao, 10) || null,
+        destinoClienteCode: parseInt(req.query.destino, 10) || null,
+      });
+      return successResponse(res, r, `Transferência da ${EMPRESA_ORIGEM_NOTA} para ${r.destino.nome}`);
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+const mensagemNota = (r) =>
+  !r.fiscal?.ok
+    ? `NF-e não autorizada: ${r.fiscal?.mensagem || 'erro'}`
+    : r.totvs?.ok
+      ? `Transferência concluída: NF-e ${r.nota?.numero}/${r.nota?.serie} e transação ${r.totvs.transactionCode} atendida no TOTVS`
+      : `NF-e ${r.nota?.numero}/${r.nota?.serie} autorizada. TOTVS: ${r.totvs?.mensagem || 'pendente'}`;
+router.post(
+  '/nota',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await transferirComNota(req.body || {});
+      return successResponse(res, r, mensagemNota(r), 201);
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+// "Tentar de novo": emite a nota se ainda não saiu e abre/atende a transação da 990
+router.post(
+  '/nota/:vendaId/reprocessar',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await processarTransferenciaNota(parseInt(req.params.vendaId, 10));
+      return successResponse(res, r, mensagemNota(r));
+    } catch (err) {
+      return responder(res, err);
+    }
   }),
 );
 

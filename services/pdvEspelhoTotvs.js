@@ -378,8 +378,21 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       ...((venda.pedido_info?.transacoesAnteriores || []).length
         ? [{ observation: `SUBSTITUI A TRANSACAO ${venda.pedido_info.transacoesAnteriores.map((t) => t.code).join(', ')} (CANCELAR)`.slice(0, 80) }]
         : []),
-      ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
-      { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+      ...(venda.pedido_info?.transferencia
+        ? [
+            {
+              observation: `TRANSFERENCIA${venda.pedido_info.transferencia.ref ? ` ${venda.pedido_info.transferencia.ref}` : ''} EMP ${venda.empresa} -> ${
+                venda.pedido_info.transferencia.destinoCode ?? ''
+              } ${venda.pedido_info.transferencia.destinoNome || ''}`
+                .toUpperCase()
+                .slice(0, 80),
+            },
+            { observation: `TRANSFERENCIA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+          ]
+        : [
+            ...(venda.numero_site ? [{ observation: `PEDIDO ${venda.numero_site} - FATURAMENTO EXPEDICAO HEADCOACH`.slice(0, 80) }] : []),
+            { observation: `VENDA HEADCOACH #${venda.id} - DOC INTERNO (NF PELO HEADCOACH)`.slice(0, 80) },
+          ]),
       ...(venda.pedido_info?.trocas || []).slice(0, 4).map((t) => ({
         observation: `TROCA NO FATURAMENTO: ${t.quantidade}X ${t.de} -> ${t.para} (MESMO VALOR)`.slice(0, 80),
       })),
@@ -460,6 +473,31 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       if (err instanceof EspelhoError) throw err;
       /* consulta falhou: segue para o recebimento */
     }
+  }
+
+  // 2T) TRANSFERÊNCIA (operação 8401/8404: documento interno, não movimenta
+  // financeiro): não há o que receber. O "recebimento" da API é o serviço que
+  // emite o documento interno e deixa a transação ATENDIDA, então vai sem
+  // nenhum recebimento. A documentação diz que ele só aceita modalidade Venda:
+  // se o TOTVS recusar, a transação fica aberta para ser finalizada no TRAFP005
+  // e o erro explica.
+  if (venda.pedido_info?.transferencia) {
+    const totalTransf = round2(itens.reduce((s, i) => s + Number(i.quantidade) * (round2(i.valor_unit) - round2(i.desconto_unit || 0)), 0));
+    try {
+      await callTotvs('post', `${TOTVS_BASE_URL}/general/v2/transaction-receiving`, {
+        data: { branchCode: empresaTotvs, transactionCode, transactionDate, totalAmount: totalTransf, terminalCode: terminal, receipts: [] },
+        timeout: 180000,
+      });
+    } catch (err) {
+      const t = traduzirErroTotvs(err);
+      const msg = `transferência aberta na empresa ${empresaTotvs} (transação ${transactionCode}), mas o TOTVS não a atendeu pela API: ${t.message}. Finalize-a no TRAFP005 da empresa ${empresaTotvs}; depois "Tentar de novo" só confere.`;
+      await gravar(vendaId, { totvs_erro: msg });
+      throw new EspelhoError(msg, 'TRANSFERENCIA_NAO_ATENDIDA', err.response?.status || 502, err.response?.data);
+    }
+    const seqT = await buscarDocInterno(empresaTotvs, transactionCode, transactionDate);
+    await gravar(vendaId, { totvs_status: 4, totvs_doc_interno_seq: seqT, totvs_espelhado_em: new Date().toISOString(), totvs_erro: null });
+    console.log(`✅ [Espelho TOTVS] transferência ${venda.id}: transação ${empresaTotvs}/${transactionCode} ATENDIDA (doc interno ${seqT ?? '?'}, sem financeiro)`);
+    return { transactionCode, transactionDate, status: 4, docInternoSeq: seqT, totalAmount: totalTransf };
   }
 
   // 2) Recebimento → ATENDIDA (exige caixa aberto no terminal)

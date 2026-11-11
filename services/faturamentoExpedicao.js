@@ -49,6 +49,8 @@ export const EMPRESA_FATURAMENTO = 99;
 export const TROCA_NO_FATURAMENTO_ATE = '2026-11-11';
 // Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
 export const EMPRESA_DOC_INTERNO = 990;
+// desconto de ajuste que o operador pode dar no faturamento dos pedidos do site
+export const DESCONTO_OPERADOR_MAXIMO = 15;
 
 // Documento interno no TOTVS (saída, financeira, modelo 35) por canal
 export const OPERACAO_DOC_INTERNO = { varejo: 511, franquias: 7807, mtm: 7808, revenda: 7809 };
@@ -143,7 +145,7 @@ export async function ultimaNotaTotvs(empresa, serie) {
   return max;
 }
 
-async function acertarNumeracao(empresa) {
+export async function acertarNumeracao(empresa) {
   const cfg = await buscarConfig(empresa);
   const ultTotvs = await ultimaNotaTotvs(empresa, cfg.serie_nfe);
   if (ultTotvs >= Number(cfg.prox_num_nfe)) {
@@ -385,6 +387,11 @@ export async function faturar(body) {
   if (!Array.isArray(b.itens) || !b.itens.length) throw new FaturamentoError('Nenhuma peça conferida');
   const bloqueio = await bloqueioDeFaturamento(b.chave, b.numeroSite || null);
   if (bloqueio) throw new FaturamentoError(bloqueio.texto, 'PEDIDO_JA_FATURADO', 409);
+  // Desconto do operador (ajuste) nos pedidos do site: no máximo 15% (Yago, 11/11/2026).
+  // No Brejinho vale a regra de lá (20% livre, acima com senha de owner/admin/financeiro).
+  if (!String(b.chave).startsWith('BRJ:') && Number(b.descontoFaturamento?.pct) > DESCONTO_OPERADOR_MAXIMO + 0.001) {
+    throw new FaturamentoError(`O desconto do operador é de no máximo ${DESCONTO_OPERADOR_MAXIMO}%`, 'DESCONTO_ACIMA_DO_LIMITE');
+  }
   const trocas = (Array.isArray(b.trocas) ? b.trocas : [])
     .filter((t) => t && t.de && t.para)
     .map((t) => ({ de: String(t.de), deNome: t.deNome || null, para: String(t.para), paraNome: t.paraNome || null, quantidade: Number(t.quantidade) || 1 }));

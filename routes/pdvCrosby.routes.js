@@ -1040,6 +1040,13 @@ router.post(
         await supabase.from('pdv_vendas').update({ status: 'cancelada' }).eq('id', ctx.nota.venda_id);
         // venda da expedição: o registro do faturamento acompanha (libera faturar de novo)
         await supabase.from('pedidos_venda_faturamentos').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', ctx.nota.venda_id);
+        // transferência com nota pelo HeadCoach: o registro acompanha e a solicitação volta para a fila
+        await supabase.from('transferencias_transacoes').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', ctx.nota.venda_id);
+        await supabase
+          .from('transferencias_mercadoria')
+          .update({ status: 'aguardando_transferencia', atualizado_em: new Date().toISOString() })
+          .eq('venda_id', ctx.nota.venda_id)
+          .neq('status', 'cancelada');
         // saldo bônus: o que a venda gastou volta ao cliente; o crédito que ela gerou é cancelado
         await aoCancelarVenda(ctx.nota.venda_id, req.body?.por || null).catch((e) => console.warn(`⚠️ [saldo bônus] venda ${ctx.nota.venda_id}: ${e.message}`));
         const vendaCancelada = await carregarVenda(ctx.nota.venda_id);

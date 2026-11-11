@@ -82,3 +82,22 @@ ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS origem_ref TEXT; 
 ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS valor NUMERIC(14, 2);
 ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS itens JSONB;            -- [{ cod, descricao, cor, tam, qtd, preco, tr, estoque }]
 CREATE UNIQUE INDEX IF NOT EXISTS idx_transf_origem_chave ON transferencias_mercadoria (origem_chave) WHERE origem_chave IS NOT NULL;
+
+-- 11/11/2026: transferência saindo da 99 com a NF-e pelo HeadCoach (services/transferenciaNota.js).
+-- A transação do TOTVS (990, documento interno) só existe depois da nota: o número pode ficar vazio.
+ALTER TABLE transferencias_transacoes ALTER COLUMN transacao_code DROP NOT NULL;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS venda_id BIGINT;        -- pdv_vendas (nota pelo HeadCoach)
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS empresa_totvs INT;      -- empresa da transação no TOTVS (990)
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS natureza TEXT;          -- transferencia | venda (entre filiais)
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS nota_id BIGINT;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS nf_numero INT;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS nf_serie TEXT;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS nf_chave TEXT;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS nf_status TEXT;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS totvs_erro TEXT;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS qtd_faltando INT NOT NULL DEFAULT 0;
+ALTER TABLE transferencias_transacoes ADD COLUMN IF NOT EXISTS qtd_sobrando INT NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_transf_trx_venda ON transferencias_transacoes (venda_id) WHERE venda_id IS NOT NULL;
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS venda_id BIGINT;
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS nf_numero INT;
+ALTER TABLE transferencias_mercadoria ADD COLUMN IF NOT EXISTS nf_chave TEXT;
