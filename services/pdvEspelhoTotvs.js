@@ -350,11 +350,14 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
 
   // 1) Transação em andamento (documento interno)
   if (!transactionCode) {
+    // SUFRAMA: o ICMS desonerado saiu do total da NF-e; no documento interno vai como desconto da linha
+    const desonPorSeq = venda.pedido_info?.suframa?.porItem || {};
     const linhas = itens.map((i) => ({
       productCode: Number(i.product_code),
       quantity: Number(i.quantidade),
       value: round2(i.valor_unit),
       descUnit: round2(i.desconto_unit || 0),
+      desconSuframa: round2(desonPorSeq[i.seq] || 0),
       cfop: Number(i.cfop) || DOC_INTERNO_PADRAO.cfop,
     }));
     // Expedição: o documento interno não tem campo de frete e o recebimento
@@ -375,7 +378,10 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
     // de cada unidade: com 2+ peças iguais vai multiplicado pela quantidade.
     // Mandando o unitário, o TOTVS somava um total maior e recusava a transação
     // ("totalAmountCalculated different of TotalAmountTransaction" — FR1281, 11/11/2026).
-    const items = linhas.map(({ descUnit, ...it }) => ({ ...it, ...(descUnit > 0 ? { discountValue: round2(descUnit * it.quantity) } : {}) }));
+    const items = linhas.map(({ descUnit, desconSuframa, ...it }) => {
+      const desc = round2(descUnit * it.quantity + desconSuframa);
+      return { ...it, ...(desc > 0 ? { discountValue: desc } : {}) };
+    });
     const total = Number(items.reduce((s, it) => s + it.quantity * it.value - (it.discountValue || 0), 0).toFixed(3));
     const nota = notas.find((n) => n.status === 'autorizada') || notas[0];
     // "Transação com data diferente": a data real da venda vai em linha própria,

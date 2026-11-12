@@ -213,6 +213,8 @@ function ehExterno(url) {
 //  1) a última porta que funcionou (salva na config, ex. "COM10")
 //  2) senão, a primeira com chip CP210x (o do leitor)
 //  3) senão, a primeira porta serial que existir
+const ehLeitorChainway = (d) => !!d && Number(d.vendorId) === 0x2047 && Number(d.productId) === 0x0301;
+
 function configurarSerial(ses) {
   ses.on('select-serial-port', (event, portList, _webContents, callback) => {
     event.preventDefault();
@@ -233,10 +235,21 @@ function configurarSerial(ses) {
     callback(escolhida.portId);
   });
 
+  // Leitor de mesa Chainway (série HR300…): NÃO cria porta COM, entra como HID
+  // (VID 2047 / PID 0301). O hook chama navigator.hid.requestDevice(); aqui a
+  // escolha é automática, sem janela. Sem o leitor na USB devolve vazio e o
+  // hook segue para a porta serial (.bat).
+  ses.on('select-hid-device', (event, details, callback) => {
+    event.preventDefault();
+    const leitor = (details.deviceList || []).find(ehLeitorChainway);
+    callback(leitor ? leitor.deviceId : '');
+  });
+
   // Permissões que o PDV usa: serial (RFID), fullscreen (botão da tela),
   // clipboard e notificações. O resto continua negado.
   const PERMITIDAS = new Set([
     'serial',
+    'hid',
     'fullscreen',
     'clipboard-read',
     'clipboard-sanitized-write',
@@ -247,7 +260,10 @@ function configurarSerial(ses) {
   );
   ses.setPermissionCheckHandler((_wc, permission) => PERMITIDAS.has(permission));
   // getPorts() (reconexão automática do hook) enxerga as portas seriais
-  ses.setDevicePermissionHandler((details) => details.deviceType === 'serial');
+  // …e o getDevices() do HID enxerga só o leitor Chainway (nada de teclado/mouse)
+  ses.setDevicePermissionHandler(
+    (details) => details.deviceType === 'serial' || (details.deviceType === 'hid' && ehLeitorChainway(details.device)),
+  );
 }
 
 // ----------------------------- IPC: periféricos ----------------------------

@@ -228,6 +228,8 @@ export async function buscarClienteFiscal(code) {
       cpf: ind ? digits(ind.cpf) : null,
       cnpj: leg ? digits(leg.cnpj) : null,
       ie: leg ? digits(leg.numberStateRegistration) : null,
+      // inscrição SUFRAMA (Zona Franca / Área de Livre Comércio) — cadastro do TOTVS
+      suframa: leg && digits(leg.suframaCode || '') ? digits(leg.suframaCode) : null,
       email: email || null,
       fone: fone ? digits(fone.number) : null,
       endereco: enderecoDe(addr),
@@ -552,7 +554,46 @@ const CFOP_EXPEDICAO = {
   interna: { producao: 5101, adquirido: 5102 },
   interContrib: { producao: 6101, adquirido: 6102 },
   interNaoContrib: { producao: 6107, adquirido: 6108 },
+  suframa: { producao: 6109, adquirido: 6110 },
 };
+// SUFRAMA (Zona Franca de Manaus / Áreas de Livre Comércio) — Yago, 12/11/2026.
+// Gabarito das NF-e do TOTVS na empresa 99 para os clientes com inscrição
+// SUFRAMA no cadastro (1178 SANTOS E LEMOS e 44748 COLLYER & SOARES, Boa Vista/RR;
+// NF 16249/16250 op 7007 e 14624 op 7259):
+//   natOp "VENDA DE PRODUCAO DO ESTABELECIMENTO DESTINADA A ZONA FRANCA", CFOP 6109
+//   ICMS40 CST 41 com vICMSDeson = 12% de (vProd − vDesc), motDesICMS 7 (SUFRAMA)
+//   e indDeduzDeson 1: o ICMS desonerado SAI do total da nota (vNF)
+//   PIS/COFINS PISNT/COFINSNT CST 07; IPI IPINT 53; sem IBS/CBS
+//   dest com ISUF; infCpl "ICMS 12,00 = X TOTAL X SUSP.IPI-ART.84 RIPI/10-SUFRAMA: n"
+// Só para mercadoria nacional (origem importada não tem o benefício).
+export const SUFRAMA_PCT_ICMS = 12;
+const NATOP_SUFRAMA_PRODUCAO = 'VENDA DE PRODUCAO DO ESTABELECIMENTO DESTINADA A ZONA FRANCA';
+const NATOP_SUFRAMA_ADQUIRIDA = 'VENDA DE MERCADORIA ADQUIRIDA DESTINADA A ZONA FRANCA';
+const ORIGENS_IMPORTADAS = ['1', '2', '3', '8'];
+/**
+ * ICMS desonerado de cada item (mesma conta da NF-e): 12% de (vProd − vDesc + frete
+ * rateado). Usado no XML e no total do faturamento, para os dois baterem no centavo.
+ */
+export function desoneracaoSuframa(itens, frete = 0) {
+  const liq = itens.map((it) => round2(Number(it.quantidade) * round2(it.valor_unit) - Number(it.quantidade) * Number(it.desconto_unit || 0)));
+  const fretes = rateioFrete(liq, frete);
+  const porItem = liq.map((v, i) => round2(((v + fretes[i]) * SUFRAMA_PCT_ICMS) / 100));
+  return { porItem, total: round2(porItem.reduce((s, v) => s + v, 0)), pct: SUFRAMA_PCT_ICMS };
+}
+// frete rateado pelo valor líquido de cada item; a sobra de centavos vai no de maior valor
+function rateioFrete(liq, frete) {
+  const f = round2(frete || 0);
+  const somaLiq = liq.reduce((s, v) => s + v, 0);
+  const fretes = liq.map((v) => (f > 0 && somaLiq > 0 ? round2((f * v) / somaLiq) : 0));
+  if (f > 0 && somaLiq > 0) {
+    const sobra = round2(f - fretes.reduce((s, v) => s + v, 0));
+    if (sobra !== 0) {
+      const iMaior = liq.indexOf(Math.max(...liq));
+      fretes[iMaior] = round2(fretes[iMaior] + sobra);
+    }
+  }
+  return fretes;
+}
 // TRANSFERÊNCIA saindo da expedição com a NF-e pelo HeadCoach (Yago, 11/11/2026),
 // no padrão das notas que a 99 emitia pelo TOTVS (venda.pedido_info.transferencia):
 //   natureza 'transferencia' (destino da MESMA raiz de CNPJ, op 8400 — NF 16126):
@@ -568,7 +609,9 @@ const CFOP_TRANSFERENCIA = {
   interContrib: { producao: 6151, adquirido: 6152 },
 };
 /** CFOP de um item de transferência da expedição (natureza: 'transferencia' | 'venda'). */
-export function cfopTransferencia(chave, tipo, natureza) {
+export function cfopTransferencia(chaveCenario, tipo, natureza) {
+  // transferência não usa o benefício SUFRAMA: vale o cenário interestadual comum
+  const chave = chaveCenario === 'suframa' ? 'interContrib' : chaveCenario;
   const t = tipo === 'adquirido' ? 'adquirido' : 'producao';
   if (natureza === 'transferencia') {
     if (!CFOP_TRANSFERENCIA[chave]) throw new FiscalError('Transferência exige destinatário com CNPJ e inscrição estadual', 'TRANSF_DEST_NAO_CONTRIBUINTE');
@@ -588,8 +631,10 @@ export function cenarioExpedicao({ emitUf, cliente, consumidorFinal = false }) {
   const destUf = cliente?.endereco?.UF || null;
   const contribuinte = !consumidorFinal && !!(cliente?.cnpj && cliente?.ie);
   const interestadual = !!destUf && destUf !== emitUf;
-  const chave = !interestadual ? 'interna' : contribuinte ? 'interContrib' : 'interNaoContrib';
-  return { destUf, contribuinte, interestadual, chave, difal: chave === 'interNaoContrib' };
+  // SUFRAMA: cliente de outro estado, contribuinte, com inscrição SUFRAMA no cadastro
+  const suframa = interestadual && contribuinte && !!cliente?.suframa;
+  const chave = !interestadual ? 'interna' : suframa ? 'suframa' : contribuinte ? 'interContrib' : 'interNaoContrib';
+  return { destUf, contribuinte, interestadual, chave, difal: chave === 'interNaoContrib', suframa, isuf: suframa ? cliente.suframa : null, pctSuframa: suframa ? SUFRAMA_PCT_ICMS : null };
 }
 export function cfopExpedicao(chave, tipo) {
   return CFOP_EXPEDICAO[chave]?.[tipo === 'adquirido' ? 'adquirido' : 'producao'] ?? null;
@@ -670,13 +715,16 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   // sobra de centavos vai no item de MAIOR valor — igual ao TOTVS (NF 16082)
   const frete = round2(venda.frete || 0);
   const liq = itens.map((it) => round2(Number(it.quantidade) * round2(it.valor_unit) - Number(it.quantidade) * Number(it.desconto_unit || 0)));
-  const somaLiq = liq.reduce((s, v) => s + v, 0);
-  const fretes = liq.map((v) => (frete > 0 && somaLiq > 0 ? round2((frete * v) / somaLiq) : 0));
-  if (frete > 0 && somaLiq > 0) {
-    const sobra = round2(frete - fretes.reduce((s, v) => s + v, 0));
-    if (sobra !== 0) {
-      const iMaior = liq.indexOf(Math.max(...liq));
-      fretes[iMaior] = round2(fretes[iMaior] + sobra);
+  const fretes = rateioFrete(liq, frete);
+  // SUFRAMA: ICMS desonerado e abatido do total (não vale para transferência)
+  const sufr = cen.suframa && !transf;
+  if (sufr) {
+    const importados = itens.filter((it) => ORIGENS_IMPORTADAS.includes(String(it.origem || '0')));
+    if (importados.length) {
+      throw new FiscalError(
+        `Cliente SUFRAMA: ${importados.map((it) => it.product_code).join(', ')} ${importados.length === 1 ? 'é peça importada e não tem' : 'são peças importadas e não têm'} o benefício — fature estas pelo TOTVS`,
+        'SUFRAMA_IMPORTADO',
+      );
     }
   }
 
@@ -684,6 +732,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   // natureza pelo PRIMEIRO item, como o TOTVS (NF 15921: 1º item adquirido)
   let natOp = tipos[0] === 'adquirido' ? NATOP_ADQUIRIDA : NATOP_PRODUCAO;
   if (cen.chave === 'interNaoContrib') natOp = `${natOp}${SUFIXO_NAO_CONTRIB}`;
+  if (sufr) natOp = tipos[0] === 'adquirido' ? NATOP_SUFRAMA_ADQUIRIDA : NATOP_SUFRAMA_PRODUCAO;
   if (ehTransf) natOp = tipos[0] === 'adquirido' ? NATOP_TRANSF_ADQUIRIDA : NATOP_TRANSF_PRODUCAO;
   natOp = natOp.slice(0, 60);
 
@@ -719,13 +768,14 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   dest.xNome = cliente.nome;
   dest.indIEDest = cen.contribuinte ? '1' : '9';
   if (cen.contribuinte) dest.IE = cliente.ie;
+  if (sufr) dest.ISUF = cen.isuf;
   if (cliente.email) dest.email = cliente.email.slice(0, 60);
   nfe.tagDest(dest);
   nfe.tagEnderDest(limparUndefined(cliente.endereco));
 
   const det = [];
   const imps = [];
-  const tot = { vBC: 0, vICMS: 0, vICMSUFDest: 0, vProd: 0, vFrete: 0, vDesc: 0, vPIS: 0, vCOFINS: 0, vIBSUF: 0, vCBS: 0, vNF: 0 };
+  const tot = { vBC: 0, vICMS: 0, vICMSDeson: 0, vICMSUFDest: 0, vProd: 0, vFrete: 0, vDesc: 0, vPIS: 0, vCOFINS: 0, vIBSUF: 0, vCBS: 0, vNF: 0 };
   const cfops = [];
   itens.forEach((it, i) => {
     const q = Number(it.quantidade);
@@ -758,7 +808,25 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
       indTot: '1',
     });
     const orig = String(it.origem || '0');
-    const aliq = cen.interestadual ? (['1', '2', '3', '8'].includes(orig) ? 4 : 12) : aliqInterna;
+    if (sufr) {
+      const baseS = round2(vProd - vDesc + vFrete);
+      const deson = round2((baseS * SUFRAMA_PCT_ICMS) / 100);
+      imps.push({
+        imposto: {
+          ICMS: { ICMS40: { orig, CST: '41', vICMSDeson: f2(deson), motDesICMS: '7', indDeduzDeson: '1' } },
+          IPI: { cEnq: '999', IPINT: { CST: '53' } },
+          PIS: { PISNT: { CST: '07' } },
+          COFINS: { COFINSNT: { CST: '07' } },
+        },
+      });
+      tot.vICMSDeson += deson;
+      tot.vProd += vProd;
+      tot.vFrete += vFrete;
+      tot.vDesc += vDesc;
+      tot.vNF += round2(baseS - deson);
+      return;
+    }
+    const aliq = cen.interestadual ? (ORIGENS_IMPORTADAS.includes(orig) ? 4 : 12) : aliqInterna;
     const base = round2(vProd - vDesc + vFrete);
     const vICMS = round2((base * aliq) / 100);
     const basePC = round2(base - vICMS);
@@ -815,7 +883,19 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   await nfe.tagProd(det);
   imps.forEach((x, i) => nfe.taginfAdProd(i, x));
 
-  nfe.tagTotal(
+  // SUFRAMA: só o ICMSTot, como o TOTVS (sem IBS/CBS), com o ICMS desonerado abatido do vNF
+  if (sufr) {
+    nfe.tagTotal(
+      {
+        ICMSTot: {
+          vBC: '0.00', vICMS: '0.00', vICMSDeson: f2(tot.vICMSDeson), vFCP: '0.00', vBCST: '0.00', vST: '0.00', vFCPST: '0.00', vFCPSTRet: '0.00',
+          vProd: f2(tot.vProd), vFrete: f2(tot.vFrete), vSeg: '0.00', vDesc: f2(tot.vDesc), vII: '0.00', vIPI: '0.00',
+          vIPIDevol: '0.00', vPIS: '0.00', vCOFINS: '0.00', vOutro: '0.00', vNF: f2(tot.vNF),
+        },
+      },
+      true,
+    );
+  } else nfe.tagTotal(
     {
       ICMSTot: {
         vBC: f2(tot.vBC), vICMS: f2(tot.vICMS), vICMSDeson: '0.00', vFCPUFDest: '0.00', vICMSUFDest: f2(tot.vICMSUFDest),
@@ -884,7 +964,9 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
 
   // Informações complementares (mesmo começo das notas do TOTVS)
   const aliqNota = cen.interestadual ? 12 : aliqInterna;
-  const partes = [`CST 000 ICMS ${brl(aliqNota)} ${brl(tot.vBC)} = ${brl(tot.vICMS)}`];
+  const partes = sufr
+    ? [`ICMS ${brl(SUFRAMA_PCT_ICMS)} = ${brl(tot.vICMSDeson)} TOTAL ${brl(tot.vICMSDeson)} SUSP.IPI-ART.84 RIPI/10-SUFRAMA: ${cen.isuf}`]
+    : [`CST 000 ICMS ${brl(aliqNota)} ${brl(tot.vBC)} = ${brl(tot.vICMS)}`];
   if (transf) {
     partes.push(`TRANSFERENCIA${transf.ref ? ` ${semAcento(transf.ref)}` : ''} -> ${semAcento(transf.destinoNome || cliente.nome).toUpperCase()} NAO E VENDA`);
     partes.push(`TRANSFERENCIA HEADCOACH ${venda.id}`);

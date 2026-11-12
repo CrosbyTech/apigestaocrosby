@@ -32,6 +32,7 @@ import {
   cenarioExpedicao,
   cfopExpedicao,
   ICMS_DIFAL_UF_CONFERIDA,
+  desoneracaoSuframa,
 } from './pdvFiscal.js';
 import { espelharVendaNoTotvs, cartoesTotvs } from './pdvEspelhoTotvs.js';
 import { caixaAbertoPara } from './hcCaixa.js';
@@ -353,7 +354,7 @@ export async function prepararFaturamento(chave) {
     empresa: EMPRESA_FATURAMENTO,
     emitente: { uf: emit.uf, cnpj: emit.cnpj, nome: emit.xNome },
     cliente: cliente
-      ? { code: cliente.code, nome: cliente.nome, cpf: cliente.cpf, cnpj: cliente.cnpj, ie: cliente.ie, uf: cliente.endereco?.UF, cidade: cliente.endereco?.xMun, temEndereco: !!cliente.endereco?.cMun }
+      ? { code: cliente.code, nome: cliente.nome, cpf: cliente.cpf, cnpj: cliente.cnpj, ie: cliente.ie, suframa: cliente.suframa || null, uf: cliente.endereco?.UF, cidade: cliente.endereco?.xMun, temEndereco: !!cliente.endereco?.cMun }
       : clienteCode
         ? { code: clienteCode, nome: d.nome_cliente || sep?.cliente, erro: clienteErro || 'cliente não encontrado no TOTVS' }
         : null,
@@ -405,7 +406,7 @@ export async function previaFiscal({ clienteCode, consumidorFinal = false, itens
   const tipos = await tiposFiscais(EMPRESA_FATURAMENTO, (itens || []).map((i) => ({ product_code: i.productCode, referencia: i.referencia })));
   return {
     cenario: cen,
-    cliente: { code: cliente.code, nome: cliente.nome, cpf: cliente.cpf, cnpj: cliente.cnpj, ie: cliente.ie, uf: cliente.endereco?.UF, cidade: cliente.endereco?.xMun, temEndereco: !!cliente.endereco?.cMun },
+    cliente: { code: cliente.code, nome: cliente.nome, cpf: cliente.cpf, cnpj: cliente.cnpj, ie: cliente.ie, suframa: cliente.suframa || null, uf: cliente.endereco?.UF, cidade: cliente.endereco?.xMun, temEndereco: !!cliente.endereco?.cMun },
     difalOk: !cen.difal || ICMS_DIFAL_UF_CONFERIDA[cen.destUf] != null,
     aliqDifal: cen.difal ? ICMS_DIFAL_UF_CONFERIDA[cen.destUf] ?? null : null,
     itens: (itens || []).map((i) => {
@@ -505,6 +506,12 @@ export async function faturar(body) {
   const subtotal = round2(itens.reduce((s, i) => s + i.quantidade * i.valor_unit, 0));
   const descontoTotal = round2(itens.reduce((s, i) => s + i.quantidade * i.desconto_unit, 0));
   const liquido = round2(subtotal - descontoTotal);
+  // SUFRAMA: o ICMS desonerado (12%) sai do total da nota — mesma conta da NF-e
+  const suframa = cen.suframa ? desoneracaoSuframa(itens, round2(b.transporte?.frete || 0)) : null;
+  if (suframa) {
+    const importados = itens.filter((i) => ['1', '2', '3', '8'].includes(String(i.origem || '0')));
+    if (importados.length) throw new FaturamentoError(`Cliente SUFRAMA: peça importada (${importados.map((i) => i.product_code).join(', ')}) não tem o benefício — fature esta pelo TOTVS`, 'SUFRAMA_IMPORTADO');
+  }
   const qtd = itens.reduce((s, i) => s + i.quantidade, 0);
 
   // Transporte
@@ -531,7 +538,7 @@ export async function faturar(body) {
   } else if (frete > 0) {
     throw new FaturamentoError('Frete informado sem transportadora');
   }
-  const total = round2(liquido + frete);
+  const total = round2(liquido + frete - (suframa?.total || 0));
 
   // Pagamentos (fecham com produtos + frete)
   const pagamentos = [];
@@ -565,7 +572,7 @@ export async function faturar(body) {
   const somaPag = round2(pagamentos.reduce((s, p) => s + p.valor, 0));
   if (Math.abs(somaPag - total) > 0.01) {
     throw new FaturamentoError(
-      `Pagamentos (R$ ${somaPag.toFixed(2)}) não fecham com o total (R$ ${total.toFixed(2)} = produtos ${subtotal.toFixed(2)} − desconto ${descontoTotal.toFixed(2)} + frete ${frete.toFixed(2)})`,
+      `Pagamentos (R$ ${somaPag.toFixed(2)}) não fecham com o total (R$ ${total.toFixed(2)} = produtos ${subtotal.toFixed(2)} − desconto ${descontoTotal.toFixed(2)} + frete ${frete.toFixed(2)}${suframa ? ` − ICMS SUFRAMA ${suframa.total.toFixed(2)}` : ''})`,
       'PAYMENT_MISMATCH',
     );
   }
@@ -617,7 +624,8 @@ export async function faturar(body) {
     empresa_cnpj: emit.cnpj,
     empresa_nome: emit.xNome,
     tipo_venda: 'nfe',
-    operacao: OPERACAO_VENDA[canalVenda] || null,
+    // SUFRAMA: a operação de referência é a do TOTVS (7007 no Brejinho, 7259 nos demais)
+    operacao: suframa ? (String(b.chave).startsWith('BRJ:') ? 7007 : 7259) : OPERACAO_VENDA[canalVenda] || null,
     cliente_code: cliente.code,
     cliente_nome: cliente.nome,
     cliente_cpf_cnpj: cliente.cnpj || cliente.cpf,
@@ -646,6 +654,8 @@ export async function faturar(body) {
       consumidorFinal: !!b.consumidorFinal,
       ...(avulso ? { avulso: true } : {}),
       ...(clienteTrocado ? { clienteTrocado } : {}),
+      // ICMS desonerado por item (seq → valor): o documento interno da 990 leva como desconto
+      ...(suframa ? { suframa: { isuf: cen.isuf, pct: suframa.pct, icmsDesonerado: suframa.total, porItem: Object.fromEntries(itens.map((i, k) => [i.seq, suframa.porItem[k]])) } } : {}),
       ...(b.pedidoInfo?.pix ? { pix: String(b.pedidoInfo.pix).slice(0, 100) } : {}),
       ...(creditoFalta ? { creditoFalta } : {}),
       // peças trocadas na tela (entra a que foi lida, pelo valor da que estava no pedido)
