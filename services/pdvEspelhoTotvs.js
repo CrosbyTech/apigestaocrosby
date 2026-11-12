@@ -323,6 +323,10 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
   const pagamentos = expandirSaldoBonus(pagamentosDaVenda, venda);
   if (venda.status === 'cancelada') throw new EspelhoError('Venda cancelada não é espelhada', 'VENDA_CANCELADA');
   if (venda.tipo_venda === 'troca') return { ignorado: true, motivo: 'Troca não é espelhada como documento interno' };
+  // Transferência com nota pelo HeadCoach fica registrada SÓ no HeadCoach (Yago,
+  // 11/11/2026): a API do TOTVS não finaliza transferência — o único serviço que
+  // atende transação exige forma de recebimento ("Empty field Receipts").
+  if (venda.pedido_info?.transferencia) return { ignorado: true, motivo: 'Transferência fica registrada só no HeadCoach (sem transação no TOTVS)' };
   if (cfg && cfg.espelhar_totvs === false && !forcar) return { ignorado: true, motivo: 'Espelho no TOTVS desligado para esta empresa' };
   if (venda.totvs_status === 4 && venda.totvs_transacao_code) {
     return { transactionCode: venda.totvs_transacao_code, transactionDate: venda.totvs_transacao_date, status: 4, docInternoSeq: venda.totvs_doc_interno_seq, jaEstava: true };
@@ -482,20 +486,6 @@ export async function espelharVendaNoTotvs(vendaId, { forcar = false } = {}) {
       if (err instanceof EspelhoError) throw err;
       /* consulta falhou: segue para o recebimento */
     }
-  }
-
-  // 2T) TRANSFERÊNCIA (operação 8401/8404: documento interno, não movimenta
-  // financeiro). A API do TOTVS NÃO finaliza transferência: o único serviço que
-  // atende uma transação (transaction-receiving) só aceita operação de modalidade
-  // Venda e exige ao menos um recebimento — com a lista vazia ele responde
-  // "Empty field Receipts" (visto em 11/11/2026, transação 990/903718), e
-  // transferência não tem forma de recebimento. Então a transação fica ABERTA
-  // para ser finalizada no TRAFP005; o "Tentar de novo" cai no bloco acima, vê
-  // que ela já está atendida e registra.
-  if (venda.pedido_info?.transferencia) {
-    const msg = `Falta finalizar no TOTVS: transação ${transactionCode} aberta na empresa ${empresaTotvs}. A API do TOTVS só finaliza venda (ela exige forma de recebimento, e transferência não tem). Finalize a transação no TRAFP005 da empresa ${empresaTotvs} e clique em "Tentar de novo" para confirmar.`;
-    await gravar(vendaId, { totvs_erro: msg });
-    throw new EspelhoError(msg, 'TRANSFERENCIA_NAO_ATENDIDA', 409);
   }
 
   // 2) Recebimento → ATENDIDA (exige caixa aberto no terminal)

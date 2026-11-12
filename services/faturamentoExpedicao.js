@@ -44,9 +44,10 @@ import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
 import { cardBrejinho } from './brejinhoDryland.js';
 export const EMPRESA_FATURAMENTO = 99;
 // Troca de peça NA TELA de faturamento (a que falta sai, a que sobra entra pelo
-// mesmo valor): liberada até 11/11/2026 (era só 10/11; o Yago estendeu), para os
-// pedidos cuja separação se perdeu nas 72 h do Dryland e tiveram peça trocada.
-export const TROCA_NO_FATURAMENTO_ATE = '2026-11-11';
+// mesmo valor): liberada até 13/11/2026 (era 10/11, depois 11/11; em 12/11 o Yago
+// pediu mais 2 dias), para os pedidos cuja separação se perdeu nas 72 h do Dryland
+// e tiveram peça trocada.
+export const TROCA_NO_FATURAMENTO_ATE = '2026-11-13';
 // Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
 export const EMPRESA_DOC_INTERNO = 990;
 // desconto de ajuste que o operador pode dar no faturamento dos pedidos do site
@@ -253,7 +254,49 @@ export async function bloqueioDeFaturamento(chave, ref = null) {
   return null;
 }
 
+// FATURAMENTO AVULSO (Yago, 12/11/2026): cliente que compra presencialmente na
+// matriz, sem pedido no Dryland. A tela abre vazia (chave "AVULSO:<id>"): o
+// operador escolhe cliente, operação e pagamento, bipa as peças (preço pela
+// tabela do cliente, como na Devolução) e o resto é o faturamento normal — NF-e
+// pela 99 e documento interno + contas a receber na 990.
+export const ehAvulso = (chave) => /^AVULSO:/i.test(String(chave || ''));
+export const refAvulso = (chave) => `AV-${String(chave).slice(7).replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(-8) || 'SEM-ID'}`;
+async function prepararAvulso(chave) {
+  const emit = await buscarEmitente(EMPRESA_FATURAMENTO);
+  let numeracao = null;
+  try {
+    const cfg = await buscarConfig(EMPRESA_FATURAMENTO);
+    numeracao = { serie: cfg.serie_nfe, proximo: cfg.prox_num_nfe, ambiente: cfg.ambiente };
+  } catch (e) {
+    numeracao = { erro: e.message };
+  }
+  const ref = refAvulso(chave);
+  return {
+    chave,
+    ref,
+    avulso: true,
+    canal: null,
+    empresa: EMPRESA_FATURAMENTO,
+    emitente: { uf: emit.uf, cnpj: emit.cnpj, nome: emit.xNome },
+    cliente: null,
+    cenario: null,
+    difalConferido: ICMS_DIFAL_UF_CONFERIDA,
+    vendedorCode: null,
+    operacaoDocInterno: null,
+    operacoesDocInterno: OPERACAO_DOC_INTERNO,
+    transporte: { id: 'RETIRADA', code: null, servico: null, frete: 0, pesoB: 0, volumes: 0, modFrete: 0 },
+    transportadoras: TRANSPORTADORAS,
+    pagamento: { formas: [], formaTexto: null, parcelas: 1, vencimentos: [], nsu: null, autorizacao: null, bandeira: null, pix: null, credev: null },
+    comprovantes: [],
+    // o mesmo avulso não emite duas notas
+    bloqueio: await bloqueioDeFaturamento(chave, ref).catch(() => null),
+    jaNoTotvs: [],
+    numeracao,
+  };
+}
+
 export async function prepararFaturamento(chave) {
+  if (ehAvulso(chave)) return prepararAvulso(String(chave));
   let card = null;
   let ref = null;
   if (/^BRJ:/i.test(String(chave))) {
@@ -388,18 +431,23 @@ export async function faturar(body) {
   const bloqueio = await bloqueioDeFaturamento(b.chave, b.numeroSite || null);
   if (bloqueio) throw new FaturamentoError(bloqueio.texto, 'PEDIDO_JA_FATURADO', 409);
   // Desconto do operador (ajuste) nos pedidos do site: no máximo 15% (Yago, 11/11/2026).
-  // No Brejinho vale a regra de lá (25% livre, acima com senha de owner/admin/financeiro).
-  if (!String(b.chave).startsWith('BRJ:') && Number(b.descontoFaturamento?.pct) > DESCONTO_OPERADOR_MAXIMO + 0.001) {
+  // No Brejinho e no faturamento AVULSO (venda presencial, sem valor de pedido a
+  // seguir) vale a regra de lá: 25% livre, acima com senha de owner/admin/financeiro.
+  const avulso = ehAvulso(b.chave);
+  if (!String(b.chave).startsWith('BRJ:') && !avulso && Number(b.descontoFaturamento?.pct) > DESCONTO_OPERADOR_MAXIMO + 0.001) {
     throw new FaturamentoError(`O desconto do operador é de no máximo ${DESCONTO_OPERADOR_MAXIMO}%`, 'DESCONTO_ACIMA_DO_LIMITE');
   }
   const trocas = (Array.isArray(b.trocas) ? b.trocas : [])
     .filter((t) => t && t.de && t.para)
     .map((t) => ({ de: String(t.de), deNome: t.deNome || null, para: String(t.para), paraNome: t.paraNome || null, quantidade: Number(t.quantidade) || 1 }));
   if (trocas.length && hojeBrasil() > TROCA_NO_FATURAMENTO_ATE) {
-    throw new FaturamentoError('A troca de peças no faturamento só foi liberada até 11/11/2026', 'TROCA_FORA_DO_PRAZO');
+    throw new FaturamentoError(`A troca de peças no faturamento só foi liberada até ${TROCA_NO_FATURAMENTO_ATE.split('-').reverse().join('/')}`, 'TROCA_FORA_DO_PRAZO');
   }
   // operação do documento interno: a escolhida na tela ou a do canal
   const operacaoDocInterno = Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno)) ? Number(b.operacaoDocInterno) : OPERACAO_DOC_INTERNO[b.canal] || 511;
+  // canal da venda: o do pedido; no avulso, o da operação escolhida na tela
+  const canalVenda = b.canal || Object.keys(OPERACAO_DOC_INTERNO).find((k) => OPERACAO_DOC_INTERNO[k] === operacaoDocInterno) || null;
+  if (avulso && !Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno))) throw new FaturamentoError('Escolha a operação do documento interno');
 
   // Itens + dados fiscais + produção/adquirido
   const emit = await buscarEmitente(empresa);
@@ -554,7 +602,7 @@ export async function faturar(body) {
     empresa_cnpj: emit.cnpj,
     empresa_nome: emit.xNome,
     tipo_venda: 'nfe',
-    operacao: OPERACAO_VENDA[b.canal] || null,
+    operacao: OPERACAO_VENDA[canalVenda] || null,
     cliente_code: cliente.code,
     cliente_nome: cliente.nome,
     cliente_cpf_cnpj: cliente.cnpj || cliente.cpf,
@@ -569,9 +617,9 @@ export async function faturar(body) {
     observacao: b.observacao || null,
     criado_por: b.por || null,
     origem: 'expedicao',
-    canal: b.canal || null,
+    canal: canalVenda,
     pedido_chave: b.chave,
-    numero_site: b.numeroSite || null,
+    numero_site: b.numeroSite || (avulso ? refAvulso(b.chave) : null),
     data_caixa: dataCaixa,
     operacao_doc_interno: operacaoDocInterno,
     frete,
@@ -581,6 +629,7 @@ export async function faturar(body) {
     pedido_info: {
       ...(b.pedidoInfo || {}),
       consumidorFinal: !!b.consumidorFinal,
+      ...(avulso ? { avulso: true } : {}),
       ...(b.pedidoInfo?.pix ? { pix: String(b.pedidoInfo.pix).slice(0, 100) } : {}),
       ...(creditoFalta ? { creditoFalta } : {}),
       // peças trocadas na tela (entra a que foi lida, pelo valor da que estava no pedido)
@@ -626,7 +675,7 @@ export async function faturar(body) {
     .from('pedidos_venda_faturamentos')
     .insert({
       chave: b.chave,
-      numero_site: b.numeroSite || null,
+      numero_site: b.numeroSite || (avulso ? refAvulso(b.chave) : null),
       empresa,
       venda_id: venda.id,
       operacao: operacaoDocInterno,

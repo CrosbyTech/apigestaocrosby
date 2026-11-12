@@ -7,11 +7,11 @@
 //      padrão das notas que a 99 emitia pelo TOTVS (services/pdvFiscal.js):
 //        destino da MESMA raiz de CNPJ → transferência (op 8400, CFOP 5151/5152)
 //        destino de OUTRA raiz        → venda entre filiais (op 8405, CFOP 5101/5102)
-//   3. o TOTVS recebe a transação na EMPRESA 990 como DOCUMENTO INTERNO, sem
-//      nota e sem financeiro, na operação "N/OFC" equivalente:
-//        transferência → 8401 SAIDA DE TRANSFERENCIA ENTRE FILIAIS N/OFC
-//        venda         → 8404 VENDA MERCADORIA ENTRE FILIAIS N/OFC
-//      e o HeadCoach pede o atendimento dela (services/pdvEspelhoTotvs.js).
+//   3. a transferência fica registrada SÓ NO HEADCOACH (Yago, 11/11/2026): não
+//      há mais transação no TOTVS. A primeira versão abria um documento interno
+//      na empresa 990 (operações 8401/8404), mas a API do TOTVS não finaliza
+//      transferência (exige forma de recebimento) e as transações ficavam
+//      abertas. Nota autorizada = transferência concluída.
 // A venda fica em pdv_vendas (origem 'expedicao', canal 'transferencia',
 // pedido_info.transferencia) para reaproveitar emissão, numeração, DANFE,
 // cancelamento e espelho. O acompanhamento fica em transferencias_transacoes
@@ -22,12 +22,11 @@ import supabase from '../config/supabase.js';
 import { listarFiliaisPop, raizCnpj, TransferenciaError } from './transferenciasMercadoria.js';
 import { buscarEmitente, buscarClienteFiscal, buscarProdutoFiscal, buscarConfig, tiposFiscais, cenarioExpedicao, cfopTransferencia } from './pdvFiscal.js';
 import { acertarNumeracao } from './faturamentoExpedicao.js';
-import { espelharVendaNoTotvs } from './pdvEspelhoTotvs.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
 
 export const EMPRESA_ORIGEM_NOTA = 99;
-export const EMPRESA_TOTVS_TRANSF = 990;
-// nota: operação que a 99 usava no TOTVS (só referência) · docInterno: a que vai para a 990
+// nota: operação que a 99 usava no TOTVS (só referência, define a natureza da NF-e) ·
+// docInterno: a que ia para a 990 quando havia transação no TOTVS (não é mais usada)
 export const OPERACOES_TRANSF_NOTA = {
   transferencia: { nota: 8400, docInterno: 8401, nome: 'Transferência entre filiais' },
   venda: { nota: 8405, docInterno: 8404, nome: 'Venda de mercadoria entre filiais' },
@@ -116,8 +115,7 @@ export async function prepararTransferenciaNota({ solicitacaoId = null, destinoC
     natureza: ctx.natureza,
     naturezaNome: ctx.operacoes.nome,
     operacaoNota: ctx.operacoes.nota,
-    operacaoDocInterno: ctx.operacoes.docInterno,
-    empresaTotvs: EMPRESA_TOTVS_TRANSF,
+    semTotvs: true,
     cenario: { chave: ctx.cen.chave, texto: CENARIO_TXT[ctx.cen.chave] || ctx.cen.chave, cfops: ctx.cen.contribuinte ? [cfopTransferencia(ctx.cen.chave, 'producao', ctx.natureza), cfopTransferencia(ctx.cen.chave, 'adquirido', ctx.natureza)] : [] },
     numeracao: { serie: cfg.serie_nfe, ambiente: cfg.ambiente },
     pendencias,
@@ -134,8 +132,9 @@ async function acharRegistro(vendaId) {
 }
 
 /**
- * Emite a NF-e (se ainda não saiu), abre e atende a transação na 990 (se ainda
- * não foi) e atualiza o registro e a solicitação. Pode ser chamado de novo.
+ * Emite a NF-e (se ainda não saiu) e atualiza o registro e a solicitação: com a
+ * nota autorizada a transferência está concluída (não há transação no TOTVS).
+ * Pode ser chamado de novo.
  */
 export async function processarTransferenciaNota(vendaId) {
   await exigirColunas();
@@ -165,53 +164,37 @@ export async function processarTransferenciaNota(vendaId) {
   }
   await atualizar({ nota_id: nota?.id ?? null, nf_numero: nota?.numero ?? null, nf_serie: nota?.serie != null ? String(nota.serie) : null, nf_chave: nota?.chave ?? null, nf_status: nota?.status || (fiscal.ok ? 'autorizada' : 'erro') });
   if (!fiscal.ok && nota?.status !== 'autorizada') {
-    return { vendaId, venda, nota, fiscal, totvs: { ok: false, mensagem: 'aguardando a NF-e ser autorizada' } };
+    return { vendaId, venda, nota, fiscal, totvs: { ok: false, semTotvs: true, mensagem: 'aguardando a NF-e ser autorizada' } };
   }
 
-  // 2) documento interno na 990 (sem nota, sem financeiro) + atendimento
-  let totvs;
-  try {
-    const r = await espelharVendaNoTotvs(vendaId, { forcar: true });
-    totvs = { ok: true, ...r };
-  } catch (err) {
-    totvs = { ok: false, mensagem: err.message, code: err.code };
-  }
-  venda = await carregarVenda(vendaId);
-  const atendida = venda.totvs_status === 4;
-  await atualizar({
-    transacao_code: venda.totvs_transacao_code || null,
-    transacao_date: venda.totvs_transacao_date || null,
-    transacao_status: venda.totvs_status || 1,
-    totvs_erro: totvs.ok ? null : totvs.mensagem,
-    ...(atendida ? { atendida_em: reg?.atendida_em || new Date().toISOString() } : {}),
-  });
+  // 2) sem TOTVS: a nota autorizada conclui a transferência. `totvs` continua na
+  // resposta só para a tela antiga não acusar pendência.
+  const agora = new Date().toISOString();
+  const totvs = { ok: true, semTotvs: true, mensagem: 'registrada só no HeadCoach (sem transação no TOTVS)' };
+  await atualizar({ transacao_status: 4, totvs_erro: null, atendida_em: reg?.atendida_em || agora });
 
-  // 3) solicitação acompanha: nota + transação atendida = concluída
+  // 3) solicitação acompanha: nota autorizada = concluída
   if (t.solicitacaoId) {
     await supabase
       .from('transferencias_mercadoria')
       .update({
-        status: atendida ? 'concluida' : 'em_transferencia',
+        status: 'concluida',
         venda_id: vendaId,
         nf_numero: nota?.numero ?? null,
         nf_chave: nota?.chave ?? null,
-        transacao_code: venda.totvs_transacao_code || null,
-        transacao_branch: EMPRESA_TOTVS_TRANSF,
-        transacao_date: venda.totvs_transacao_date || null,
-        transacao_status: venda.totvs_status || 1,
+        transacao_status: 4,
         transacao_total: venda.total,
-        transacao_operacao: venda.operacao_doc_interno,
         transacao_qtd_epcs: (venda.itens || []).reduce((s, i) => s + (Array.isArray(i.epcs) ? i.epcs.length : 0), 0),
         transacao_por: venda.criado_por || null,
-        ...(atendida ? { transacao_atendida_em: new Date().toISOString() } : {}),
-        atualizado_em: new Date().toISOString(),
+        transacao_atendida_em: agora,
+        atualizado_em: agora,
       })
       .eq('id', t.solicitacaoId);
   }
   return { vendaId, venda, nota, fiscal, totvs };
 }
 
-/** Recebe a conferência da tela, grava a venda e processa (nota + 990). */
+/** Recebe a conferência da tela, grava a venda e emite a nota. */
 export async function transferirComNota(b = {}) {
   await exigirColunas();
   if (!Number(b.vendedorCode)) throw new TransferenciaError('Escolha o vendedor', 'SEM_VENDEDOR');
@@ -287,15 +270,13 @@ export async function transferirComNota(b = {}) {
     pedido_chave: null,
     numero_site: ref,
     data_caixa: hojeBrasil(),
-    operacao_doc_interno: operacoes.docInterno,
+    operacao_doc_interno: null,
     frete: 0,
     transporte: null,
     cobranca: null,
     comprovantes: [],
     pedido_info: {
       transferencia: { natureza, ref, solicitacaoId: sol?.id || null, destinoCode: ctx.filial?.code ?? null, destinoNome, operacaoNota: operacoes.nota },
-      empresaTotvs: EMPRESA_TOTVS_TRANSF,
-      terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null,
     },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
@@ -307,17 +288,17 @@ export async function transferirComNota(b = {}) {
   }
   await registrarEpcs({ venda, itens: itensGravados || [], tipo: 'venda' });
 
-  // registro da aba Transações (acompanha nota e transação da 990)
+  // registro da aba Transações (acompanha a nota; não há transação no TOTVS)
   const { error: e2 } = await supabase.from('transferencias_transacoes').insert({
     transferencia_id: sol?.id || null,
     empresa: EMPRESA_ORIGEM_NOTA,
     empresa_destino: ctx.filial?.code ?? 0,
-    empresa_totvs: EMPRESA_TOTVS_TRANSF,
+    empresa_totvs: null,
     venda_id: venda.id,
     natureza,
     transacao_code: null,
     transacao_status: 1,
-    operacao: operacoes.docInterno,
+    operacao: operacoes.nota,
     cfop: itens[0]?.cfop || null,
     total,
     qtd_pecas: qtd,
@@ -333,6 +314,6 @@ export async function transferirComNota(b = {}) {
   });
   if (e2) console.warn(`⚠️ [transferência] venda ${venda.id}: não gravei o registro da aba Transações: ${e2.message}`);
   if (sol) await supabase.from('transferencias_mercadoria').update({ status: 'em_transferencia', venda_id: venda.id, atualizado_em: new Date().toISOString() }).eq('id', sol.id);
-  console.log(`🔁 [transferência] ${ref || 'avulsa'}: 99 → ${ctx.filial?.code ?? cliente.code} ${destinoNome} · ${qtd} pç · R$ ${total.toFixed(2)} · ${natureza} (990 op ${operacoes.docInterno}) · venda ${venda.id}`);
+  console.log(`🔁 [transferência] ${ref || 'avulsa'}: 99 → ${ctx.filial?.code ?? cliente.code} ${destinoNome} · ${qtd} pç · R$ ${total.toFixed(2)} · ${natureza} · só HeadCoach · venda ${venda.id}`);
   return processarTransferenciaNota(venda.id);
 }

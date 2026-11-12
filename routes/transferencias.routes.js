@@ -92,6 +92,15 @@ router.post(
 );
 
 // ─── Transações ──────────────────────────────────────────────────────────────
+// Transferência com nota pelo HeadCoach (venda_id) não tem transação no TOTVS: a
+// situação é a da NOTA — autorizada = concluída (4), cancelada = cancelada (6),
+// senão em andamento (1). As primeiras ficaram com uma transação aberta na 990
+// que não conta mais (o número fica guardado em transacao_code_antiga).
+const situacaoPelaNota = (t) => {
+  if (!t?.venda_id) return t;
+  const st = t.nf_status === 'autorizada' ? 4 : t.nf_status === 'cancelada' ? 6 : 1;
+  return { ...t, transacao_status: st, sem_totvs: true, transacao_code_antiga: t.transacao_code || null, transacao_code: null, empresa_totvs: null, totvs_erro: null };
+};
 router.post(
   '/transacoes',
   asyncHandler(async (req, res) => {
@@ -136,7 +145,7 @@ router.get(
     // banco ainda sem as colunas da nota: lista como antes
     if (error && /column|does not exist|schema cache/i.test(String(error.message || ''))) ({ data, error } = await consultar(COLUNAS));
     if (error) return responder(res, error);
-    const items = data || [];
+    const items = (data || []).map(situacaoPelaNota);
     const valendo = items.filter((i) => i.transacao_status !== 6);
     return successResponse(
       res,
@@ -162,7 +171,7 @@ router.get(
     const { data, error } = await supabase.from('transferencias_transacoes').select('*').eq('id', parseInt(req.params.id, 10)).maybeSingle();
     if (error) return responder(res, error);
     if (!data) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
-    return successResponse(res, data, 'Transação de transferência');
+    return successResponse(res, situacaoPelaNota(data), 'Transação de transferência');
   }),
 );
 
@@ -216,9 +225,7 @@ router.get(
 const mensagemNota = (r) =>
   !r.fiscal?.ok
     ? `NF-e não autorizada: ${r.fiscal?.mensagem || 'erro'}`
-    : r.totvs?.ok
-      ? `Transferência concluída: NF-e ${r.nota?.numero}/${r.nota?.serie} e transação ${r.totvs.transactionCode} atendida no TOTVS`
-      : `NF-e ${r.nota?.numero}/${r.nota?.serie} autorizada. TOTVS: ${r.totvs?.mensagem || 'pendente'}`;
+    : `Transferência concluída: NF-e ${r.nota?.numero}/${r.nota?.serie} autorizada e registrada no HeadCoach`;
 router.post(
   '/nota',
   asyncHandler(async (req, res) => {
@@ -230,7 +237,7 @@ router.post(
     }
   }),
 );
-// "Tentar de novo": emite a nota se ainda não saiu e abre/atende a transação da 990
+// "Tentar de novo": emite a nota que não saiu (não há transação no TOTVS)
 router.post(
   '/nota/:vendaId/reprocessar',
   asyncHandler(async (req, res) => {
