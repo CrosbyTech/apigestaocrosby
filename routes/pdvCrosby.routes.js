@@ -45,6 +45,7 @@ import {
   ICMS_ALIQ_UF,
 } from '../services/pdvFiscal.js';
 import { espelharVendaNoTotvs, EspelhoError } from '../services/pdvEspelhoTotvs.js';
+import { caixaAbertoPara } from '../services/hcCaixa.js';
 import { aoCancelarVenda } from '../services/saldoBonus.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
 import {
@@ -564,6 +565,9 @@ router.post(
       observacao: b.observacao || null,
       criado_por: b.criadoPor || null,
     };
+    // HEADCOACH › CAIXA: a venda entra no caixa aberto da empresa (sem caixa aberto, segue sem)
+    const caixa = await caixaAbertoPara(empresa, b.terminal);
+    if (caixa) cabecalho.caixa_id = caixa.id;
     const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
     const { data: itensGravados, error: e1 } = await supabase

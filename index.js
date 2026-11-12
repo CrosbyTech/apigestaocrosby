@@ -44,6 +44,8 @@ import drylandChamadosRoutes from './routes/drylandChamados.routes.js';
 import devolucoesRoutes from './routes/devolucoes.routes.js';
 import transferenciasRoutes from './routes/transferencias.routes.js';
 import pedidosVendaRoutes from './routes/pedidosVenda.routes.js';
+import hcTransacoesRoutes from './routes/hcTransacoes.routes.js';
+import hcCaixaRoutes from './routes/hcCaixa.routes.js';
 import faturamentoExpedicaoRoutes from './routes/faturamentoExpedicao.routes.js';
 import balancoRfidRoutes from './routes/balancoRfid.routes.js';
 import brejinhoRoutes from './routes/brejinho.routes.js';
@@ -247,6 +249,8 @@ app.use('/api/dryland', drylandChamadosRoutes); // Dryland — chamados da rede 
 app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — link público /devolucao + página /devolucoes-mercadoria
 app.use('/api/transferencias', transferenciasRoutes); // Transferências de mercadoria entre empresas — regra do POP (7272/7273/7280), página /transferencias-mercadoria
 app.use('/api/pedidos-venda', pedidosVendaRoutes); // Pedidos de venda do Dryland (separação → pedido), página /expedicao/pedidos-venda
+app.use('/api/hc/caixa', hcCaixaRoutes); // HEADCOACH › CAIXA: abertura, suprimento/retirada, contagem, fechamento e encerramento diário (data de caixa) — exige login
+app.use('/api/hc', hcTransacoesRoutes); // HEADCOACH › Transações: tudo o que o HeadCoach emite (PDV, faturamento, transferências, devoluções), consulta no estilo do TRAFL016 — exige login
 app.use('/api/faturamento-expedicao', faturamentoExpedicaoRoutes); // FATURAR da expedição: NF-e pelo HeadCoach (empresa 99) + documento interno e contas a receber no TOTVS
 app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos de contagem do app Android (Urovo)
 app.use('/api/brejinho', brejinhoRoutes); // Expedição Brejinho — pedidos das franquias do Dryland /brejinho

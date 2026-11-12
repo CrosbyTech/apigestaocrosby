@@ -34,6 +34,7 @@ import {
   ICMS_DIFAL_UF_CONFERIDA,
 } from './pdvFiscal.js';
 import { espelharVendaNoTotvs, cartoesTotvs } from './pdvEspelhoTotvs.js';
+import { caixaAbertoPara } from './hcCaixa.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
 import { enviarDuplicata, gravarNotaNoCard, temBoleto } from './faturamentoDuplicata.js';
 import { logisticaDosFaturamentos } from './faturamentoLogistica.js';
@@ -443,6 +444,20 @@ export async function faturar(body) {
   if (trocas.length && hojeBrasil() > TROCA_NO_FATURAMENTO_ATE) {
     throw new FaturamentoError(`A troca de peças no faturamento só foi liberada até ${TROCA_NO_FATURAMENTO_ATE.split('-').reverse().join('/')}`, 'TROCA_FORA_DO_PRAZO');
   }
+  // Cliente: pedido que veio SEM cliente → o operador escolhe livre. Pedido COM
+  // cliente → trocar pede a senha de owner/admin/financeiro (Yago, 12/11/2026),
+  // e quem liberou fica na venda (pedido_info.clienteTrocado).
+  let clienteTrocado = null;
+  if (!avulso && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(b.chave))) {
+    const { data: cardFila } = await supabase.from('pedidos_venda_fila').select('dados').eq('id', b.chave).maybeSingle();
+    const doPedido = parseInt(cardFila?.dados?.codigo_cliente, 10) || null;
+    if (doPedido && Number(b.clienteCode) !== doPedido) {
+      if (!b.trocaCliente?.liberadoPor) throw new FaturamentoError(`O pedido é do cliente ${doPedido}: trocar o cliente pede a senha de owner, admin ou financeiro`, 'TROCA_CLIENTE_SEM_SENHA', 403);
+      clienteTrocado = { de: doPedido, para: Number(b.clienteCode), liberadoPor: String(b.trocaCliente.liberadoPor).slice(0, 120) };
+    }
+  } else if (b.trocaCliente?.liberadoPor && b.clientePedido && Number(b.clienteCode) !== Number(b.clientePedido)) {
+    clienteTrocado = { de: Number(b.clientePedido), para: Number(b.clienteCode), liberadoPor: String(b.trocaCliente.liberadoPor).slice(0, 120) };
+  }
   // operação do documento interno: a escolhida na tela ou a do canal
   const operacaoDocInterno = Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno)) ? Number(b.operacaoDocInterno) : OPERACAO_DOC_INTERNO[b.canal] || 511;
   // canal da venda: o do pedido; no avulso, o da operação escolhida na tela
@@ -630,6 +645,7 @@ export async function faturar(body) {
       ...(b.pedidoInfo || {}),
       consumidorFinal: !!b.consumidorFinal,
       ...(avulso ? { avulso: true } : {}),
+      ...(clienteTrocado ? { clienteTrocado } : {}),
       ...(b.pedidoInfo?.pix ? { pix: String(b.pedidoInfo.pix).slice(0, 100) } : {}),
       ...(creditoFalta ? { creditoFalta } : {}),
       // peças trocadas na tela (entra a que foi lida, pelo valor da que estava no pedido)
@@ -646,6 +662,9 @@ export async function faturar(body) {
       empresaTotvs: EMPRESA_DOC_INTERNO,
     },
   };
+  // HEADCOACH › CAIXA: a venda entra no caixa aberto da empresa (sem caixa aberto, segue sem)
+  const caixaHc = await caixaAbertoPara(empresa, b.terminal);
+  if (caixaHc) cabecalho.caixa_id = caixaHc.id;
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
   if (error) throw new FaturamentoError(error.message, 'DB_ERROR', 500);
   const { data: itensGravados, error: e1 } = await supabase.from('pdv_venda_itens').insert(itens.map((i) => ({ ...i, venda_id: venda.id }))).select();

@@ -83,6 +83,22 @@ router.post(
   }),
 );
 
+// trocar o cliente que veio no pedido do Dryland pede senha de owner/admin/financeiro
+router.post(
+  '/autorizar-troca-cliente',
+  asyncHandler(async (req, res) => {
+    const { email, senha, pedido, de, para, por } = req.body || {};
+    try {
+      const autorizador = await verificarSenhaAutorizador(email, senha, ['owner', 'admin', 'user']);
+      console.log(`🔓 [Faturamento] troca de cliente liberada por ${autorizador.email} (${autorizador.role}) para ${por || '?'} no pedido ${pedido ?? '?'}: ${de ?? '?'} → ${para ?? '(a escolher)'}`);
+      return successResponse(res, autorizador, 'Troca de cliente liberada');
+    } catch (err) {
+      if (err instanceof AutorizacaoError) return errorResponse(res, err.message, err.status, err.code);
+      throw err;
+    }
+  }),
+);
+
 router.post(
   '/previa',
   asyncHandler(async (req, res) => {
