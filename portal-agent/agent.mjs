@@ -235,6 +235,14 @@ async function sessaoDeComando(fn) {
 
 function interpretarPotencias(data) {
   const n = Math.floor((data.length - 1) / 5);
+  // Firmware 7.x (ex.: portal 192.168.99.203) tem UMA potência para o leitor
+  // todo e responde um registro só, com antena 0: [00][00, leitura, escrita].
+  // Mostra como 4 antenas iguais; gravar qualquer uma muda a de todas.
+  if (n === 1 && data[1] === 0) {
+    const leitura = data.readUInt16BE(2) / 100;
+    const escrita = data.readUInt16BE(4) / 100;
+    return [1, 2, 3, 4].map((ant) => ({ ant, leitura, escrita, global: true }));
+  }
   const antenas = [];
   for (let k = 0; k < n; k++) {
     const o = 1 + k * 5;
