@@ -542,7 +542,9 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
 //   indPres 9, indIntermed 0, indFinal 1 sem IE / 0 com IE
 // Alíquota interna da UF de destino usada no DIFAL — SÓ as conferidas nas notas
 // do TOTVS (pICMSUFDest, FCP 0). UF fora da lista é recusada em vez de chutar.
-export const ICMS_DIFAL_UF_CONFERIDA = { AL: 19, BA: 20.5, CE: 20, ES: 17, MA: 23, PA: 19, PB: 20, PE: 20.5, PI: 22.5, SE: 19, TO: 20 };
+// MG: 18% conferido em 12/11/2026 nas NF 15639/3 e 15640/3 da empresa 99 (14/10/2026,
+// consumidor final de MG): pICMSUFDest 18, pICMSInter 12, pFCPUFDest 0, partilha 100%.
+export const ICMS_DIFAL_UF_CONFERIDA = { AL: 19, BA: 20.5, CE: 20, ES: 17, MA: 23, MG: 18, PA: 19, PB: 20, PE: 20.5, PI: 22.5, SE: 19, TO: 20 };
 const NATOP_PRODUCAO = 'VENDA DE PRODUCAO DO ESTABELECIMENTO';
 const NATOP_ADQUIRIDA = 'VENDA DE MERCADORIA ADQUIRIDA OU RECEBIDA DE TERCEIROS';
 const SUFIXO_NAO_CONTRIB = ', DESTINADAS A NAO CONTRIBUINTE';
