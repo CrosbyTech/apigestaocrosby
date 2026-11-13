@@ -4,11 +4,12 @@
 //   GET  /?empresa&busca&todos=1        clientes com saldo (todos=1 inclui zerados)
 //   GET  /cliente/:code?empresa         saldo + extrato do cliente
 //   POST /sincronizar-devolucoes        credita as devoluções atendidas que faltam (owner/admin)
+//   POST /gerar                         { empresa, clienteCode, clienteNome, tipo: credev|adiantamento, valor, motivo, senha } (owner/admin)
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
-import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes } from '../services/hcSaldosClientes.js';
+import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes, gerarCredito } from '../services/hcSaldosClientes.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -45,6 +46,11 @@ router.post(
     if (!['owner', 'admin'].includes(req.user?.role)) throw new SaldoClienteError('Só owner ou admin', 'SEM_PERMISSAO', 403);
     return sincronizarDevolucoes();
   }, (r) => `${r.creditadas} devolução(ões) creditada(s), ${r.descreditadas} desfeita(s)`),
+);
+
+router.post(
+  '/gerar',
+  rota((req) => gerarCredito(req.user, req.body || {}), (r) => `${r.tipo === 'credev' ? 'CREDEV' : 'Adiantamento'} de R$ ${r.valor.toFixed(2).replace('.', ',')} gerado — saldo agora R$ ${Number(r.saldo).toFixed(2).replace('.', ',')}`),
 );
 
 export default router;

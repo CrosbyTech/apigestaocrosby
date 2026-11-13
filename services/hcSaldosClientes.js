@@ -8,12 +8,14 @@
 //     "Adiantamento" consomem daqui, nunca mais do TOTVS;
 //   • nota cancelada / pedido refaturado (estornarVenda): o que a venda gastou volta;
 //   • devolução atendida (creditarDevolucao / sincronizarDevolucoes): o valor
-//     entra no CREDEV do cliente naquela empresa; cancelada, sai de novo.
+//     entra no CREDEV do cliente naquela empresa; cancelada, sai de novo;
+//   • crédito gerado à mão (gerarCredito): owner/admin, com senha e motivo.
 // Devoluções ANTERIORES à carga já estão no saldo que veio do TOTVS: só entra
 // devolução atendida depois da carga.
 // ============================================================================
 import supabase from '../config/supabase.js';
 import { postTotvs } from './bluecardLimite.js';
+import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
 
 export class SaldoClienteError extends Error {
   constructor(message, code = 'SALDO_CLIENTE', status = 400) {
@@ -177,6 +179,48 @@ export async function estornarVendas(vendaIds, motivo = null, por = null) {
   let total = 0;
   for (const id of [...new Set((vendaIds || []).map(Number).filter(Boolean))]) total = round2(total + (await estornarVenda(id, motivo, por)));
   return total;
+}
+
+// ─── crédito gerado à mão (owner/admin) ──────────────────────────────────────
+/**
+ * Gera CREDEV ou adiantamento para o cliente numa empresa (HeadCoach › Saldos
+ * de Clientes, botão GERAR CRÉDITO). Só owner ou admin, com a própria senha e
+ * motivo. Fica no extrato como "ajuste" com quem gerou e por quê.
+ */
+export async function gerarCredito(user, b = {}) {
+  if (!['owner', 'admin'].includes(user?.role)) throw new SaldoClienteError('Só owner ou admin gera CREDEV ou adiantamento', 'SEM_PERMISSAO', 403);
+  const empresa = parseInt(b.empresa, 10);
+  const cliente = parseInt(b.clienteCode, 10);
+  const tipo = String(b.tipo || '');
+  const bruto = String(b.valor ?? '').trim();
+  const valor = round2(Number(bruto.includes(',') ? bruto.replace(/\./g, '').replace(',', '.') : bruto));
+  const motivo = String(b.motivo || '').trim();
+  if (!(empresa > 0)) throw new SaldoClienteError('Informe a empresa');
+  if (!(cliente > 0)) throw new SaldoClienteError('Escolha o cliente');
+  if (!TIPOS[tipo]) throw new SaldoClienteError('Escolha CREDEV ou adiantamento');
+  if (!(valor > 0)) throw new SaldoClienteError('Informe o valor');
+  if (motivo.length < 5) throw new SaldoClienteError('Informe o motivo');
+  try {
+    await verificarSenhaAutorizador(user?.email, b.senha, ['owner', 'admin']);
+  } catch (e) {
+    if (e instanceof AutorizacaoError) throw new SaldoClienteError(e.message, e.code, e.status);
+    throw e;
+  }
+  const quem = user?.name || user?.email || null;
+  const r = await movimentar({
+    empresa,
+    cliente,
+    tipo,
+    valor,
+    movimento: 'ajuste',
+    referencia: 'gerado no HeadCoach',
+    observacao: `${TIPOS[tipo]} gerado por ${quem}: ${motivo}`,
+    por: quem,
+    nome: b.clienteNome ? String(b.clienteNome).slice(0, 200) : null,
+    doc: b.clienteDoc ? String(b.clienteDoc).replace(/\D/g, '') || null : null,
+  });
+  console.log(`💳 [saldos] ${TIPOS[tipo]} de ${brl(valor)} gerado para o cliente ${cliente} na empresa ${empresa} por ${quem}: ${motivo}`);
+  return { empresa, clienteCode: cliente, tipo, valor, saldo: r.saldo };
 }
 
 // ─── devoluções ──────────────────────────────────────────────────────────────
