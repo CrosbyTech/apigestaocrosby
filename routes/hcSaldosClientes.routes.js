@@ -9,6 +9,7 @@
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
+import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes, gerarCredito } from '../services/hcSaldosClientes.js';
 
 const router = express.Router();
@@ -26,9 +27,20 @@ const rota = (fn, msg) =>
     }
   });
 
+// só as empresas que a pessoa pode ver (utils/empresasUsuario.js; null = todas)
+async function permitidas(req, empresa = null) {
+  const codes = await empresasRestritasDoUsuario(req.user);
+  if (codes && empresa && !codes.includes(Number(empresa))) throw new SaldoClienteError(`Você não tem acesso à empresa ${empresa}`, 'SEM_ACESSO_EMPRESA', 403);
+  return codes;
+}
+
 router.get(
   '/',
-  rota((req) => listarSaldos({ empresa: req.query.empresa || null, busca: req.query.busca || '', comSaldo: req.query.todos !== '1' }), (r) => `${r.totais.clientes} cliente(s)`),
+  rota(async (req) => {
+    const codes = await permitidas(req, req.query.empresa || null);
+    if (codes && !codes.length) return { lista: [], totais: { clientes: 0, credev: 0, adiantamento: 0 } };
+    return listarSaldos({ empresa: req.query.empresa || null, empresas: codes, busca: req.query.busca || '', comSaldo: req.query.todos !== '1' });
+  }, (r) => `${r.totais.clientes} cliente(s)`),
 );
 router.get(
   '/cliente/:code',
@@ -36,6 +48,7 @@ router.get(
     const code = parseInt(req.params.code, 10);
     if (!code) throw new SaldoClienteError('Informe o cliente');
     const empresa = parseInt(req.query.empresa, 10) || 99;
+    await permitidas(req, empresa);
     const [saldo, extrato] = await Promise.all([saldoDoCliente(code, empresa), extratoDoCliente(code, empresa)]);
     return { saldo, extrato };
   }, 'Saldo do cliente'),

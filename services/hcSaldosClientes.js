@@ -82,11 +82,12 @@ export async function saldoDoCliente(cliente, empresa = EMPRESA_CARGA) {
   return out;
 }
 
-export async function listarSaldos({ empresa, busca, comSaldo = true } = {}) {
+export async function listarSaldos({ empresa, empresas = null, busca, comSaldo = true } = {}) {
   const out = [];
   for (let de = 0; ; de += 1000) {
     let qy = supabase.from('hc_cliente_saldos').select('*').order('saldo', { ascending: false }).order('cliente_code').range(de, de + 999);
     if (empresa) qy = qy.eq('empresa', Number(empresa));
+    else if (empresas) qy = qy.in('empresa', empresas);
     if (comSaldo) qy = qy.gt('saldo', 0);
     const b = String(busca || '').trim();
     if (b) qy = /^\d+$/.test(b) ? qy.eq('cliente_code', Number(b)) : qy.ilike('cliente_nome', `%${b.replace(/[%_,()]/g, ' ')}%`);
@@ -393,5 +394,216 @@ export async function carregarDoTotvs({ empresa = EMPRESA_CARGA, ano = 2026, por
     }
     log(`   ${Math.min(i + 50, codes.length)}/${codes.length} cliente(s) conferido(s)…`);
   }
+  return r;
+}
+
+// ─── varredura completa (todos os clientes do cadastro) ──────────────────────
+/**
+ * Confere no TOTVS o saldo de CREDEV e adiantamento de TODOS os clientes do
+ * cadastro (pes_pessoa) na empresa e traz para o HeadCoach quem tem saldo e
+ * ainda não foi carregado (Yago, 13/11/2026: a 1ª carga só olhou quem teve
+ * título em 2026 e deixou de fora saldos mais antigos). Só leitura no TOTVS.
+ *   • cliente já carregado → não mexe (o saldo daqui já está andando);
+ *   • cliente sem carga mas com movimento no HeadCoach (devolução creditada,
+ *     crédito gerado à mão…) → NÃO carrega sozinho, vai para "revisar" (o
+ *     saldo do TOTVS pode já incluir o que entrou aqui e duplicaria).
+ */
+export async function varrerTodosDoTotvs({ empresa = EMPRESA_CARGA, lote = 500, paralelo = 3, por = 'carga completa (TOTVS)', log = console.log } = {}) {
+  // 1) todos os códigos do cadastro
+  const codes = [];
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await supabase.from('pes_pessoa').select('code').order('code').range(de, de + 999);
+    if (error) throw falhaDb(error);
+    for (const p of data || []) {
+      const c = Number(p.code);
+      if (c > 0) codes.push(c);
+    }
+    if (!data || data.length < 1000) break;
+  }
+  const unicos = [...new Set(codes)];
+  log(`🔎 ${unicos.length} pessoa(s) no cadastro — conferindo o saldo de cada uma na empresa ${empresa} no TOTVS…`);
+
+  // 2) quem já tem carga e quem já tem movimento no HeadCoach (nesta empresa)
+  const movs = [];
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await supabase.from('hc_cliente_saldos_mov').select('cliente_code, tipo, movimento').eq('empresa', empresa).order('id').range(de, de + 999);
+    if (error) throw falhaDb(error);
+    movs.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const comCarga = new Set(movs.filter((m) => m.movimento === 'carga_inicial').map((m) => `${m.cliente_code}|${m.tipo}`));
+  const comMovimento = new Set(movs.filter((m) => m.movimento !== 'carga_inicial').map((m) => `${m.cliente_code}|${m.tipo}`));
+
+  const r = { pessoas: unicos.length, conferidas: 0, comSaldo: 0, carregados: 0, credev: 0, adiantamento: 0, jaCarregados: 0, revisar: [], erros: [] };
+  const consultar = async (lista, tentativa = 1) => {
+    try {
+      const resp = await postTotvs(
+        '/accounts-receivable/v2/customer-financial-balance/search',
+        { filter: { customerCodeList: lista }, option: { branchCodeList: [empresa], isRefundCredit: true, isAdvanceAmount: true }, page: 1, pageSize: lista.length },
+        { timeout: 180000 },
+      );
+      return resp.data?.items || [];
+    } catch (e) {
+      if (tentativa >= 4) throw e;
+      await new Promise((ok) => setTimeout(ok, 3000 * tentativa));
+      return consultar(lista, tentativa + 1);
+    }
+  };
+  const lotes = [];
+  for (let i = 0; i < unicos.length; i += lote) lotes.push(unicos.slice(i, i + lote));
+  let proximo = 0;
+  const trabalhador = async () => {
+    while (proximo < lotes.length) {
+      const idx = proximo++;
+      const lista = lotes[idx];
+      let itens;
+      try {
+        itens = await consultar(lista);
+      } catch (e) {
+        r.erros.push({ lote: idx, de: lista[0], ate: lista[lista.length - 1], erro: e.message });
+        continue;
+      }
+      for (const it of itens) {
+        const code = Number(it.code);
+        const v = (it.values || []).find((x) => Number(x.branchCode) === empresa) || {};
+        const saldos = { credev: round2(v.refundCreditValue || 0), adiantamento: round2(v.advanceAmountValue || 0) };
+        if (!(saldos.credev > 0) && !(saldos.adiantamento > 0)) continue;
+        r.comSaldo += 1;
+        for (const tipo of Object.keys(TIPOS)) {
+          if (!(saldos[tipo] > 0)) continue;
+          const k = `${code}|${tipo}`;
+          if (comCarga.has(k)) {
+            r.jaCarregados += 1;
+            continue;
+          }
+          if (comMovimento.has(k)) {
+            r.revisar.push({ cliente: code, nome: it.name || null, tipo, saldoTotvs: saldos[tipo] });
+            continue;
+          }
+          try {
+            const x = await movimentar({
+              empresa,
+              cliente: code,
+              tipo,
+              valor: saldos[tipo],
+              movimento: 'carga_inicial',
+              referencia: `TOTVS ${new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife' }).format(new Date())}`,
+              observacao: `Saldo de ${TIPOS[tipo]} no TOTVS na carga completa (todos os clientes)`,
+              por,
+              nome: it.name || null,
+              doc: String(it.cpfCnpj || '').replace(/\D/g, '') || null,
+            });
+            if (x.jaFeito) r.jaCarregados += 1;
+            else {
+              r.carregados += 1;
+              r[tipo] = round2(r[tipo] + saldos[tipo]);
+              comCarga.add(k);
+            }
+          } catch (e) {
+            r.erros.push({ cliente: code, tipo, erro: e.message });
+          }
+        }
+      }
+      r.conferidas += lista.length;
+      if ((idx + 1) % 10 === 0 || r.conferidas === unicos.length) log(`   ${r.conferidas}/${unicos.length} conferida(s) · ${r.carregados} saldo(s) novo(s) · CREDEV ${brl(r.credev)} · adiantamento ${brl(r.adiantamento)}`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, paralelo) }, trabalhador));
+  return r;
+}
+
+// ─── acerto pelo relatório do TOTVS (FCCR015 - Saldo de Conta por Pool) ──────
+/**
+ * Lê o texto do relatório FCCR015 do TOTVS (Saldo de Conta por Pool) e devolve
+ * uma linha por pessoa: { cliente, nome, credev, adiantamento } — só as
+ * colunas CREDEV e Adiantamento (Saldo e Saldo Concil. são ignorados).
+ */
+export function lerRelatorioFccr015(texto) {
+  const num = (s) => Number(String(s).replace(/\./g, '').replace(',', '.'));
+  const rx = /^\s*\d+\s+(\d+)\s+[\d.]+\s+(.*?)\s(\d+)\s+(?:\d{3} -\S+|-)\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s*$/;
+  const linhas = [];
+  let contas = 0;
+  for (const l of String(texto).split(/\r?\n/)) {
+    if (/^\s*\d+\s+\d+\s+[\d.]+\s/.test(l) && /,\d{2}\s*$/.test(l)) contas += 1;
+    const m = l.match(rx);
+    if (m) linhas.push({ grupo: Number(m[1]), cliente: Number(m[3]), nome: m[2].trim() || null, credev: num(m[6]), adiantamento: num(m[7]) });
+  }
+  // linha do total: só os 4 valores (Saldo, Saldo Concil., Credev, Adiantamento)
+  const soNumeros = String(texto)
+    .split('\n')
+    .map((l) => l.match(/^\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s*$/))
+    .filter(Boolean);
+  const tot = soNumeros[soNumeros.length - 1];
+  const totais = tot ? { credev: num(tot[3]), adiantamento: num(tot[4]) } : null;
+  return { linhas, contas, totais };
+}
+
+/**
+ * Deixa o saldo de CREDEV/adiantamento da empresa igual ao relatório do TOTVS
+ * (Yago, 13/11/2026), mais o que só aconteceu no HeadCoach e o TOTVS não sabe
+ * (uso no faturamento, estorno, crédito gerado à mão). Devolução creditada
+ * aqui NÃO soma (a devolução também gera o CREDEV no TOTVS, já está no
+ * relatório). Quem está aqui e não está no relatório fica com 0 + o que é só
+ * do HeadCoach. Negativo no TOTVS vira 0 (aqui não existe saldo negativo).
+ * Cada diferença vira um movimento no extrato (carga_inicial para quem ainda
+ * não tinha, ajuste para os demais) e valor_inicial passa a ser o do relatório.
+ * aplicar=false só simula.
+ */
+export async function acertarPeloRelatorio({ empresa = EMPRESA_CARGA, linhas, referencia, aplicar = false, por = 'acerto pelo relatório do TOTVS', log = console.log }) {
+  const SO_HEADCOACH = new Set(['uso', 'estorno', 'ajuste']);
+  const relatorio = new Map(linhas.map((l) => [Number(l.cliente), l]));
+  const rows = [];
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await supabase.from('hc_cliente_saldos').select('*').eq('empresa', empresa).range(de, de + 999);
+    if (error) throw falhaDb(error);
+    rows.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const clientes = new Set([...relatorio.keys(), ...rows.filter((r) => Number(r.saldo) > 0 || Number(r.valor_inicial) > 0).map((r) => Number(r.cliente_code))]);
+  const r = { empresa, clientes: clientes.size, mudancas: [], negativos: [], semMudanca: 0, aplicadas: 0, erros: [], antes: { credev: 0, adiantamento: 0 }, depois: { credev: 0, adiantamento: 0 } };
+  for (const cliente of [...clientes].sort((a, b) => a - b)) {
+    const rel = relatorio.get(cliente) || null;
+    const { data: movs, error } = await supabase.from('hc_cliente_saldos_mov').select('tipo, movimento, valor').eq('empresa', empresa).eq('cliente_code', cliente);
+    if (error) throw falhaDb(error);
+    for (const tipo of Object.keys(TIPOS)) {
+      const atual = rows.find((x) => Number(x.cliente_code) === cliente && x.tipo === tipo);
+      const saldoAtual = round2(atual?.saldo || 0);
+      const totvsBruto = round2(rel ? rel[tipo] : 0);
+      if (totvsBruto < 0) r.negativos.push({ cliente, nome: rel?.nome || null, tipo, valor: totvsBruto });
+      const totvs = Math.max(0, totvsBruto);
+      const soHc = round2((movs || []).filter((m) => m.tipo === tipo && SO_HEADCOACH.has(m.movimento)).reduce((s, m) => s + Number(m.valor), 0));
+      const alvo = Math.max(0, round2(totvs + soHc));
+      r.antes[tipo] = round2(r.antes[tipo] + saldoAtual);
+      r.depois[tipo] = round2(r.depois[tipo] + alvo);
+      const diff = round2(alvo - saldoAtual);
+      const temCarga = (movs || []).some((m) => m.tipo === tipo && m.movimento === 'carga_inicial');
+      if (Math.abs(diff) < 0.005) {
+        r.semMudanca += 1;
+        if (aplicar && atual && round2(atual.valor_inicial) !== totvs) await supabase.from('hc_cliente_saldos').update({ valor_inicial: totvs }).eq('empresa', empresa).eq('cliente_code', cliente).eq('tipo', tipo);
+        continue;
+      }
+      const mov = { cliente, nome: atual?.cliente_nome || rel?.nome || null, tipo, antes: saldoAtual, totvs, soHeadcoach: soHc, depois: alvo, diferenca: diff, movimento: !temCarga && diff > 0 ? 'carga_inicial' : 'ajuste' };
+      r.mudancas.push(mov);
+      if (!aplicar) continue;
+      try {
+        await movimentar({
+          empresa,
+          cliente,
+          tipo,
+          valor: diff,
+          movimento: mov.movimento,
+          referencia,
+          observacao: `Acerto pelo relatório do TOTVS (${referencia}): ${TIPOS[tipo]} no TOTVS ${brl(totvs)}${soHc ? ` + movimentos só do HeadCoach ${brl(soHc)}` : ''}`,
+          por,
+          nome: atual?.cliente_nome ? null : rel?.nome || null,
+        });
+        await supabase.from('hc_cliente_saldos').update({ valor_inicial: totvs }).eq('empresa', empresa).eq('cliente_code', cliente).eq('tipo', tipo);
+        r.aplicadas += 1;
+      } catch (e) {
+        r.erros.push({ cliente, tipo, erro: e.message });
+      }
+    }
+  }
+  if (aplicar) log(`✅ acerto aplicado: ${r.aplicadas} mudança(s), ${r.erros.length} erro(s)`);
   return r;
 }
