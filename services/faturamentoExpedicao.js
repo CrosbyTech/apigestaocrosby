@@ -1,5 +1,14 @@
 // ============================================================================
-// FATURAMENTO DA EXPEDIÇÃO — NF-e pelo HeadCoach + documento interno no TOTVS
+// FATURAMENTO DA EXPEDIÇÃO — NF-e, transação e contas a receber pelo HeadCoach
+//
+// DESDE 13/11/2026 (Yago): o Faturamento e o Faturamento Brejinho geram a
+// transação e o contas a receber APENAS no HeadCoach — nada vai para o TOTVS
+// (o documento interno da 990 descrito abaixo NÃO é mais feito). A venda entra
+// no CAIXA DO HEADCOACH da empresa 99 (HeadCoach › Caixa), que tem que estar
+// aberto para faturar, e os títulos saem em HeadCoach › Contas a Receber
+// (services/hcContasReceber.js, fatura 9.000.000.000 + nº da transação).
+// O texto abaixo fica como histórico de como era até 12/11/2026.
+//
 // Tela: Expedição → Faturamento (/expedicao/faturamento?chave=).
 //
 // O pedido separado (Dryland) vira uma venda do PDV Crosby (pdv_vendas,
@@ -34,8 +43,10 @@ import {
   ICMS_DIFAL_UF_CONFERIDA,
   desoneracaoSuframa,
 } from './pdvFiscal.js';
-import { espelharVendaNoTotvs, cartoesTotvs } from './pdvEspelhoTotvs.js';
+import { cartoesTotvs } from './pdvEspelhoTotvs.js';
 import { caixaAbertoPara } from './hcCaixa.js';
+import { gerarTitulosDaVenda, BASE_FATURA } from './hcContasReceber.js';
+import { usoDosPagamentos, conferirSaldo, usarNaVenda, estornarVendas, estornarVenda, SaldoClienteError } from './hcSaldosClientes.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
 import { enviarDuplicata, gravarNotaNoCard, temBoleto } from './faturamentoDuplicata.js';
 import { logisticaDosFaturamentos } from './faturamentoLogistica.js';
@@ -432,6 +443,11 @@ export async function faturar(body) {
   if (!Array.isArray(b.itens) || !b.itens.length) throw new FaturamentoError('Nenhuma peça conferida');
   const bloqueio = await bloqueioDeFaturamento(b.chave, b.numeroSite || null);
   if (bloqueio) throw new FaturamentoError(bloqueio.texto, 'PEDIDO_JA_FATURADO', 409);
+  // HEADCOACH › CAIXA: só fatura com o caixa da empresa aberto no HeadCoach (Yago, 13/11/2026)
+  const caixaHc = await caixaAbertoPara(empresa);
+  if (!caixaHc) {
+    throw new FaturamentoError(`O caixa da empresa ${empresa} está fechado no HeadCoach: abra o caixa (HeadCoach › Caixa) para faturar`, 'CAIXA_FECHADO', 409);
+  }
   // Desconto do operador (ajuste) nos pedidos do site: no máximo 15% (Yago, 11/11/2026).
   // No Brejinho e no faturamento AVULSO (venda presencial, sem valor de pedido a
   // seguir) vale a regra de lá: 25% livre, acima com senha de owner/admin/financeiro.
@@ -594,6 +610,20 @@ export async function faturar(body) {
       throw e;
     }
   }
+  // CREDEV e adiantamento: saldo do HeadCoach na empresa 99 (Yago, 13/11/2026 —
+  // não usa mais o saldo do TOTVS). O que uma tentativa anterior deste mesmo
+  // pedido tinha gasto volta primeiro (ela não virou nota).
+  const usoSaldos = usoDosPagamentos(pagamentos);
+  if (usoSaldos.credev > 0 || usoSaldos.adiantamento > 0) {
+    try {
+      const { data: anteriores } = await supabase.from('pdv_vendas').select('id').eq('pedido_chave', b.chave).eq('origem', 'expedicao');
+      await estornarVendas((anteriores || []).map((v) => v.id), 'Pedido faturado de novo: a tentativa anterior não virou nota', b.por || null);
+      await conferirSaldo({ cliente: cliente.code, empresa, uso: usoSaldos });
+    } catch (e) {
+      if (e instanceof SaldoClienteError) throw new FaturamentoError(e.message, e.code, e.status);
+      throw e;
+    }
+  }
   // Peça em falta com o cliente ficando com o crédito: a peça já está fora dos
   // itens (e da nota); o valor dela vira crédito de adiantamento depois da nota
   // e da transação do TOTVS (services/faturamentoCredito.js)
@@ -613,11 +643,10 @@ export async function faturar(body) {
     cobranca = { parcelas };
   }
 
-  // Venda do HeadCoach
-  // A transação do TOTVS sai SEMPRE com a data de hoje: a API só recebe com
-  // caixa aberto na data corrente. Venda de outro dia ("transação com data
-  // diferente") leva a data real só na observação: VENDA DO DIA dd/mm/aaaa.
-  const dataCaixa = hojeBrasil();
+  // Venda do HeadCoach: data de caixa = a do caixa aberto no HeadCoach.
+  // Venda de outro dia ("transação com data diferente") leva a data real na
+  // observação: VENDA DO DIA dd/mm/aaaa.
+  const dataCaixa = String(caixaHc.data_caixa || hojeBrasil()).slice(0, 10);
   const dataVenda = /^\d{4}-\d{2}-\d{2}$/.test(String(b.dataVenda || '')) && b.dataVenda !== dataCaixa ? b.dataVenda : null;
   const cabecalho = {
     empresa,
@@ -665,16 +694,13 @@ export async function faturar(body) {
       ...(Number(b.descontoFaturamento?.pct) > 0
         ? { descontoFaturamento: { pct: round2(b.descontoFaturamento.pct), liberadoPor: b.descontoFaturamento.liberadoPor || null } }
         : {}),
-      terminal: Number(b.terminal) > 0 ? Number(b.terminal) : null,
-      receberComoFatura: !!b.receberComoFatura,
       dataVenda,
-      cartaoTotvs: CARTAO_TOTVS_EXPEDICAO,
-      empresaTotvs: EMPRESA_DOC_INTERNO,
+      // transação e contas a receber só no HeadCoach (nada vai para o TOTVS)
+      somenteHeadcoach: true,
+      caixa: { id: caixaHc.id, dataCaixa },
     },
+    caixa_id: caixaHc.id,
   };
-  // HEADCOACH › CAIXA: a venda entra no caixa aberto da empresa (sem caixa aberto, segue sem)
-  const caixaHc = await caixaAbertoPara(empresa, b.terminal);
-  if (caixaHc) cabecalho.caixa_id = caixaHc.id;
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
   if (error) throw new FaturamentoError(error.message, 'DB_ERROR', 500);
   const { data: itensGravados, error: e1 } = await supabase.from('pdv_venda_itens').insert(itens.map((i) => ({ ...i, venda_id: venda.id }))).select();
@@ -695,6 +721,19 @@ export async function faturar(body) {
       await estornarUsoDasVendas([venda.id], 'Falha ao gravar a venda', b.por || null).catch(() => {});
       await supabase.from('pdv_vendas').delete().eq('id', venda.id);
       throw new FaturamentoError(e.message, e.code || 'BONUS_ERROR', e.status || 400);
+    }
+  }
+  // CREDEV / adiantamento: sai do saldo do cliente já (atômico: ninguém gasta o
+  // mesmo saldo duas vezes). Volta sozinho se o pedido for faturado de novo ou
+  // se a nota for cancelada.
+  if (usoSaldos.credev > 0 || usoSaldos.adiantamento > 0) {
+    try {
+      await usarNaVenda({ venda, uso: usoSaldos, por: b.por || null });
+    } catch (e) {
+      if (usoBonus > 0) await estornarUsoDasVendas([venda.id], 'Falha ao usar o CREDEV/adiantamento', b.por || null).catch(() => {});
+      await estornarVenda(venda.id, 'Falha ao gravar a venda', b.por || null).catch(() => {});
+      await supabase.from('pdv_vendas').delete().eq('id', venda.id);
+      throw new FaturamentoError(e.message, e.code || 'SALDO_ERROR', e.status || 400);
     }
   }
   await registrarEpcs({ venda, itens: itensGravados || [], tipo: 'venda' });
@@ -747,33 +786,8 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
     const { data } = await supabase.from('pedidos_venda_faturamentos').select('id').eq('venda_id', vendaId).maybeSingle();
     fatId = data?.id || null;
   }
-  // Abre OUTRA transação (data de hoje) para a mesma venda quando:
-  //  • a operação do documento interno foi trocada (a API não altera a operação
-  //    de uma transação existente), ou
-  //  • a venda ainda está presa numa transação da 99 (anterior à mudança para a
-  //    990) — "Tentar de novo" leva o documento interno para a 990.
-  // A anterior fica "em andamento" no TOTVS, anotada para ser cancelada.
-  {
-    const { data: v0 } = await supabase.from('pdv_vendas').select('origem, operacao_doc_interno, totvs_transacao_code, totvs_status, pedido_info').eq('id', vendaId).maybeSingle();
-    if (v0 && v0.origem === 'expedicao' && v0.totvs_status !== 4) {
-      const opPedida = Number(opcoes.operacaoDocInterno);
-      const opNova = Object.values(OPERACAO_DOC_INTERNO).includes(opPedida) ? opPedida : null;
-      const empresaAtual = Number(v0.pedido_info?.empresaTotvs) || EMPRESA_FATURAMENTO;
-      const trocaOperacao = !!opNova && Number(v0.operacao_doc_interno) !== opNova;
-      const trocaEmpresa = empresaAtual !== EMPRESA_DOC_INTERNO;
-      if (trocaOperacao || trocaEmpresa) {
-        const info = { ...(v0.pedido_info || {}), empresaTotvs: EMPRESA_DOC_INTERNO };
-        if (v0.totvs_transacao_code) info.transacoesAnteriores = [...(info.transacoesAnteriores || []), { code: v0.totvs_transacao_code, operacao: v0.operacao_doc_interno, empresa: empresaAtual }];
-        const operacao = opNova || Number(v0.operacao_doc_interno) || 511;
-        await supabase
-          .from('pdv_vendas')
-          .update({ operacao_doc_interno: operacao, totvs_transacao_code: null, totvs_transacao_date: null, totvs_status: null, totvs_erro: null, data_caixa: hojeBrasil(), pedido_info: info })
-          .eq('id', vendaId);
-        if (fatId) await supabase.from('pedidos_venda_faturamentos').update({ operacao, transacao_code: null, transacao_date: null, transacao_status: 1 }).eq('id', fatId);
-        console.log(`🔁 [Faturamento] venda ${vendaId}: nova transação no TOTVS (empresa ${empresaAtual} → ${EMPRESA_DOC_INTERNO}, operação ${v0.operacao_doc_interno ?? '—'} → ${operacao}; anterior ${v0.totvs_transacao_code ?? '—'})`);
-      }
-    }
-  }
+  // (até 12/11/2026 aqui se abria OUTRA transação no TOTVS quando a operação
+  // do documento interno mudava; desde 13/11 nada vai para o TOTVS)
   const atualizar = async (patch) => {
     if (fatId) await supabase.from('pedidos_venda_faturamentos').update({ ...patch, atualizado_em: new Date().toISOString() }).eq('id', fatId);
   };
@@ -800,18 +814,31 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
     return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs: { ok: false, mensagem: 'aguardando a NF-e ser autorizada' } };
   }
 
-  // 2) Documento interno + contas a receber no TOTVS (empresa 990)
-  let totvs;
+  // 2) Transação + contas a receber SÓ no HeadCoach (Yago, 13/11/2026): nada
+  //    vai para o TOTVS. Os títulos saem em HeadCoach › Contas a Receber.
+  let contasReceber;
   try {
-    const r = await espelharVendaNoTotvs(vendaId, { forcar: true });
-    totvs = { ok: true, ...r };
-    await atualizar({ transacao_code: r.transactionCode, transacao_date: r.transactionDate, transacao_status: r.status || 4, totvs_erro: null, ...(r.status === 4 ? { atendida_em: new Date().toISOString() } : {}) });
+    if (!venda.pedido_info?.somenteHeadcoach) {
+      const info = { ...(venda.pedido_info || {}), somenteHeadcoach: true };
+      await supabase.from('pdv_vendas').update({ pedido_info: info }).eq('id', vendaId);
+    }
+    const g = await gerarTitulosDaVenda(vendaId);
+    const { data: tits, error: et } = await supabase.from('hc_cr_titulos').select('id, fatura, parcela, forma, valor, vencimento, situacao').eq('venda_id', vendaId).order('parcela');
+    if (et) throw new Error(et.message);
+    const ativos = (tits || []).filter((t) => t.situacao !== 'cancelado');
+    contasReceber = ativos.length
+      ? { ok: true, fatura: BASE_FATURA + Number(vendaId), titulos: ativos, total: round2(ativos.reduce((s, t) => s + Number(t.valor), 0)) }
+      : { ok: false, mensagem: `Contas a receber não gerado (${g?.motivo || 'sem títulos'})` };
+    await atualizar(contasReceber.ok ? { totvs_erro: null, atendida_em: new Date().toISOString() } : { totvs_erro: contasReceber.mensagem });
   } catch (err) {
-    totvs = { ok: false, mensagem: err.message, code: err.code };
-    const v = await carregarVenda(vendaId);
-    await atualizar({ totvs_erro: err.message, ...(v?.totvs_transacao_code ? { transacao_code: v.totvs_transacao_code, transacao_date: v.totvs_transacao_date, transacao_status: v.totvs_status || 1 } : {}) });
+    contasReceber = { ok: false, mensagem: `Contas a receber: ${err.message}` };
+    await atualizar({ totvs_erro: contasReceber.mensagem });
   }
   venda = await carregarVenda(vendaId);
+  // compatibilidade com a tela antiga (o app do PDV ainda não atualizado): "ok" = transação fechada
+  const totvs = contasReceber.ok
+    ? { ok: true, headcoach: true, transactionCode: Number(vendaId), transactionDate: venda?.data_caixa || null, status: 4 }
+    : { ok: false, headcoach: true, mensagem: contasReceber.mensagem };
 
   // 3) Dryland: a nota vai para o card da fila (é dela que os robôs de minuta
   //    precisam) e, se a venda tem boleto, sai a duplicata para o cliente
@@ -838,14 +865,36 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
   const cred = venda.pedido_info?.creditoFalta;
   if (cred && Number(cred.valor) > 0 && notaOk && venda.status !== 'cancelada') {
     if (cred.chamado?.id && cred.status !== 'erro') credito = { ...cred };
-    else if (venda.totvs_status === 4) {
+    else if (venda.totvs_status === 4 || contasReceber.ok) {
       credito = { ...cred, emAndamento: true };
       setImmediate(() => {
         gerarCreditoFalta(vendaId, { por: venda.criado_por || null }).catch((e) => console.warn(`⚠️ [crédito] venda ${vendaId}: ${e.message}`));
       });
     } else credito = { ...cred, aguardandoTotvs: true };
   }
-  return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs, duplicata, credito };
+  return { vendaId, faturamentoId: fatId, venda, nota, fiscal, totvs, contasReceber, duplicata, credito };
+}
+
+// títulos do contas a receber do HeadCoach por venda (aba Transações)
+async function crPorVenda(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data } = await supabase.from('hc_cr_titulos').select('venda_id, fatura, parcela, forma, valor, vencimento, situacao, data_pagamento').in('venda_id', ids.slice(i, i + 200)).order('parcela');
+    for (const t of data || []) {
+      const k = Number(t.venda_id);
+      if (!out.has(k)) out.set(k, { fatura: t.fatura, qtd: 0, total: 0, abertos: 0, cancelados: 0, titulos: [] });
+      const c = out.get(k);
+      c.titulos.push(t);
+      if (t.situacao === 'cancelado') c.cancelados += 1;
+      else {
+        c.qtd += 1;
+        c.total = round2(c.total + Number(t.valor));
+        if (t.situacao === 'aberto') c.abertos += 1;
+      }
+    }
+  }
+  return out;
 }
 
 // ─── Aba Transações ─────────────────────────────────────────────────────────
@@ -865,7 +914,8 @@ export async function listarTransacoes({ de, ate, busca, limite = 300 } = {}) {
     const vPor = new Map((vendas || []).map((v) => [v.id, v]));
     const nPor = new Map();
     for (const n of notas || []) if (!nPor.has(n.venda_id) || n.status === 'autorizada') nPor.set(n.venda_id, n);
-    lista = lista.map((f) => ({ ...f, venda: vPor.get(f.venda_id) || null, nota: nPor.get(f.venda_id) || null }));
+    const crPor = await crPorVenda(ids);
+    lista = lista.map((f) => ({ ...f, venda: vPor.get(f.venda_id) || null, nota: nPor.get(f.venda_id) || null, cr: crPor.get(Number(f.venda_id)) || null }));
   }
   const t = String(busca || '').trim().toUpperCase();
   if (t) {
@@ -885,5 +935,6 @@ export async function detalheTransacao(faturamentoId) {
     ? await supabase.from('pdv_epc_movimentos').select('epc, tipo, product_code, produto_nome, valor_unit, ocorrido_em').eq('venda_id', fat.venda_id).order('product_code')
     : { data: [] };
   const [logistica] = await logisticaDosFaturamentos([fat]);
-  return { faturamento: fat, venda, kardex: kardex || [], minuta: logistica?.minuta || null, duplicata: logistica?.duplicata || null, temCard: !!logistica?.temCard };
+  const cr = fat.venda_id ? (await crPorVenda([fat.venda_id])).get(Number(fat.venda_id)) || null : null;
+  return { faturamento: fat, venda, cr, kardex: kardex || [], minuta: logistica?.minuta || null, duplicata: logistica?.duplicata || null, temCard: !!logistica?.temCard };
 }

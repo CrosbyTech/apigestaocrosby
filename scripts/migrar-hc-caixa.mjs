@@ -49,6 +49,7 @@ const confere = await Promise.all(
   }),
 );
 const v = await supabase.from('pdv_vendas').select('id, caixa_id').limit(1);
-console.log(`\n${confere.join(' · ')} · pdv_vendas.caixa_id: ${v.error?.message || 'ok'}`);
-console.log(falhas || v.error || confere.some((c) => !c.endsWith('ok')) ? 'TERMINOU COM ERRO: rode de novo (a conexão pode ter caído).' : 'PRONTO: tabelas do caixa criadas.');
+const reab = await supabase.from('hc_caixa_contagens').select('id, reaberta_em, reaberta_por, reabertura_autorizada_por, reabertura_motivo').limit(1);
+console.log(`\n${confere.join(' · ')} · pdv_vendas.caixa_id: ${v.error?.message || 'ok'} · reabertura da contagem: ${reab.error?.message || 'ok'}`);
+console.log(falhas || v.error || reab.error || confere.some((c) => !c.endsWith('ok')) ? 'TERMINOU COM ERRO: rode de novo (a conexão pode ter caído).' : 'PRONTO: tabelas do caixa criadas.');
 process.exit(0);

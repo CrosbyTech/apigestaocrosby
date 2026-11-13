@@ -37,6 +37,15 @@ import {
 } from '../services/transferenciasMercadoria.js';
 import { prepararTransferenciaNota, transferirComNota, processarTransferenciaNota, EMPRESA_ORIGEM_NOTA } from '../services/transferenciaNota.js';
 import { FiscalError } from '../services/pdvFiscal.js';
+import { empresasRestritasDoUsuario, usuarioDaRequisicao } from '../utils/empresasUsuario.js';
+
+// vendedor só vê as transferências da(s) própria(s) loja(s), como origem ou
+// destino (Yago, 13/11/2026). null = sem restrição (owner/admin, sem login).
+async function lojasDoPedido(req) {
+  const user = await usuarioDaRequisicao(req);
+  return user ? empresasRestritasDoUsuario(user) : null;
+}
+const daLoja = (lojas, ...codigos) => !lojas || codigos.some((c) => lojas.includes(Number(c)));
 
 const router = express.Router();
 
@@ -120,6 +129,7 @@ router.get(
     const ate = req.query.ate ? String(req.query.ate).slice(0, 10) : null;
     const empresa = parseInt(req.query.empresa, 10) || null;
     const busca = String(req.query.busca || '').trim();
+    const lojas = await lojasDoPedido(req);
     const COLUNAS =
       'id, transferencia_id, empresa, empresa_destino, transacao_code, transacao_date, transacao_status, operacao, cfop, total, qtd_pecas, qtd_epcs, cliente_code, cliente_nome, vendedor_nome, criado_por, criado_em, atendida_em';
     // transferência com nota pelo HeadCoach: a lista precisa destes campos para mostrar a
@@ -134,6 +144,10 @@ router.get(
       if (de) q = q.gte('criado_em', `${de}T00:00:00-03:00`);
       if (ate) q = q.lte('criado_em', `${ate}T23:59:59.999-03:00`);
       if (empresa) q = q.or(`empresa.eq.${empresa},empresa_destino.eq.${empresa}`);
+      if (lojas) {
+        const l = lojas.length ? lojas.join(',') : '-1';
+        q = q.or(`empresa.in.(${l}),empresa_destino.in.(${l})`);
+      }
       if (busca) {
         q = /^\d+$/.test(busca)
           ? q.or(`transacao_code.eq.${busca},empresa.eq.${busca},empresa_destino.eq.${busca},cliente_code.eq.${busca}`)
@@ -170,7 +184,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase.from('transferencias_transacoes').select('*').eq('id', parseInt(req.params.id, 10)).maybeSingle();
     if (error) return responder(res, error);
-    if (!data) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
+    if (!data || !daLoja(await lojasDoPedido(req), data.empresa, data.empresa_destino)) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
     return successResponse(res, situacaoPelaNota(data), 'Transação de transferência');
   }),
 );
@@ -265,10 +279,15 @@ router.get(
       dryland = { erro: e.message };
       console.warn('[transferências] não importei as solicitações do Dryland:', e.message);
     }
+    const lojas = await lojasDoPedido(req);
     let q = supabase.from('transferencias_mercadoria').select('*').order('id', { ascending: false }).limit(500);
     if (status === 'abertas') q = q.in('status', ['aguardando_transferencia', 'em_transferencia']);
     else if (STATUS.includes(status)) q = q.eq('status', status);
     if (empresa) q = q.or(`empresa_origem.eq.${empresa},empresa_destino.eq.${empresa}`);
+    if (lojas) {
+      const l = lojas.length ? lojas.join(',') : '-1';
+      q = q.or(`empresa_origem.in.(${l}),empresa_destino.in.(${l})`);
+    }
     if (busca) {
       q = /^\d+$/.test(busca)
         ? q.or(`id.eq.${busca},empresa_origem.eq.${busca},empresa_destino.eq.${busca},transacao_code.eq.${busca}`)
@@ -277,7 +296,12 @@ router.get(
     const { data, error } = await q;
     if (error) return responder(res, error);
     // resumo sobre todas (não só o filtro)
-    const { data: todas } = await supabase.from('transferencias_mercadoria').select('status, qtd_pecas');
+    let qTodas = supabase.from('transferencias_mercadoria').select('status, qtd_pecas');
+    if (lojas) {
+      const l = lojas.length ? lojas.join(',') : '-1';
+      qTodas = qTodas.or(`empresa_origem.in.(${l}),empresa_destino.in.(${l})`);
+    }
+    const { data: todas } = await qTodas;
     const conta = (s) => (todas || []).filter((t) => t.status === s).length;
     return successResponse(
       res,
@@ -302,7 +326,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const { data, error } = await supabase.from('transferencias_mercadoria').select('*').eq('id', parseInt(req.params.id, 10)).maybeSingle();
     if (error) return responder(res, error);
-    if (!data) return errorResponse(res, 'Solicitação não encontrada', 404, 'NOT_FOUND');
+    if (!data || !daLoja(await lojasDoPedido(req), data.empresa_origem, data.empresa_destino)) return errorResponse(res, 'Solicitação não encontrada', 404, 'NOT_FOUND');
     return successResponse(res, data, 'Solicitação');
   }),
 );

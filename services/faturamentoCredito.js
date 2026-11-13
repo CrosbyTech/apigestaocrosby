@@ -16,8 +16,9 @@
 //   { valor, pecas[{ productCode, nome, quantidade, valor }], formas[], origem,
 //     status: pendente | gerado | erro, bonus: { id }, chamado: { id, numero,
 //     abertoEm }, erro }
-// Só roda com a NF-e autorizada E a transação do TOTVS atendida (o chamado
-// precisa do número dela).
+// Só roda com a NF-e autorizada E a transação fechada: desde 13/11/2026 a do
+// HeadCoach (contas a receber gerado em HeadCoach › Contas a Receber); antes,
+// a do TOTVS.
 // ============================================================================
 import supabase from '../config/supabase.js';
 import { drylandRpc } from '../routes/drylandChamados.routes.js';
@@ -82,7 +83,9 @@ function textoDoChamado({ venda, nota, credito, saldo }) {
     `Pedido: ${venda.numero_site || '—'}`,
     `NF-e: ${nota.numero}/${nota.serie} (empresa ${venda.empresa})`,
     `Transação HeadCoach: nº ${venda.id}`,
-    `Transação TOTVS: ${empTotvs}/${venda.totvs_transacao_code} (${String(venda.totvs_transacao_date || '').slice(0, 10).split('-').reverse().join('/')})`,
+    venda.totvs_transacao_code
+      ? `Transação TOTVS: ${empTotvs}/${venda.totvs_transacao_code} (${String(venda.totvs_transacao_date || '').slice(0, 10).split('-').reverse().join('/')})`
+      : `Contas a receber HeadCoach: fatura ${9000000000 + Number(venda.id)} (sem transação no TOTVS)`,
     `VALOR DO CRÉDITO GERADO: ${brl(credito.valor)}`,
     `Pagamento do pedido: ${(credito.formas || []).map((f) => FORMAS[f] || f).join(' + ') || '—'}`,
     `Total da nota (só as peças que existiam): ${brl(venda.total)}`,
@@ -91,7 +94,7 @@ function textoDoChamado({ venda, nota, credito, saldo }) {
     ...credito.pecas.map((p) => ` • ${p.quantidade}x ${p.productCode} ${p.nome} — ${brl(p.valor)}`),
     '',
     `O crédito foi gerado como SALDO BÔNUS do cliente no HeadCoach${saldo != null ? ` (saldo bônus atual do cliente: ${brl(saldo)})` : ''}. Não é adiantamento no TOTVS: a transação acima ficou só com as peças que existiam.`,
-    `O valor entrou no pagamento deste pedido (${forma}). Quando o cliente usar o saldo bônus em outro faturamento, a transação do TOTVS daquela venda recebe esse valor em ${forma}.`,
+    `O valor entrou no pagamento deste pedido (${forma}). Quando o cliente usar o saldo bônus em outro faturamento, a transação daquela venda recebe esse valor em ${forma}.`,
     '',
     `Faturado por ${venda.criado_por || '—'} em ${dataHora(venda.criado_em)}.`,
   ].join('\n');
@@ -142,8 +145,11 @@ export async function gerarCreditoFalta(vendaId, { por = null } = {}) {
     const { data: notas } = await supabase.from('pdv_notas_fiscais').select('id, numero, serie, chave, status').eq('venda_id', vendaId).order('id', { ascending: false });
     const nota = (notas || []).find((n) => n.status === 'autorizada');
     if (!nota) throw new CreditoError('A NF-e desta venda não está autorizada: o crédito só sai depois da nota', 'SEM_NOTA');
-    if (venda.totvs_status !== 4 || !venda.totvs_transacao_code) {
-      throw new CreditoError('A transação do TOTVS desta venda ainda não foi atendida: o crédito sai assim que ela for', 'SEM_TRANSACAO');
+    const fechadaTotvs = venda.totvs_status === 4 && !!venda.totvs_transacao_code;
+    if (!fechadaTotvs) {
+      // desde 13/11/2026 a transação é só do HeadCoach: basta o contas a receber gerado
+      const { data: tits } = await supabase.from('hc_cr_titulos').select('id').eq('venda_id', vendaId).neq('situacao', 'cancelado').limit(1);
+      if (!tits?.length) throw new CreditoError('O contas a receber desta venda ainda não foi gerado: o crédito sai assim que for', 'SEM_TRANSACAO');
     }
     const quem = por || venda.criado_por || null;
 

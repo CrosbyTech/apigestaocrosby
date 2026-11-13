@@ -127,6 +127,12 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS hc_caixas_touch ON hc_caixas;
 CREATE TRIGGER hc_caixas_touch BEFORE UPDATE ON hc_caixas FOR EACH ROW EXECUTE FUNCTION hc_caixas_touch();
 
+-- contagem salva fica TRAVADA; só owner, admin ou financeiro reabre (Yago, 12/11/2026)
+ALTER TABLE hc_caixa_contagens ADD COLUMN IF NOT EXISTS reaberta_em TIMESTAMPTZ;
+ALTER TABLE hc_caixa_contagens ADD COLUMN IF NOT EXISTS reaberta_por TEXT;
+ALTER TABLE hc_caixa_contagens ADD COLUMN IF NOT EXISTS reabertura_autorizada_por TEXT;
+ALTER TABLE hc_caixa_contagens ADD COLUMN IF NOT EXISTS reabertura_motivo TEXT;
+
 -- só o servidor acessa
 ALTER TABLE hc_caixa_datas ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hc_caixas ENABLE ROW LEVEL SECURITY;

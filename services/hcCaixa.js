@@ -2,13 +2,18 @@
 // HEADCOACH › CAIXA — abertura, suprimento, retirada, contagem, fechamento e
 // encerramento diário (Yago, 12/11/2026). Mesmo roteiro do TOTVS (manual da
 // Crosby, itens 3 e 16–20: PDVFM001 › Menu Caixa e GERFP010), mais enxuto:
-//   • ABERTURA: empresa + terminal, na DATA DE CAIXA da empresa, com o fundo de
+// UM CAIXA POR EMPRESA (Yago, 12/11/2026: o terminal não é necessário). A coluna
+// hc_caixas.terminal continua no banco, sempre 1, e o índice hc_caixas_um_aberto
+// (empresa, terminal) garante um caixa aberto por empresa.
+//   • ABERTURA: a empresa, na DATA DE CAIXA dela, com o fundo de
 //     troco (sugere o que o caixa anterior deixou). Se a data de caixa ficou
 //     para trás, dá para encerrar o dia anterior e abrir em hoje de uma vez.
 //   • SUPRIMENTO / RETIRADA: com motivo; a retirada pede a senha de quem lança.
 //     Lançou errado → estorno (com motivo e senha); nada é apagado.
-//   • CONTAGEM: dinheiro por cédula/moeda + o valor de cada forma (cartão, Pix…)
-//     contra o que o sistema registrou; pode contar quantas vezes quiser.
+//   • CONTAGEM: o valor total em dinheiro + o valor de cada forma (cartão, Pix…)
+//     contra o que o sistema registrou. Salvou, fica TRAVADA: só owner, admin ou
+//     financeiro reabre (com senha). Venda ou movimento depois dela destrava
+//     sozinho (precisa contar de novo).
 //   • FECHAMENTO: exige contagem feita depois do último movimento; diz quanto
 //     fica de fundo para o próximo caixa (o resto sai como retirada do
 //     fechamento) e guarda a foto dos totais. Irreversível — só owner/admin
@@ -16,11 +21,15 @@
 //   • ENCERRAMENTO DIÁRIO: com todos os caixas da empresa fechados, a data de
 //     caixa passa para o dia seguinte (ou para hoje, se tinha ficado para
 //     trás). Pular para depois de hoje pede owner, admin ou financeiro.
+//   • VOLTAR A DATA: encerrou para a data errada → owner, admin ou financeiro
+//     volta a data de caixa (com motivo e senha), sem caixa aberto e nunca para
+//     antes de um caixa que já existe. Fica no histórico de encerramentos.
 // As vendas (pdv_vendas) entram no caixa aberto da empresa pela coluna
 // caixa_id (caixaAbertoPara). Tabelas: migrations/hc_caixa.sql.
 // ============================================================================
 import supabase from '../config/supabase.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
+import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 
 export class CaixaError extends Error {
   constructor(message, code = 'CAIXA', status = 400) {
@@ -43,6 +52,8 @@ const ehData = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const TODOS_OS_PERFIS = ['owner', 'admin', 'manager', 'user', 'guest', 'vendedor', 'franquias'];
 const PERFIS_REABRIR = ['owner', 'admin'];
 const PERFIS_DATA_FUTURA = ['owner', 'admin', 'user']; // user = financeiro
+const PERFIS_REABRIR_CONTAGEM = PERFIS_DATA_FUTURA;
+const PERFIS_VOLTAR_DATA = PERFIS_DATA_FUTURA;
 export const CEDULAS = [200, 100, 50, 20, 10, 5, 2, 1, 0.5, 0.25, 0.1, 0.05];
 export const FORMAS = {
   dinheiro: 'Dinheiro',
@@ -82,15 +93,21 @@ async function conferirSenha(email, senha, perfis = TODOS_OS_PERFIS) {
 }
 
 // ─── empresas que o usuário pode operar ──────────────────────────────────────
-// owner/admin: todas as próprias; os demais: as vinculadas em user_companies
-// (sem vínculo nenhum: todas, como no PDV Crosby)
+// owner/admin: todas as próprias; os demais: as vinculadas em user_companies.
+// Sem vínculo: vendedor/guest não vê nenhuma (Yago, 13/11/2026); os outros
+// perfis, todas (utils/empresasUsuario.js).
 export async function empresasDoUsuario(user) {
   const proprias = await q(supabase.from('erp_empresas').select('code, descricao, fantasia, uf').eq('propria', true).order('code'));
   let lista = proprias || [];
-  if (!['owner', 'admin'].includes(user?.role)) {
-    const vinc = await q(supabase.from('user_companies').select('cd_empresa').eq('user_id', user?.id || '00000000-0000-0000-0000-000000000000'));
-    const codes = new Set((vinc || []).map((v) => Number(v.cd_empresa)));
-    if (codes.size) lista = lista.filter((e) => codes.has(Number(e.code)));
+  let restritas;
+  try {
+    restritas = await empresasRestritasDoUsuario(user);
+  } catch (e) {
+    throw new CaixaError(e.message, 'DB_ERROR', 500);
+  }
+  if (restritas) {
+    const codes = new Set(restritas);
+    lista = lista.filter((e) => codes.has(Number(e.code)));
   }
   return lista.map((e) => ({ code: Number(e.code), nome: String(e.descricao || '').replace(/^\s*\d+\s*-\s*/, '').trim() || e.fantasia || `Empresa ${e.code}`, uf: e.uf || null }));
 }
@@ -190,24 +207,28 @@ export async function resumoDoCaixa(caixa) {
     contagens: contagens || [],
     ultimaContagem: ultima,
     contagemDesatualizada: depois,
+    // contagem salva fica travada até owner/admin/financeiro reabrir (ou até
+    // entrar venda/movimento depois dela — aí precisa contar de novo)
+    contagemReaberta: !!(ultima && ultima.reaberta_em),
+    contagemTravada: !!(ultima && !ultima.reaberta_em && !depois),
   };
 }
 
-// ─── situação (o que a tela mostra ao escolher empresa + terminal) ───────────
-export async function situacao(user, empresa, terminal = 1) {
+// ─── situação (o que a tela mostra ao escolher a empresa) ────────────────────
+export async function situacao(user, empresa) {
   const e = await exigirEmpresa(user, empresa);
-  const t = Math.max(1, parseInt(terminal, 10) || 1);
   const data = await dataDaEmpresa(e.code);
-  const [aberto, ultimoFechado, caixasDaData, encerramentos] = await Promise.all([
-    q(supabase.from('hc_caixas').select('*').eq('empresa', e.code).eq('terminal', t).eq('status', 'aberto').maybeSingle()),
-    q(supabase.from('hc_caixas').select('*').eq('empresa', e.code).eq('terminal', t).eq('status', 'fechado').order('fechado_em', { ascending: false }).limit(1).maybeSingle()),
-    q(supabase.from('hc_caixas').select('id, terminal, data_caixa, status, aberto_em, aberto_por, fechado_em, fechado_por, fundo_inicial, diferenca').eq('empresa', e.code).eq('data_caixa', data.data).order('terminal')),
+  const [abertos, ultimoFechado, caixasDaData, encerramentos, ultimoCaixa] = await Promise.all([
+    q(supabase.from('hc_caixas').select('*').eq('empresa', e.code).eq('status', 'aberto').order('aberto_em', { ascending: false }).limit(1)),
+    q(supabase.from('hc_caixas').select('*').eq('empresa', e.code).eq('status', 'fechado').order('fechado_em', { ascending: false }).limit(1).maybeSingle()),
+    q(supabase.from('hc_caixas').select('id, data_caixa, status, aberto_em, aberto_por, fechado_em, fechado_por, fundo_inicial, diferenca').eq('empresa', e.code).eq('data_caixa', data.data).order('aberto_em')),
     q(supabase.from('hc_caixa_encerramentos').select('data_caixa, proxima_data, por, em').eq('empresa', e.code).order('em', { ascending: false }).limit(5)),
+    q(supabase.from('hc_caixas').select('id, data_caixa').eq('empresa', e.code).order('data_caixa', { ascending: false }).limit(1).maybeSingle()),
   ]);
   const hoje = hojeBrasil();
+  const aberto = (abertos || [])[0] || null;
   return {
     empresa: e,
-    terminal: t,
     hoje,
     dataCaixa: data.data,
     dataDefinida: data.definida,
@@ -217,13 +238,14 @@ export async function situacao(user, empresa, terminal = 1) {
     fundoSugerido: ultimoFechado?.fundo_final != null ? round2(ultimoFechado.fundo_final) : null,
     caixasDaData: caixasDaData || [],
     encerramentos: encerramentos || [],
+    // voltar a data: nunca para antes do último caixa que existe
+    voltarDataMinima: ultimoCaixa ? String(ultimoCaixa.data_caixa).slice(0, 10) : null,
   };
 }
 
 // ─── abertura ────────────────────────────────────────────────────────────────
 export async function abrirCaixa(user, b = {}) {
   const e = await exigirEmpresa(user, b.empresa);
-  const terminal = Math.max(1, parseInt(b.terminal, 10) || 1);
   const fundo = round2(Number(String(b.fundoInicial ?? 0).replace(',', '.')) || 0);
   if (fundo < 0) throw new CaixaError('O fundo de troco não pode ser negativo');
   const hoje = hojeBrasil();
@@ -241,12 +263,12 @@ export async function abrirCaixa(user, b = {}) {
     data = await dataDaEmpresa(e.code);
   }
   if (!data.definida) await gravarData(e.code, data.data, quem(user));
-  const anterior = await q(supabase.from('hc_caixas').select('fundo_final').eq('empresa', e.code).eq('terminal', terminal).eq('status', 'fechado').order('fechado_em', { ascending: false }).limit(1).maybeSingle());
+  const anterior = await q(supabase.from('hc_caixas').select('fundo_final').eq('empresa', e.code).eq('status', 'fechado').order('fechado_em', { ascending: false }).limit(1).maybeSingle());
   const { data: caixa, error } = await supabase
     .from('hc_caixas')
     .insert({
       empresa: e.code,
-      terminal,
+      terminal: 1, // um caixa por empresa
       data_caixa: data.data,
       status: 'aberto',
       fundo_inicial: fundo,
@@ -258,10 +280,10 @@ export async function abrirCaixa(user, b = {}) {
     .select()
     .single();
   if (error) {
-    if (/duplicate key|hc_caixas_um_aberto/i.test(error.message)) throw new CaixaError(`O terminal ${terminal} da empresa ${e.code} já tem um caixa aberto`, 'JA_ABERTO', 409);
+    if (/duplicate key|hc_caixas_um_aberto/i.test(error.message)) throw new CaixaError(`A empresa ${e.code} já tem um caixa aberto`, 'JA_ABERTO', 409);
     throw falhaDb(error);
   }
-  console.log(`💰 [caixa] aberto #${caixa.id} · empresa ${e.code} terminal ${terminal} · data ${data.data} · fundo R$ ${fundo.toFixed(2)} · ${quem(user)}`);
+  console.log(`💰 [caixa] aberto #${caixa.id} · empresa ${e.code} · data ${data.data} · fundo R$ ${fundo.toFixed(2)} · ${quem(user)}`);
   return caixa;
 }
 
@@ -311,16 +333,29 @@ export async function registrarContagem(user, caixaId, b = {}) {
   const caixa = await carregarCaixa(caixaId);
   await exigirEmpresa(user, caixa.empresa);
   if (caixa.status !== 'aberto') throw new CaixaError('O caixa está fechado', 'CAIXA_FECHADO', 409);
+  const r = await resumoDoCaixa(caixa);
+  if (r.contagemTravada) {
+    throw new CaixaError('A contagem deste caixa já foi finalizada. Para contar de novo, owner, admin ou financeiro precisa reabrir a contagem.', 'CONTAGEM_TRAVADA', 409);
+  }
+  // o operador informa só o VALOR em dinheiro (Yago, 12/11/2026: sem detalhar
+  // cédulas e moedas). Contagem por cédula continua aceita, se vier.
   const cedulas = {};
   let contado = 0;
-  for (const c of CEDULAS) {
-    const n = Math.max(0, parseInt(b.cedulas?.[String(c)] ?? b.cedulas?.[c] ?? 0, 10) || 0);
-    if (n > 100000) throw new CaixaError(`Quantidade de ${c} grande demais`);
-    if (n) cedulas[String(c)] = n;
-    contado += n * c;
+  const informadoDinheiro = b.dinheiroContado;
+  if (informadoDinheiro !== undefined && informadoDinheiro !== null && informadoDinheiro !== '') {
+    contado = round2(Number(String(informadoDinheiro).replace(',', '.')));
+    if (!Number.isFinite(contado) || contado < 0) throw new CaixaError('Informe o valor em dinheiro que tem no caixa');
+  } else if (b.cedulas) {
+    for (const c of CEDULAS) {
+      const n = Math.max(0, parseInt(b.cedulas?.[String(c)] ?? b.cedulas?.[c] ?? 0, 10) || 0);
+      if (n > 100000) throw new CaixaError(`Quantidade de ${c} grande demais`);
+      if (n) cedulas[String(c)] = n;
+      contado += n * c;
+    }
+    contado = round2(contado);
+  } else {
+    throw new CaixaError('Informe o valor em dinheiro que tem no caixa');
   }
-  contado = round2(contado);
-  const r = await resumoDoCaixa(caixa);
   // outras formas: o que o operador conferiu (comprovantes da maquininha, extrato do Pix…)
   const formas = {};
   let difOutras = 0;
@@ -356,6 +391,35 @@ export async function registrarContagem(user, caixaId, b = {}) {
   return cont;
 }
 
+/**
+ * Reabre a contagem finalizada (owner, admin ou financeiro, com senha). Quem
+ * autoriza pode ser outra pessoa que não a logada: { autorizador: { email, senha } }.
+ * Sem autorizador, vale a senha de quem está logado ({ senha }).
+ */
+export async function reabrirContagem(user, caixaId, b = {}) {
+  const caixa = await carregarCaixa(caixaId);
+  await exigirEmpresa(user, caixa.empresa);
+  if (caixa.status !== 'aberto') throw new CaixaError('O caixa está fechado', 'CAIXA_FECHADO', 409);
+  const r = await resumoDoCaixa(caixa);
+  if (!r.ultimaContagem) throw new CaixaError('Este caixa ainda não tem contagem');
+  if (!r.contagemTravada) throw new CaixaError('A contagem já está aberta: é só contar de novo');
+  const email = String(b.autorizador?.email || user?.email || '').trim();
+  const senha = b.autorizador ? b.autorizador.senha : b.senha;
+  const a = await conferirSenha(email, senha, PERFIS_REABRIR_CONTAGEM);
+  const motivo = String(b.motivo || '').trim() || null;
+  const cont = await q(
+    supabase
+      .from('hc_caixa_contagens')
+      .update({ reaberta_em: new Date().toISOString(), reaberta_por: quem(user), reabertura_autorizada_por: a?.nome || email, reabertura_motivo: motivo })
+      .eq('id', r.ultimaContagem.id)
+      .is('reaberta_em', null)
+      .select()
+      .single(),
+  );
+  console.log(`💰 [caixa] #${caixa.id} contagem #${cont.id} reaberta · autorizou ${a?.nome || email} · ${quem(user)}${motivo ? ` · ${motivo}` : ''}`);
+  return cont;
+}
+
 // ─── fechamento ──────────────────────────────────────────────────────────────
 export async function fecharCaixa(user, caixaId, b = {}) {
   const caixa = await carregarCaixa(caixaId);
@@ -364,6 +428,7 @@ export async function fecharCaixa(user, caixaId, b = {}) {
   const r = await resumoDoCaixa(caixa);
   if (!r.ultimaContagem) throw new CaixaError('Faça a contagem do caixa antes de fechar', 'SEM_CONTAGEM');
   if (r.contagemDesatualizada) throw new CaixaError('Houve venda ou movimento depois da última contagem: conte o caixa de novo antes de fechar', 'CONTAGEM_DESATUALIZADA');
+  if (r.contagemReaberta) throw new CaixaError('A contagem foi reaberta: salve a contagem de novo antes de fechar', 'CONTAGEM_REABERTA');
   const contado = round2(r.ultimaContagem.dinheiro_contado);
   const fundoFinal = round2(Number(String(b.fundoFinal ?? contado).replace(',', '.')) || 0);
   if (fundoFinal < 0 || fundoFinal > contado + 0.005) throw new CaixaError(`O fundo que fica no caixa tem que estar entre 0 e o dinheiro contado (${contado.toFixed(2).replace('.', ',')})`);
@@ -412,7 +477,7 @@ export async function fecharCaixa(user, caixaId, b = {}) {
     .select()
     .single();
   if (error) throw falhaDb(error);
-  console.log(`💰 [caixa] fechado #${caixa.id} · empresa ${caixa.empresa} terminal ${caixa.terminal} · diferença ${fechado.diferenca} · fundo ${fundoFinal.toFixed(2)} · ${quem(user)}`);
+  console.log(`💰 [caixa] fechado #${caixa.id} · empresa ${caixa.empresa} · diferença ${fechado.diferenca} · fundo ${fundoFinal.toFixed(2)} · ${quem(user)}`);
   return fechado;
 }
 
@@ -443,7 +508,7 @@ export async function reabrirCaixa(user, caixaId, b = {}) {
     .select()
     .single();
   if (error) {
-    if (/duplicate key|hc_caixas_um_aberto/i.test(error.message)) throw new CaixaError(`O terminal ${caixa.terminal} já tem outro caixa aberto`, 'JA_ABERTO', 409);
+    if (/duplicate key|hc_caixas_um_aberto/i.test(error.message)) throw new CaixaError(`A empresa ${caixa.empresa} já tem outro caixa aberto: feche-o antes de reabrir este`, 'JA_ABERTO', 409);
     throw falhaDb(error);
   }
   return reaberto;
@@ -454,7 +519,7 @@ export async function verificarEncerramento(user, empresa) {
   const e = await exigirEmpresa(user, empresa);
   const data = await dataDaEmpresa(e.code);
   const hoje = hojeBrasil();
-  const caixas = await q(supabase.from('hc_caixas').select('id, terminal, status, aberto_por, aberto_em, fechado_em, fechado_por, diferenca').eq('empresa', e.code).eq('data_caixa', data.data).order('terminal'));
+  const caixas = await q(supabase.from('hc_caixas').select('id, status, aberto_por, aberto_em, fechado_em, fechado_por, diferenca').eq('empresa', e.code).eq('data_caixa', data.data).order('aberto_em'));
   const ids = (caixas || []).map((c) => c.id);
   const pendentes = ids.length
     ? await q(supabase.from('pdv_vendas').select('id, status, total, cliente_nome, caixa_id').in('caixa_id', ids).in('status', ['registrada', 'emitindo', 'rejeitada']))
@@ -471,7 +536,7 @@ export async function verificarEncerramento(user, empresa) {
     vendasPendentes: pendentes || [],
     comDiferenca: (caixas || []).filter((c) => c.status === 'fechado' && Math.abs(Number(c.diferenca || 0)) > 0.005),
     podeEncerrar: abertos.length === 0,
-    motivo: abertos.length ? `Feche ${abertos.length === 1 ? 'o caixa' : 'os caixas'} do terminal ${abertos.map((c) => c.terminal).join(', ')} antes de encerrar o dia` : null,
+    motivo: abertos.length ? `Feche o caixa #${abertos.map((c) => c.id).join(', #')} antes de encerrar o dia` : null,
   };
 }
 
@@ -509,15 +574,63 @@ export async function encerrarDia(user, b = {}) {
   return enc;
 }
 
+/**
+ * Volta a data de caixa da empresa (encerrou para a data errada). Só owner,
+ * admin ou financeiro, com a própria senha e motivo. Não volta com caixa aberto
+ * nem para antes de um caixa que já existe. Fica registrado em
+ * hc_caixa_encerramentos (proxima_data < data_caixa, verificacao.tipo = 'voltar_data').
+ */
+export async function voltarData(user, b = {}) {
+  if (!PERFIS_VOLTAR_DATA.includes(user?.role)) throw new CaixaError('Só owner, admin ou financeiro volta a data de caixa', 'SEM_PERMISSAO', 403);
+  const e = await exigirEmpresa(user, b.empresa);
+  const data = await dataDaEmpresa(e.code);
+  if (!data.definida) throw new CaixaError(`A empresa ${e.code} ainda não tem data de caixa`);
+  const nova = String(b.novaData || '');
+  if (!ehData(nova)) throw new CaixaError('Escolha a data');
+  if (nova >= data.data) throw new CaixaError(`A data nova tem que ser antes da atual (${fmtData(data.data)})`);
+  const motivo = String(b.motivo || '').trim();
+  if (motivo.length < 3) throw new CaixaError('Informe o motivo');
+  const abertos = await q(supabase.from('hc_caixas').select('id').eq('empresa', e.code).eq('status', 'aberto'));
+  if (abertos?.length) throw new CaixaError(`Feche o caixa #${abertos.map((c) => c.id).join(', #')} antes de voltar a data`, 'CAIXA_ABERTO', 409);
+  const depois = await q(supabase.from('hc_caixas').select('id, data_caixa').eq('empresa', e.code).gt('data_caixa', nova).order('data_caixa', { ascending: false }));
+  if (depois?.length) {
+    const maisNova = String(depois[0].data_caixa).slice(0, 10);
+    throw new CaixaError(
+      `Já tem caixa em ${fmtData(maisNova)} (#${depois.map((c) => c.id).join(', #')}): a data de caixa não pode voltar para antes de ${fmtData(maisNova)}`,
+      'TEM_CAIXA_DEPOIS',
+      409,
+    );
+  }
+  const a = await conferirSenha(user?.email, b.senha, PERFIS_VOLTAR_DATA);
+  await gravarData(e.code, nova, quem(user));
+  const reg = await q(
+    supabase
+      .from('hc_caixa_encerramentos')
+      .insert({
+        empresa: e.code,
+        data_caixa: data.data,
+        proxima_data: nova,
+        verificacao: { tipo: 'voltar_data', motivo },
+        autorizado_por: a?.nome || quem(user),
+        por_id: user?.id || null,
+        por: quem(user),
+      })
+      .select()
+      .single(),
+  );
+  console.log(`📅 [caixa] data VOLTOU empresa ${e.code}: ${data.data} → ${nova} · ${quem(user)} · ${motivo}`);
+  return reg;
+}
+
 // ─── histórico de caixas ─────────────────────────────────────────────────────
 export async function listarCaixas(user, { empresa, de, ate } = {}) {
   const e = await exigirEmpresa(user, empresa);
   let qy = supabase
     .from('hc_caixas')
-    .select('id, terminal, data_caixa, status, aberto_em, aberto_por, fechado_em, fechado_por, fundo_inicial, fundo_final, retirada_fechamento, diferenca, diferenca_dinheiro, resumo')
+    .select('id, data_caixa, status, aberto_em, aberto_por, fechado_em, fechado_por, fundo_inicial, fundo_final, retirada_fechamento, diferenca, diferenca_dinheiro, resumo')
     .eq('empresa', e.code)
     .order('data_caixa', { ascending: false })
-    .order('terminal')
+    .order('aberto_em', { ascending: false })
     .limit(200);
   if (ehData(de)) qy = qy.gte('data_caixa', de);
   if (ehData(ate)) qy = qy.lte('data_caixa', ate);
@@ -534,14 +647,13 @@ export async function detalheCaixa(user, caixaId) {
 /**
  * Caixa aberto da empresa para gravar na venda (pdv_vendas.caixa_id).
  * Nunca lança erro: sem caixa aberto (ou sem as tabelas) devolve null e a
- * venda segue como antes. Com mais de um terminal aberto, usa o terminal
- * informado; senão, o de menor número.
+ * venda segue como antes. Um caixa por empresa.
  */
-export async function caixaAbertoPara(empresa, terminal = null) {
+export async function caixaAbertoPara(empresa) {
   try {
-    const { data, error } = await supabase.from('hc_caixas').select('id, terminal, data_caixa').eq('empresa', Number(empresa)).eq('status', 'aberto').order('terminal');
+    const { data, error } = await supabase.from('hc_caixas').select('id, data_caixa').eq('empresa', Number(empresa)).eq('status', 'aberto').order('aberto_em', { ascending: false }).limit(1);
     if (error || !data?.length) return null;
-    return data.find((c) => Number(c.terminal) === Number(terminal)) || data[0];
+    return data[0];
   } catch {
     return null;
   }

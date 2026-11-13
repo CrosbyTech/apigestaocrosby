@@ -35,6 +35,7 @@ import {
   sincronizarChamados,
   registrarTransacao,
 } from '../services/devolucoesMercadoria.js';
+import { devolucaoEmSegundoPlano } from '../services/hcSaldosClientes.js';
 
 const router = express.Router();
 
@@ -252,6 +253,8 @@ router.post(
         : supabase.from('devolucoes_transacoes').upsert(registro, { onConflict: 'empresa,transacao_code' });
     const { data, error } = await op.select('id').single();
     if (error) return erroTrx(res, error);
+    // HEADCOACH › SALDOS: devolução atendida soma ao CREDEV do cliente nesta empresa
+    if (registro.transacao_status === 4) devolucaoEmSegundoPlano(data.id);
     console.log(
       `📦 [Devoluções] ${origem === 'fisfp082' ? 'recebimento FISFP082' : `transação ${empresa}/${transacaoCode}`} registrado: ${registro.qtd_recebida} recebida(s), ${registro.qtd_faltando} faltando, ${registro.qtd_sobrando} sobrando`,
     );
@@ -339,6 +342,8 @@ router.post(
       .select('id, origem, devolucao_id, transacao_status')
       .single();
     if (error) return erroTrx(res, error);
+    // HEADCOACH › SALDOS: atendida soma ao CREDEV do cliente; cancelada, sai de novo
+    if (status === 4 || status === 6) devolucaoEmSegundoPlano(data.id);
     // FISFP082 vinculado a uma solicitação: "lançada" (4) conclui a solicitação
     // (sai de Solicitações); "reabrir" (1) volta para recebida/aguardando entrada.
     if (data?.origem === 'fisfp082' && data?.devolucao_id) {

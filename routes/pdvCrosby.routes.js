@@ -46,6 +46,8 @@ import {
 } from '../services/pdvFiscal.js';
 import { espelharVendaNoTotvs, EspelhoError } from '../services/pdvEspelhoTotvs.js';
 import { caixaAbertoPara } from '../services/hcCaixa.js';
+import { sincronizarVendaEmSegundoPlano } from '../services/hcContasReceber.js';
+import { estornarVenda as estornarSaldosDaVenda } from '../services/hcSaldosClientes.js';
 import { aoCancelarVenda } from '../services/saldoBonus.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
 import {
@@ -565,9 +567,11 @@ router.post(
       observacao: b.observacao || null,
       criado_por: b.criadoPor || null,
     };
-    // HEADCOACH › CAIXA: a venda entra no caixa aberto da empresa (sem caixa aberto, segue sem)
-    const caixa = await caixaAbertoPara(empresa, b.terminal);
-    if (caixa) cabecalho.caixa_id = caixa.id;
+    // HEADCOACH › CAIXA: só vende com o caixa da empresa aberto (Yago, 12/11/2026);
+    // a venda entra nesse caixa
+    const caixa = await caixaAbertoPara(empresa);
+    if (!caixa) return errorResponse(res, `O caixa da empresa ${empresa} está fechado: abra o caixa para vender`, 409, 'CAIXA_FECHADO');
+    cabecalho.caixa_id = caixa.id;
     const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
     const { data: itensGravados, error: e1 } = await supabase
@@ -779,6 +783,9 @@ router.post(
     }
     const { error } = await supabase.from('pdv_vendas').update({ status: 'cancelada', observacao: [venda.observacao, req.body?.motivo].filter(Boolean).join(' | ') || null }).eq('id', venda.id);
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    await estornarSaldosDaVenda(venda.id, 'Venda cancelada', req.body?.por || null).catch((e) => {
+      if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${venda.id}: ${e.message}`);
+    });
     await registrarEpcs({ venda, itens: venda.itens, tipo: 'estorno' });
     return successResponse(res, await carregarVenda(venda.id), 'Venda cancelada');
   }),
@@ -883,6 +890,8 @@ export async function emitirVendaPdv(id) {
     };
     await supabase.from('pdv_notas_fiscais').update(patch).eq('id', notaId);
     await supabase.from('pdv_vendas').update({ status: envio.autorizada ? 'autorizada' : 'rejeitada' }).eq('id', id);
+    // HEADCOACH › CONTAS A RECEBER: nota autorizada gera os títulos da venda
+    if (envio.autorizada) sincronizarVendaEmSegundoPlano(id);
     console.log(
       `${envio.autorizada ? '✅' : '❌'} [PDV Crosby] Venda ${id} → ${modelo === 65 ? 'NFC-e' : 'NF-e'} ${serie}/${numero} ${envio.cStat} ${envio.xMotivo} (amb ${cfg.ambiente})`,
     );
@@ -1042,6 +1051,7 @@ router.post(
           })
           .eq('id', ctx.nota.id);
         await supabase.from('pdv_vendas').update({ status: 'cancelada' }).eq('id', ctx.nota.venda_id);
+        sincronizarVendaEmSegundoPlano(ctx.nota.venda_id); // cancela os títulos do contas a receber
         // venda da expedição: o registro do faturamento acompanha (libera faturar de novo)
         await supabase.from('pedidos_venda_faturamentos').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', ctx.nota.venda_id);
         // transferência com nota pelo HeadCoach: o registro acompanha e a solicitação volta para a fila
@@ -1053,6 +1063,10 @@ router.post(
           .neq('status', 'cancelada');
         // saldo bônus: o que a venda gastou volta ao cliente; o crédito que ela gerou é cancelado
         await aoCancelarVenda(ctx.nota.venda_id, req.body?.por || null).catch((e) => console.warn(`⚠️ [saldo bônus] venda ${ctx.nota.venda_id}: ${e.message}`));
+        // CREDEV / adiantamento do HeadCoach que a venda usou volta ao cliente
+        await estornarSaldosDaVenda(ctx.nota.venda_id, 'Nota fiscal da venda cancelada', req.body?.por || null).catch((e) => {
+          if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${ctx.nota.venda_id}: ${e.message}`);
+        });
         const vendaCancelada = await carregarVenda(ctx.nota.venda_id);
         if (vendaCancelada) {
           await registrarEpcs({ venda: vendaCancelada, itens: vendaCancelada.itens, tipo: 'estorno', nota: ctx.nota });
