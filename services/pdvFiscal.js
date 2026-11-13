@@ -230,7 +230,9 @@ export async function buscarClienteFiscal(code) {
       ie: leg ? digits(leg.numberStateRegistration) : null,
       // inscrição SUFRAMA (Zona Franca / Área de Livre Comércio) — cadastro do TOTVS
       suframa: leg && digits(leg.suframaCode || '') ? digits(leg.suframaCode) : null,
-      email: email || null,
+      // e-mail do cadastro do TOTVS às vezes vem com espaço/quebra de linha no fim
+      // (ex.: "fulano@gmail.com" + espaço + CR/LF): limpa, senão a NF-e cai na rejeição 297
+      email: String(email || '').replace(/\s+/g, '') || null,
       fone: fone ? digits(fone.number) : null,
       endereco: enderecoDe(addr),
     };
@@ -1023,9 +1025,15 @@ export async function assinarEEnviar({ xml, modelo, emit, cfg, cert }) {
     }
   }
   const tools = toolsPara({ modelo, uf: emit.uf, cfg, cert, cnpj: emit.cnpj });
+  // Rejeição 297 (assinatura difere do calculado): o node-sped-nfe assina o XML
+  // como recebe e DEPOIS o passa por xml2json -> json2xml, que apara espaços nas
+  // pontas de cada texto. Campo com espaço sobrando (ex.: e-mail do cadastro com
+  // quebra de linha no fim) ia assinado de um jeito e enviado de outro. Normalizando
+  // antes com a MESMA ida e volta, o que é assinado é exatamente o que vai para a SEFAZ.
+  const xmlNormalizado = await json2xml(await xml2json(xml));
   let xmlAssinado;
   try {
-    xmlAssinado = await tools.xmlSign(xml);
+    xmlAssinado = await tools.xmlSign(xmlNormalizado);
   } catch (e) {
     throw new FiscalError(`Falha ao assinar o XML: ${e?.message || e}`, 'SIGN_ERROR');
   }
