@@ -210,7 +210,9 @@ export function parcelasIguais(total, n, vencimentos) {
 // (ou nunca tiver sido aberta). Devolve { motivo, texto, … } ou null.
 export async function bloqueioDeFaturamento(chave, ref = null) {
   let q = supabase.from('pedidos_venda_faturamentos').select('id, chave, numero_site, venda_id, criado_em').not('venda_id', 'is', null).order('id', { ascending: false }).limit(50);
-  const r = ref ? String(ref).replace(/[,()]/g, '') : null;
+  // Brejinho: o pedido de showroom (ex.: BRJ 22657) é entregue em várias remessas,
+  // cada uma num card próprio — a trava é só do card (chave BRJ:<id>), nunca do número
+  const r = ref && !/^BRJ:/i.test(String(chave)) ? String(ref).replace(/[,()]/g, '') : null;
   q = r ? q.or(`chave.eq.${chave},numero_site.eq.${r}`) : q.eq('chave', chave);
   const { data: fats, error } = await q;
   if (error || !(fats || []).length) return null;
