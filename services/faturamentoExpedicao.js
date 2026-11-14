@@ -57,10 +57,10 @@ import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
 import { cardBrejinho } from './brejinhoDryland.js';
 export const EMPRESA_FATURAMENTO = 99;
 // Troca de peça NA TELA de faturamento (a que falta sai, a que sobra entra pelo
-// mesmo valor): liberada até 13/11/2026 (era 10/11, depois 11/11; em 12/11 o Yago
-// pediu mais 2 dias), para os pedidos cuja separação se perdeu nas 72 h do Dryland
+// mesmo valor): liberada até 16/11/2026 (era 10/11, depois 11/11 e 13/11; em 14/11
+// o Yago pediu até 16/11), para os pedidos cuja separação se perdeu nas 72 h do Dryland
 // e tiveram peça trocada.
-export const TROCA_NO_FATURAMENTO_ATE = '2026-11-13';
+export const TROCA_NO_FATURAMENTO_ATE = '2026-11-16';
 // Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
 export const EMPRESA_DOC_INTERNO = 990;
 // desconto de ajuste que o operador pode dar no faturamento dos pedidos do site
