@@ -1765,8 +1765,11 @@ router.post(
             const pCode = p.code ?? p.personCode;
             if (pCode != null) {
               supplierInfoMap.set(pCode, {
-                nome: p.fantasyName || p.name || p.corporateName || '',
+                // razão social primeiro: o nome fantasia ("DADA CORTE" da
+                // J MACIEL DE SOUZA LTDA) confundia a Titia (12/11/2026)
+                nome: p.legalName || p.name || p.corporateName || p.fantasyName || '',
                 razaoSocial: p.legalName || p.name || p.corporateName || '',
+                fantasia: p.fantasyName || '',
                 doc: String(p.cnpj || p.cpfCnpj || '').trim(),
               });
             }
@@ -1806,6 +1809,7 @@ router.post(
         if (!info) return;
         if (info.nome) item.nm_fornecedor = info.nome;
         if (info.razaoSocial) item.nm_razaosocial_fornecedor = info.razaoSocial;
+        if (info.fantasia) item.nm_fantasia_fornecedor = info.fantasia;
         // Só sobrescreve se a duplicata não trouxe o documento
         if (!item.nr_cpfcnpj_fornecedor && info.doc) {
           item.nr_cpfcnpj_fornecedor = info.doc;

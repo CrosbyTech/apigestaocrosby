@@ -1970,6 +1970,71 @@ export async function atualizarAnexos(id, anexos) {
  * (duplicata/solicitação/liberação), outras saídas que usam a mesma origem
  * (pagamento parcial) e os anexos.
  */
+// ─── empresa + despesa de cada item conciliado (Titia, 16/11/2026) ──────
+// Empresa = onde a despesa/receita foi registrada (filial do título no TOTVS,
+// empresa da Liberação/Solicitação); Despesa = item de despesa do título.
+const itensDaConc = (c) => {
+  const ref = c?.referencia || {};
+  if (Array.isArray(ref.itens) && ref.itens.length) return ref.itens.filter((it) => it && it.id != null).map((it) => ({ origem: it.origem, id: String(it.id), empresa: it.empresa || null }));
+  return ref.id != null ? [{ origem: c.origem, id: String(ref.id), empresa: ref.empresa || null }] : [];
+};
+export async function empresaDespesaDeItens(itens) {
+  const out = new Map(); // `${origem}:${id}` → { empresa, despesa, despesaCodigo }
+  const cp = itens.filter((i) => i.origem === 'TOTVS_CP');
+  const libs = [...new Set(itens.filter((i) => i.origem === 'LIBERACAO').map((i) => i.id))];
+  const sols = [...new Set(itens.filter((i) => i.origem === 'SOLICITACAO').map((i) => i.id))];
+  if (cp.length) {
+    const dups = [...new Set(cp.map((i) => parseInt(String(i.id).split('|')[1], 10)).filter(Number.isFinite))];
+    const linhas = [];
+    for (let k = 0; k < dups.length; k += 200) {
+      const { data } = await supabase.from('accounts_payable_duplicates_v').select('branch_code,branch_name,duplicate_code,installment_code,supplier_code,expense').in('duplicate_code', dups.slice(k, k + 200));
+      linhas.push(...(data || []));
+    }
+    for (const i of cp) {
+      const [b, d, p, f] = String(i.id).split('|').map((x) => (x === '' ? null : Number(x)));
+      const t = linhas.find((x) => Number(x.duplicate_code) === d && Number(x.branch_code) === b && (p == null || Number(x.installment_code) === p) && (f == null || Number(x.supplier_code) === f));
+      const exp = Array.isArray(t?.expense) ? t.expense : [];
+      out.set(`TOTVS_CP:${i.id}`, {
+        empresa: t ? `${t.branch_code}${t.branch_name ? ` · ${t.branch_name}` : ''}` : b != null ? `Empresa ${b}` : null,
+        despesa: exp.length ? [...new Set(exp.map((e) => `${e.expenseCode} ${e.expenseName || ''}`.trim()))].join(' / ') : null,
+        despesaCodigo: exp[0]?.expenseCode ?? null,
+      });
+    }
+  }
+  for (let k = 0; k < libs.length; k += 200) {
+    const { data } = await supabase.from(T.lib).select('id,cd_empresa,nm_empresa,ds_despesaitem').in('id', libs.slice(k, k + 200));
+    for (const l of data || []) out.set(`LIBERACAO:${l.id}`, { empresa: [l.cd_empresa, l.nm_empresa].filter(Boolean).join(' · ') || null, despesa: l.ds_despesaitem || null, despesaCodigo: parseInt(String(l.ds_despesaitem || ''), 10) || null });
+  }
+  for (let k = 0; k < sols.length; k += 200) {
+    const { data } = await supabase.from(T.sol).select('id,cd_empresa,nm_empresa,despesa_code').in('id', sols.slice(k, k + 200));
+    for (const x of data || []) out.set(`SOLICITACAO:${x.id}`, { empresa: [x.cd_empresa, x.nm_empresa].filter(Boolean).join(' · ') || null, despesa: x.despesa_code ? String(x.despesa_code) : null, despesaCodigo: x.despesa_code || null });
+  }
+  for (const i of itens.filter((x) => x.origem === 'TOTVS_CR')) {
+    const b = String(i.id).split('|')[0];
+    out.set(`TOTVS_CR:${i.id}`, { empresa: i.empresa || (b ? `Empresa ${b}` : null), despesa: null, despesaCodigo: null });
+  }
+  return out;
+}
+/** Para o Excel da conciliação: conciliação id → { empresa, despesa } (itens juntos). */
+export async function empresaDespesaDasConciliacoes(ids) {
+  const lista = [...new Set((ids || []).map(Number).filter(Boolean))];
+  const concs = [];
+  for (let k = 0; k < lista.length; k += 200) {
+    const { data, error } = await supabase.from(T.conc).select('id,origem,referencia').in('id', lista.slice(k, k + 200));
+    if (error) throw new Error(error.message);
+    concs.push(...(data || []));
+  }
+  const porConc = concs.map((c) => ({ c, itens: itensDaConc(c) }));
+  const mapa = await empresaDespesaDeItens(porConc.flatMap((x) => x.itens));
+  const out = {};
+  for (const { c, itens } of porConc) {
+    const vals = itens.map((i) => mapa.get(`${i.origem}:${i.id}`) || { empresa: i.empresa || null, despesa: null });
+    const junta = (k) => [...new Set(vals.map((v) => v[k]).filter(Boolean))].join(' / ') || null;
+    out[c.id] = { empresa: junta('empresa') || c.referencia?.empresa || null, despesa: junta('despesa'), despesaCodigo: vals.find((v) => v.despesaCodigo)?.despesaCodigo || null };
+  }
+  return out;
+}
+
 export async function detalheConciliacao(id) {
   const { data: c, error } = await supabase.from(T.conc).select('*').eq('id', id).maybeSingle();
   lancar(error);
@@ -1994,7 +2059,11 @@ export async function detalheConciliacao(id) {
       origem: null,
       solicitacao: null,
       comprovante,
-      itens: ref.itens,
+      itens: await (async () => {
+        // despesa + empresa de cada duplicata (Titia, 16/11/2026)
+        const mapa = await empresaDespesaDeItens(ref.itens.filter((it) => it?.id != null).map((it) => ({ origem: it.origem, id: String(it.id), empresa: it.empresa || null }))).catch(() => new Map());
+        return ref.itens.map((it) => ({ ...it, ...(mapa.get(`${it.origem}:${it.id}`) ? { despesa: mapa.get(`${it.origem}:${it.id}`).despesa, despesaCodigo: mapa.get(`${it.origem}:${it.id}`).despesaCodigo, empresaRegistro: mapa.get(`${it.origem}:${it.id}`).empresa } : {}) }));
+      })(),
       usos: [],
       parcial: { totalUsado: ref.valorTotal, valorDuplicata: ref.valorDuplicata, restante: ref.valorDuplicata != null && ref.valorTotal != null ? round2(ref.valorDuplicata - ref.valorTotal) : null },
     };

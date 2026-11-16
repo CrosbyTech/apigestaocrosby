@@ -395,6 +395,19 @@ router.post(
   }),
 );
 
+// empresa + despesa de cada conciliação (Excel do extrato — Titia, 16/11/2026)
+router.post(
+  '/conciliacao/empresa-despesa',
+  asyncHandler(async (req, res) => {
+    try {
+      const { empresaDespesaDasConciliacoes } = await import('../services/fluxoCaixaConciliacao.js');
+      return successResponse(res, await empresaDespesaDasConciliacoes(req.body?.ids || []));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Entradas pendentes de todas as contas (Inefável, 10/11/2026)
 router.get(
   '/conciliacao/entradas-pendentes',
