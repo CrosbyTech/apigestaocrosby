@@ -1978,8 +1978,23 @@ const itensDaConc = (c) => {
   if (Array.isArray(ref.itens) && ref.itens.length) return ref.itens.filter((it) => it && it.id != null).map((it) => ({ origem: it.origem, id: String(it.id), empresa: it.empresa || null }));
   return ref.id != null ? [{ origem: c.origem, id: String(ref.id), empresa: ref.empresa || null }] : [];
 };
+// nome e CNPJ únicos por código de empresa (lista de filiais do TOTVS) —
+// "1 · CROSBY MATRIZ" em vez de cada fonte com um nome (Titia, 16/11/2026)
+async function empresasPorCodigo() {
+  const m = await mapearFiliaisTotvsPorCnpj().catch(() => null);
+  const out = new Map();
+  for (const [cnpj, arr] of m || []) for (const f of arr || []) if (!out.has(Number(f.code))) out.set(Number(f.code), { nome: f.nome, cnpj });
+  return out;
+}
 export async function empresaDespesaDeItens(itens) {
-  const out = new Map(); // `${origem}:${id}` → { empresa, despesa, despesaCodigo }
+  const out = new Map(); // `${origem}:${id}` → { empresa, cnpjEmpresa, codigoEmpresa, despesa, despesaCodigo }
+  const empresas = await empresasPorCodigo();
+  const emp = (codigo, fallback = null) => {
+    const c = parseInt(String(codigo ?? ''), 10);
+    const e = Number.isFinite(c) ? empresas.get(c) : null;
+    if (e) return { empresa: `${c} · ${e.nome}`, cnpjEmpresa: e.cnpj, codigoEmpresa: c };
+    return { empresa: Number.isFinite(c) ? `${c}${fallback ? ` · ${fallback}` : ''}` : fallback, cnpjEmpresa: null, codigoEmpresa: Number.isFinite(c) ? c : null };
+  };
   const cp = itens.filter((i) => i.origem === 'TOTVS_CP');
   const libs = [...new Set(itens.filter((i) => i.origem === 'LIBERACAO').map((i) => i.id))];
   const sols = [...new Set(itens.filter((i) => i.origem === 'SOLICITACAO').map((i) => i.id))];
@@ -1995,7 +2010,7 @@ export async function empresaDespesaDeItens(itens) {
       const t = linhas.find((x) => Number(x.duplicate_code) === d && Number(x.branch_code) === b && (p == null || Number(x.installment_code) === p) && (f == null || Number(x.supplier_code) === f));
       const exp = Array.isArray(t?.expense) ? t.expense : [];
       out.set(`TOTVS_CP:${i.id}`, {
-        empresa: t ? `${t.branch_code}${t.branch_name ? ` · ${t.branch_name}` : ''}` : b != null ? `Empresa ${b}` : null,
+        ...emp(t?.branch_code ?? b, t?.branch_name || null),
         despesa: exp.length ? [...new Set(exp.map((e) => `${e.expenseCode} ${e.expenseName || ''}`.trim()))].join(' / ') : null,
         despesaCodigo: exp[0]?.expenseCode ?? null,
       });
@@ -2003,15 +2018,15 @@ export async function empresaDespesaDeItens(itens) {
   }
   for (let k = 0; k < libs.length; k += 200) {
     const { data } = await supabase.from(T.lib).select('id,cd_empresa,nm_empresa,ds_despesaitem').in('id', libs.slice(k, k + 200));
-    for (const l of data || []) out.set(`LIBERACAO:${l.id}`, { empresa: [l.cd_empresa, l.nm_empresa].filter(Boolean).join(' · ') || null, despesa: l.ds_despesaitem || null, despesaCodigo: parseInt(String(l.ds_despesaitem || ''), 10) || null });
+    for (const l of data || []) out.set(`LIBERACAO:${l.id}`, { ...emp(l.cd_empresa, l.nm_empresa || null), despesa: l.ds_despesaitem || null, despesaCodigo: parseInt(String(l.ds_despesaitem || ''), 10) || null });
   }
   for (let k = 0; k < sols.length; k += 200) {
     const { data } = await supabase.from(T.sol).select('id,cd_empresa,nm_empresa,despesa_code').in('id', sols.slice(k, k + 200));
-    for (const x of data || []) out.set(`SOLICITACAO:${x.id}`, { empresa: [x.cd_empresa, x.nm_empresa].filter(Boolean).join(' · ') || null, despesa: x.despesa_code ? String(x.despesa_code) : null, despesaCodigo: x.despesa_code || null });
+    for (const x of data || []) out.set(`SOLICITACAO:${x.id}`, { ...emp(x.cd_empresa, x.nm_empresa || null), despesa: x.despesa_code ? String(x.despesa_code) : null, despesaCodigo: x.despesa_code || null });
   }
   for (const i of itens.filter((x) => x.origem === 'TOTVS_CR')) {
     const b = String(i.id).split('|')[0];
-    out.set(`TOTVS_CR:${i.id}`, { empresa: i.empresa || (b ? `Empresa ${b}` : null), despesa: null, despesaCodigo: null });
+    out.set(`TOTVS_CR:${i.id}`, { ...emp(b, null), despesa: null, despesaCodigo: null });
   }
   return out;
 }
@@ -2030,7 +2045,7 @@ export async function empresaDespesaDasConciliacoes(ids) {
   for (const { c, itens } of porConc) {
     const vals = itens.map((i) => mapa.get(`${i.origem}:${i.id}`) || { empresa: i.empresa || null, despesa: null });
     const junta = (k) => [...new Set(vals.map((v) => v[k]).filter(Boolean))].join(' / ') || null;
-    out[c.id] = { empresa: junta('empresa') || c.referencia?.empresa || null, despesa: junta('despesa'), despesaCodigo: vals.find((v) => v.despesaCodigo)?.despesaCodigo || null };
+    out[c.id] = { empresa: junta('empresa') || c.referencia?.empresa || null, cnpjEmpresa: junta('cnpjEmpresa'), despesa: junta('despesa'), despesaCodigo: vals.find((v) => v.despesaCodigo)?.despesaCodigo || null };
   }
   return out;
 }
@@ -2062,7 +2077,10 @@ export async function detalheConciliacao(id) {
       itens: await (async () => {
         // despesa + empresa de cada duplicata (Titia, 16/11/2026)
         const mapa = await empresaDespesaDeItens(ref.itens.filter((it) => it?.id != null).map((it) => ({ origem: it.origem, id: String(it.id), empresa: it.empresa || null }))).catch(() => new Map());
-        return ref.itens.map((it) => ({ ...it, ...(mapa.get(`${it.origem}:${it.id}`) ? { despesa: mapa.get(`${it.origem}:${it.id}`).despesa, despesaCodigo: mapa.get(`${it.origem}:${it.id}`).despesaCodigo, empresaRegistro: mapa.get(`${it.origem}:${it.id}`).empresa } : {}) }));
+        return ref.itens.map((it) => {
+          const x = mapa.get(`${it.origem}:${it.id}`);
+          return { ...it, ...(x ? { despesa: x.despesa, despesaCodigo: x.despesaCodigo, empresaRegistro: x.empresa, cnpjEmpresa: x.cnpjEmpresa } : {}) };
+        });
       })(),
       usos: [],
       parcial: { totalUsado: ref.valorTotal, valorDuplicata: ref.valorDuplicata, restante: ref.valorDuplicata != null && ref.valorTotal != null ? round2(ref.valorDuplicata - ref.valorTotal) : null },
