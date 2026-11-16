@@ -17,6 +17,11 @@ import {
 import supabase from '../config/supabase.js';
 import supabaseFiscal from '../config/supabaseFiscal.js';
 import { cpfsQueCompraramNoApp } from '../services/bluecardClient.js';
+import {
+  vendasHeadcoachParaForecast,
+  EMPRESA_HC_FATURAMENTO,
+  OP_SHOWROOM_BREJINHO,
+} from '../services/hcVendasForecast.js';
 
 // Operações que o TOTVS NÃO classifica como operationModel "Sales", então
 // não retornam no /sale-panel/v2/totals-branch/search mesmo passando elas
@@ -1024,6 +1029,17 @@ const PANEL_ATACADO_SELLERS = new Set([40, 161, 241, 165, 259, 21, 26]);
 
 // Cache: rota pesada (AR paginado + fiscal-movement paginado). 30min —
 // também serve o drill-down por vendedor sem recomputar.
+// forma vazia das vendas do HeadCoach (services/hcVendasForecast.js)
+const HC_VAZIO = () => ({
+  atacado: [],
+  brejinho: [],
+  varejo: [],
+  espelhos: new Set(),
+  espelhoClientes: new Set(),
+  credevDescontado: 0,
+  soCredev: { qtd: 0, valor: 0 },
+  doGrupo: { qtd: 0, valor: 0 },
+});
 const FAT_VEND_CACHE = new Map();
 const FAT_VEND_TTL = 30 * 60 * 1000;
 
@@ -1363,6 +1379,7 @@ router.post(
       expedicaoNFs,
       bluecredCodes,
       nonSalesVarejo,
+      hcVendas,
     ] = await Promise.all([
         fetchFaturas(),
         fetchMovementMap(),
@@ -1378,7 +1395,19 @@ router.post(
           datemin: dmin,
           datemax: dmax,
         }),
+        // Vendas do Faturamento / Faturamento Brejinho do HEADCOACH (empresa
+        // 99; desde 13/11/2026 não vão mais ao TOTVS). Falha aqui não derruba
+        // o painel, mas o resultado não é cacheado (ver hcVendasErro).
+        branchs.includes(EMPRESA_HC_FATURAMENTO)
+          ? vendasHeadcoachParaForecast({ dmin, dmax }).catch((e) => {
+              console.error(`[fat-vendedor/headcoach] ${e.message}`);
+              return { erro: e.message, ...HC_VAZIO() };
+            })
+          : null,
       ]);
+    const hc = hcVendas || HC_VAZIO();
+    const hcVendasErro = hcVendas?.erro || null;
+    const somaHc = (arr) => Math.round(arr.reduce((a, v) => a + v.valor, 0) * 100) / 100;
 
     // Mescla as non-sales no painel varejo. NF com dealer_code soma no
     // vendedor real (ex: 5919 da NETO na Midway); sem dealer vira linha
@@ -1416,6 +1445,52 @@ router.post(
         row.valor = Math.round((row.valor + valor) * 100) / 100;
       }
       if (row) row.sellers.sort((a, b) => b.valor - a.valor);
+    }
+    // ── VAREJO do HeadCoach (pedidos VJ da loja virtual, empresa 99) ────────
+    // A venda espelhada na 990 do TOTVS (10 a 13/11/2026) já está no painel
+    // oficial: sai de lá (por vendedor, até o que o painel tem) e TODAS as
+    // vendas de varejo do HeadCoach entram numa linha própria da empresa 99.
+    if (hc.varejo.length > 0) {
+      const row990 = varejoPainel.find((b) => b.branch_code === 990);
+      if (row990) {
+        for (const v of hc.varejo) {
+          if (!v.espelhada) continue;
+          const sel = row990.sellers.find((x) => x.seller_code === v.vendedor_code);
+          if (!sel || !(sel.valor > 0)) continue;
+          const desc = Math.min(sel.valor, v.total);
+          sel.valor = Math.round((sel.valor - desc) * 100) / 100;
+          sel.qtd = Math.max(0, (sel.qtd || 0) - 1);
+          row990.valor = Math.round((row990.valor - desc) * 100) / 100;
+          row990.qtd = Math.max(0, (row990.qtd || 0) - 1);
+        }
+        row990.sellers = row990.sellers.filter((x) => x.valor > 0);
+        if (row990.sellers.length === 0) {
+          varejoPainel.splice(varejoPainel.indexOf(row990), 1);
+        }
+      }
+      let row99 = varejoPainel.find((b) => b.branch_code === EMPRESA_HC_FATURAMENTO);
+      if (!row99) {
+        row99 = { branch_code: EMPRESA_HC_FATURAMENTO, qtd: 0, valor: 0, sellers: [] };
+        varejoPainel.push(row99);
+      }
+      for (const v of hc.varejo) {
+        let sel = row99.sellers.find((x) => x.seller_code === v.vendedor_code);
+        if (!sel) {
+          sel = {
+            seller_code: v.vendedor_code,
+            seller_name:
+              sellerNames.get(v.vendedor_code) || v.vendedor_nome || `Vend. ${v.vendedor_code}`,
+            qtd: 0,
+            valor: 0,
+          };
+          row99.sellers.push(sel);
+        }
+        sel.qtd += 1;
+        sel.valor = Math.round((sel.valor + v.valor) * 100) / 100;
+        row99.qtd += 1;
+        row99.valor = Math.round((row99.valor + v.valor) * 100) / 100;
+      }
+      row99.sellers.sort((a, b) => b.valor - a.valor);
     }
     varejoPainel.sort((a, b) => b.valor - a.valor);
     console.log(
@@ -1552,6 +1627,31 @@ router.post(
       }
     }
 
+    // ─── 4.1b) Espelho do HeadCoach no TOTVS ────────────────────────────────
+    // De 10 a 13/11/2026 a venda do Faturamento do HeadCoach também gerou
+    // documento interno + contas a receber na 990. O TOTVS só enxergava parte
+    // delas (cartão/Pix sem NF caem como pagamento avulso). A fonte dessas
+    // vendas é o HeadCoach (passos 4.3 e 6.0): o espelho sai daqui para não
+    // contar em dobro. Na 990 basta o CLIENTE ter venda espelhada (o título
+    // nem sempre leva o nº da NF: cartão sai com o da liquidação); na 99 só
+    // sai o título com o mesmo nº da NF-e ou da transação.
+    const espelhoHc = { qtd: 0, valor: 0 };
+    if (hc.espelhos.size > 0 || hc.espelhoClientes.size > 0) {
+      for (let i = vendasFinais.length - 1; i >= 0; i--) {
+        const f = vendasFinais[i];
+        const bc = Number(f.branchCode);
+        const cli = Number(f.customerCode);
+        const ehEspelho =
+          bc === 990
+            ? hc.espelhoClientes.has(cli)
+            : bc === EMPRESA_HC_FATURAMENTO && hc.espelhos.has(`${cli}|${Number(f.receivableCode)}`);
+        if (!ehEspelho) continue;
+        espelhoHc.qtd += 1;
+        espelhoHc.valor += f.valor;
+        vendasFinais.splice(i, 1);
+      }
+    }
+
     // ─── 4.2) Atribuição de vendedor por CASAMENTO DE VALOR ─────────────────
     // Quando o cliente compra de 2+ vendedores no mesmo dia (ex: vendedor da
     // franquia + showroom/GERAL), cada fatura vai pro vendedor cuja soma de
@@ -1633,6 +1733,25 @@ router.post(
         op_nome: nf.operationName || null, // rótulo da operação no drill
       });
     }
+    // Faturamento BREJINHO do HeadCoach = showroom (no TOTVS era a op 7254).
+    // O valor já vem sem a parte paga com CREDEV (diretriz do New Forecast).
+    for (const v of hc.brejinho) {
+      expedicaoTotal += v.valor;
+      expPorOp[OP_SHOWROOM_BREJINHO] =
+        Math.round(((expPorOp[OP_SHOWROOM_BREJINHO] || 0) + v.valor) * 100) / 100;
+      vendasExp.push({
+        data: v.data,
+        branch_code: v.branch_code,
+        fatura: v.fatura, // nº da NF-e do HeadCoach
+        cliente_code: v.cliente_code,
+        cliente_nome: v.cliente_nome,
+        valor: v.valor,
+        op: OP_SHOWROOM_BREJINHO,
+        op_nome: null,
+        origem: 'headcoach',
+        pedido: v.pedido,
+      });
+    }
     vendasExp.sort(
       (a, b) =>
         String(b.data).localeCompare(String(a.data)) || b.valor - a.valor,
@@ -1709,6 +1828,8 @@ router.post(
         // clientes da EXPEDIÇÃO (podem não ter fatura no período — ex: CYRO)
         ...vendasExp.map((v) => v.cliente_code),
         ...vendasBluecred.map((v) => v.cliente_code),
+        // atacado do HeadCoach: o nome fantasia decide franquia × multimarcas
+        ...hc.atacado.map((v) => v.cliente_code),
       ]),
     ].filter(Boolean);
     const excludedCustomers = new Set(); // mantido vazio (ver nota acima)
@@ -1780,6 +1901,37 @@ router.post(
       bySeller.set(code, cur);
     }
 
+    // ─── 6.0) ATACADO do HeadCoach (Faturamento: revenda, multimarcas e ─────
+    // franquias) no vendedor da venda. Uma linha por venda; "fatura" = nº da
+    // NF-e. Valor já vem sem a parte paga com CREDEV (mesma regra do AR).
+    for (const v of hc.atacado) {
+      const code = v.vendedor_code || 0;
+      const cur = bySeller.get(code) || {
+        seller_code: code,
+        seller_name: sellerNames.get(code) || v.vendedor_nome || null,
+        valor: 0,
+        faturas: new Map(),
+        porFilial: {},
+      };
+      if (!cur.seller_name && v.vendedor_nome) cur.seller_name = v.vendedor_nome;
+      const pf = cur.porFilial[v.branch_code] || { qtd: 0, valor: 0 };
+      pf.qtd += 1;
+      pf.valor += v.valor;
+      cur.porFilial[v.branch_code] = pf;
+      cur.faturas.set(`hc|${v.venda_id}`, {
+        data: v.data,
+        branch_code: v.branch_code,
+        fatura: v.fatura,
+        cliente_code: v.cliente_code,
+        cliente_nome: null, // preenchido abaixo (personNames)
+        valor: v.valor,
+        origem: 'headcoach',
+        pedido: v.pedido,
+      });
+      cur.valor += v.valor;
+      bySeller.set(code, cur);
+    }
+
     // ─── 6.1) Nomes faltantes: busca dirigida por código ────────────────────
     // A varredura geral (passo 3) é limitada às linhas mais recentes; um
     // vendedor que não vendeu nesses dias chegaria aqui como "Vend. 26".
@@ -1846,12 +1998,14 @@ router.post(
       .sort((a, b) => b.valor - a.valor);
 
     // Detalhe por vendedor: lista de vendas (faturas), mais recentes primeiro
+    const hcNomeCliente = new Map(hc.atacado.map((v) => [v.cliente_code, v.cliente_nome]));
     const detalhes = {};
     for (const s of bySeller.values()) {
       detalhes[s.seller_code] = [...s.faturas.values()]
         .map((f) => ({
           ...f,
-          cliente_nome: personNames.get(f.cliente_code) || null,
+          cliente_nome:
+            personNames.get(f.cliente_code) || hcNomeCliente.get(f.cliente_code) || null,
           valor: Math.round(f.valor * 100) / 100,
         }))
         .sort(
@@ -1933,6 +2087,20 @@ router.post(
         valor: Math.round(valor * 100) / 100,
       });
     }
+    for (const v of hc.varejo) {
+      const sc = String(v.vendedor_code);
+      if (!varejoDetalhes[sc]) varejoDetalhes[sc] = [];
+      varejoDetalhes[sc].push({
+        data: v.data,
+        branch_code: v.branch_code,
+        fatura: v.fatura,
+        cliente_code: v.cliente_code,
+        cliente_nome: v.cliente_nome,
+        valor: v.valor,
+        origem: 'headcoach',
+        pedido: v.pedido,
+      });
+    }
     for (const arr of Object.values(varejoDetalhes)) {
       arr.sort(
         (a, b) =>
@@ -1972,6 +2140,24 @@ router.post(
         qtd: foraPeriodo.qtd,
         valor: Math.round(foraPeriodo.valor * 100) / 100,
       },
+      // Vendas do Faturamento do HeadCoach somadas acima (atacado no vendedor,
+      // Brejinho na expedição/showroom, varejo na empresa 99) e o espelho da
+      // 990 do TOTVS que saiu para não dobrar
+      headcoach: {
+        atacado: { qtd: hc.atacado.length, valor: somaHc(hc.atacado) },
+        brejinho: { qtd: hc.brejinho.length, valor: somaHc(hc.brejinho) },
+        varejo: { qtd: hc.varejo.length, valor: somaHc(hc.varejo) },
+        espelho_totvs_removido: {
+          qtd: espelhoHc.qtd,
+          valor: Math.round(espelhoHc.valor * 100) / 100,
+        },
+        // CREDEV nunca entra: o que saiu das vendas parciais e as 100% CREDEV
+        credev_descontado: hc.credevDescontado,
+        so_credev_fora: hc.soCredev,
+        // faturado para CNPJ do próprio grupo = transferência, não entra
+        para_o_grupo_fora: hc.doGrupo,
+        erro: hcVendasErro,
+      },
       period: { datemin: dmin, datemax: dmax },
       branchs_used: branchs,
       stats: { fm_chaves: movMap.size, ar_parcelas: faturas.length },
@@ -1987,7 +2173,10 @@ router.post(
         `[fat-vendedor] ⚠️ resultado colapsado (sem_vinculo ${semVinculo.valor.toFixed(2)} > 50% do bruto) — NÃO cacheado`,
       );
     }
-    if (!colapsado && (dataRow.length > 0 || varejoPainel.length > 0)) {
+    if (hcVendasErro) {
+      console.error('[fat-vendedor] ⚠️ vendas do HeadCoach não lidas — resultado NÃO cacheado');
+    }
+    if (!colapsado && !hcVendasErro && (dataRow.length > 0 || varejoPainel.length > 0)) {
       // detalhes fica só no cache (drill-down) — não infla a resposta da lista
       FAT_VEND_CACHE.set(cacheKey, {
         data: responseData,
