@@ -220,6 +220,12 @@ export async function gerarCsv(id, tipo = 'epcs') {
   const { data: arq, error } = await supabase.from(TABELA).select('*').eq('id', id).maybeSingle();
   if (error) throw error;
   if (!arq) throw new BalancoError('Arquivo não encontrado', 'NOT_FOUND', 404);
+  // TXT: só os EPCs da loja, um por linha, sem cabeçalho (Yago, 17/11/2026)
+  if (tipo === 'txt') {
+    const epcs = [...new Set((arq.epcs || []).map((e) => String(e).trim().toUpperCase()).filter(Boolean))];
+    const arquivo = `${arq.nome.replace(/[\\/:*?"<>|]/g, '-')} - EPCS.txt`;
+    return { arquivo, conteudo: epcs.length ? `${epcs.join('\r\n')}\r\n` : '', tipoConteudo: 'text/plain; charset=utf-8' };
+  }
   const linhas = [];
   if (tipo === 'produtos') {
     const { itens } = await gerarResumo(id);

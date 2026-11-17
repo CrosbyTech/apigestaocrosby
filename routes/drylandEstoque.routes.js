@@ -9,12 +9,32 @@
 //   GET /saldo?cod&busca&grupo&subgrupo&classificacao&so_com_saldo&limite&offset
 //   GET /movimentos?cod&desde&limite&offset
 //   GET /fila?id=                    pedidos do HeadCoach na fila do Estoquista (sem restrição de loja)
+// Lojas físicas (16/11/2026 — ações lojas + saldo_loja do Dryland), cada um só vê as suas:
+//   GET /lojas                       lojas próprias que a pessoa enxerga
+//   GET /lojas/resumo?forcar=1       peças e códigos de cada loja + de qual balanço vem o saldo
+//   GET /saldo-loja?loja&busca&classificacao&pagina&porPagina&forcar
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
-import { EstoqueDrylandError, EMPRESA_DO_ESTOQUE, podeVerEstoque, status, ajuda, operacoes, grupos, manual, saldo, movimentos, minhaFila, resumo } from '../services/drylandEstoque.js';
+import {
+  EstoqueDrylandError,
+  EMPRESA_DO_ESTOQUE,
+  podeVerEstoque,
+  status,
+  ajuda,
+  operacoes,
+  grupos,
+  manual,
+  saldo,
+  movimentos,
+  minhaFila,
+  resumo,
+  lojas,
+  resumoLojas,
+  saldoLoja,
+} from '../services/drylandEstoque.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -53,6 +73,17 @@ router.get('/manual', rota((req) => manual(req.query.id || null), 'Manual do est
 router.get('/resumo', rota(comTrava((req) => resumo({ forcar: req.query.forcar === '1' })), 'Resumo do estoque da Loja Virtual'));
 router.get('/saldo', rota(comTrava((req) => saldo(req.query)), 'Saldo do estoque'));
 router.get('/movimentos', rota(comTrava((req) => movimentos(req.query)), 'Movimentos do produto'));
+// lojas físicas: cada um só as suas (vendedor: a própria; owner/admin: todas)
+router.get(
+  '/lojas',
+  rota(async (req) => {
+    const permitidas = await empresasRestritasDoUsuario(req.user);
+    const todas = await lojas();
+    return { lojas: permitidas ? todas.filter((l) => permitidas.map(Number).includes(l.code)) : todas };
+  }, 'Lojas'),
+);
+router.get('/lojas/resumo', rota(async (req) => resumoLojas(await empresasRestritasDoUsuario(req.user), { forcar: req.query.forcar === '1' }), 'Estoque das lojas'));
+router.get('/saldo-loja', rota(async (req) => saldoLoja(req.query, await empresasRestritasDoUsuario(req.user)), 'Saldo da loja'));
 router.get(
   '/fila',
   rota(async (req) => {

@@ -5,7 +5,8 @@
 //   GET  /                 lista (?empresa=&de=&ate=&busca=) — sem os EPCs
 //   GET  /:id              arquivo completo (com os EPCs)
 //   POST /:id/resumo       agrupa por produto (EPC → EAN → TOTVS); ?forcar=1 refaz
-//   GET  /:id/csv          exporta (?tipo=epcs|produtos&por=email) — só nas primeiras 48 h
+//   GET  /:id/csv          exporta (?tipo=epcs|produtos|txt&por=email) — só nas primeiras 48 h
+//                          txt = só os EPCs, um por linha (17/11/2026)
 //   POST /:id/csv-autorizado  depois das 48 h: { email, senha } de gerente/admin/owner
 // Consultas (tudo menos o POST / do app) exigem login e só mostram os balanços
 // das empresas do usuário (utils/empresasUsuario.js — Yago, 13/11/2026).
@@ -144,8 +145,8 @@ router.post(
 );
 
 async function enviarCsv(res, id, tipo) {
-  const { arquivo, conteudo } = await gerarCsv(id, tipo);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  const { arquivo, conteudo, tipoConteudo } = await gerarCsv(id, tipo);
+  res.setHeader('Content-Type', tipoConteudo || 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(arquivo)}`);
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
   return res.send(conteudo);
@@ -163,7 +164,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const tipo = req.query.tipo === 'produtos' ? 'produtos' : 'epcs';
+      const tipo = ['produtos', 'txt'].includes(req.query.tipo) ? req.query.tipo : 'epcs';
       await exigirArquivoPermitido(req, id);
       const criadoEm = await carregarCriadoEm(id);
       if (!downloadLiberado(criadoEm)) {
@@ -188,7 +189,7 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const tipo = req.body?.tipo === 'produtos' ? 'produtos' : 'epcs';
+      const tipo = ['produtos', 'txt'].includes(req.body?.tipo) ? req.body.tipo : 'epcs';
       await exigirArquivoPermitido(req, id);
       await carregarCriadoEm(id);
       const autorizador = await verificarAutorizador(req.body?.email, req.body?.senha);

@@ -28,7 +28,7 @@ export class EstoqueDrylandError extends Error {
 // sem ela, a anon antiga do Dryland
 const chavePublica = () => String(process.env.DRYLAND_ESTQ_KEY || '').trim() || DRYLAND_KEY;
 
-const ACOES_CONSULTA = ['ajuda', 'manual', 'operacoes', 'saldo', 'grupos', 'movimentos', 'minha_fila'];
+const ACOES_CONSULTA = ['ajuda', 'manual', 'operacoes', 'saldo', 'grupos', 'movimentos', 'minha_fila', 'lojas', 'saldo_loja'];
 
 export function tokenConfigurado() {
   return !!String(process.env.DRYLAND_ESTQ_TOKEN || '').trim();
@@ -166,6 +166,111 @@ export function resumo({ forcar = false } = {}) {
     const classificacoes = [...porClass.values()].map((g) => ({ ...g, valor: Math.round(g.valor * 100) / 100 })).sort((a, b) => b.total - a.total);
     return { totais: tot, classificacoes, atualizadoEm: new Date().toISOString() };
   });
+}
+
+// ─── saldo por LOJA FÍSICA (ações lojas + saldo_loja, liberadas em 16/11/2026) ──
+// O Fábio passou a devolver o saldo de cada loja própria: base = último balanço
+// RFID da loja + movimentos lançados depois (venda, devolução, transferência).
+// O saldo_loja não tem busca por descrição: a loja inteira (≈2 mil códigos) é
+// lida de 500 em 500, guardada 2 min e filtrada/paginada aqui.
+const semAcento = (s) =>
+  String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
+
+/** Lojas do Dryland (loja_cd = código da empresa). Só as próprias e ativas. */
+export async function lojas() {
+  const r = await comCache('lojas', 10 * 60_000, () => estqGw('lojas'));
+  if (!Array.isArray(r)) throw new EstoqueDrylandError('O Dryland devolveu as lojas num formato inesperado', 'FORMATO', 502);
+  return r.filter((l) => l.propria && l.ativo !== false).map((l) => ({ code: Number(l.loja_cd), nome: txt(l.nome) })).sort((a, b) => a.code - b.code);
+}
+
+async function linhasDaLoja(lojaCd, { forcar = false } = {}) {
+  const chave = `saldo_loja:${lojaCd}`;
+  if (forcar) cache.delete(chave);
+  return comCache(chave, 2 * 60_000, async () => {
+    const linhas = [];
+    for (let offset = 0; offset < 100_000; offset += 500) {
+      const r = await estqGw('saldo_loja', { loja_cd: lojaCd, so_com_saldo: true, limite: 500, offset });
+      if (!Array.isArray(r)) throw new EstoqueDrylandError('O Dryland devolveu o saldo da loja num formato inesperado', 'FORMATO', 502);
+      linhas.push(...r);
+      if (r.length < 500) break;
+    }
+    return linhas;
+  });
+}
+
+// de onde vem o saldo da loja: o balanço que mais aparece + o último movimento
+function origemDoSaldo(linhas) {
+  const bases = new Map();
+  let atualizado = null;
+  for (const l of linhas) {
+    if (String(l.base || '').startsWith('balanco')) {
+      const k = `${l.base}|${l.base_em || ''}`;
+      bases.set(k, (bases.get(k) || 0) + 1);
+    }
+    if (l.atualizado_em && (!atualizado || l.atualizado_em > atualizado)) atualizado = l.atualizado_em;
+  }
+  const [principal] = [...bases.entries()].sort((a, b) => b[1] - a[1]);
+  const [base, baseEm] = principal ? principal[0].split('|') : [null, null];
+  return { base, baseEm: baseEm || null, atualizadoEm: atualizado };
+}
+
+function permitida(lojaCd, permitidas) {
+  if (permitidas && !permitidas.map(Number).includes(Number(lojaCd))) throw new EstoqueDrylandError(`Você não tem acesso à loja ${lojaCd}`, 'SEM_ACESSO_EMPRESA', 403);
+}
+
+/** Totais de cada loja que a pessoa enxerga (permitidas = null → todas). */
+export async function resumoLojas(permitidas, { forcar = false } = {}) {
+  const todas = await lojas();
+  const minhas = permitidas ? todas.filter((l) => permitidas.map(Number).includes(l.code)) : todas;
+  const out = [];
+  for (const l of minhas) {
+    const linhas = await linhasDaLoja(l.code, { forcar });
+    out.push({ ...l, codigos: linhas.length, pecas: linhas.reduce((s, x) => s + (Number(x.qtd) || 0), 0), ...origemDoSaldo(linhas) });
+  }
+  return { lojas: out, totais: { codigos: out.reduce((s, l) => s + l.codigos, 0), pecas: out.reduce((s, l) => s + l.pecas, 0) } };
+}
+
+/** Saldo de uma loja, com busca (código ou descrição), classificação e páginas. */
+export async function saldoLoja(q = {}, permitidas = null) {
+  const loja = parseInt(q.loja, 10);
+  if (!loja) throw new EstoqueDrylandError('Escolha a loja');
+  permitida(loja, permitidas);
+  const linhas = await linhasDaLoja(loja, { forcar: q.forcar === '1' });
+  const busca = semAcento(txt(q.busca));
+  const classe = txt(q.classificacao);
+  let lista = linhas;
+  if (classe) lista = lista.filter((l) => (txt(l.classificacao) || 'SEM CLASSIFICAÇÃO') === classe);
+  if (busca) lista = lista.filter((l) => String(l.cod) === busca || String(l.cod).startsWith(busca) || semAcento(l.descricao).includes(busca));
+  lista = [...lista].sort((a, b) => String(a.descricao || '').localeCompare(String(b.descricao || '')));
+  const porPagina = Math.max(1, Math.min(500, parseInt(q.porPagina, 10) || 100));
+  const pagina = Math.max(1, parseInt(q.pagina, 10) || 1);
+  const classes = new Map();
+  for (const l of linhas) {
+    const c = txt(l.classificacao) || 'SEM CLASSIFICAÇÃO';
+    classes.set(c, (classes.get(c) || 0) + (Number(l.qtd) || 0));
+  }
+  return {
+    loja: (await lojas()).find((l) => l.code === loja) || { code: loja, nome: null },
+    ...origemDoSaldo(linhas),
+    totais: { codigos: linhas.length, pecas: linhas.reduce((s, x) => s + (Number(x.qtd) || 0), 0) },
+    filtrado: { codigos: lista.length, pecas: lista.reduce((s, x) => s + (Number(x.qtd) || 0), 0) },
+    classificacoes: [...classes.entries()].map(([classificacao, pecas]) => ({ classificacao, pecas })).sort((a, b) => b.pecas - a.pecas),
+    pagina,
+    porPagina,
+    itens: lista.slice((pagina - 1) * porPagina, pagina * porPagina).map((l) => ({
+      cod: l.cod,
+      descricao: l.descricao,
+      cor: l.cor,
+      tamanho: l.tamanho,
+      classificacao: l.classificacao,
+      qtd: Number(l.qtd) || 0,
+      base: l.base,
+      atualizadoEm: l.atualizado_em,
+    })),
+  };
 }
 
 /** Situação da ligação (para a tela): token configurado e a porta respondendo. */
