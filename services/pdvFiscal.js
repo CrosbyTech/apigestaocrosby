@@ -374,6 +374,17 @@ export function chavesReferenciadas(texto) {
 // venda: linha de pdv_vendas + itens[] + pagamentos[]
 // Retorna { xml (não assinado), numero, serie, modelo, chaveParcial }
 export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, numero }) {
+  // DEVOLUÇÃO RFID (17/11/2026): a NF-e é montada a partir das notas de venda
+  // referenciadas (services/devolucaoRfidHc.js) — import tardio: o serviço usa este arquivo
+  if (venda.canal === 'devolucao' && venda.pedido_info?.devolucaoRfid) {
+    const { montarXmlDevolucaoRfid, DevolucaoRfidError } = await import('./devolucaoRfidHc.js');
+    try {
+      return await montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero });
+    } catch (err) {
+      if (err instanceof DevolucaoRfidError) throw new FiscalError(err.message, err.code);
+      throw err;
+    }
+  }
   if (venda.origem === 'expedicao') return montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente, numero });
   const modelo = venda.tipo_venda === 'nfce' ? 65 : 55;
   const regra = venda.tipo_venda === 'troca' ? REGRAS.devolucao : REGRAS.venda;

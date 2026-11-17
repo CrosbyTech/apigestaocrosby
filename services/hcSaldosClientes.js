@@ -183,6 +183,10 @@ export async function usarNaVenda({ venda, uso, por = null, descricao = null }) 
 // pagamento da próxima compra. Um crédito por troca (venda_id = a troca).
 const TROCA_CREDEV_DESDE = '2026-11-17';
 
+// A devolução da tela Devolução RFID é gravada como tipo_venda 'troca' com canal
+// 'devolucao' (17/11/2026): mesmo CREDEV, só muda o nome no extrato do cliente.
+const rotuloDaTroca = (venda) => (venda?.canal === 'devolucao' ? 'devolução' : 'troca');
+
 async function creditoLiquidoDaTroca(vendaId) {
   const movs = await q(supabase.from('hc_cliente_saldos_mov').select('valor').eq('venda_id', Number(vendaId)).in('movimento', ['devolucao', 'devolucao_cancelada']));
   return round2((movs || []).reduce((s, m) => s + Number(m.valor), 0));
@@ -202,13 +206,13 @@ export async function creditarTroca(venda, { por = null, nf = null } = {}) {
     valor,
     movimento: 'devolucao',
     vendaId: venda.id,
-    referencia: `troca ${venda.id}`,
-    observacao: `Troca no PDV Crosby (transação nº ${venda.id}${nf ? ` · NF-e de devolução ${nf}` : ''})`,
+    referencia: `${rotuloDaTroca(venda)} ${venda.id}`,
+    observacao: `${venda.canal === 'devolucao' ? 'Devolução RFID' : 'Troca no PDV Crosby'} (transação nº ${venda.id}${nf ? ` · NF-e de devolução ${nf}` : ''})`,
     por,
     nome: venda.cliente_nome || null,
     doc: venda.cliente_cpf_cnpj || null,
   });
-  console.log(`💳 [saldos] troca ${venda.id}: CREDEV de ${brl(valor)} para o cliente ${venda.cliente_code} na empresa ${venda.empresa}`);
+  console.log(`💳 [saldos] ${rotuloDaTroca(venda)} ${venda.id}: CREDEV de ${brl(valor)} para o cliente ${venda.cliente_code} na empresa ${venda.empresa}`);
   return { ...r, valor };
 }
 
@@ -244,8 +248,8 @@ export async function descreditarTroca(venda, { motivo = null, por = null } = {}
     valor: -sit.retirar,
     movimento: 'devolucao_cancelada',
     vendaId: venda.id,
-    referencia: `troca ${venda.id}`,
-    observacao: motivo || `Troca nº ${venda.id} cancelada`,
+    referencia: `${rotuloDaTroca(venda)} ${venda.id}`,
+    observacao: motivo || `${venda.canal === 'devolucao' ? 'Devolução' : 'Troca'} nº ${venda.id} cancelada`,
     por,
     nome: venda.cliente_nome || null,
     doc: venda.cliente_cpf_cnpj || null,
@@ -264,7 +268,7 @@ export async function acertarTrocasCanceladas({ cliente, empresa, por = null }) 
   const trocas = await q(
     supabase
       .from('pdv_vendas')
-      .select('id, empresa, tipo_venda, status, total, cliente_code, cliente_nome, cliente_cpf_cnpj')
+      .select('id, empresa, tipo_venda, canal, status, total, cliente_code, cliente_nome, cliente_cpf_cnpj')
       .eq('tipo_venda', 'troca')
       .eq('status', 'cancelada')
       .eq('empresa', Number(empresa))
@@ -285,7 +289,7 @@ export async function sincronizarTrocas() {
   const trocas = await q(
     supabase
       .from('pdv_vendas')
-      .select('id, empresa, tipo_venda, status, total, cliente_code, cliente_nome, cliente_cpf_cnpj')
+      .select('id, empresa, tipo_venda, canal, status, total, cliente_code, cliente_nome, cliente_cpf_cnpj')
       .eq('tipo_venda', 'troca')
       .eq('status', 'autorizada')
       .not('cliente_code', 'is', null)

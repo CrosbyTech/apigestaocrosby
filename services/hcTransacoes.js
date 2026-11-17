@@ -113,6 +113,8 @@ async function lerTudo(montar) {
 }
 
 function origemDaVenda(v) {
+  // Devolução RFID (17/11/2026) e NF-e de devolução de uma venda: entrada pelo HeadCoach
+  if (v.canal === 'devolucao') return 'devolucao';
   if (v.origem === 'pdv' || !v.origem) return v.tipo_venda === 'troca' ? 'troca' : 'pdv';
   if (v.canal === 'transferencia' || v.pedido_info?.transferencia) return 'transferencia';
   if (String(v.pedido_chave || '').startsWith('BRJ:')) return 'brejinho';
