@@ -1253,6 +1253,12 @@ router.post(
 //   GET  /vendas/:id/cancelamento         o que a transação tem e o que será desfeito
 //   POST /vendas/:id/cancelar-transacao   cancela tudo  { justificativa, por }
 const PRAZO_SEFAZ_MIN = { 65: 30, 55: 24 * 60 }; // prazo normal: NFC-e 30 min, NF-e 24 h
+// VENDA atendida (nota autorizada) acima deste valor só cancela com a senha de
+// alguém do financeiro (no HeadCoach: perfil "user", além de admin e owner)
+const CANCELAMENTO_LIMITE_SEM_AUTORIZACAO = 1000;
+const PERFIS_AUTORIZAM_CANCELAMENTO = ['user', 'admin', 'owner'];
+const precisaAutorizacaoParaCancelar = (venda) =>
+  venda.tipo_venda !== 'troca' && venda.status !== 'cancelada' && Number(venda.total) > CANCELAMENTO_LIMITE_SEM_AUTORIZACAO && (venda.notas || []).some((n) => n.status === 'autorizada');
 
 async function titulosDaVenda(vendaId) {
   const { data, error } = await supabase
@@ -1324,6 +1330,8 @@ async function previaDoCancelamento(vendaId) {
     avisos,
     bloqueio,
     podeCancelar: !bloqueio,
+    precisaAutorizacao: !bloqueio && precisaAutorizacaoParaCancelar(venda),
+    limiteSemAutorizacao: CANCELAMENTO_LIMITE_SEM_AUTORIZACAO,
     vaiCancelar: {
       nota: notaAutorizada ? `${Number(nota.modelo) === 65 ? 'NFC-e' : 'NF-e'} ${nota.numero}/${nota.serie}` : null,
       titulos: titulos.filter((t) => t.situacao !== 'cancelado').length,
@@ -1349,6 +1357,24 @@ router.post(
     if (justificativa.length < 15) return errorResponse(res, 'Escreva o motivo do cancelamento (pelo menos 15 caracteres)', 400, 'JUSTIFICATIVA_CURTA');
     const venda = await carregarVenda(id);
     if (!venda) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
+    // venda atendida acima do limite: alguém do financeiro digita e-mail + senha
+    let autorizadoPor = null;
+    if (precisaAutorizacaoParaCancelar(venda)) {
+      try {
+        autorizadoPor = await verificarSenhaAutorizador(req.body?.autorizador?.email, req.body?.autorizador?.senha, PERFIS_AUTORIZAM_CANCELAMENTO);
+      } catch (err) {
+        if (err instanceof AutorizacaoError) {
+          const falta = err.code === 'CREDENCIAIS_AUSENTES';
+          return errorResponse(
+            res,
+            falta ? `Venda atendida acima de R$ ${CANCELAMENTO_LIMITE_SEM_AUTORIZACAO.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}: o cancelamento precisa do e-mail e da senha de alguém do financeiro` : err.message,
+            falta ? 403 : err.status,
+            falta ? 'AUTORIZACAO_FINANCEIRO' : err.code,
+          );
+        }
+        throw err;
+      }
+    }
     const passos = [];
     const passo = (nome, ok, detalhe) => passos.push({ nome, ok, detalhe });
     try {
@@ -1407,10 +1433,14 @@ router.post(
       if (Number(feito?.etiquetas) > 0) passo('Etiquetas', true, `${feito.etiquetas} peça(s) estornada(s)`);
       // quem cancelou e por quê (fica na transação)
       if (!venda.pedido_info?.cancelamento) {
-        const info = { ...(venda.pedido_info || {}), cancelamento: { por, motivo: justificativa, em: new Date().toISOString() } };
+        const info = {
+          ...(venda.pedido_info || {}),
+          cancelamento: { por, motivo: justificativa, em: new Date().toISOString(), ...(autorizadoPor ? { autorizadoPor: autorizadoPor.nome, autorizadoPorEmail: autorizadoPor.email } : {}) },
+        };
         await supabase.from('pdv_vendas').update({ pedido_info: info }).eq('id', id);
       }
-      console.log(`🚫 [PDV Crosby] Transação ${id} cancelada por ${por || '—'}: ${justificativa}`);
+      if (autorizadoPor) passo('Autorização', true, `cancelamento autorizado por ${autorizadoPor.nome} (financeiro)`);
+      console.log(`🚫 [PDV Crosby] Transação ${id} cancelada por ${por || '—'}${autorizadoPor ? `, autorizada por ${autorizadoPor.nome}` : ''}: ${justificativa}`);
       return successResponse(res, { passos, venda: await carregarVenda(id), titulos: depois }, 'Transação cancelada');
     } catch (err) {
       if (err instanceof CancelamentoError) return errorResponse(res, err.message, err.status, err.code, { ...(err.details || {}), passos });
