@@ -149,7 +149,7 @@ export async function conferirSaldo({ cliente, empresa, uso }) {
 }
 
 /** Consome os saldos que a venda usou. Se um falhar, devolve o que já tinha saído. */
-export async function usarNaVenda({ venda, uso, por = null }) {
+export async function usarNaVenda({ venda, uso, por = null, descricao = null }) {
   const feitos = [];
   try {
     for (const tipo of Object.keys(TIPOS)) {
@@ -162,7 +162,7 @@ export async function usarNaVenda({ venda, uso, por = null }) {
         movimento: 'uso',
         vendaId: venda.id,
         referencia: venda.numero_site || null,
-        observacao: `Faturamento${venda.numero_site ? ` ${venda.numero_site}` : ''} (transação nº ${venda.id})`,
+        observacao: descricao || `Faturamento${venda.numero_site ? ` ${venda.numero_site}` : ''} (transação nº ${venda.id})`,
         por,
         nome: venda.cliente_nome || null,
         doc: venda.cliente_cpf_cnpj || null,
@@ -175,6 +175,105 @@ export async function usarNaVenda({ venda, uso, por = null }) {
   }
   if (feitos.length) console.log(`💳 [saldos] venda ${venda.id}: ${feitos.map((t) => `${TIPOS[t]} ${brl(uso[t])}`).join(' + ')} do cliente ${venda.cliente_code}`);
   return feitos;
+}
+
+// ─── troca do PDV Crosby ─────────────────────────────────────────────────────
+// Regra do Yago (17/11/2026): o cliente devolveu a peça → a troca AUTORIZADA (NF-e
+// de devolução) gera CREDEV para ele, para usar SÓ NAQUELA LOJA, como forma de
+// pagamento da próxima compra. Um crédito por troca (venda_id = a troca).
+const TROCA_CREDEV_DESDE = '2026-11-17';
+
+async function creditoLiquidoDaTroca(vendaId) {
+  const movs = await q(supabase.from('hc_cliente_saldos_mov').select('valor').eq('venda_id', Number(vendaId)).in('movimento', ['devolucao', 'devolucao_cancelada']));
+  return round2((movs || []).reduce((s, m) => s + Number(m.valor), 0));
+}
+
+/** Troca autorizada → CREDEV do cliente na loja da troca. Chamar de novo não duplica. */
+export async function creditarTroca(venda, { por = null, nf = null } = {}) {
+  if (!venda || venda.tipo_venda !== 'troca' || !venda.cliente_code) return { ignorada: true };
+  const valor = round2(venda.total);
+  if (!(valor > 0)) return { ignorada: true };
+  const ja = await creditoLiquidoDaTroca(venda.id);
+  if (ja > 0.005) return { jaFeito: true, valor: ja };
+  const r = await movimentar({
+    empresa: venda.empresa,
+    cliente: venda.cliente_code,
+    tipo: 'credev',
+    valor,
+    movimento: 'devolucao',
+    vendaId: venda.id,
+    referencia: `troca ${venda.id}`,
+    observacao: `Troca no PDV Crosby (transação nº ${venda.id}${nf ? ` · NF-e de devolução ${nf}` : ''})`,
+    por,
+    nome: venda.cliente_nome || null,
+    doc: venda.cliente_cpf_cnpj || null,
+  });
+  console.log(`💳 [saldos] troca ${venda.id}: CREDEV de ${brl(valor)} para o cliente ${venda.cliente_code} na empresa ${venda.empresa}`);
+  return { ...r, valor };
+}
+
+/** Dá para cancelar a troca? Só se o CREDEV que ela gerou ainda estiver no saldo do cliente. */
+export async function conferirCancelamentoDaTroca(venda) {
+  if (!venda || venda.tipo_venda !== 'troca' || !venda.cliente_code) return;
+  const creditado = await creditoLiquidoDaTroca(venda.id);
+  if (!(creditado > 0.005)) return;
+  const s = await saldoDoCliente(venda.cliente_code, venda.empresa);
+  if (s.credev + 0.005 < creditado) {
+    throw new SaldoClienteError(
+      `Esta troca gerou ${brl(creditado)} de CREDEV e o cliente já usou parte dele (saldo atual ${brl(s.credev)}): não dá para cancelar a troca`,
+      'CREDEV_DA_TROCA_USADO',
+      409,
+    );
+  }
+}
+
+/** Troca cancelada → tira do cliente o CREDEV que ela tinha gerado. */
+export async function descreditarTroca(venda, { motivo = null, por = null } = {}) {
+  if (!venda || venda.tipo_venda !== 'troca' || !venda.cliente_code) return 0;
+  const creditado = await creditoLiquidoDaTroca(venda.id);
+  if (!(creditado > 0.005)) return 0;
+  await movimentar({
+    empresa: venda.empresa,
+    cliente: venda.cliente_code,
+    tipo: 'credev',
+    valor: -creditado,
+    movimento: 'devolucao_cancelada',
+    vendaId: venda.id,
+    referencia: `troca ${venda.id}`,
+    observacao: motivo || `Troca nº ${venda.id} cancelada`,
+    por,
+    nome: venda.cliente_nome || null,
+    doc: venda.cliente_cpf_cnpj || null,
+  });
+  console.log(`💳 [saldos] troca ${venda.id} cancelada: ${brl(creditado)} de CREDEV retirado do cliente ${venda.cliente_code}`);
+  return creditado;
+}
+
+/** Rede de segurança: troca autorizada que ficou sem o CREDEV (falha na hora) é creditada aqui. */
+export async function sincronizarTrocas() {
+  const desde = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const trocas = await q(
+    supabase
+      .from('pdv_vendas')
+      .select('id, empresa, tipo_venda, status, total, cliente_code, cliente_nome, cliente_cpf_cnpj')
+      .eq('tipo_venda', 'troca')
+      .eq('status', 'autorizada')
+      .not('cliente_code', 'is', null)
+      .gte('criado_em', `${desde > TROCA_CREDEV_DESDE ? desde : TROCA_CREDEV_DESDE}T00:00:00-03:00`)
+      .order('id')
+      .limit(1000),
+  );
+  let creditadas = 0;
+  const erros = [];
+  for (const v of trocas || []) {
+    try {
+      const r = await creditarTroca(v, { por: 'conferência automática' });
+      if (!r.jaFeito && !r.ignorada) creditadas += 1;
+    } catch (e) {
+      erros.push({ venda: v.id, erro: e.message });
+    }
+  }
+  return { trocas: (trocas || []).length, creditadas, erros };
 }
 
 /** Devolve ao cliente o que estas vendas gastaram (nota cancelada, pedido refaturado). */

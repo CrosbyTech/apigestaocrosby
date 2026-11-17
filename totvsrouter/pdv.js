@@ -1609,33 +1609,48 @@ router.get(
 // TROCA do PDV Crosby para escolher a peça e referenciar a nota no TOTVS.
 // Sem ?branch= procura em todas as empresas próprias (código < 6000).
 // =============================================================================
-router.get(
-  '/pdv/customer-purchases',
-  asyncHandler(async (req, res) => {
-    const customer = parseInt(req.query.customer, 10);
-    if (!customer) return errorResponse(res, 'Informe ?customer=', 400, 'MISSING_PARAMS');
-    const branch = parseInt(req.query.branch, 10) || null;
-    const hoje = new Date();
-    const iso = (d) => d.toISOString().slice(0, 10);
-    const ate = String(req.query.ate || iso(hoje)).slice(0, 10);
-    const de = String(req.query.de || iso(new Date(hoje.getTime() - 90 * 86400000))).slice(0, 10);
-
-    const branchCodeList = branch
-      ? [branch]
-      : (await listarFiliais()).filter((b) => b.code < 6000).map((b) => b.code);
-    const brutas = await buscarNotas(
-      {
-        branchCodeList,
-        personCodeList: [customer],
-        operationType: 'Output',
-        startIssueDate: `${de}T00:00:00.000Z`,
-        endIssueDate: `${ate}T23:59:59.999Z`,
-      },
-      'items',
-    );
-
-    const num = (v) => Number(v || 0);
-    const notas = brutas
+// Notas emitidas (não canceladas) das nossas empresas para o cliente, com os
+// itens pelo valor pago. tipo 'Output' = compras dele; 'Input' = devoluções
+// (notas de entrada em nome dele). Usada pela rota abaixo e pela TROCA do PDV
+// Crosby (services/pdvTroca.js), que acha sozinha a nota de origem da peça.
+export async function notasDoClienteTotvs({ customer, de, ate, branch = null, tipo = 'Output' }) {
+  const branchCodeList = branch
+    ? [branch]
+    : (await listarFiliais()).filter((b) => b.code < 6000).map((b) => b.code);
+  // O TOTVS recusa período maior que 6 meses ("The date range must be within 6
+  // months"): a busca vai em blocos de 180 dias, do mais recente ao mais antigo.
+  const blocos = [];
+  const dia = (d) => d.toISOString().slice(0, 10);
+  let fim = new Date(`${ate}T12:00:00Z`);
+  const inicio = new Date(`${de}T12:00:00Z`);
+  while (fim >= inicio && blocos.length < 12) {
+    const ini = new Date(Math.max(inicio.getTime(), fim.getTime() - 179 * 86400000));
+    blocos.push([dia(ini), dia(fim)]);
+    fim = new Date(ini.getTime() - 86400000);
+  }
+  const partes = await Promise.all(
+    blocos.map(([d1, d2]) =>
+      buscarNotas(
+        {
+          branchCodeList,
+          personCodeList: [customer],
+          operationType: tipo,
+          startIssueDate: `${d1}T00:00:00.000Z`,
+          endIssueDate: `${d2}T23:59:59.999Z`,
+        },
+        'items',
+      ),
+    ),
+  );
+  const vistas = new Set();
+  const brutas = partes.flat().filter((n) => {
+    const k = `${n.branchCode}|${n.invoiceSequence ?? n.invoiceCode}|${n.serialCode}`;
+    if (vistas.has(k)) return false;
+    vistas.add(k);
+    return true;
+  });
+  const num = (v) => Number(v || 0);
+  return brutas
       .filter((n) => n.invoiceStatus === 'Issued')
       .map((n) => ({
         branchCode: n.branchCode,
@@ -1665,7 +1680,19 @@ router.get(
         }),
       }))
       .sort((a, b) => (a.invoiceDate < b.invoiceDate ? 1 : -1));
+}
 
+router.get(
+  '/pdv/customer-purchases',
+  asyncHandler(async (req, res) => {
+    const customer = parseInt(req.query.customer, 10);
+    if (!customer) return errorResponse(res, 'Informe ?customer=', 400, 'MISSING_PARAMS');
+    const branch = parseInt(req.query.branch, 10) || null;
+    const hoje = new Date();
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const ate = String(req.query.ate || iso(hoje)).slice(0, 10);
+    const de = String(req.query.de || iso(new Date(hoje.getTime() - 90 * 86400000))).slice(0, 10);
+    const notas = await notasDoClienteTotvs({ customer, de, ate, branch });
     return successResponse(res, { customer, de, ate, notas }, `${notas.length} compra(s) do cliente`);
   }),
 );

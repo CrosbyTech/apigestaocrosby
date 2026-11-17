@@ -67,6 +67,7 @@ const TPAG = {
   credito: '03',
   debito: '04',
   credito_loja: '05',
+  adiantamento: '05',
   vale_troca: '05',
 };
 
@@ -350,6 +351,11 @@ export function calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo }) 
   return { imposto, base, vICMS, vPIS, vCOFINS, vIBSUF, vIBSMun, vCBS };
 }
 
+// chaves (44 dígitos) guardadas em pdv_vendas.nf_referenciada, sem repetir
+export function chavesReferenciadas(texto) {
+  return [...new Set(String(texto || '').split(/[^0-9]+/).filter((c) => c.length === 44))];
+}
+
 // ─── Montagem do XML ─────────────────────────────────────────────────────────
 // venda: linha de pdv_vendas + itens[] + pagamentos[]
 // Retorna { xml (não assinado), numero, serie, modelo, chaveParcial }
@@ -402,8 +408,12 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
     verProc: VERSAO_APLICACAO,
   });
   // TROCA: referencia a NF-e/NFC-e de origem quando informada
-  if (venda.tipo_venda === 'troca' && digits(venda.nf_referenciada).length === 44) {
-    nfe.tagRefNFe(digits(venda.nf_referenciada));
+  // (nf_referenciada pode trazer várias chaves separadas por vírgula: peças de
+  // compras diferentes na mesma troca)
+  if (venda.tipo_venda === 'troca') {
+    const chaves = chavesReferenciadas(venda.nf_referenciada);
+    if (chaves.length === 1) nfe.tagRefNFe(chaves[0]);
+    else if (chaves.length > 1) nfe.tagRefNFe(chaves);
   }
 
   // A lib grava as chaves na ordem de inserção: ao receber xFant, tagEmit cria
@@ -622,7 +632,7 @@ export function cfopTransferencia(chaveCenario, tipo, natureza) {
   return CFOP_EXPEDICAO[chave][t];
 }
 // saldo_bonus = crédito do cliente guardado no HeadCoach (peça em falta de outro pedido)
-const TPAG_EXPEDICAO = { ...TPAG, boleto: '15', adiantamento: TPAG.credito_loja, saldo_bonus: TPAG.credito_loja };
+const TPAG_EXPEDICAO = { ...TPAG, boleto: '15', saldo_bonus: TPAG.credito_loja };
 const f3 = (v) => (Number(v) || 0).toFixed(3);
 const brl = (v) => round2(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 

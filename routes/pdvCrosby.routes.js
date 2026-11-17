@@ -47,9 +47,20 @@ import {
 import { espelharVendaNoTotvs, EspelhoError } from '../services/pdvEspelhoTotvs.js';
 import { caixaAbertoPara } from '../services/hcCaixa.js';
 import { sincronizarVendaEmSegundoPlano } from '../services/hcContasReceber.js';
-import { estornarVenda as estornarSaldosDaVenda } from '../services/hcSaldosClientes.js';
+import {
+  estornarVenda as estornarSaldosDaVenda,
+  SaldoClienteError,
+  saldoDoCliente,
+  usoDosPagamentos,
+  conferirSaldo,
+  usarNaVenda,
+  creditarTroca,
+  conferirCancelamentoDaTroca,
+  descreditarTroca,
+} from '../services/hcSaldosClientes.js';
 import { aoCancelarVenda } from '../services/saldoBonus.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
+import { conferirTroca, TrocaError } from '../services/pdvTroca.js';
 import {
   PromocaoPdvError,
   listarPromocoes,
@@ -61,7 +72,9 @@ import {
 const router = express.Router();
 
 const TIPOS = ['nfce', 'nfe', 'troca'];
-const FORMAS = ['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'vale_troca'];
+// credito_loja = CREDEV · adiantamento = adiantamento: os dois consomem o saldo do
+// cliente NA LOJA (hc_cliente_saldos), cada um o seu
+const FORMAS = ['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'vale_troca'];
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const hojeBrasil = () =>
   new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -450,6 +463,43 @@ export async function carregarVenda(id) {
   return { ...venda, itens: itens || [], pagamentos: pagamentos || [], notas: notas || [] };
 }
 
+// ─── Saldos do cliente na loja (CREDEV e adiantamento do HeadCoach) ──────────
+// GET /saldos-cliente/:code?empresa=  → { credev, adiantamento } daquela loja
+router.get(
+  '/saldos-cliente/:code',
+  asyncHandler(async (req, res) => {
+    const code = parseInt(req.params.code, 10);
+    const empresa = parseInt(req.query.empresa, 10);
+    if (!code || !empresa) return errorResponse(res, 'Informe o cliente e ?empresa=', 400, 'MISSING_PARAMS');
+    try {
+      const s = await saldoDoCliente(code, empresa);
+      return successResponse(res, { clienteCode: code, empresa, credev: s.credev, adiantamento: s.adiantamento }, 'Saldos do cliente na loja');
+    } catch (err) {
+      if (err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status, err.code);
+      throw err;
+    }
+  }),
+);
+
+// ─── Troca: o cliente comprou a peça? qual nota referenciar? ─────────────────
+// POST /troca/conferir { empresa, clienteCode, itens:[{ productCode, quantidade }] }
+// Procura as compras do cliente (TOTVS + HeadCoach), desconta o que ele já
+// devolveu e devolve, por peça, a nota de origem e o valor pago (services/pdvTroca.js).
+router.post(
+  '/troca/conferir',
+  asyncHandler(async (req, res) => {
+    const b = req.body || {};
+    try {
+      const r = await conferirTroca({ empresa: b.empresa, clienteCode: b.clienteCode, itens: b.itens });
+      return successResponse(res, r, r.ok ? 'Peças conferidas nas compras do cliente' : 'Há peça que não pode ser trocada');
+    } catch (err) {
+      if (err instanceof TrocaError) return errorResponse(res, err.message, err.status, err.code);
+      console.error('[PDV Crosby] conferir troca:', err.message);
+      return errorResponse(res, `Não consegui conferir as compras do cliente: ${err.message}`, 502, 'TROCA_CONFERIR');
+    }
+  }),
+);
+
 router.post(
   '/vendas',
   asyncHandler(async (req, res) => {
@@ -461,6 +511,30 @@ router.post(
     if (!b.vendedor?.code) return errorResponse(res, 'Vendedor obrigatório', 400, 'INVALID_PAYLOAD');
     if (tipoVenda !== 'nfce' && !b.cliente?.code) return errorResponse(res, 'NF-e e TROCA exigem cliente identificado', 400, 'INVALID_PAYLOAD');
 
+    // TROCA: a peça só volta se o cliente a comprou. O servidor confere de novo
+    // (não confia na tela), usa o VALOR PAGO na nota de origem e referencia essa
+    // nota na NF-e de devolução.
+    let troca = null;
+    if (tipoVenda === 'troca') {
+      try {
+        troca = await conferirTroca({ empresa, clienteCode: b.cliente.code, itens: b.itens });
+      } catch (err) {
+        if (err instanceof TrocaError) return errorResponse(res, err.message, err.status, err.code);
+        return errorResponse(res, `Não consegui conferir as compras do cliente: ${err.message}`, 502, 'TROCA_CONFERIR');
+      }
+      const ruins = troca.itens.filter((i) => !i.ok);
+      if (ruins.length) {
+        return errorResponse(
+          res,
+          `Troca recusada — ${ruins.map((i) => `peça ${i.productCode}: ${i.mensagem}`).join('; ')}`,
+          422,
+          'TROCA_SEM_COMPRA',
+          { itens: troca.itens, avisos: troca.avisos },
+        );
+      }
+    }
+    const trocaPorProduto = new Map((troca?.itens || []).map((i) => [Number(i.productCode), i]));
+
     // Itens: totais + dados fiscais do produto (NCM/CEST/origem)
     let subtotal = 0;
     let desconto = 0;
@@ -469,8 +543,9 @@ router.post(
     let seq = 1;
     for (const it of b.itens) {
       const q = Number(it.quantidade);
-      const vUn = round2(it.valorUnit);
-      const dUn = round2(it.descontoUnit || 0);
+      const daTroca = trocaPorProduto.get(Number(it.productCode));
+      const vUn = daTroca ? round2(daTroca.valorUnit) : round2(it.valorUnit);
+      const dUn = daTroca ? 0 : round2(it.descontoUnit || 0);
       if (!(q > 0) || !(vUn > 0)) return errorResponse(res, `Item ${it.productCode}: quantidade/valor inválidos`, 400, 'INVALID_ITEM');
       let fiscal = { ncm: it.ncm || null, cest: it.cest || null, origem: it.origem || '0', unidade: it.unidade || 'UN', referencia: it.referencia || null, sku: it.sku || null, nome: it.nome };
       try {
@@ -534,6 +609,17 @@ router.post(
         return errorResponse(res, `Pagamentos (R$ ${round2(soma - troco).toFixed(2)}) não fecham com o total da venda (R$ ${total.toFixed(2)})`, 400, 'PAYMENT_MISMATCH');
       }
     }
+    // CREDEV e ADIANTAMENTO: só com cliente identificado e até o saldo dele NESTA loja
+    const usoSaldos = usoDosPagamentos(pagamentos);
+    if (usoSaldos.credev > 0 || usoSaldos.adiantamento > 0) {
+      if (!b.cliente?.code) return errorResponse(res, 'Credev e adiantamento exigem o cliente identificado', 400, 'SALDO_SEM_CLIENTE');
+      try {
+        await conferirSaldo({ cliente: b.cliente.code, empresa, uso: usoSaldos });
+      } catch (err) {
+        if (err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status, err.code);
+        throw err;
+      }
+    }
 
     // Operação: a enviada pela tela ou, na falta, a cadastrada para a empresa
     let operacao = b.operacao ? parseInt(b.operacao, 10) : null;
@@ -563,10 +649,23 @@ router.post(
       cashback_usado: cashbackUsado,
       total,
       status: 'registrada',
-      nf_referenciada: b.nfReferenciada ? String(b.nfReferenciada).replace(/\D/g, '') : null,
+      // troca: a(s) nota(s) de origem achada(s) nas compras do cliente (várias = vírgula)
+      nf_referenciada: troca ? troca.chaves.join(',') : b.nfReferenciada ? String(b.nfReferenciada).replace(/\D/g, '') : null,
       observacao: b.observacao || null,
       criado_por: b.criadoPor || null,
     };
+    if (troca) {
+      cabecalho.pedido_info = {
+        troca: {
+          conferidoEm: new Date().toISOString(),
+          itens: troca.itens.map((i) => ({ productCode: i.productCode, quantidade: i.quantidade, valorUnit: i.valorUnit, notas: i.notas })),
+        },
+      };
+    }
+    // VENDA | TROCA (17/11/2026): venda fechada no mesmo atendimento de uma troca,
+    // paga com o Credev que ela gerou — guarda o nº da troca para rastrear
+    const trocaVendaId = parseInt(b.trocaVendaId, 10) || null;
+    if (!troca && trocaVendaId) cabecalho.pedido_info = { trocaVendaId };
     // HEADCOACH › CAIXA: só vende com o caixa da empresa aberto (Yago, 12/11/2026);
     // a venda entra nesse caixa
     const caixa = await caixaAbertoPara(empresa);
@@ -582,6 +681,18 @@ router.post(
     if (e1 || e2) {
       await supabase.from('pdv_vendas').delete().eq('id', venda.id);
       return errorResponse(res, (e1 || e2).message, 500, 'DB_ERROR');
+    }
+    // consome o CREDEV / adiantamento usados (a função recusa se o saldo acabou no meio do caminho)
+    if (usoSaldos.credev > 0 || usoSaldos.adiantamento > 0) {
+      try {
+        await usarNaVenda({ venda, uso: usoSaldos, por: b.criadoPor || null, descricao: `Venda no PDV Crosby (transação nº ${venda.id})` });
+      } catch (err) {
+        await supabase.from('pdv_venda_pagamentos').delete().eq('venda_id', venda.id);
+        await supabase.from('pdv_venda_itens').delete().eq('venda_id', venda.id);
+        await supabase.from('pdv_vendas').delete().eq('id', venda.id);
+        if (err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status, err.code);
+        return errorResponse(res, err.message, 500, 'SALDO_ERRO');
+      }
     }
     // Movimentação das etiquetas: TROCA devolve a peça, os demais dão saída
     await registrarEpcs({
@@ -683,6 +794,8 @@ router.get(
       cashbackUsado: round2(validas.reduce((s2, v) => s2 + Number(v.cashback_usado || 0), 0)),
       trocas: trocas.length,
       valorTrocas: round2(trocas.reduce((s2, v) => s2 + Number(v.total), 0)),
+      // faturamento da loja = vendas − devoluções (a venda paga com CREDEV conta; a troca abate)
+      faturamento: round2(validas.reduce((s2, v) => s2 + Number(v.total), 0) - trocas.reduce((s2, v) => s2 + Number(v.total), 0)),
       canceladas: items.filter((v) => v.status === 'cancelada').length,
       pendentes: items.filter((v) => ['registrada', 'emitindo', 'rejeitada'].includes(v.status)).length,
       autorizadas: items.filter((v) => v.status === 'autorizada').length,
@@ -892,6 +1005,12 @@ export async function emitirVendaPdv(id) {
     await supabase.from('pdv_vendas').update({ status: envio.autorizada ? 'autorizada' : 'rejeitada' }).eq('id', id);
     // HEADCOACH › CONTAS A RECEBER: nota autorizada gera os títulos da venda
     if (envio.autorizada) sincronizarVendaEmSegundoPlano(id);
+    // TROCA autorizada: o valor devolvido vira CREDEV do cliente nesta loja
+    if (envio.autorizada && venda.tipo_venda === 'troca') {
+      await creditarTroca(venda, { por: venda.criado_por || null, nf: `${numero}/${serie}` }).catch((e) =>
+        console.warn(`⚠️ [saldos] troca ${id}: CREDEV não gerado agora (${e.message}); a conferência automática tenta de novo`),
+      );
+    }
     console.log(
       `${envio.autorizada ? '✅' : '❌'} [PDV Crosby] Venda ${id} → ${modelo === 65 ? 'NFC-e' : 'NF-e'} ${serie}/${numero} ${envio.cStat} ${envio.xMotivo} (amb ${cfg.ambiente})`,
     );
@@ -1011,6 +1130,14 @@ router.post(
         return errorResponse(res, 'Só é possível cancelar nota autorizada', 409, 'NOT_AUTHORIZED');
       }
 
+      // nota de TROCA: o CREDEV que ela gerou precisa estar inteiro no saldo do cliente
+      const vendaDaNota = await carregarVenda(ctx.nota.venda_id);
+      try {
+        await conferirCancelamentoDaTroca(vendaDaNota);
+      } catch (err) {
+        if (err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status, err.code);
+        throw err;
+      }
       console.log(
         `🚫 [PDV Crosby] Cancelando ${ctx.nota.modelo === 65 ? 'NFC-e' : 'NF-e'} ${ctx.nota.serie}/${ctx.nota.numero} (chave ${ctx.nota.chave})…`,
       );
@@ -1067,6 +1194,10 @@ router.post(
         await estornarSaldosDaVenda(ctx.nota.venda_id, 'Nota fiscal da venda cancelada', req.body?.por || null).catch((e) => {
           if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${ctx.nota.venda_id}: ${e.message}`);
         });
+        // troca cancelada: sai o CREDEV que ela tinha gerado
+        await descreditarTroca(vendaDaNota, { motivo: 'Nota de devolução da troca cancelada', por: req.body?.por || null }).catch((e) =>
+          console.warn(`⚠️ [saldos] troca ${ctx.nota.venda_id}: ${e.message}`),
+        );
         const vendaCancelada = await carregarVenda(ctx.nota.venda_id);
         if (vendaCancelada) {
           await registrarEpcs({ venda: vendaCancelada, itens: vendaCancelada.itens, tipo: 'estorno', nota: ctx.nota });

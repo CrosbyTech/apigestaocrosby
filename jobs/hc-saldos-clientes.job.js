@@ -7,7 +7,7 @@
  * Devoluções já faz isso na hora; o job cobre o que escapar.
  */
 import cron from 'node-cron';
-import { sincronizarDevolucoes } from '../services/hcSaldosClientes.js';
+import { sincronizarDevolucoes, sincronizarTrocas } from '../services/hcSaldosClientes.js';
 
 let rodando = false;
 async function rodar() {
@@ -18,6 +18,9 @@ async function rodar() {
     if (r.creditadas || r.descreditadas || r.erros?.length) {
       console.log(`💳 [hc-saldos-clientes] ${r.creditadas} devolução(ões) creditada(s), ${r.descreditadas} desfeita(s), ${r.erros?.length || 0} erro(s)`);
     }
+    // trocas do PDV Crosby autorizadas que ficaram sem o CREDEV
+    const t = await sincronizarTrocas();
+    if (t.creditadas || t.erros.length) console.log(`💳 [hc-saldos-clientes] trocas do PDV: ${t.creditadas} CREDEV gerado(s), ${t.erros.length} erro(s)`);
   } catch (e) {
     if (e.code !== 'MIGRATION_PENDING') console.error('[hc-saldos-clientes]', e.message);
   } finally {

@@ -155,6 +155,9 @@ export async function resumoDoCaixa(caixa) {
   };
   let totalVendas = 0;
   let qtdVendas = 0;
+  // TROCA autorizada = devolução: não é venda e ABATE do faturamento (Yago, 17/11/2026)
+  let totalDevolucoes = 0;
+  let qtdDevolucoes = 0;
   const pendentes = [];
   const lista = [];
   for (const v of vendas || []) {
@@ -173,6 +176,11 @@ export async function resumoDoCaixa(caixa) {
     });
     if (['registrada', 'emitindo', 'rejeitada'].includes(v.status)) pendentes.push({ id: v.id, status: v.status, total: round2(v.total), cliente: v.cliente_nome });
     if (!valida) continue; // só venda com nota autorizada entra no caixa
+    if (v.tipo_venda === 'troca') {
+      qtdDevolucoes += 1;
+      totalDevolucoes += Number(v.total) || 0;
+      continue; // o vale-troca não é forma de recebimento
+    }
     qtdVendas += 1;
     totalVendas += Number(v.total) || 0;
     for (const p of v.pdv_venda_pagamentos || []) {
@@ -198,6 +206,10 @@ export async function resumoDoCaixa(caixa) {
     vendas: lista,
     qtdVendas,
     totalVendas: round2(totalVendas),
+    qtdDevolucoes,
+    totalDevolucoes: round2(totalDevolucoes),
+    // faturamento do caixa = vendas − devoluções (a venda paga com CREDEV conta; a devolução abate)
+    faturamento: round2(totalVendas - totalDevolucoes),
     pendentes,
     movimentos: movs || [],
     suprimentos,
