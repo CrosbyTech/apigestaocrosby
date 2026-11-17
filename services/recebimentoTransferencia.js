@@ -13,6 +13,12 @@
 //   • a solicitação (se houver) vai para concluída, mercadoria no destino.
 // Por enquanto o estoque é só isso (pedido do Yago); depois ganha vendas,
 // devoluções etc. Tabelas: migrations/hc_estoque_recebimento.sql.
+// VENDA DA MATRIZ PARA A LOJA (Yago, 17/11/2026): a loja de outro CNPJ fora dos
+// grupos do POP (ex.: 98 Shopping Recife / CROSBY RECIFE MALL) não recebe
+// transferência, recebe VENDA da 99. Essa nota sai pela mesma tela (natureza
+// "venda") e ficava com empresa_destino = 0: aqui a loja é reconhecida pelo
+// CLIENTE da nota (a pessoa do cadastro da empresa, erp_empresas.person_code),
+// então a venda aparece para ela conferir e dar entrada como qualquer remessa.
 // Quem vê/recebe: quem tem acesso à empresa de destino (mesma regra do caixa:
 // owner/admin todas as próprias; os demais, as vinculadas).
 // ============================================================================
@@ -60,20 +66,42 @@ async function empresasPermitidas(user, empresa) {
   return { lista, codes: lista.map((e) => e.code) };
 }
 
+// pessoa (cliente do TOTVS) → empresa própria, para achar a loja de destino pela nota
+async function empresasPorPessoa(codes = null) {
+  let qy = supabase.from('erp_empresas').select('code, person_code').eq('propria', true).not('person_code', 'is', null);
+  if (codes) qy = qy.in('code', codes);
+  const rows = await q(qy);
+  const mapa = new Map();
+  // se duas empresas tiverem a mesma pessoa, vale a de menor código (a matriz do par)
+  for (const e of (rows || []).sort((a, b) => Number(b.code) - Number(a.code))) mapa.set(Number(e.person_code), Number(e.code));
+  return mapa;
+}
+// loja de destino: a gravada na remessa ou, se veio 0 (venda para empresa fora do POP), a do cliente da nota
+const destinoDe = (t, porPessoa) => Number(t.empresa_destino) || porPessoa.get(Number(t.cliente_code)) || 0;
+
 // transferência que já saiu: nota autorizada (99 pelo HeadCoach) ou transação atendida no TOTVS
 const saiu = (t) => (t.venda_id ? t.nf_status === 'autorizada' : Number(t.transacao_status) === 4);
 const cancelada = (t) => t.nf_status === 'cancelada' || Number(t.transacao_status) === 6;
 const esperadoDe = (itens) => (itens || []).reduce((s, i) => s + (Number(i.quantidade) || 0), 0);
 
 const CAMPOS_TRX =
-  'id, transferencia_id, empresa, empresa_destino, transacao_code, transacao_status, venda_id, nf_numero, nf_serie, nf_chave, nf_status, natureza, total, qtd_pecas, qtd_epcs, cliente_nome, criado_por, criado_em, itens';
+  'id, transferencia_id, empresa, empresa_destino, transacao_code, transacao_status, venda_id, nf_numero, nf_serie, nf_chave, nf_status, natureza, total, qtd_pecas, qtd_epcs, cliente_code, cliente_nome, criado_por, criado_em, itens';
 
-/** Transferências para as lojas do usuário: a receber e recebidas. */
+/** Remessas para as lojas do usuário (transferências e vendas da matriz): a receber e recebidas. */
 export async function listarTransferencias(user, f = {}) {
   const { lista, codes } = await empresasPermitidas(user, f.empresa);
   if (!codes.length) return { empresas: lista, transferencias: [] };
-  const trx = await todas(() => supabase.from('transferencias_transacoes').select(CAMPOS_TRX).in('empresa_destino', codes).order('id', { ascending: false }));
-  const validas = trx.filter((t) => saiu(t) && !cancelada(t));
+  // pelo destino gravado OU, na venda para loja fora do POP (destino 0), pelo cliente da nota
+  const porPessoa = await empresasPorPessoa(codes);
+  const pessoas = [...porPessoa.keys()];
+  const filtro = pessoas.length
+    ? `empresa_destino.in.(${codes.join(',')}),and(empresa_destino.eq.0,cliente_code.in.(${pessoas.join(',')}))`
+    : `empresa_destino.in.(${codes.join(',')})`;
+  const trx = (await todas(() => supabase.from('transferencias_transacoes').select(CAMPOS_TRX).or(filtro).order('id', { ascending: false }))).map((t) => ({
+    ...t,
+    empresa_destino: destinoDe(t, porPessoa),
+  }));
+  const validas = trx.filter((t) => t.empresa_destino && saiu(t) && !cancelada(t));
   const recs = new Map();
   for (let i = 0; i < validas.length; i += 200) {
     const ids = validas.slice(i, i + 200).map((t) => t.id);
@@ -100,6 +128,8 @@ export async function listarTransferencias(user, f = {}) {
 export async function detalheTransferencia(user, id) {
   const t = await q(supabase.from('transferencias_transacoes').select(CAMPOS_TRX).eq('id', Number(id)).maybeSingle());
   if (!t) throw new RecebimentoError('Transferência não encontrada', 'NOT_FOUND', 404);
+  if (!Number(t.empresa_destino)) t.empresa_destino = destinoDe(t, await empresasPorPessoa());
+  if (!t.empresa_destino) throw new RecebimentoError('Esta nota não é para uma loja do grupo: não há o que receber', 'SEM_LOJA_DESTINO', 404);
   const { lista } = await empresasPermitidas(user, t.empresa_destino);
   const recebimento = await q(supabase.from('hc_recebimentos_transferencia').select('*').eq('transferencia_transacao_id', t.id).maybeSingle());
   const itens = (t.itens || []).map((i) => ({

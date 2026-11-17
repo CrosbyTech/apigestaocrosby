@@ -65,9 +65,17 @@ async function contexto(destinoClienteCode) {
   if (!cliente.cnpj) throw new TransferenciaError(`O destino ${cliente.nome} não tem CNPJ no TOTVS: transferência é só entre empresas`, 'DESTINO_SEM_CNPJ');
   const filial = filiais.find((f) => Number(f.personCode) === pessoa) || null;
   if (filial && Number(filial.code) === EMPRESA_ORIGEM_NOTA) throw new TransferenciaError('A loja de destino é a própria origem (99)', 'MESMA_EMPRESA');
+  // Loja própria fora dos grupos do POP (ex.: 98 Shopping Recife, que recebe VENDA):
+  // não é "filial" para a regra da operação, mas a nota guarda o código dela para
+  // a loja ver a mercadoria em Recebimento de Mercadoria.
+  let empresaDestino = filial ? Number(filial.code) : null;
+  if (!empresaDestino) {
+    const { data: emp } = await supabase.from('erp_empresas').select('code').eq('person_code', pessoa).eq('propria', true).order('code').limit(1);
+    empresaDestino = emp?.[0]?.code ? Number(emp[0].code) : null;
+  }
   const natureza = raizCnpj(cliente.cnpj) === raizCnpj(emit.cnpj) ? 'transferencia' : 'venda';
   const cen = cenarioExpedicao({ emitUf: emit.uf, cliente });
-  return { emit, cliente, filial, natureza, cen, operacoes: OPERACOES_TRANSF_NOTA[natureza] };
+  return { emit, cliente, filial, empresaDestino, natureza, cen, operacoes: OPERACOES_TRANSF_NOTA[natureza] };
 }
 
 async function solicitacaoDe(id) {
@@ -276,7 +284,7 @@ export async function transferirComNota(b = {}) {
     cobranca: null,
     comprovantes: [],
     pedido_info: {
-      transferencia: { natureza, ref, solicitacaoId: sol?.id || null, destinoCode: ctx.filial?.code ?? null, destinoNome, operacaoNota: operacoes.nota },
+      transferencia: { natureza, ref, solicitacaoId: sol?.id || null, destinoCode: ctx.filial?.code ?? ctx.empresaDestino ?? null, destinoNome, operacaoNota: operacoes.nota },
     },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
@@ -292,7 +300,7 @@ export async function transferirComNota(b = {}) {
   const { error: e2 } = await supabase.from('transferencias_transacoes').insert({
     transferencia_id: sol?.id || null,
     empresa: EMPRESA_ORIGEM_NOTA,
-    empresa_destino: ctx.filial?.code ?? 0,
+    empresa_destino: ctx.filial?.code ?? ctx.empresaDestino ?? 0,
     empresa_totvs: null,
     venda_id: venda.id,
     natureza,
