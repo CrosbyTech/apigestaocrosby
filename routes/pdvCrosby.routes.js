@@ -46,7 +46,7 @@ import {
 } from '../services/pdvFiscal.js';
 import { espelharVendaNoTotvs, EspelhoError } from '../services/pdvEspelhoTotvs.js';
 import { caixaAbertoPara } from '../services/hcCaixa.js';
-import { sincronizarVendaEmSegundoPlano } from '../services/hcContasReceber.js';
+import { sincronizarVendaEmSegundoPlano, gerarTitulosDaVenda } from '../services/hcContasReceber.js';
 import {
   estornarVenda as estornarSaldosDaVenda,
   SaldoClienteError,
@@ -57,6 +57,7 @@ import {
   creditarTroca,
   conferirCancelamentoDaTroca,
   descreditarTroca,
+  acertarTrocasCanceladas,
 } from '../services/hcSaldosClientes.js';
 import { aoCancelarVenda } from '../services/saldoBonus.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
@@ -727,6 +728,8 @@ router.get(
     if (empresa) q = q.eq('empresa', empresa);
     if (TIPOS.includes(tipo)) q = q.eq('tipo_venda', tipo);
     if (status) q = q.eq('status', status);
+    // ?origem=pdv → só as transações feitas no PDV Crosby (sem o faturamento da expedição)
+    if (String(req.query.origem || '').toLowerCase() === 'pdv') q = q.eq('origem', 'pdv');
 
     const { data: vendas, error } = await q;
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
@@ -1112,116 +1115,306 @@ router.post(
 
 const cancelando = new Set(); // trava por nota (evita duplo clique)
 
-router.post(
-  '/notas/:id/cancelar',
-  asyncHandler(async (req, res) => {
-    const id = parseInt(req.params.id, 10);
-    if (cancelando.has(id)) {
-      return errorResponse(res, 'Cancelamento já em andamento para esta nota', 409, 'CANCEL_IN_PROGRESS');
-    }
-    cancelando.add(id);
-    try {
-      const ctx = await contextoNota(id);
-      if (!ctx) return errorResponse(res, 'Nota não encontrada', 404, 'NOT_FOUND');
-      if (ctx.nota.status === 'cancelada') {
-        return successResponse(res, { jaCancelada: true, nProt: ctx.nota.cancel_protocolo }, 'Nota já estava cancelada');
-      }
-      if (ctx.nota.status !== 'autorizada') {
-        return errorResponse(res, 'Só é possível cancelar nota autorizada', 409, 'NOT_AUTHORIZED');
-      }
+class CancelamentoError extends Error {
+  constructor(message, status = 400, code = 'CANCEL_ERROR', details = undefined) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
 
-      // nota de TROCA: o CREDEV que ela gerou precisa estar inteiro no saldo do cliente
-      const vendaDaNota = await carregarVenda(ctx.nota.venda_id);
-      try {
-        await conferirCancelamentoDaTroca(vendaDaNota);
-      } catch (err) {
-        if (err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status, err.code);
-        throw err;
-      }
-      console.log(
-        `🚫 [PDV Crosby] Cancelando ${ctx.nota.modelo === 65 ? 'NFC-e' : 'NF-e'} ${ctx.nota.serie}/${ctx.nota.numero} (chave ${ctx.nota.chave})…`,
-      );
-      const r = await cancelarNota({
+/**
+ * Cancela a nota na SEFAZ (evento 110111) e, com a SEFAZ aceitando, desfaz o
+ * que a transação fez no HeadCoach: venda cancelada, títulos do contas a
+ * receber cancelados, Credev/adiantamento/saldo bônus usados de volta ao
+ * cliente, Credev gerado pela troca retirado, etiquetas estornadas e os
+ * registros de faturamento/transferência acompanhando. Se a SEFAZ recusa, nada
+ * muda. Devolve o que foi feito; lança CancelamentoError ou FiscalError.
+ */
+export async function cancelarNotaFiscal(id, { justificativa = null, por = null } = {}) {
+  if (cancelando.has(id)) throw new CancelamentoError('Cancelamento já em andamento para esta nota', 409, 'CANCEL_IN_PROGRESS');
+  cancelando.add(id);
+  try {
+    const ctx = await contextoNota(id);
+    if (!ctx) throw new CancelamentoError('Nota não encontrada', 404, 'NOT_FOUND');
+    if (ctx.nota.status === 'cancelada') return { semMudanca: true, jaCancelada: true, nProt: ctx.nota.cancel_protocolo, vendaId: ctx.nota.venda_id };
+    if (ctx.nota.status !== 'autorizada') throw new CancelamentoError('Só é possível cancelar nota autorizada', 409, 'NOT_AUTHORIZED');
+
+    // nota de TROCA: o CREDEV que ela gerou sai do cliente (o que ainda houver no saldo)
+    const vendaDaNota = await carregarVenda(ctx.nota.venda_id);
+    const credevDaTroca = await conferirCancelamentoDaTroca(vendaDaNota).catch(() => null);
+    console.log(
+      `🚫 [PDV Crosby] Cancelando ${ctx.nota.modelo === 65 ? 'NFC-e' : 'NF-e'} ${ctx.nota.serie}/${ctx.nota.numero} (chave ${ctx.nota.chave})…`,
+    );
+    const r = await cancelarNota({
+      chave: ctx.nota.chave,
+      nProt: ctx.nota.protocolo,
+      justificativa,
+      modelo: ctx.nota.modelo,
+      emit: ctx.emit,
+      cfg: ctx.cfg,
+      cert: ctx.cert,
+    });
+
+    // 573 = duplicidade de evento: o cancelamento já havia sido registrado.
+    // Confirma na SEFAZ antes de marcar, para não mascarar outra rejeição.
+    let jaCancelada = false;
+    if (!r.ok && r.cStat === '573') {
+      const sit = await consultarChave({
         chave: ctx.nota.chave,
-        nProt: ctx.nota.protocolo,
-        justificativa: req.body?.justificativa,
         modelo: ctx.nota.modelo,
         emit: ctx.emit,
         cfg: ctx.cfg,
         cert: ctx.cert,
       });
+      jaCancelada = sit.cancelada;
+    }
 
-      // 573 = duplicidade de evento: o cancelamento já havia sido registrado.
-      // Confirma na SEFAZ antes de marcar, para não mascarar outra rejeição.
-      let jaCancelada = false;
-      if (!r.ok && r.cStat === '573') {
-        const sit = await consultarChave({
-          chave: ctx.nota.chave,
-          modelo: ctx.nota.modelo,
-          emit: ctx.emit,
-          cfg: ctx.cfg,
-          cert: ctx.cert,
-        });
-        jaCancelada = sit.cancelada;
-      }
-
-      if (r.ok || jaCancelada) {
-        await supabase
-          .from('pdv_notas_fiscais')
-          .update({
-            status: 'cancelada',
-            cancel_protocolo: r.nProt,
-            cancel_justificativa: req.body?.justificativa || null,
-            cancel_em: new Date().toISOString(),
-            cstat: r.cStat,
-            xmotivo: r.xMotivo,
-          })
-          .eq('id', ctx.nota.id);
-        await supabase.from('pdv_vendas').update({ status: 'cancelada' }).eq('id', ctx.nota.venda_id);
-        sincronizarVendaEmSegundoPlano(ctx.nota.venda_id); // cancela os títulos do contas a receber
-        // venda da expedição: o registro do faturamento acompanha (libera faturar de novo)
-        await supabase.from('pedidos_venda_faturamentos').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', ctx.nota.venda_id);
-        // transferência com nota pelo HeadCoach: o registro acompanha e a solicitação volta para a fila
-        await supabase.from('transferencias_transacoes').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', ctx.nota.venda_id);
-        await supabase
-          .from('transferencias_mercadoria')
-          .update({ status: 'aguardando_transferencia', atualizado_em: new Date().toISOString() })
-          .eq('venda_id', ctx.nota.venda_id)
-          .neq('status', 'cancelada');
-        // saldo bônus: o que a venda gastou volta ao cliente; o crédito que ela gerou é cancelado
-        await aoCancelarVenda(ctx.nota.venda_id, req.body?.por || null).catch((e) => console.warn(`⚠️ [saldo bônus] venda ${ctx.nota.venda_id}: ${e.message}`));
-        // CREDEV / adiantamento do HeadCoach que a venda usou volta ao cliente
-        await estornarSaldosDaVenda(ctx.nota.venda_id, 'Nota fiscal da venda cancelada', req.body?.por || null).catch((e) => {
-          if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${ctx.nota.venda_id}: ${e.message}`);
-        });
-        // troca cancelada: sai o CREDEV que ela tinha gerado
-        await descreditarTroca(vendaDaNota, { motivo: 'Nota de devolução da troca cancelada', por: req.body?.por || null }).catch((e) =>
-          console.warn(`⚠️ [saldos] troca ${ctx.nota.venda_id}: ${e.message}`),
-        );
-        const vendaCancelada = await carregarVenda(ctx.nota.venda_id);
-        if (vendaCancelada) {
-          await registrarEpcs({ venda: vendaCancelada, itens: vendaCancelada.itens, tipo: 'estorno', nota: ctx.nota });
-        }
-        console.log(`🚫 [PDV Crosby] Nota ${ctx.nota.chave} cancelada (${r.cStat} ${r.xMotivo})`);
-        return successResponse(
-          res,
-          { cStat: r.cStat, xMotivo: r.xMotivo, nProt: r.nProt, dhRegEvento: r.dhRegEvento, jaCancelada },
-          jaCancelada ? 'Nota já constava cancelada na SEFAZ' : 'Nota cancelada na SEFAZ',
-        );
-      }
-
+    if (!(r.ok || jaCancelada)) {
       console.warn(`⚠️ [PDV Crosby] SEFAZ recusou o cancelamento: ${r.cStat} ${r.xMotivo}`);
-      return errorResponse(
+      throw new CancelamentoError(`SEFAZ recusou o cancelamento: ${r.cStat} — ${r.xMotivo}`, 422, 'CANCEL_REJECTED', { cStat: r.cStat, xMotivo: r.xMotivo });
+    }
+
+    const vendaId = ctx.nota.venda_id;
+    await supabase
+      .from('pdv_notas_fiscais')
+      .update({
+        status: 'cancelada',
+        cancel_protocolo: r.nProt,
+        cancel_justificativa: justificativa || null,
+        cancel_em: new Date().toISOString(),
+        cstat: r.cStat,
+        xmotivo: r.xMotivo,
+      })
+      .eq('id', ctx.nota.id);
+    await supabase.from('pdv_vendas').update({ status: 'cancelada' }).eq('id', vendaId);
+    // contas a receber: cancela os títulos agora (se falhar, o job diário cancela)
+    const titulos = await gerarTitulosDaVenda(vendaId).catch((e) => {
+      console.error(`[contas a receber] venda ${vendaId}:`, e.message);
+      return { acao: 'erro', erro: e.message };
+    });
+    // venda da expedição: o registro do faturamento acompanha (libera faturar de novo)
+    await supabase.from('pedidos_venda_faturamentos').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', vendaId);
+    // transferência com nota pelo HeadCoach: o registro acompanha e a solicitação volta para a fila
+    await supabase.from('transferencias_transacoes').update({ nf_status: 'cancelada', atualizado_em: new Date().toISOString() }).eq('venda_id', vendaId);
+    await supabase
+      .from('transferencias_mercadoria')
+      .update({ status: 'aguardando_transferencia', atualizado_em: new Date().toISOString() })
+      .eq('venda_id', vendaId)
+      .neq('status', 'cancelada');
+    // saldo bônus: o que a venda gastou volta ao cliente; o crédito que ela gerou é cancelado
+    await aoCancelarVenda(vendaId, por).catch((e) => console.warn(`⚠️ [saldo bônus] venda ${vendaId}: ${e.message}`));
+    // CREDEV / adiantamento do HeadCoach que a venda usou volta ao cliente
+    const saldosDevolvidos = await estornarSaldosDaVenda(vendaId, 'Nota fiscal da venda cancelada', por).catch((e) => {
+      if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${vendaId}: ${e.message}`);
+      return null;
+    });
+    // venda cancelada que devolveu CREDEV: se ele vinha de uma troca já cancelada, sai agora
+    if (Number(saldosDevolvidos) > 0 && vendaDaNota?.cliente_code) {
+      await acertarTrocasCanceladas({ cliente: vendaDaNota.cliente_code, empresa: vendaDaNota.empresa, por }).catch((e) => console.warn(`⚠️ [saldos] acerto de trocas canceladas: ${e.message}`));
+    }
+    // troca cancelada: sai o CREDEV que ela tinha gerado (até onde o saldo do cliente alcança)
+    const credevRetirado = await descreditarTroca(vendaDaNota, { motivo: 'Nota de devolução da troca cancelada', por }).catch((e) => {
+      console.warn(`⚠️ [saldos] troca ${vendaId}: ${e.message}`);
+      return null;
+    });
+    const credevJaUsado = credevDaTroca ? round2(credevDaTroca.creditado - Number(credevRetirado || 0)) : 0;
+    const vendaCancelada = await carregarVenda(vendaId);
+    let etiquetas = 0;
+    if (vendaCancelada) etiquetas = await registrarEpcs({ venda: vendaCancelada, itens: vendaCancelada.itens, tipo: 'estorno', nota: ctx.nota });
+    console.log(`🚫 [PDV Crosby] Nota ${ctx.nota.chave} cancelada (${r.cStat} ${r.xMotivo})`);
+    return { vendaId, cStat: r.cStat, xMotivo: r.xMotivo, nProt: r.nProt, dhRegEvento: r.dhRegEvento, jaCancelada, titulos, saldosDevolvidos, credevRetirado, credevJaUsado, etiquetas };
+  } finally {
+    cancelando.delete(id);
+  }
+}
+
+router.post(
+  '/notas/:id/cancelar',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await cancelarNotaFiscal(parseInt(req.params.id, 10), { justificativa: req.body?.justificativa, por: req.body?.por || null });
+      if (r.semMudanca) return successResponse(res, { jaCancelada: true, nProt: r.nProt }, 'Nota já estava cancelada');
+      return successResponse(
         res,
-        `SEFAZ recusou o cancelamento: ${r.cStat} — ${r.xMotivo}`,
-        422,
-        'CANCEL_REJECTED',
-        { cStat: r.cStat, xMotivo: r.xMotivo },
+        { cStat: r.cStat, xMotivo: r.xMotivo, nProt: r.nProt, dhRegEvento: r.dhRegEvento, jaCancelada: r.jaCancelada },
+        r.jaCancelada ? 'Nota já constava cancelada na SEFAZ' : 'Nota cancelada na SEFAZ',
       );
     } catch (err) {
+      if (err instanceof CancelamentoError) return errorResponse(res, err.message, err.status, err.code, err.details);
       return respostaErroFiscal(res, err);
-    } finally {
-      cancelando.delete(id);
+    }
+  }),
+);
+
+// ─── CANCELAMENTO DE TRANSAÇÃO (tela do PDV Crosby, Yago 17/11/2026) ─────────
+// Uma ação só cancela a nota fiscal, a transação e o contas a receber.
+//   GET  /vendas/:id/cancelamento         o que a transação tem e o que será desfeito
+//   POST /vendas/:id/cancelar-transacao   cancela tudo  { justificativa, por }
+const PRAZO_SEFAZ_MIN = { 65: 30, 55: 24 * 60 }; // prazo normal: NFC-e 30 min, NF-e 24 h
+
+async function titulosDaVenda(vendaId) {
+  const { data, error } = await supabase
+    .from('hc_cr_titulos')
+    .select('id, fatura, parcela, forma, valor, situacao, vencimento, data_pagamento, data_liquidacao, conciliado_em, cancelado_em')
+    .eq('venda_id', vendaId)
+    .order('parcela');
+  if (error) return [];
+  return data || [];
+}
+
+async function previaDoCancelamento(vendaId) {
+  const venda = await carregarVenda(vendaId);
+  if (!venda) return null;
+  const nota = venda.notas.find((n) => n.status === 'autorizada') || venda.notas.find((n) => n.status === 'cancelada') || venda.notas[0] || null;
+  const titulos = await titulosDaVenda(vendaId);
+  let caixa = null;
+  if (venda.caixa_id) {
+    const { data } = await supabase.from('hc_caixas').select('id, status, data_caixa, fechado_em').eq('id', venda.caixa_id).maybeSingle();
+    caixa = data || null;
+  }
+  const avisos = [];
+  let bloqueio = null;
+  const notaAutorizada = nota?.status === 'autorizada';
+  if (venda.status === 'cancelada') bloqueio = 'Esta transação já está cancelada.';
+  // troca: o Credev que ela gerou sai do cliente; se ele já usou parte, sai o que resta
+  if (!bloqueio && venda.tipo_venda === 'troca' && notaAutorizada) {
+    const c = await conferirCancelamentoDaTroca(venda);
+    const brl = (n) => `R$ ${Number(n).toFixed(2).replace('.', ',')}`;
+    if (c && c.jaUsado > 0.005) {
+      avisos.push(
+        `Esta troca gerou ${brl(c.creditado)} de Credev e o cliente já usou ${brl(c.jaUsado)}. Ao cancelar, ${c.retirar > 0.005 ? `saem os ${brl(c.retirar)} que restam no saldo dele` : 'não há saldo para retirar agora'}; os ${brl(c.jaUsado)} já usados só saem se a venda em que foram usados também for cancelada.`,
+      );
+    } else if (c) {
+      avisos.push(`O Credev de ${brl(c.creditado)} que esta troca gerou sai do saldo do cliente.`);
+    }
+  }
+  if (notaAutorizada) {
+    const minutos = Math.round((Date.now() - new Date(nota.dh_autorizacao || nota.criado_em).getTime()) / 60000);
+    const prazo = PRAZO_SEFAZ_MIN[Number(nota.modelo)] || null;
+    if (prazo && minutos > prazo) {
+      avisos.push(
+        `A ${Number(nota.modelo) === 65 ? 'NFC-e' : 'NF-e'} foi autorizada há ${minutos >= 120 ? `${Math.round(minutos / 60)} horas` : `${minutos} minutos`}: o prazo normal da SEFAZ é de ${prazo === 30 ? '30 minutos' : '24 horas'} e ela pode recusar. Se recusar, nada é cancelado.`,
+      );
+    }
+  } else if (venda.status !== 'cancelada') {
+    avisos.push('Esta transação não tem nota autorizada: nada vai à SEFAZ, só a transação é cancelada.');
+  }
+  const uso = usoDosPagamentos(venda.pagamentos || []);
+  if (uso.credev > 0 || uso.adiantamento > 0) {
+    const partes = [];
+    if (uso.credev > 0) partes.push(`R$ ${uso.credev.toFixed(2).replace('.', ',')} de Credev`);
+    if (uso.adiantamento > 0) partes.push(`R$ ${uso.adiantamento.toFixed(2).replace('.', ',')} de adiantamento`);
+    avisos.push(`${partes.join(' e ')} ${partes.length > 1 ? 'voltam' : 'volta'} para o saldo do cliente nesta loja.`);
+  }
+  if (venda.pedido_info?.trocaVendaId) {
+    avisos.push(`Esta venda foi fechada junto com a troca nº ${venda.pedido_info.trocaVendaId}. A troca é outra transação e continua valendo; para desfazer tudo, cancele a troca depois desta.`);
+  }
+  if (Number(venda.cashback_usado) > 0) avisos.push(`O cashback usado nesta venda (R$ ${Number(venda.cashback_usado).toFixed(2).replace('.', ',')}) não volta sozinho: reponha no TOTVS se for o caso.`);
+  if (venda.tipo_venda !== 'troca' && venda.cliente_code && notaAutorizada) avisos.push('O cashback que esta venda gerou para o cliente no TOTVS não é retirado daqui.');
+  if (venda.totvs_transacao_code) avisos.push(`A transação ${venda.totvs_transacao_code} do TOTVS (espelho desta venda) não é cancelada daqui: cancele no TOTVS.`);
+  if (titulos.some((t) => t.conciliado_em && t.situacao !== 'cancelado')) avisos.push('Há título desta transação já conciliado no contas a receber: ele também será cancelado.');
+  if (caixa && caixa.status !== 'aberto') avisos.push(`A transação é do caixa nº ${caixa.id} (${String(caixa.data_caixa).slice(0, 10).split('-').reverse().join('/')}), que já está fechado: o resumo desse caixa muda.`);
+  return {
+    venda,
+    nota,
+    titulos,
+    caixa,
+    avisos,
+    bloqueio,
+    podeCancelar: !bloqueio,
+    vaiCancelar: {
+      nota: notaAutorizada ? `${Number(nota.modelo) === 65 ? 'NFC-e' : 'NF-e'} ${nota.numero}/${nota.serie}` : null,
+      titulos: titulos.filter((t) => t.situacao !== 'cancelado').length,
+    },
+  };
+}
+
+router.get(
+  '/vendas/:id/cancelamento',
+  asyncHandler(async (req, res) => {
+    const p = await previaDoCancelamento(parseInt(req.params.id, 10));
+    if (!p) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
+    return successResponse(res, p, 'Prévia do cancelamento');
+  }),
+);
+
+router.post(
+  '/vendas/:id/cancelar-transacao',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const justificativa = String(req.body?.justificativa || '').trim();
+    const por = req.body?.por || null;
+    if (justificativa.length < 15) return errorResponse(res, 'Escreva o motivo do cancelamento (pelo menos 15 caracteres)', 400, 'JUSTIFICATIVA_CURTA');
+    const venda = await carregarVenda(id);
+    if (!venda) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
+    const passos = [];
+    const passo = (nome, ok, detalhe) => passos.push({ nome, ok, detalhe });
+    try {
+      const notaAut = venda.notas.find((n) => n.status === 'autorizada') || null;
+      let feito = null;
+      if (notaAut) {
+        // com nota autorizada: a SEFAZ decide; se ela recusa, nada é cancelado
+        feito = await cancelarNotaFiscal(notaAut.id, { justificativa, por });
+        passo(
+          'Nota fiscal',
+          true,
+          `${Number(notaAut.modelo) === 65 ? 'NFC-e' : 'NF-e'} ${notaAut.numero}/${notaAut.serie} cancelada na SEFAZ${feito.nProt ? ` (protocolo ${feito.nProt})` : ''}${feito.jaCancelada ? ' — já constava cancelada' : ''}`,
+        );
+      } else if (venda.status !== 'cancelada') {
+        const { error } = await supabase.from('pdv_vendas').update({ status: 'cancelada' }).eq('id', id);
+        if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+        const saldosDevolvidos = await estornarSaldosDaVenda(id, 'Venda cancelada', por).catch((e) => {
+          if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${id}: ${e.message}`);
+          return null;
+        });
+        if (Number(saldosDevolvidos) > 0 && venda.cliente_code) {
+          await acertarTrocasCanceladas({ cliente: venda.cliente_code, empresa: venda.empresa, por }).catch((e) => console.warn(`⚠️ [saldos] acerto de trocas canceladas: ${e.message}`));
+        }
+        const etiquetas = await registrarEpcs({ venda, itens: venda.itens, tipo: 'estorno' });
+        feito = { saldosDevolvidos, etiquetas };
+        passo('Nota fiscal', true, venda.notas.some((n) => n.status === 'cancelada') ? 'a nota já estava cancelada' : 'não havia nota autorizada');
+      } else {
+        passo('Nota fiscal', true, 'a nota já estava cancelada');
+      }
+      passo('Transação', true, `nº ${id} cancelada`);
+      // contas a receber: garante os títulos cancelados (repetir não faz mal)
+      const tit = feito?.titulos?.acao && feito.titulos.acao !== 'nada' ? feito.titulos : await gerarTitulosDaVenda(id).catch((e) => ({ acao: 'erro', erro: e.message }));
+      const depois = await titulosDaVenda(id);
+      const ativos = depois.filter((t) => t.situacao !== 'cancelado').length;
+      passo(
+        'Contas a receber',
+        tit.acao !== 'erro' && ativos === 0,
+        tit.acao === 'erro'
+          ? `não consegui cancelar os títulos agora (${tit.erro}); o sistema tenta de novo sozinho`
+          : depois.length
+            ? `${depois.length} título(s) cancelado(s)`
+            : 'a transação não tinha títulos',
+      );
+      const uso = usoDosPagamentos(venda.pagamentos || []);
+      if (uso.credev > 0 || uso.adiantamento > 0) {
+        passo('Saldo do cliente', feito?.saldosDevolvidos !== null, `R$ ${round2(uso.credev + uso.adiantamento).toFixed(2).replace('.', ',')} de Credev/adiantamento de volta para o cliente`);
+      }
+      if (venda.tipo_venda === 'troca' && (Number(feito?.credevRetirado) > 0 || Number(feito?.credevJaUsado) > 0)) {
+        const brl = (n) => `R$ ${Number(n).toFixed(2).replace('.', ',')}`;
+        passo(
+          'Credev da troca',
+          true,
+          `${brl(feito.credevRetirado || 0)} retirado do saldo do cliente${Number(feito.credevJaUsado) > 0.005 ? `; ${brl(feito.credevJaUsado)} já tinham sido usados por ele e não saíram` : ''}`,
+        );
+      }
+      if (Number(feito?.etiquetas) > 0) passo('Etiquetas', true, `${feito.etiquetas} peça(s) estornada(s)`);
+      // quem cancelou e por quê (fica na transação)
+      if (!venda.pedido_info?.cancelamento) {
+        const info = { ...(venda.pedido_info || {}), cancelamento: { por, motivo: justificativa, em: new Date().toISOString() } };
+        await supabase.from('pdv_vendas').update({ pedido_info: info }).eq('id', id);
+      }
+      console.log(`🚫 [PDV Crosby] Transação ${id} cancelada por ${por || '—'}: ${justificativa}`);
+      return successResponse(res, { passos, venda: await carregarVenda(id), titulos: depois }, 'Transação cancelada');
+    } catch (err) {
+      if (err instanceof CancelamentoError) return errorResponse(res, err.message, err.status, err.code, { ...(err.details || {}), passos });
+      return respostaErroFiscal(res, err);
     }
   }),
 );

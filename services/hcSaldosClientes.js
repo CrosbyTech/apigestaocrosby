@@ -213,30 +213,35 @@ export async function creditarTroca(venda, { por = null, nf = null } = {}) {
 }
 
 /** Dá para cancelar a troca? Só se o CREDEV que ela gerou ainda estiver no saldo do cliente. */
+// A troca PODE ser cancelada com o CREDEV dela já usado (Yago, 17/11/2026): sai
+// do cliente o que ainda houver no saldo; a parte já gasta fica "devendo" e é
+// retirada quando a venda que a usou for cancelada (acertarTrocasCanceladas).
+/**
+ * O que acontece com o CREDEV de uma troca se ela for cancelada agora:
+ * { creditado, saldo, retirar, jaUsado } — ou null se a troca não gerou crédito.
+ */
 export async function conferirCancelamentoDaTroca(venda) {
-  if (!venda || venda.tipo_venda !== 'troca' || !venda.cliente_code) return;
+  if (!venda || venda.tipo_venda !== 'troca' || !venda.cliente_code) return null;
   const creditado = await creditoLiquidoDaTroca(venda.id);
-  if (!(creditado > 0.005)) return;
+  if (!(creditado > 0.005)) return null;
   const s = await saldoDoCliente(venda.cliente_code, venda.empresa);
-  if (s.credev + 0.005 < creditado) {
-    throw new SaldoClienteError(
-      `Esta troca gerou ${brl(creditado)} de CREDEV e o cliente já usou parte dele (saldo atual ${brl(s.credev)}): não dá para cancelar a troca`,
-      'CREDEV_DA_TROCA_USADO',
-      409,
-    );
-  }
+  const retirar = round2(Math.max(0, Math.min(creditado, s.credev)));
+  return { creditado, saldo: s.credev, retirar, jaUsado: round2(creditado - retirar) };
 }
 
-/** Troca cancelada → tira do cliente o CREDEV que ela tinha gerado. */
+/**
+ * Troca cancelada → tira do cliente o CREDEV que ela tinha gerado, até onde o
+ * saldo alcança. Pode ser chamada de novo: tira o que ainda faltar.
+ * Devolve quanto tirou agora.
+ */
 export async function descreditarTroca(venda, { motivo = null, por = null } = {}) {
-  if (!venda || venda.tipo_venda !== 'troca' || !venda.cliente_code) return 0;
-  const creditado = await creditoLiquidoDaTroca(venda.id);
-  if (!(creditado > 0.005)) return 0;
+  const sit = await conferirCancelamentoDaTroca(venda);
+  if (!sit || !(sit.retirar > 0.005)) return 0;
   await movimentar({
     empresa: venda.empresa,
     cliente: venda.cliente_code,
     tipo: 'credev',
-    valor: -creditado,
+    valor: -sit.retirar,
     movimento: 'devolucao_cancelada',
     vendaId: venda.id,
     referencia: `troca ${venda.id}`,
@@ -245,8 +250,33 @@ export async function descreditarTroca(venda, { motivo = null, por = null } = {}
     nome: venda.cliente_nome || null,
     doc: venda.cliente_cpf_cnpj || null,
   });
-  console.log(`💳 [saldos] troca ${venda.id} cancelada: ${brl(creditado)} de CREDEV retirado do cliente ${venda.cliente_code}`);
-  return creditado;
+  console.log(`💳 [saldos] troca ${venda.id} cancelada: ${brl(sit.retirar)} de CREDEV retirado do cliente ${venda.cliente_code}${sit.jaUsado > 0 ? ` (${brl(sit.jaUsado)} já tinham sido usados)` : ''}`);
+  return sit.retirar;
+}
+
+/**
+ * Trocas CANCELADAS do cliente nesta loja cujo CREDEV ainda não saiu inteiro
+ * (o cliente já tinha gastado): tira agora o que o saldo permitir. Chamar
+ * depois que uma venda cancelada devolveu CREDEV ao cliente. Devolve o total.
+ */
+export async function acertarTrocasCanceladas({ cliente, empresa, por = null }) {
+  if (!cliente || !empresa) return 0;
+  const trocas = await q(
+    supabase
+      .from('pdv_vendas')
+      .select('id, empresa, tipo_venda, status, total, cliente_code, cliente_nome, cliente_cpf_cnpj')
+      .eq('tipo_venda', 'troca')
+      .eq('status', 'cancelada')
+      .eq('empresa', Number(empresa))
+      .eq('cliente_code', Number(cliente))
+      .order('id')
+      .limit(200),
+  );
+  let total = 0;
+  for (const t of trocas || []) {
+    total = round2(total + (await descreditarTroca(t, { motivo: `Troca nº ${t.id} cancelada (acerto do CREDEV que tinha sido usado)`, por })));
+  }
+  return total;
 }
 
 /** Rede de segurança: troca autorizada que ficou sem o CREDEV (falha na hora) é creditada aqui. */
