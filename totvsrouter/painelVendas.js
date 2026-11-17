@@ -22,6 +22,19 @@ import {
   EMPRESA_HC_FATURAMENTO,
   OP_SHOWROOM_BREJINHO,
 } from '../services/hcVendasForecast.js';
+import { vendasPdvHeadcoach, pdvPorFilial, pdvPorVendedor } from '../services/hcVendasPdv.js';
+
+// Vendas do PDV Crosby (HeadCoach) do período, para somar aos números do TOTVS.
+// As lojas que vendem pelo PDV Crosby não mandam mais a venda ao TOTVS (a 1ª
+// foi o Midway, em 17/11/2026). Falha aqui não derruba o painel: fica só o TOTVS.
+async function pdvHeadcoachSeguro({ datemin, datemax, branchs, tag }) {
+  try {
+    return await vendasPdvHeadcoach({ dmin: String(datemin).slice(0, 10), dmax: String(datemax).slice(0, 10), empresas: branchs });
+  } catch (e) {
+    console.error(`[${tag}] ⚠️ vendas do PDV Crosby não lidas: ${e.message}`);
+    return null;
+  }
+}
 
 // Operações que o TOTVS NÃO classifica como operationModel "Sales", então
 // não retornam no /sale-panel/v2/totals-branch/search mesmo passando elas
@@ -310,7 +323,7 @@ router.post(
       resolvedBranchs = await getBranchCodes(token);
     }
 
-    const [mergedData, nonSalesAgg] = await Promise.all([
+    const [mergedData, nonSalesAgg, pdvHc] = await Promise.all([
       fetchBranchTotalsFromTotvs({
         initialToken: token,
         branchs: resolvedBranchs,
@@ -329,12 +342,14 @@ router.post(
         datemin,
         datemax,
       }),
+      // vendas do PDV Crosby (HeadCoach): não estão no TOTVS
+      pdvHeadcoachSeguro({ datemin, datemax, branchs: resolvedBranchs, tag: 'RankingFaturamento' }),
     ]);
 
-    // Mescla as ops non-sales no resultado, mantém ordenação por invoice_value
+    // Mescla as ops non-sales e as vendas do PDV Crosby no resultado, mantém ordenação por invoice_value
     const augmentedDataRow = mergeNonSalesIntoDataRow(
-      mergedData.dataRow,
-      nonSalesAgg,
+      mergeNonSalesIntoDataRow(mergedData.dataRow, nonSalesAgg),
+      pdvPorFilial(pdvHc),
     ).sort(
       (a, b) => Number(b.invoice_value || 0) - Number(a.invoice_value || 0),
     );
@@ -481,6 +496,29 @@ router.post(
     }
 
     const branchesData = results.filter(Boolean);
+
+    // Vendas do PDV Crosby (HeadCoach): somam no vendedor e na filial
+    const pdvHc = await pdvHeadcoachSeguro({ datemin, datemax, branchs: branches.map((b) => b.code), tag: 'PainelVendas/Sellers' });
+    for (const [empresa, vendedores] of pdvPorVendedor(pdvHc)) {
+      let filial = branchesData.find((b) => Number(b.branch_code) === empresa);
+      if (!filial) {
+        filial = { branch_code: empresa, branch_name: branches.find((b) => b.code === empresa)?.name || '', dataRow: [], invoiceQuantity: 0, invoiceValue: 0, itemQuantity: 0 };
+        branchesData.push(filial);
+      }
+      for (const v of vendedores.values()) {
+        let linha = filial.dataRow.find((r) => Number(r.seller_code) === v.seller_code);
+        if (!linha) {
+          linha = { seller_code: v.seller_code, seller_name: v.seller_name || `Vend. ${v.seller_code}`, seller_sale_qty: 0, seller_sale_item_qty: 0, seller_sale_value: 0 };
+          filial.dataRow.push(linha);
+        }
+        linha.seller_sale_qty = Number(linha.seller_sale_qty || 0) + v.qtd;
+        linha.seller_sale_item_qty = Number(linha.seller_sale_item_qty || 0) + v.pecas;
+        linha.seller_sale_value = Math.round((Number(linha.seller_sale_value || 0) + v.valor) * 100) / 100;
+        filial.invoiceQuantity = Number(filial.invoiceQuantity || 0) + v.qtd;
+        filial.itemQuantity = Number(filial.itemQuantity || 0) + v.pecas;
+        filial.invoiceValue = Math.round((Number(filial.invoiceValue || 0) + v.valor) * 100) / 100;
+      }
+    }
 
     return successResponse(
       res,
@@ -1492,6 +1530,29 @@ router.post(
       }
       row99.sellers.sort((a, b) => b.valor - a.valor);
     }
+    // ── VAREJO do PDV Crosby (HeadCoach) ────────────────────────────────────
+    // Lojas que vendem pelo PDV Crosby (Midway desde 17/11/2026): a venda não
+    // vai ao TOTVS, então soma aqui, na loja e no vendedor. Troca entra negativa
+    // (faturamento da loja = vendas − devoluções).
+    const pdvHc = await pdvHeadcoachSeguro({ datemin: dmin, datemax: dmax, branchs, tag: 'fat-vendedor' });
+    const pdvHcErro = pdvHc === null;
+    for (const v of pdvHc || []) {
+      let row = varejoPainel.find((b) => b.branch_code === v.empresa);
+      if (!row) {
+        row = { branch_code: v.empresa, qtd: 0, valor: 0, sellers: [] };
+        varejoPainel.push(row);
+      }
+      let sel = row.sellers.find((x) => x.seller_code === v.vendedor_code);
+      if (!sel) {
+        sel = { seller_code: v.vendedor_code, seller_name: sellerNames.get(v.vendedor_code) || v.vendedor_nome || `Vend. ${v.vendedor_code}`, qtd: 0, valor: 0 };
+        row.sellers.push(sel);
+      }
+      sel.qtd += v.qtd;
+      sel.valor = Math.round((sel.valor + v.valor) * 100) / 100;
+      row.qtd += v.qtd;
+      row.valor = Math.round((row.valor + v.valor) * 100) / 100;
+    }
+    for (const row of varejoPainel) row.sellers.sort((a, b) => b.valor - a.valor);
     varejoPainel.sort((a, b) => b.valor - a.valor);
     console.log(
       `[fat-vendedor] ${faturas.length} parcelas AR · ${movMap.size} NFs no fiscal-movement (${Date.now() - startTime}ms)`,
@@ -2101,6 +2162,21 @@ router.post(
         pedido: v.pedido,
       });
     }
+    // vendas (e trocas, negativas) do PDV Crosby
+    for (const v of pdvHc || []) {
+      const sc = String(v.vendedor_code);
+      if (!varejoDetalhes[sc]) varejoDetalhes[sc] = [];
+      varejoDetalhes[sc].push({
+        data: v.data,
+        branch_code: v.empresa,
+        fatura: v.nf,
+        cliente_code: v.cliente_code,
+        cliente_nome: v.cliente_nome,
+        valor: v.valor,
+        origem: 'headcoach',
+        pedido: `PDV ${v.id}${v.tipo === 'troca' ? ' (troca)' : ''}`,
+      });
+    }
     for (const arr of Object.values(varejoDetalhes)) {
       arr.sort(
         (a, b) =>
@@ -2176,7 +2252,10 @@ router.post(
     if (hcVendasErro) {
       console.error('[fat-vendedor] ⚠️ vendas do HeadCoach não lidas — resultado NÃO cacheado');
     }
-    if (!colapsado && !hcVendasErro && (dataRow.length > 0 || varejoPainel.length > 0)) {
+    if (pdvHcErro) {
+      console.error('[fat-vendedor] ⚠️ vendas do PDV Crosby não lidas — resultado NÃO cacheado');
+    }
+    if (!colapsado && !hcVendasErro && !pdvHcErro && (dataRow.length > 0 || varejoPainel.length > 0)) {
       // detalhes fica só no cache (drill-down) — não infla a resposta da lista
       FAT_VEND_CACHE.set(cacheKey, {
         data: responseData,
