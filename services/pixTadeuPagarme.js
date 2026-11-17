@@ -144,6 +144,7 @@ async function titulosDoCliente({ cd, cpf }) {
     cd_portador: t.bearerCode ?? null,
     nm_portador: t.bearerName ?? null,
     aberto: !t.paymentDate && !t.settlementDate,
+    liquidacao: String(t.settlementDate || t.paymentDate || '').slice(0, 10) || null,
   }));
 }
 
@@ -357,6 +358,26 @@ export async function sincronizar({ dias = DIAS_PADRAO } = {}) {
       } else if (p.origem === 'tadeu_gerador') {
         // Gerador: cliente pelo código da referência; títulos vencidos mais antigos até o valor (+ juros)
         achado = casarGerador(abertos, cents(p.valor));
+      }
+      // Não RECRIAR "a conferir" de um Pix que JÁ foi baixado (João, 17/11/2026):
+      // se não achou título aberto, mas o cliente tem título(s) LIQUIDADO(S) perto
+      // da data do Pix (± 3 dias) cuja soma casa com o valor do Pix, o pagamento já
+      // foi reconciliado no TOTVS — pula em vez de devolver pra aba. (A dedupe por
+      // order_id só vale enquanto a solicitação existe; baixa feita fora do fluxo ou
+      // processada removida fazia o Pix voltar como "a conferir".)
+      if (!achado && p.dia) {
+        const perto = (d) =>
+          d && Math.abs((new Date(d) - new Date(p.dia)) / 86400000) <= 3;
+        const baixadosPerto = titulos.filter((t) => !t.aberto && perto(t.liquidacao));
+        const jaBaixado =
+          baixadosPerto.length &&
+          (p.origem === 'tadeu_gerador'
+            ? casarGerador(baixadosPerto, cents(p.valor))
+            : casar(baixadosPerto, cents(p.valor)));
+        if (jaBaixado) {
+          resumo.ja_baixados = (resumo.ja_baixados || 0) + 1;
+          continue;
+        }
       }
       const quem = `Pix ${p.origem.replace('tadeu_', '')} · ${p.conta === 'fabio' ? 'FA MODA' : 'Crosby'}${p.loja ? ` · loja ${p.loja}` : ''}${p.vendedor ? ` · ${p.vendedor}` : ''}`;
       const cabec = [
