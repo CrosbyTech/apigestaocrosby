@@ -13,13 +13,17 @@
 -- Toda mexida passa por hc_saldo_movimentar() (atômica: dois faturamentos ao
 -- mesmo tempo não gastam o mesmo saldo). RLS ligado e sem política: só o
 -- servidor acessa. Nada se apaga.
+-- CASHBACK (Yago, 16/11/2026): terceiro tipo de saldo, por loja. É a cópia do
+-- "saldo bônus" do TOTVS de quem comprou nas lojas ativas nos últimos 90 dias,
+-- acertada todo dia (services/hcCashback.js): a diferença entra no extrato como
+-- carga_inicial (1ª vez) ou sinc_totvs (dias seguintes).
 -- Rodar: node scripts/migrar-hc-saldos-clientes.mjs [--carregar]
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS hc_cliente_saldos (
   empresa INT NOT NULL,
   cliente_code BIGINT NOT NULL,
-  tipo TEXT NOT NULL CHECK (tipo IN ('credev', 'adiantamento')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('credev', 'adiantamento', 'cashback')),
   cliente_nome TEXT,
   cliente_cpf_cnpj TEXT,
   valor_inicial NUMERIC(14, 2) NOT NULL DEFAULT 0,      -- o que veio do TOTVS na carga
@@ -34,8 +38,8 @@ CREATE TABLE IF NOT EXISTS hc_cliente_saldos_mov (
   id BIGSERIAL PRIMARY KEY,
   empresa INT NOT NULL,
   cliente_code BIGINT NOT NULL,
-  tipo TEXT NOT NULL CHECK (tipo IN ('credev', 'adiantamento')),
-  movimento TEXT NOT NULL CHECK (movimento IN ('carga_inicial', 'devolucao', 'devolucao_cancelada', 'uso', 'estorno', 'ajuste')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('credev', 'adiantamento', 'cashback')),
+  movimento TEXT NOT NULL CHECK (movimento IN ('carga_inicial', 'devolucao', 'devolucao_cancelada', 'uso', 'estorno', 'ajuste', 'sinc_totvs')),
   valor NUMERIC(14, 2) NOT NULL,                        -- + entra · − sai
   saldo_depois NUMERIC(14, 2) NOT NULL,
   venda_id BIGINT,                                      -- uso / estorno: a venda do faturamento
@@ -47,6 +51,15 @@ CREATE TABLE IF NOT EXISTS hc_cliente_saldos_mov (
 );
 CREATE INDEX IF NOT EXISTS hc_cli_saldos_mov_cliente ON hc_cliente_saldos_mov (cliente_code, empresa, em DESC);
 CREATE INDEX IF NOT EXISTS hc_cli_saldos_mov_venda ON hc_cliente_saldos_mov (venda_id) WHERE venda_id IS NOT NULL;
+-- Tabelas criadas antes do cashback: troca as travas de tipo/movimento (pode rodar de novo)
+ALTER TABLE hc_cliente_saldos DROP CONSTRAINT IF EXISTS hc_cliente_saldos_tipo_check;
+ALTER TABLE hc_cliente_saldos ADD CONSTRAINT hc_cliente_saldos_tipo_check CHECK (tipo IN ('credev', 'adiantamento', 'cashback'));
+ALTER TABLE hc_cliente_saldos_mov DROP CONSTRAINT IF EXISTS hc_cliente_saldos_mov_tipo_check;
+ALTER TABLE hc_cliente_saldos_mov ADD CONSTRAINT hc_cliente_saldos_mov_tipo_check CHECK (tipo IN ('credev', 'adiantamento', 'cashback'));
+ALTER TABLE hc_cliente_saldos_mov DROP CONSTRAINT IF EXISTS hc_cliente_saldos_mov_movimento_check;
+ALTER TABLE hc_cliente_saldos_mov ADD CONSTRAINT hc_cliente_saldos_mov_movimento_check CHECK (movimento IN ('carga_inicial', 'devolucao', 'devolucao_cancelada', 'uso', 'estorno', 'ajuste', 'sinc_totvs'));
+CREATE INDEX IF NOT EXISTS hc_cli_saldos_tipo ON hc_cliente_saldos (tipo, empresa);
+
 -- carga inicial uma vez por cliente+empresa+tipo; devolução creditada uma vez (e cancelada uma vez)
 CREATE UNIQUE INDEX IF NOT EXISTS hc_cli_saldos_mov_carga ON hc_cliente_saldos_mov (empresa, cliente_code, tipo) WHERE movimento = 'carga_inicial';
 CREATE UNIQUE INDEX IF NOT EXISTS hc_cli_saldos_mov_dev ON hc_cliente_saldos_mov (devolucao_trx_id, movimento) WHERE movimento IN ('devolucao', 'devolucao_cancelada');
@@ -70,7 +83,7 @@ DECLARE
   v_valor NUMERIC := round(p_valor, 2);
   v_saldo NUMERIC;
 BEGIN
-  IF p_tipo NOT IN ('credev', 'adiantamento') THEN
+  IF p_tipo NOT IN ('credev', 'adiantamento', 'cashback') THEN
     RAISE EXCEPTION 'Tipo de saldo inválido: %', p_tipo;
   END IF;
   IF v_valor = 0 THEN

@@ -1,9 +1,10 @@
 // ============================================================================
 // /api/hc/saldos-clientes — HEADCOACH › SALDOS DE CLIENTES (CREDEV e
 // adiantamento do HeadCoach; services/hcSaldosClientes.js). Exige login.
-//   GET  /?empresa&busca&todos=1        clientes com saldo (todos=1 inclui zerados)
+//   GET  /?empresa&busca&todos=1&tipo=  clientes com saldo (todos=1 inclui zerados; tipo credev|adiantamento|cashback)
 //   GET  /cliente/:code?empresa         saldo + extrato do cliente
 //   POST /sincronizar-devolucoes        credita as devoluções atendidas que faltam (owner/admin)
+//   POST /sincronizar-cashback          acerta o cashback pelo saldo bônus do TOTVS agora, em segundo plano (owner/admin)
 //   POST /gerar                         { empresa, clienteCode, clienteNome, tipo: credev|adiantamento, valor, motivo, senha } (owner/admin)
 // ============================================================================
 import express from 'express';
@@ -11,6 +12,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { requireAuth } from '../middlewares/auth.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes, gerarCredito } from '../services/hcSaldosClientes.js';
+import { rodarCashback } from '../jobs/hc-cashback.job.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -38,8 +40,8 @@ router.get(
   '/',
   rota(async (req) => {
     const codes = await permitidas(req, req.query.empresa || null);
-    if (codes && !codes.length) return { lista: [], totais: { clientes: 0, credev: 0, adiantamento: 0 } };
-    return listarSaldos({ empresa: req.query.empresa || null, empresas: codes, busca: req.query.busca || '', comSaldo: req.query.todos !== '1' });
+    if (codes && !codes.length) return { lista: [], totais: { clientes: 0, credev: 0, adiantamento: 0, cashback: 0 } };
+    return listarSaldos({ empresa: req.query.empresa || null, empresas: codes, busca: req.query.busca || '', comSaldo: req.query.todos !== '1', tipo: req.query.tipo || null });
   }, (r) => `${r.totais.clientes} cliente(s)`),
 );
 router.get(
@@ -59,6 +61,17 @@ router.post(
     if (!['owner', 'admin'].includes(req.user?.role)) throw new SaldoClienteError('Só owner ou admin', 'SEM_PERMISSAO', 403);
     return sincronizarDevolucoes();
   }, (r) => `${r.creditadas} devolução(ões) creditada(s), ${r.descreditadas} desfeita(s)`),
+);
+
+// CASHBACK: acerta agora pelo saldo bônus do TOTVS (o job faz isso todo dia às 05:10).
+// Leva alguns minutos: responde na hora e roda em segundo plano.
+router.post(
+  '/sincronizar-cashback',
+  rota(async (req) => {
+    if (!['owner', 'admin'].includes(req.user?.role)) throw new SaldoClienteError('Só owner ou admin', 'SEM_PERMISSAO', 403);
+    rodarCashback().catch(() => {});
+    return { iniciado: true };
+  }, 'Sincronização do cashback iniciada (leva alguns minutos)'),
 );
 
 router.post(

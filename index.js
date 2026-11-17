@@ -159,6 +159,7 @@ import { iniciarJobPedidosVendaSync } from './jobs/pedidos-venda-sync.job.js';
 import { iniciarJobFaturamentoDuplicata } from './jobs/faturamento-duplicata.job.js';
 import { iniciarJobHcContasReceber } from './jobs/hc-contas-receber.job.js';
 import { iniciarJobHcSaldosClientes } from './jobs/hc-saldos-clientes.job.js';
+import { iniciarJobHcCashback } from './jobs/hc-cashback.job.js';
 import { iniciarJobPagarmeBoletosRetorno } from './jobs/pagarme-boletos-retorno.job.js';
 import { iniciarBluecardPagamentosSync } from './jobs/bluecard-pagamentos-sync.job.js';
 import { iniciarBluecardLimiteWatchdog } from './jobs/bluecard-limite.job.js';
@@ -359,6 +360,7 @@ app.listen(PORT, async () => {
   iniciarJobFaturamentoDuplicata(); // assinatura das duplicatas enviadas pelo HeadCoach
   iniciarJobHcContasReceber(); // títulos do contas a receber do HeadCoach (vendas autorizadas/canceladas)
   iniciarJobHcSaldosClientes(); // CREDEV das devoluções atendidas no saldo do HeadCoach
+  iniciarJobHcCashback(); // CASHBACK: cópia diária do saldo bônus do TOTVS (lojas ativas, quem comprou em 90 dias)
   iniciarJobPagarmeBoletosRetorno();
   iniciarJobErpSync();
   iniciarJobIntegracaoOutbox();

@@ -26,6 +26,9 @@ export class SaldoClienteError extends Error {
 }
 
 export const TIPOS = { credev: 'Credev', adiantamento: 'Adiantamento' };
+// cashback = cópia diária do saldo bônus do TOTVS, por loja (services/hcCashback.js):
+// aparece na consulta, mas não é gerado à mão nem usado no faturamento
+export const TIPO_CASHBACK = 'cashback';
 // forma de pagamento da venda → tipo de saldo
 export const FORMA_PARA_TIPO = { credito_loja: 'credev', adiantamento: 'adiantamento' };
 export const EMPRESA_CARGA = 99;
@@ -73,7 +76,7 @@ async function movimentar({ empresa, cliente, tipo, valor, movimento, vendaId = 
 /** Saldo de CREDEV e adiantamento do cliente numa empresa. */
 export async function saldoDoCliente(cliente, empresa = EMPRESA_CARGA) {
   const rows = await q(supabase.from('hc_cliente_saldos').select('tipo, saldo, cliente_nome').eq('cliente_code', Number(cliente)).eq('empresa', Number(empresa)));
-  const out = { clienteCode: Number(cliente), empresa: Number(empresa), credev: 0, adiantamento: 0, nome: null };
+  const out = { clienteCode: Number(cliente), empresa: Number(empresa), credev: 0, adiantamento: 0, cashback: 0, nome: null };
   for (const r of rows || []) {
     out[r.tipo] = round2(r.saldo);
     out.nome = out.nome || r.cliente_nome || null;
@@ -82,12 +85,13 @@ export async function saldoDoCliente(cliente, empresa = EMPRESA_CARGA) {
   return out;
 }
 
-export async function listarSaldos({ empresa, empresas = null, busca, comSaldo = true } = {}) {
+export async function listarSaldos({ empresa, empresas = null, busca, comSaldo = true, tipo = null } = {}) {
   const out = [];
   for (let de = 0; ; de += 1000) {
     let qy = supabase.from('hc_cliente_saldos').select('*').order('saldo', { ascending: false }).order('cliente_code').range(de, de + 999);
     if (empresa) qy = qy.eq('empresa', Number(empresa));
     else if (empresas) qy = qy.in('empresa', empresas);
+    if (tipo && (TIPOS[tipo] || tipo === TIPO_CASHBACK)) qy = qy.eq('tipo', tipo);
     if (comSaldo) qy = qy.gt('saldo', 0);
     const b = String(busca || '').trim();
     if (b) qy = /^\d+$/.test(b) ? qy.eq('cliente_code', Number(b)) : qy.ilike('cliente_nome', `%${b.replace(/[%_,()]/g, ' ')}%`);
@@ -106,8 +110,13 @@ export async function listarSaldos({ empresa, empresas = null, busca, comSaldo =
     c.nome = c.nome || r.cliente_nome;
     if (r.atualizado_em > c.atualizadoEm) c.atualizadoEm = r.atualizado_em;
   }
-  const lista = [...porCliente.values()].map((c) => ({ ...c, total: round2(c.credev + c.adiantamento) })).sort((a, b) => b.total - a.total);
-  const totais = lista.reduce((t, c) => ({ clientes: t.clientes + 1, credev: round2(t.credev + c.credev), adiantamento: round2(t.adiantamento + c.adiantamento) }), { clientes: 0, credev: 0, adiantamento: 0 });
+  const lista = [...porCliente.values()]
+    .map((c) => ({ ...c, cashback: round2(c.cashback || 0), total: round2(c.credev + c.adiantamento + (c.cashback || 0)) }))
+    .sort((a, b) => b.total - a.total);
+  const totais = lista.reduce(
+    (t, c) => ({ clientes: t.clientes + 1, credev: round2(t.credev + c.credev), adiantamento: round2(t.adiantamento + c.adiantamento), cashback: round2(t.cashback + c.cashback) }),
+    { clientes: 0, credev: 0, adiantamento: 0, cashback: 0 },
+  );
   return { lista, totais };
 }
 
