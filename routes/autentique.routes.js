@@ -1263,9 +1263,40 @@ const ensureChromePath = async () => {
 //      Chrome pelo puppeteer fica estagnado ali).
 //   3) fallback: download sob demanda (ensureChromePath)
 // Retorna { browser, via } — `via` diz qual caminho foi usado (pra diagnóstico).
+//
+// No SERVIDOR (Linux/Render) o Chromium empacotado vem PRIMEIRO (17/11/2026): o
+// download do Chrome em segundo plano (prewarmChrome) fica parado no Render com
+// o arquivo aberto pela metade; ele "existe", o getChromePath() o encontra e
+// todo launch volta "spawn ETXTBSY" — foi o que travou as duplicatas do
+// faturamento de 11 a 17/11. Por isso também nunca se usa o Chrome local
+// enquanto ele ainda está sendo baixado.
+async function abrirSparticuz() {
+  const chromium = (await import('@sparticuz/chromium')).default;
+  const execPath = await chromium.executablePath();
+  if (!execPath || !tryFile(execPath)) return null;
+  const browser = await puppeteer.launch({
+    headless: chromium.headless,
+    args: [...chromium.args, '--disable-dev-shm-usage'],
+    defaultViewport: chromium.defaultViewport,
+    executablePath: execPath,
+  });
+  return { browser, via: `sparticuz:${execPath}` };
+}
+
 export async function launchPuppeteer() {
   const base = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
-  const localChrome = getChromePath();
+  const servidor = process.platform === 'linux';
+  let tentouSparticuz = false;
+  if (servidor) {
+    tentouSparticuz = true;
+    try {
+      const r = await abrirSparticuz();
+      if (r) return r;
+    } catch (e) {
+      console.warn(`[Puppeteer] @sparticuz/chromium falhou (${e.message}) — tentando o Chrome local...`);
+    }
+  }
+  const localChrome = _chromeInstalling ? null : getChromePath();
   if (localChrome) {
     const browser = await puppeteer.launch({
       headless: 'new',
@@ -1274,23 +1305,16 @@ export async function launchPuppeteer() {
     });
     return { browser, via: `local:${localChrome}` };
   }
-  // @sparticuz/chromium (produção)
-  try {
-    const chromium = (await import('@sparticuz/chromium')).default;
-    const execPath = await chromium.executablePath();
-    if (execPath && tryFile(execPath)) {
-      const browser = await puppeteer.launch({
-        headless: chromium.headless,
-        args: [...chromium.args, '--disable-dev-shm-usage'],
-        defaultViewport: chromium.defaultViewport,
-        executablePath: execPath,
-      });
-      return { browser, via: `sparticuz:${execPath}` };
+  // @sparticuz/chromium (quando não há Chrome local)
+  if (!tentouSparticuz) {
+    try {
+      const r = await abrirSparticuz();
+      if (r) return r;
+    } catch (e) {
+      console.warn(
+        `[Puppeteer] @sparticuz/chromium indisponível (${e.message}) — tentando download...`,
+      );
     }
-  } catch (e) {
-    console.warn(
-      `[Puppeteer] @sparticuz/chromium indisponível (${e.message}) — tentando download...`,
-    );
   }
   // Último recurso: download sob demanda
   const dl = await ensureChromePath();
