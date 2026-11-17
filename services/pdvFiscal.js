@@ -71,6 +71,20 @@ const TPAG = {
   vale_troca: '05',
 };
 
+// Grupo <card> do pagamento. A SEFAZ exige o grupo para cartão de crédito (03),
+// débito (04) e PIX (17): sem ele a nota volta com a rejeição 391 "Não informados
+// os dados do cartão de crédito/débito" — foi o que aconteceu com a venda em PIX
+// do Midway em 17/11/2026. Aqui a maquininha não é integrada ao PDV, então vai
+// tpIntegra 2 (não integrado), como nas notas do TOTVS da mesma loja; CNPJ da
+// credenciadora, bandeira e autorização entram quando foram informados.
+function grupoCard(p) {
+  const card = { tpIntegra: '2' };
+  if (digits(p.adquirente_cnpj).length === 14) card.CNPJ = digits(p.adquirente_cnpj);
+  if (p.forma !== 'pix' && p.bandeira && BANDEIRAS[p.bandeira]) card.tBand = BANDEIRAS[p.bandeira];
+  if (p.autorizacao) card.cAut = String(p.autorizacao).slice(0, 20);
+  return card;
+}
+
 // Bandeiras (tBand) da NF-e
 export const BANDEIRAS = {
   visa: '01', mastercard: '02', amex: '03', sorocred: '04', diners: '05',
@@ -512,12 +526,7 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
         tPag: TPAG[p.forma] || '99',
         vPag: f2(valor),
       };
-      if (cartao) {
-        d.card = { tpIntegra: '2' };
-        if (digits(p.adquirente_cnpj).length === 14) d.card.CNPJ = digits(p.adquirente_cnpj);
-        if (p.bandeira && BANDEIRAS[p.bandeira]) d.card.tBand = BANDEIRAS[p.bandeira];
-        if (p.autorizacao) d.card.cAut = String(p.autorizacao).slice(0, 20);
-      }
+      if (cartao || p.forma === 'pix') d.card = grupoCard(p);
       detPag.push(d);
       troco += Number(p.troco || 0);
     }
@@ -959,12 +968,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
     if (!(valor > 0)) continue;
     const cartao = p.forma === 'credito' || p.forma === 'debito';
     const d = { indPag: p.forma === 'boleto' || p.forma === 'credito' ? '1' : '0', tPag: TPAG_EXPEDICAO[p.forma] || '99', vPag: f2(valor) };
-    if (cartao) {
-      d.card = { tpIntegra: '2' };
-      if (digits(p.adquirente_cnpj).length === 14) d.card.CNPJ = digits(p.adquirente_cnpj);
-      if (p.bandeira && BANDEIRAS[p.bandeira]) d.card.tBand = BANDEIRAS[p.bandeira];
-      if (p.autorizacao) d.card.cAut = String(p.autorizacao).slice(0, 20);
-    }
+    if (cartao || p.forma === 'pix') d.card = grupoCard(p);
     detPag.push(d);
   }
   if (!detPag.length) throw new FiscalError('Venda sem pagamento informado', 'PAYMENT_MISSING');
