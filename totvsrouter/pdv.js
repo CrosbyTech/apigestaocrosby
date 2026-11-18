@@ -20,6 +20,7 @@ import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
 import { comandoVendasDoUrl, espelharEscritaVendas } from '../services/erp/vendas.js';
 import { promocaoVigente } from '../services/pdvPromocoes.js';
+import { LOJAS_CASHBACK } from '../services/hcCashback.js';
 
 const router = express.Router();
 
@@ -1802,7 +1803,25 @@ router.get(
   }),
 );
 
-// GET /pdv/bonus?cpf=06537964474&branch=99 — saldo do cliente na empresa
+// CASHBACK VALE EM QUALQUER LOJA (Yago, 18/11/2026). No TOTVS o saldo bônus fica
+// guardado por empresa (a loja onde a venda gerou), mas o cliente pode usar em
+// qualquer uma: o saldo mostrado é a SOMA das lojas e o consumo sai primeiro da
+// loja da venda e depois das outras, da maior para a menor.
+const round2Bonus = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
+async function saldosBonusDoCpf(cpf, lojaDaVenda) {
+  const lojas = [...new Set([Number(lojaDaVenda), ...LOJAS_CASHBACK].filter(Boolean))];
+  const resp = await callTotvs('post', `${TOTVS_BASE_URL}/person/v2/list-balance-bonus`, {
+    data: { personCpf: cpf, branchList: lojas.map((b) => ({ branchCode: b })) },
+  });
+  const porEmpresa = (resp.data?.balanceBonus || [])
+    .map((b) => ({ branchCode: Number(b.branchCode), balance: round2Bonus(b.balanceValue) }))
+    .filter((b) => lojas.includes(b.branchCode) && b.balance > 0)
+    .sort((a, b) => Number(b.branchCode === Number(lojaDaVenda)) - Number(a.branchCode === Number(lojaDaVenda)) || b.balance - a.balance);
+  return { porEmpresa, total: round2Bonus(porEmpresa.reduce((t, b) => t + b.balance, 0)) };
+}
+
+// GET /pdv/bonus?cpf=06537964474&branch=95 — cashback do cliente: total de todas
+// as lojas (balance) + quanto está em cada uma (porEmpresa)
 router.get(
   '/pdv/bonus',
   asyncHandler(async (req, res) => {
@@ -1811,27 +1830,28 @@ router.get(
     if (!cpf || !branch) {
       return errorResponse(res, 'Informe ?cpf=&branch=', 400, 'MISSING_PARAMS');
     }
-    const resp = await callTotvs(
-      'post',
-      `${TOTVS_BASE_URL}/person/v2/list-balance-bonus`,
-      { data: { personCpf: cpf, branchList: [{ branchCode: branch }] } },
-    );
-    const entry = (resp.data?.balanceBonus || []).find(
-      (b) => b.branchCode === branch,
-    );
+    const { porEmpresa, total } = await saldosBonusDoCpf(cpf, branch);
     return successResponse(
       res,
-      { branchCode: branch, balance: entry?.balanceValue || 0 },
+      {
+        branchCode: branch,
+        balance: total,
+        balanceNaEmpresa: porEmpresa.find((b) => b.branchCode === branch)?.balance || 0,
+        porEmpresa,
+      },
       'Saldo bônus',
     );
   }),
 );
 
-// POST /pdv/bonus/consume — consome saldo (usado como desconto na venda)
+// POST /pdv/bonus/consume — consome o cashback usado como desconto na venda.
+// Body: { personCode, branchCode, usedValue, cpf? }. Com o cpf, o valor sai do
+// saldo de qualquer loja (primeiro o da loja da venda); sem ele, só o da branchCode.
 router.post(
   '/pdv/bonus/consume',
   asyncHandler(async (req, res) => {
     const { personCode, branchCode, usedValue } = req.body || {};
+    const cpf = String(req.body?.cpf || '').replace(/\D/g, '');
     if (!personCode || !branchCode || !(usedValue > 0)) {
       return errorResponse(
         res,
@@ -1840,36 +1860,54 @@ router.post(
         'INVALID_PAYLOAD',
       );
     }
+    const valor = round2Bonus(usedValue);
+    // de onde sai: [{ branchCode, valor }]
+    let partes = [{ branchCode: parseInt(branchCode, 10), valor }];
+    if (cpf) {
+      let saldos;
+      try {
+        saldos = await saldosBonusDoCpf(cpf, branchCode);
+      } catch (err) {
+        return errorResponse(res, `Não consegui ler o cashback do cliente no TOTVS: ${err.response?.data?.message || err.message}`, 502, 'BONUS_BALANCE_ERROR');
+      }
+      if (saldos.total + 0.005 < valor) {
+        return errorResponse(res, `Cashback insuficiente: o cliente tem R$ ${saldos.total.toFixed(2)} somando as lojas e a venda usou R$ ${valor.toFixed(2)}`, 409, 'BONUS_INSUFICIENTE', saldos);
+      }
+      partes = [];
+      let falta = valor;
+      for (const b of saldos.porEmpresa) {
+        if (falta <= 0) break;
+        const usa = round2Bonus(Math.min(falta, b.balance));
+        if (usa > 0) partes.push({ branchCode: b.branchCode, valor: usa });
+        falta = round2Bonus(falta - usa);
+      }
+    }
+    const consumido = [];
     try {
-      const resp = await callTotvs(
-        'post',
-        `${TOTVS_BASE_URL}/person/v2/bonus-consume`,
-        {
-          data: {
-            personCode: parseInt(personCode, 10),
-            branchCode: parseInt(branchCode, 10),
-            usedValue: Number(Number(usedValue).toFixed(2)),
-          },
-        },
-      );
+      for (const p of partes) {
+        await callTotvs('post', `${TOTVS_BASE_URL}/person/v2/bonus-consume`, {
+          data: { personCode: parseInt(personCode, 10), branchCode: p.branchCode, usedValue: p.valor },
+        });
+        consumido.push(p);
+      }
       console.log(
-        `💰 [Cashback] Consumido R$ ${usedValue} do cliente ${personCode} (empresa ${branchCode})`,
+        `💰 [Cashback] Consumido R$ ${valor} do cliente ${personCode} (venda na empresa ${branchCode}; saiu de ${consumido.map((p) => `${p.branchCode}: R$ ${p.valor}`).join(', ')})`,
       );
-      return successResponse(res, resp.data ?? {}, 'Saldo consumido');
+      return successResponse(res, { consumido, total: valor }, 'Saldo consumido');
     } catch (err) {
       const detail = err.response?.data;
+      const feito = round2Bonus(consumido.reduce((t, p) => t + p.valor, 0));
       console.error(
-        `❌ [Cashback] Erro ao consumir:`,
+        `❌ [Cashback] Erro ao consumir (cliente ${personCode}, já saiu R$ ${feito} de ${valor}):`,
         JSON.stringify(detail || err.message).slice(0, 300),
       );
+      const msg = Array.isArray(detail) ? detail.map((d) => d.message).join('; ') : detail?.message || err.message;
       return errorResponse(
         res,
-        Array.isArray(detail)
-          ? detail.map((d) => d.message).join('; ')
-          : detail?.message || err.message,
+        feito > 0 ? `${msg} — só R$ ${feito.toFixed(2)} de R$ ${valor.toFixed(2)} foram baixados (${consumido.map((p) => `empresa ${p.branchCode}`).join(', ')})` : msg,
         err.response?.status || 502,
         'BONUS_CONSUME_ERROR',
-        detail,
+        { detail, consumido, faltou: round2Bonus(valor - feito) },
       );
     }
   }),
