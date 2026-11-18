@@ -55,6 +55,7 @@ import balancoRfidRoutes from './routes/balancoRfid.routes.js';
 import brejinhoRoutes from './routes/brejinho.routes.js';
 import devolucaoRfidHcRoutes from './routes/devolucaoRfidHc.routes.js';
 import erpRoutes from './routes/erp.routes.js';
+import headcoachApiRoutes from './routes/headcoachApi/index.js';
 import { iniciarJobErpSync } from './jobs/erp-sync.job.js';
 import { iniciarJobIntegracaoOutbox } from './jobs/integracao-outbox.job.js';
 import { iniciarCronUazapiSync } from './services/uazapiSync.js';
@@ -268,6 +269,7 @@ app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos d
 app.use('/api/brejinho', brejinhoRoutes); // Expedição Brejinho — pedidos das franquias do Dryland /brejinho
 app.use('/api/devolucao-rfid', devolucaoRfidHcRoutes); // Devolução RFID 100% no HeadCoach — notas de venda do cliente, NF-e de devolução e CREDEV
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
+app.use('/api/headcoach', headcoachApiRoutes); // API HEADCOACH (somente leitura, padrão TOTVS): /api/headcoach/<módulo>/v1/<recurso> para o Dryland consultar; chave em HEADCOACH_API_KEYS; documentação em /api/headcoach/docs
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
 app.use('/api/provisao-liberacao', provisaoLiberacaoRoutes); // Provisão automática — duplicatas selecionadas na tela + busca no Contas a Pagar
 app.use('/api/whatsapp-cp', whatsappContasPagarRoutes); // WhatsApp CONTAS A PAGAR — uazapi (techcrosby), só a instância "CONTAS A PAGAR"
