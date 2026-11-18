@@ -17,6 +17,7 @@ import {
   errorResponse,
 } from '../utils/errorHandler.js';
 import { postTotvs } from '../services/bluecardLimite.js';
+import supabase from '../config/supabase.js';
 import { sanitizePayload } from './cadastroCliente.js';
 import {
   PORTADORES_REMESSA,
@@ -208,7 +209,7 @@ router.get(
     // "A vencer": nunca antes de hoje.
     const de = dt_inicio < hoje ? hoje : dt_inicio;
 
-    const { items, tabelaAusente } = await carregarFaturas(
+    const { items: itemsTotvs, tabelaAusente } = await carregarFaturas(
       {
         branchCodeList,
         startExpiredDate: `${de}T00:00:00`,
@@ -216,6 +217,12 @@ router.get(
       },
       de,
     );
+    // Banco próprio do HeadCoach: boletos em aberto a vencer no período (João, 18/11/2026)
+    const hc = await carregarFaturasHc({ branchCodeList, de, dt_fim }).catch((e) => {
+      console.warn(`⚠️ [remessa-boletos] hc_cr: ${e.message}`);
+      return { items: [] };
+    });
+    const items = [...itemsTotvs, ...hc.items];
 
     return successResponse(
       res,
@@ -310,6 +317,75 @@ async function carregarFaturas(filtro, de) {
   return { items, tabelaAusente: ativos.tabelaAusente };
 }
 
+/**
+ * Boletos EM ABERTO do banco PRÓPRIO do HeadCoach (hc_cr_titulos, forma 'boleto',
+ * fatura = 9.000.000.000 + nº da transação). Mesma forma/shape das faturas do
+ * TOTVS, com `origem: 'hc_cr'`, pra entrar na mesma remessa (João, 18/11/2026).
+ * Passe `faturaList` (nº das faturas) para reler faturas específicas no /gerar,
+ * ou `de`/`dt_fim` para listar as a vencer no período.
+ */
+async function carregarFaturasHc({ branchCodeList, de, dt_fim, faturaList }) {
+  let q = supabase
+    .from('hc_cr_titulos')
+    .select('empresa, fatura, parcela, cliente_code, cliente_nome, cliente_cpf_cnpj, emissao, vencimento, valor, portador')
+    .eq('forma', 'boleto')
+    .eq('situacao', 'aberto');
+  if (Array.isArray(branchCodeList) && branchCodeList.length) q = q.in('empresa', branchCodeList);
+  if (Array.isArray(faturaList) && faturaList.length) {
+    q = q.in('fatura', faturaList);
+  } else {
+    if (de) q = q.gte('vencimento', de);
+    if (dt_fim) q = q.lte('vencimento', dt_fim);
+  }
+  const { data, error } = await q.order('vencimento', { ascending: true }).limit(2000);
+  if (error) {
+    // Migração ainda não rodou: sem banco próprio, segue só com o TOTVS.
+    if (/hc_cr_titulos/i.test(error.message) && /exist|not find|schema cache/i.test(error.message)) return { items: [] };
+    throw new Error(`hc_cr_titulos: ${error.message}`);
+  }
+  const titulos = data || [];
+  if (!titulos.length) return { items: [] };
+  const chaveDe = (t) => `${t.empresa}-${Number(t.fatura)}-${t.parcela ?? 1}`;
+  const codigos = [...new Set(titulos.map((t) => Number(t.cliente_code)).filter(Boolean))];
+  const nrFaturas = titulos.map((t) => Number(t.fatura));
+  const [clientes, ativos, erros, bloqueados] = await Promise.all([
+    codigos.length ? buscarClientes(codigos) : {},
+    boletosAtivosPorTitulo(nrFaturas),
+    ultimosErrosPorTitulo(nrFaturas),
+    clientesBloqueados(),
+  ]);
+  const items = titulos
+    .map((t) => {
+      const chave = chaveDe(t);
+      const cli = clientes[t.cliente_code];
+      return {
+        origem: 'hc_cr',
+        cd_empresa: t.empresa,
+        cd_cliente: t.cliente_code,
+        nr_fatura: Number(t.fatura),
+        nr_parcela: t.parcela ?? 1,
+        dt_emissao: (t.emissao || '').slice(0, 10) || null,
+        dt_vencimento: (t.vencimento || '').slice(0, 10) || null,
+        vl_fatura: Number(t.valor || 0),
+        cd_portador: null,
+        nm_portador: 'HEADCOACH (boleto próprio)',
+        tp_cobranca: null,
+        boleto_registrado: false,
+        nosso_numero: null,
+        pagarme: ativos.mapa[chave] || null,
+        ultimo_erro: ativos.mapa[chave] ? null : erros[chave] || null,
+        cliente: cli || {
+          codigo: t.cliente_code,
+          nome: t.cliente_nome || '',
+          documento: soDigitos(t.cliente_cpf_cnpj) || null,
+          pendencias: ['cadastro não encontrado no TOTVS'],
+        },
+      };
+    })
+    .filter((i) => !clienteExcluido(i.cliente) && !bloqueados.has(Number(i.cd_cliente)));
+  return { items };
+}
+
 // POST /remessa-boletos/gerar
 // Body: { faturas: [{ cd_empresa, cd_cliente, nr_fatura, nr_parcela }], usuario, remessaId? }
 // Relê cada fatura no TOTVS (valor/vencimento/portador não vêm do navegador),
@@ -361,8 +437,20 @@ router.post(
         'MIGRATION_PENDING',
       );
     }
+    // Faturas do banco próprio do HeadCoach (fatura 9e9+venda): relê no hc_cr.
+    const hcPed = faturas.filter((f) => Number(f.nr_fatura) >= 9000000000);
+    let itemsHc = [];
+    if (hcPed.length) {
+      const r = await carregarFaturasHc({
+        branchCodeList: [...new Set(hcPed.map((f) => Number(f.cd_empresa)))],
+        faturaList: [...new Set(hcPed.map((f) => Number(f.nr_fatura)))],
+      });
+      itemsHc = r.items;
+    }
     const porChave = new Map(
-      items.filter((i) => pedidas.has(chaveDe(i))).map((i) => [chaveDe(i), i]),
+      [...items, ...itemsHc]
+        .filter((i) => pedidas.has(chaveDe(i)))
+        .map((i) => [chaveDe(i), i]),
     );
 
     const resultados = [];

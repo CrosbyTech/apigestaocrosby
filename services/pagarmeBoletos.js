@@ -442,7 +442,10 @@ async function mudarCarteiraSimples(fatura) {
 export async function emitirBoleto(fatura, { remessaId, usuario }) {
   const chave = `${fatura.cd_empresa}-${fatura.nr_fatura}-${fatura.nr_parcela}`;
   const cliente = fatura.cliente || {};
-  if (!PORTADORES_REMESSA.includes(Number(fatura.cd_portador))) {
+  // Título próprio do HeadCoach (contas a receber do HeadCoach, fatura 9e9+venda):
+  // não tem portador de remessa do TOTVS nem carteira no TOTVS (João, 18/11/2026).
+  const ehHc = fatura.origem === 'hc_cr' || Number(fatura.nr_fatura) >= 9000000000;
+  if (!ehHc && !PORTADORES_REMESSA.includes(Number(fatura.cd_portador))) {
     return { ok: false, chave, motivo: `portador ${fatura.cd_portador} não entra na remessa` };
   }
   if (cliente.pendencias?.length) {
@@ -522,13 +525,18 @@ export async function emitirBoleto(fatura, { remessaId, usuario }) {
   // 3) Carteira → Simples no TOTVS. Falha aqui não desfaz o boleto: fica
   //    registrada na linha para o financeiro ajustar.
   let carteiraErro = null;
-  try {
-    await mudarCarteiraSimples(fatura);
+  if (ehHc) {
+    // Título do HeadCoach: não existe no TOTVS, não há carteira a mudar.
     await gravar({ carteira_ok: true, carteira_erro: null });
-  } catch (e) {
-    carteiraErro = erroTotvs(e);
-    await gravar({ carteira_ok: false, carteira_erro: carteiraErro });
-    console.error(`⚠️ [remessa-boletos] carteira ${chave}: ${carteiraErro}`);
+  } else {
+    try {
+      await mudarCarteiraSimples(fatura);
+      await gravar({ carteira_ok: true, carteira_erro: null });
+    } catch (e) {
+      carteiraErro = erroTotvs(e);
+      await gravar({ carteira_ok: false, carteira_erro: carteiraErro });
+      console.error(`⚠️ [remessa-boletos] carteira ${chave}: ${carteiraErro}`);
+    }
   }
 
   return {
