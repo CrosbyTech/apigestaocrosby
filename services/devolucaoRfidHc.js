@@ -27,6 +27,16 @@
 // é o que já gera o CREDEV na autorização e desfaz no cancelamento), canal
 // 'devolucao', origem 'devolucao' e pedido_info.devolucaoRfid com as notas e a
 // distribuição peça × linha da nota. Nada vai para o TOTVS.
+//
+// Peça que NÃO ACHA nas notas escolhidas (Yago, 18/11/2026): só para ela, o
+// operador referencia OUTRA nota qualquer da empresa (de outro período ou até de
+// outro cliente). Se a peça está nessa nota, entra pela linha dela (valor pago).
+// Se não está, entra "avulsa": a nota escolhida vai no NFref e o item copia a
+// tributação (CFOP, alíquotas de ICMS/PIS/COFINS/IBS/CBS, DIFAL) de uma linha
+// das notas do próprio cliente (mesmo cenário fiscal; sem elas, da nota
+// escolhida), com os dados do produto (TOTVS) e o valor da tabela do cliente que
+// a tela mostra. Na alocação: avulsa:true + modeloChave/nItem da linha modelo,
+// que não é gasta. O destinatário da NF-e nunca vem de nota de outro cliente.
 // ============================================================================
 import crypto from 'crypto';
 import axios from 'axios';
@@ -35,7 +45,7 @@ import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 import { notasDoClienteTotvs } from '../totvsrouter/pdv.js';
-import { agoraBrasil, buscarEmitente, buscarClienteFiscal, VERSAO_APLICACAO } from './pdvFiscal.js';
+import { agoraBrasil, buscarEmitente, buscarClienteFiscal, buscarProdutoFiscal, VERSAO_APLICACAO } from './pdvFiscal.js';
 
 export class DevolucaoRfidError extends Error {
   constructor(message, code = 'DEVOLUCAO_RFID', status = 400, detalhes = null) {
@@ -150,6 +160,7 @@ async function jaDevolvidoPorLinha(chaves, { ignorarVenda = null } = {}) {
   for (const v of data || []) {
     if (ignorarVenda && Number(v.id) === Number(ignorarVenda)) continue;
     for (const a of v.pedido_info?.devolucaoRfid?.alocacao || []) {
+      if (a.avulsa) continue; // peça avulsa só copiou a tributação da linha
       if (!alvo.has(String(a.chave))) continue;
       const k = `${a.chave}|${a.nItem}`;
       mapa.set(k, (mapa.get(k) || 0) + num(a.quantidade));
@@ -275,17 +286,28 @@ export async function listarNotasDeVenda({ empresa, cliente, de, ate }) {
 // ─── Conferência: as peças lidas cabem nas notas escolhidas? ─────────────────
 /**
  * itens: [{ productCode, quantidade }] · chaves: notas de venda escolhidas, na ordem.
+ * avulsas: [{ productCode, chave, valorUnit }] — só para a peça que não coube nas
+ * notas escolhidas: a outra nota que ela referencia e o valor da peça (tabela do
+ * cliente) caso o produto não esteja nessa nota.
  * Devolve { ok, itens[{ productCode, quantidade, ok, mensagem, naNota, jaDevolvido,
  * disponivel, valorUnit, total, notas[{ chave, numero, serie, quantidade, valorUnit }] }],
  * alocacao[{ chave, nItem, productCode, quantidade }], notas[], chavesUsadas[], totais, avisos[] }
  */
-export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, ignorarVenda = null }) {
+export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, avulsas = [], ignorarVenda = null }) {
   const emp = parseInt(empresa, 10);
   const cliente = parseInt(clienteCode, 10);
   if (!emp) throw new DevolucaoRfidError('Informe a empresa', 'EMPRESA_OBRIGATORIA');
   if (!cliente) throw new DevolucaoRfidError('A devolução exige o cliente identificado', 'CLIENTE_OBRIGATORIO');
   const escolhidas = [...new Set((chaves || []).map((c) => digitos(c)).filter(chaveValida))];
-  if (!escolhidas.length) throw new DevolucaoRfidError('Escolha ao menos uma nota de venda do cliente para referenciar', 'SEM_NOTA');
+  // referência avulsa por peça (a última vale se vier repetida)
+  const avulsaDe = new Map();
+  for (const a of Array.isArray(avulsas) ? avulsas : []) {
+    const cod = parseInt(a?.productCode, 10);
+    const ch = digitos(a?.chave);
+    if (!cod || !chaveValida(ch)) continue;
+    avulsaDe.set(cod, { chave: ch, valorUnit: r2(num(a.valorUnit)) });
+  }
+  if (!escolhidas.length && !avulsaDe.size) throw new DevolucaoRfidError('Escolha ao menos uma nota de venda do cliente para referenciar', 'SEM_NOTA');
   const pedidos = new Map();
   for (const it of itens || []) {
     const cod = parseInt(it.productCode, 10);
@@ -294,8 +316,14 @@ export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, i
     pedidos.set(cod, (pedidos.get(cod) || 0) + q);
   }
   if (pedidos.size === 0) throw new DevolucaoRfidError('Nenhuma peça na devolução', 'SEM_ITENS');
+  for (const cod of [...avulsaDe.keys()]) if (!pedidos.has(cod)) avulsaDe.delete(cod);
+  const chavesAvulsas = [...new Set([...avulsaDe.values()].map((a) => a.chave))].filter((c) => !escolhidas.includes(c));
 
-  const [emit, cli, devolvido] = await Promise.all([buscarEmitente(emp), buscarClienteFiscal(cliente), jaDevolvidoPorLinha(escolhidas, { ignorarVenda })]);
+  const [emit, cli, devolvido] = await Promise.all([
+    buscarEmitente(emp),
+    buscarClienteFiscal(cliente),
+    jaDevolvidoPorLinha([...escolhidas, ...chavesAvulsas], { ignorarVenda }),
+  ]);
   if (!cli) throw new DevolucaoRfidError(`Cliente ${cliente} não encontrado no TOTVS`, 'CLIENTE_NAO_ENCONTRADO', 404);
   const docCliente = digitos(cli.cnpj || cli.cpf);
   const notas = [];
@@ -309,8 +337,20 @@ export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, i
     }
     notas.push(n);
   }
-
   const avisos = [];
+  // notas avulsas: qualquer nota de venda da empresa (outro período, outro cliente)
+  const notasAvulsas = new Map(); // chave → nota
+  for (const chave of chavesAvulsas) {
+    const n = await notaInterpretada(chave);
+    if (n.emitCnpj !== digitos(emit.cnpj)) {
+      throw new DevolucaoRfidError(`A nota ${n.numero}/${n.serie} foi emitida por outra empresa (CNPJ ${n.emitCnpj}): a devolução só referencia notas da empresa ${emp}`, 'NOTA_DE_OUTRA_EMPRESA');
+    }
+    if (n.destDoc && docCliente && n.destDoc !== docCliente) avisos.push(`A nota ${n.numero}/${n.serie} (referência avulsa) é de outro cliente (documento ${n.destDoc}).`);
+    notasAvulsas.set(chave, n);
+  }
+  for (const [cod, a] of avulsaDe) if (escolhidas.includes(a.chave)) a.nota = notas.find((n) => n.chave === a.chave);
+  for (const a of avulsaDe.values()) if (!a.nota) a.nota = notasAvulsas.get(a.chave);
+
   // Devoluções que o cliente já fez pelo TOTVS (notas de entrada dele nesta empresa
   // desde a nota mais antiga escolhida): descontam das peças das notas, começando
   // pela compra mais antiga — para a mesma peça não voltar duas vezes.
@@ -323,7 +363,7 @@ export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, i
   for (const [cod, qtdTotvs] of devTotvs) {
     if (!pedidos.has(cod)) continue;
     let resta = qtdTotvs;
-    const linhasDoProduto = notas
+    const linhasDoProduto = [...notas, ...notasAvulsas.values()]
       .flatMap((n) => n.linhas.filter((l) => l.productCode === cod).map((l) => ({ n, l })))
       .sort((a, b) => String(a.n.data).localeCompare(String(b.n.data)) || a.n.numero - b.n.numero || a.l.nItem - b.l.nItem);
     for (const { n, l } of linhasDoProduto) {
@@ -363,8 +403,67 @@ export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, i
       }
     }
     const disponivel = naNota - jaDev;
-    const base = { productCode: cod, nome, quantidade: qtd, naNota, jaDevolvido: jaDev, disponivel, valorUnit: null, total: 0, notas: [] };
-    if (naNota === 0) {
+    const base = { productCode: cod, nome, quantidade: qtd, naNota, jaDevolvido: jaDev, disponivel, valorUnit: null, total: 0, notas: [], avulsa: null };
+    // Não coube nas escolhidas e o operador apontou outra nota só para esta peça
+    const av = falta > 0 ? avulsaDe.get(cod) : null;
+    if (av) {
+      const n = av.nota;
+      let erroAv = null;
+      // 1º a própria peça na outra nota (valor pago), se tiver saldo
+      for (const l of n.linhas) {
+        if (falta <= 0 || l.productCode !== cod || !CFOP_DEVOLUCAO[l.cfop]) continue;
+        const k = `${n.chave}|${l.nItem}`;
+        const ocupado = partes.filter((p) => p.chave === n.chave && p.nItem === l.nItem).reduce((s, p) => s + p.quantidade, 0);
+        const livre = l.quantidade - Math.min((devolvido.get(k) || 0) + (consumidoTotvs.get(k) || 0) + ocupado, l.quantidade);
+        if (livre <= 0) continue;
+        nome = nome || l.nome;
+        const q = Math.min(falta, livre);
+        falta -= q;
+        partes.push({ chave: n.chave, numero: n.numero, serie: n.serie, nItem: l.nItem, quantidade: q, valorUnit: l.valorUnit, avulsaNota: true });
+      }
+      // 2º o resto entra avulso: referencia a nota escolhida, com a tributação de
+      // uma linha das notas do PRÓPRIO cliente (mesmo cenário fiscal da devolução);
+      // sem nota do cliente, uma linha da nota escolhida
+      if (falta > 0) {
+        if (!(av.valorUnit > 0)) erroAv = 'Peça sem preço na tabela do cliente: não dá para referenciar avulsa';
+        else {
+          let produto;
+          try {
+            produto = await buscarProdutoFiscal(cod, emp);
+          } catch (e) {
+            erroAv = `Não achei o produto ${cod} no TOTVS (${e.message})`;
+          }
+          const modelo = produto ? linhaModelo([notas, [n]], produto.ncm) : null;
+          if (produto && !modelo) erroAv = `A nota ${n.numero}/${n.serie} não tem item com tributação que sirva de modelo para a devolução`;
+          if (modelo && modelo.nota === n && !notas.includes(n) && n.destDoc && docCliente && n.destDoc !== docCliente) {
+            const aviso = `A tributação da peça avulsa veio da nota ${n.numero}, de outro cliente: confira se o CFOP serve para este cliente.`;
+            if (!avisos.includes(aviso)) avisos.push(aviso);
+          }
+          if (produto && modelo) {
+            nome = nome || produto.nome;
+            partes.push({
+              chave: n.chave,
+              numero: n.numero,
+              serie: n.serie,
+              nItem: modelo.linha.nItem,
+              modeloChave: modelo.nota.chave,
+              quantidade: falta,
+              valorUnit: av.valorUnit,
+              avulsaNota: true,
+              avulsa: true,
+              produto: { nome: produto.nome, sku: produto.sku, ncm: produto.ncm, cest: produto.cest, origem: produto.origem },
+            });
+            falta = 0;
+          }
+        }
+      }
+      base.avulsa = { chave: n.chave, numero: n.numero, serie: n.serie, erro: erroAv };
+      if (erroAv) {
+        saida.push({ ...base, nome, ok: false, motivo: 'avulsa', mensagem: erroAv });
+        continue;
+      }
+    }
+    if (naNota === 0 && falta > 0) {
       saida.push({ ...base, ok: false, motivo: 'fora_das_notas', mensagem: 'Esta peça não está em nenhuma das notas escolhidas' });
       continue;
     }
@@ -380,20 +479,31 @@ export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, i
       });
       continue;
     }
-    const total = r2(partes.reduce((s, p) => s + p.quantidade * p.valorUnit, 0));
+    const total = r2(partes.reduce((s, p) => s + r2(p.quantidade * p.valorUnit), 0));
     for (const p of partes) {
-      alocacao.push({ chave: p.chave, nItem: p.nItem, productCode: cod, quantidade: p.quantidade });
+      alocacao.push({
+        chave: p.chave,
+        nItem: p.nItem,
+        productCode: cod,
+        quantidade: p.quantidade,
+        ...(p.avulsa ? { avulsa: true, modeloChave: p.modeloChave, valorUnit: p.valorUnit, produto: p.produto } : {}),
+      });
       usadas.add(p.chave);
     }
     saida.push({
       ...base,
+      nome,
       ok: true,
       motivo: null,
       mensagem: null,
       valorUnit: r2(total / qtd),
       total,
-      notas: partes.map((p) => ({ chave: p.chave, numero: p.numero, serie: p.serie, quantidade: p.quantidade, valorUnit: p.valorUnit })),
+      notas: partes.map((p) => ({ chave: p.chave, numero: p.numero, serie: p.serie, quantidade: p.quantidade, valorUnit: p.valorUnit, avulsaNota: !!p.avulsaNota, avulsa: !!p.avulsa })),
     });
+  }
+  const avulsasUsadas = [...notasAvulsas.values()].filter((n) => usadas.has(n.chave));
+  if (saida.some((i) => i.ok && i.notas.some((p) => p.avulsa))) {
+    avisos.push('Peça avulsa: entra com o valor da tabela do cliente e a tributação de um item da nota referenciada.');
   }
   const semUso = notas.filter((n) => !usadas.has(n.chave));
   if (semUso.length) avisos.push(`Nota${semUso.length > 1 ? 's' : ''} ${semUso.map((n) => n.numero).join(', ')} escolhida${semUso.length > 1 ? 's' : ''} sem nenhuma peça lida: não ${semUso.length > 1 ? 'serão referenciadas' : 'será referenciada'}.`);
@@ -402,8 +512,11 @@ export async function conferirDevolucao({ empresa, clienteCode, itens, chaves, i
     ok,
     itens: saida,
     alocacao: ok ? alocacao : [],
-    chavesUsadas: notas.filter((n) => usadas.has(n.chave)).map((n) => n.chave),
-    notas: notas.map((n) => ({ chave: n.chave, origem: n.origem, numero: n.numero, serie: n.serie, modelo: n.modelo, data: n.data, usada: usadas.has(n.chave) })),
+    chavesUsadas: [...notas, ...avulsasUsadas].filter((n) => usadas.has(n.chave)).map((n) => n.chave),
+    notas: [
+      ...notas.map((n) => ({ chave: n.chave, origem: n.origem, numero: n.numero, serie: n.serie, modelo: n.modelo, data: n.data, usada: usadas.has(n.chave) })),
+      ...avulsasUsadas.map((n) => ({ chave: n.chave, origem: n.origem, numero: n.numero, serie: n.serie, modelo: n.modelo, data: n.data, usada: true, avulsa: true })),
+    ],
     totais: { pecas: saida.reduce((s, i) => s + (i.ok ? i.quantidade : 0), 0), valor: r2(saida.reduce((s, i) => s + i.total, 0)) },
     cliente: { code: cliente, nome: cli.nome, doc: docCliente || null },
     avisos,
@@ -422,6 +535,79 @@ function dvChave(base43) {
   return resto < 2 ? 0 : 11 - resto;
 }
 const fmtQtd = (q) => (Number.isInteger(q) ? String(q) : String(Number(q.toFixed(4))));
+
+/**
+ * Linha que serve de modelo de tributação para uma peça avulsa: grupos de notas
+ * em ordem de preferência; dentro do grupo, o mesmo NCM primeiro. { nota, linha }
+ */
+function linhaModelo(grupos, ncm = null) {
+  for (const grupo of grupos) {
+    const boas = grupo.flatMap((nota) =>
+      nota.linhas.filter((l) => CFOP_DEVOLUCAO[l.cfop] && Object.keys(l.det?.imposto?.ICMS || {})[0] === 'ICMS00' && l.quantidade > 0).map((linha) => ({ nota, linha })),
+    );
+    if (boas.length) return boas.find((b) => ncm && String(b.linha.det.prod.NCM) === String(ncm)) || boas[0];
+  }
+  return null;
+}
+
+/**
+ * Item de venda "de mentira" para a peça avulsa: a linha modelo da nota com o
+ * produto, a quantidade e o valor da peça; os impostos recalculados com as
+ * alíquotas da linha. Depois passa pelo itemDevolvido como qualquer outro.
+ */
+export function detAvulso(detModelo, a) {
+  const det = JSON.parse(JSON.stringify(detModelo));
+  const p = det.prod;
+  const pr = a.produto || {};
+  const q = num(a.quantidade);
+  const vUn = r2(a.valorUnit);
+  const vProd = r2(q * vUn);
+  const ean = /^\d{8,14}$/.test(String(pr.sku || '')) ? String(pr.sku) : 'SEM GTIN';
+  p.cProd = String(a.productCode);
+  p.cEAN = ean;
+  p.xProd = String(pr.nome || `PRODUTO ${a.productCode}`).slice(0, 120);
+  if (pr.ncm) p.NCM = pr.ncm;
+  if ('CEST' in p) {
+    if (pr.cest) p.CEST = pr.cest;
+    else delete p.CEST;
+  }
+  // mesmas casas decimais da linha modelo (1.0000 / 110.0000000000)
+  const como = (modelo, v, min) => Number(v).toFixed(Math.max(min, (String(modelo ?? '').split('.')[1] || '').length));
+  p.qCom = como(p.qCom, q, 0);
+  p.vUnCom = como(p.vUnCom, vUn, 2);
+  p.vProd = f2(vProd);
+  if ('cEANTrib' in p) p.cEANTrib = ean;
+  if ('qTrib' in p) p.qTrib = como(p.qTrib, q, 0);
+  if ('vUnTrib' in p) p.vUnTrib = como(p.vUnTrib, vUn, 2);
+  for (const campo of ['vDesc', 'vFrete', 'vSeg', 'vOutro', 'xPed', 'nItemPed', 'nFCI']) delete p[campo];
+  const imp = det.imposto;
+  const icms = imp.ICMS.ICMS00;
+  // a base de PIS/COFINS da linha modelo era sem o ICMS? (padrão das notas da Crosby)
+  const semIcms = ['PIS', 'COFINS'].some((g) => {
+    const x = imp[g]?.[`${g}Aliq`];
+    return x && Math.abs(num(x.vBC) - (num(icms.vBC) - num(icms.vICMS))) <= 0.02 && num(icms.vICMS) > 0;
+  });
+  if (pr.origem != null && /^\d$/.test(String(pr.origem))) icms.orig = String(pr.origem);
+  const vICMS = r2((vProd * num(icms.pICMS)) / 100);
+  icms.vBC = f2(vProd);
+  icms.vICMS = f2(vICMS);
+  for (const [g, pCampo, vCampo] of [
+    ['PIS', 'pPIS', 'vPIS'],
+    ['COFINS', 'pCOFINS', 'vCOFINS'],
+  ]) {
+    const x = imp[g]?.[`${g}Aliq`];
+    if (!x) continue;
+    const base = semIcms ? r2(vProd - vICMS) : vProd;
+    x.vBC = f2(base);
+    x[vCampo] = f2((base * num(x[pCampo])) / 100);
+  }
+  return det;
+}
+
+/** O item da NF-e de devolução de uma linha da alocação (da nota ou avulso). */
+function itemDaAlocacao(linha, a) {
+  return itemDevolvido(a.avulsa ? detAvulso(linha.det, a) : linha.det, Number(a.quantidade));
+}
 
 /**
  * Item da devolução a partir da linha da nota de venda: `q` peças das `Q` da linha.
@@ -557,9 +743,11 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
   if (!plano?.alocacao?.length) throw new DevolucaoRfidError(`A transação ${venda.id} não tem as notas de venda da devolução`, 'SEM_PLANO');
   const serie = cfg.serie_nfe;
   const tpAmb = Number(cfg.ambiente);
-  const chaves = [...new Set(plano.alocacao.map((a) => String(a.chave)))];
+  // referência avulsa (nota de outro período/cliente, 18/11/2026) vai por último
+  const avulsasPlano = new Set((plano.notas || []).filter((n) => n.avulsa).map((n) => String(n.chave)));
+  const chaves = [...new Set(plano.alocacao.map((a) => String(a.chave)))].sort((a, b) => Number(avulsasPlano.has(a)) - Number(avulsasPlano.has(b)));
   const notas = new Map();
-  for (const chave of chaves) notas.set(chave, await notaInterpretada(chave));
+  for (const chave of new Set([...chaves, ...plano.alocacao.map((a) => a.modeloChave).filter(Boolean).map(String)])) notas.set(chave, await notaInterpretada(chave));
   const primeira = notas.get(chaves[0]);
   if (primeira.emitCnpj !== digitos(emit.cnpj)) throw new DevolucaoRfidError('As notas de venda são de outra empresa', 'NOTA_DE_OUTRA_EMPRESA');
 
@@ -571,10 +759,10 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
   let temIbs = false;
   let temDifal = false;
   for (const a of plano.alocacao) {
-    const nota = notas.get(String(a.chave));
+    const nota = notas.get(String(a.modeloChave || a.chave));
     const linha = nota.linhas.find((l) => l.nItem === Number(a.nItem));
     if (!linha) throw new DevolucaoRfidError(`A linha ${a.nItem} não existe mais na nota ${nota.numero}`, 'LINHA_NAO_ENCONTRADA');
-    const { det, soma, liq } = itemDevolvido(linha.det, Number(a.quantidade));
+    const { det, soma, liq } = itemDaAlocacao(linha, a);
     det['@nItem'] = String(dets.length + 1);
     dets.push(det);
     for (const k of ['vProd', 'vDesc', 'vBC', 'vICMS', 'vPIS', 'vCOFINS', 'vICMSUFRemet', 'vFCPUFDest', 'vBCIBSCBS', 'vIBSUF', 'vIBSMun', 'vCBS']) tot[k] = r2(tot[k] + soma[k]);
@@ -594,7 +782,11 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
   const chave = `${base43}${cDV}`;
 
   // destinatário: o da nota de venda (NF-e); se as notas forem NFC-e, o cadastro do cliente
-  const comDest = [...notas.values()].find((n) => n.modelo === 55 && n.inf.dest?.enderDest);
+  // (nunca de uma nota de outro cliente referenciada avulsa)
+  const docCli = digitos(cliente?.cnpj || cliente?.cpf || venda.cliente_cpf_cnpj);
+  const comDest = chaves
+    .map((c) => notas.get(c))
+    .find((n) => n.modelo === 55 && n.inf.dest?.enderDest && (!avulsasPlano.has(n.chave) || (docCli && n.destDoc === docCli)));
   let dest;
   if (comDest) {
     dest = JSON.parse(JSON.stringify(comDest.inf.dest));
@@ -681,7 +873,7 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
     total.vNFTot = f2(tot.vNF);
   }
 
-  const numeros = [...notas.values()].map((n) => n.numero);
+  const numeros = chaves.map((c) => notas.get(c).numero);
   const resumoIcms =
     aliquotas.size === 1 && csts.size === 1
       ? `CST ${[...csts][0]} ICMS ${brNum([...aliquotas][0])} ${brNum(tot.vBC)} = ${brNum(tot.vICMS)}`
@@ -716,25 +908,25 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
  * pdv_vendas / pdv_venda_itens. Não grava nada: quem grava é a rota, que
  * também cuida do caixa, das etiquetas e da emissão.
  */
-export async function prepararTransacao({ empresa, cliente, vendedor, operacao, itens, chaves, solicitacaoId = null }) {
+export async function prepararTransacao({ empresa, cliente, vendedor, operacao, itens, chaves, avulsas = [], solicitacaoId = null }) {
   const op = parseInt(operacao, 10);
   if (!OPERACOES_DEVOLUCAO[op]) throw new DevolucaoRfidError('Escolha a operação da devolução (7243, 7244 ou 7245)', 'OPERACAO_OBRIGATORIA');
   if (!vendedor?.code) throw new DevolucaoRfidError('Informe o vendedor', 'VENDEDOR_OBRIGATORIO');
-  const conf = await conferirDevolucao({ empresa, clienteCode: cliente?.code, itens, chaves });
+  const conf = await conferirDevolucao({ empresa, clienteCode: cliente?.code, itens, chaves, avulsas });
   if (!conf.ok) {
     const ruins = conf.itens.filter((i) => !i.ok);
     throw new DevolucaoRfidError(`Devolução recusada — ${ruins.map((i) => `peça ${i.productCode}: ${i.mensagem}`).join('; ')}`, 'PECA_FORA_DAS_NOTAS', 422, { itens: conf.itens, avisos: conf.avisos });
   }
   // valores exatos como vão sair na nota (para a transação bater com a NF-e no centavo)
   const notas = new Map();
-  for (const chave of conf.chavesUsadas) notas.set(chave, await notaInterpretada(chave));
+  for (const chave of new Set([...conf.chavesUsadas, ...conf.alocacao.map((a) => a.modeloChave).filter(Boolean)])) notas.set(chave, await notaInterpretada(chave));
   const porProduto = new Map();
   let vNF = 0;
   let vProdTot = 0;
   let vDescTot = 0;
   for (const a of conf.alocacao) {
-    const linha = notas.get(a.chave).linhas.find((l) => l.nItem === a.nItem);
-    const { det, soma, liq } = itemDevolvido(linha.det, a.quantidade);
+    const linha = notas.get(a.modeloChave || a.chave).linhas.find((l) => l.nItem === a.nItem);
+    const { det, soma, liq } = itemDaAlocacao(linha, a);
     vNF = r2(vNF + liq);
     vProdTot = r2(vProdTot + soma.vProd);
     vDescTot = r2(vDescTot + soma.vDesc);

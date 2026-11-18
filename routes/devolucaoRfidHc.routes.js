@@ -6,10 +6,12 @@
 // transação, emite a NF-e de devolução e gera o CREDEV do cliente.
 //
 //   GET  /notas-venda?empresa=&cliente=&de=&ate=   notas de venda do cliente (TOTVS + HeadCoach)
-//   POST /conferir   { empresa, clienteCode, itens[{ productCode, quantidade }], chaves[] }
-//                    as peças lidas cabem nas notas escolhidas? valor de cada uma
+//   POST /conferir   { empresa, clienteCode, itens[{ productCode, quantidade }], chaves[],
+//                      avulsas?[{ productCode, chave, valorUnit }] }
+//                    as peças lidas cabem nas notas escolhidas? valor de cada uma.
+//                    avulsas = outra nota só para a peça que não coube (18/11/2026)
 //   POST /encerrar   { empresa, empresaNome, cliente{code,nome,cpfCnpj}, vendedor{code,nome},
-//                      operacao, itens[{ productCode, quantidade, epcs[] }], chaves[],
+//                      operacao, itens[{ productCode, quantidade, epcs[] }], chaves[], avulsas?[],
 //                      solicitacaoId?, observacao?, criadoPor? }
 //                    grava a transação, emite a NF-e de devolução e gera o CREDEV
 //
@@ -64,7 +66,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const b = req.body || {};
     try {
-      const r = await conferirDevolucao({ empresa: b.empresa, clienteCode: b.clienteCode, itens: b.itens, chaves: b.chaves });
+      const r = await conferirDevolucao({ empresa: b.empresa, clienteCode: b.clienteCode, itens: b.itens, chaves: b.chaves, avulsas: b.avulsas });
       return successResponse(res, r, r.ok ? 'Peças conferidas nas notas escolhidas' : 'Há peça fora das notas escolhidas');
     } catch (err) {
       return responder(res, err);
@@ -93,6 +95,7 @@ router.post(
         operacao: b.operacao,
         itens: b.itens,
         chaves: b.chaves,
+        avulsas: b.avulsas,
         solicitacaoId: b.solicitacaoId || null,
       });
       // entra no caixa da empresa se houver um aberto (devolução não é venda: não exige caixa)
