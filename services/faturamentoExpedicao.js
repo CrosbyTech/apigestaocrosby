@@ -55,12 +55,13 @@ import { saldoBonusDoCliente, usarBonus, estornarUsoDasVendas, BonusError } from
 import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
 
 import { cardBrejinho } from './brejinhoDryland.js';
+import { lerTrocaProdutos, motivoTrocaBloqueada } from './faturamentoConfig.js';
 export const EMPRESA_FATURAMENTO = 99;
 // Troca de peça NA TELA de faturamento (a que falta sai, a que sobra entra pelo
-// mesmo valor): liberada até 16/11/2026 (era 10/11, depois 11/11 e 13/11; em 14/11
-// o Yago pediu até 16/11), para os pedidos cuja separação se perdeu nas 72 h do Dryland
-// e tiveram peça trocada.
-export const TROCA_NO_FATURAMENTO_ATE = '2026-11-16';
+// mesmo valor), para os pedidos cuja separação se perdeu nas 72 h do Dryland e
+// tiveram peça trocada. Era uma data fixa aqui (10/11, 11/11, 13/11, 16/11/2026);
+// desde 18/11/2026 o admin ou o owner libera pela tela, com a data final
+// (services/faturamentoConfig.js · tabela faturamento_config).
 // Empresa do TOTVS que recebe o documento interno + contas a receber (ver topo)
 export const EMPRESA_DOC_INTERNO = 990;
 // desconto de ajuste que o operador pode dar no faturamento dos pedidos do site
@@ -460,8 +461,9 @@ export async function faturar(body) {
   const trocas = (Array.isArray(b.trocas) ? b.trocas : [])
     .filter((t) => t && t.de && t.para)
     .map((t) => ({ de: String(t.de), deNome: t.deNome || null, para: String(t.para), paraNome: t.paraNome || null, quantidade: Number(t.quantidade) || 1 }));
-  if (trocas.length && hojeBrasil() > TROCA_NO_FATURAMENTO_ATE) {
-    throw new FaturamentoError(`A troca de peças no faturamento só foi liberada até ${TROCA_NO_FATURAMENTO_ATE.split('-').reverse().join('/')}`, 'TROCA_FORA_DO_PRAZO');
+  if (trocas.length) {
+    const troca = await lerTrocaProdutos({ forcar: true });
+    if (!troca.vigente) throw new FaturamentoError(motivoTrocaBloqueada(troca), 'TROCA_FORA_DO_PRAZO');
   }
   // Cliente: pedido que veio SEM cliente → o operador escolhe livre. Pedido COM
   // cliente → trocar pede a senha de owner/admin/financeiro (Yago, 12/11/2026),

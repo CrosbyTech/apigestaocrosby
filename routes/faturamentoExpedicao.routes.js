@@ -33,16 +33,44 @@ import { enviarDuplicata, conferirAssinaturas, dadosDaDuplicata, pdfDaDuplicata,
 import { pedirMinuta, MinutaError } from '../services/faturamentoLogistica.js';
 import { gerarCreditoFalta, CreditoError } from '../services/faturamentoCredito.js';
 import { saldoBonusDoCliente, BonusError } from '../services/saldoBonus.js';
+import { lerTrocaProdutos, salvarTrocaProdutos, ConfigFaturamentoError } from '../services/faturamentoConfig.js';
+import { requireAdmin } from '../middlewares/auth.js';
 import { saldoDoCliente as saldoCredevAdiant, SaldoClienteError } from '../services/hcSaldosClientes.js';
 
 const router = express.Router();
 
 function falha(res, err) {
-  if (err instanceof FaturamentoError) return errorResponse(res, err.message, err.status || 400, err.code);
+  if (err instanceof FaturamentoError || err instanceof ConfigFaturamentoError) return errorResponse(res, err.message, err.status || 400, err.code);
   if (err instanceof DuplicataError || err instanceof MinutaError || err instanceof CreditoError || err instanceof BonusError || err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status || 400, err.code);
   if (err instanceof FiscalError) return errorResponse(res, err.message, 422, err.code);
   return errorResponse(res, err?.message || 'Erro no faturamento', 500, 'FATURAMENTO_ERROR');
 }
+
+// ─── Troca de produtos no faturamento: o admin/owner libera pela tela ────────
+//   GET /config/troca-produtos   situação atual { liberada, ate, vigente, … }
+//   PUT /config/troca-produtos   { liberada, ate }  — só admin ou owner (logado)
+router.get(
+  '/config/troca-produtos',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await lerTrocaProdutos({ forcar: req.query.agora === '1' }), 'Troca de produtos no faturamento');
+    } catch (err) {
+      return falha(res, err);
+    }
+  }),
+);
+router.put(
+  '/config/troca-produtos',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await salvarTrocaProdutos(req.user, req.body || {});
+      return successResponse(res, r, r.liberada ? `Troca de produtos liberada até ${r.ate.split('-').reverse().join('/')}` : 'Troca de produtos bloqueada');
+    } catch (err) {
+      return falha(res, err);
+    }
+  }),
+);
 
 router.get(
   '/preparar/:chave',
