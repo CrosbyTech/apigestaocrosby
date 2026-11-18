@@ -61,6 +61,7 @@ export const FORMAS = {
   credito: 'Cartão de crédito',
   debito: 'Cartão de débito',
   boleto: 'Boleto',
+  bluecard: 'BlueCard',
   credito_loja: 'Credev',
   adiantamento: 'Adiantamento',
   vale_troca: 'Vale-troca',

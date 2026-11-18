@@ -75,7 +75,11 @@ const router = express.Router();
 const TIPOS = ['nfce', 'nfe', 'troca'];
 // credito_loja = CREDEV · adiantamento = adiantamento: os dois consomem o saldo do
 // cliente NA LOJA (hc_cliente_saldos), cada um o seu
-const FORMAS = ['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'vale_troca'];
+// bluecard = crediário BlueCard: a prazo, em parcelas mensais; no contas a receber
+// vira BOLETO / FATURA em aberto (Yago, 18/11/2026). Por enquanto sem conferir
+// limite — "deixe livre por enquanto".
+const FORMAS = ['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'bluecard', 'vale_troca'];
+const BLUECARD_MAX_PARCELAS = 4; // teto de parcelas do BlueCard
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const hojeBrasil = () =>
   new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -593,10 +597,15 @@ router.post(
         if ((forma === 'credito' || forma === 'debito') && !p.nsu && !p.autorizacao) {
           return errorResponse(res, 'Cartão exige NSU e/ou código de autorização', 400, 'CARD_AUTH_REQUIRED');
         }
+        if (forma === 'bluecard') {
+          if (!b.cliente?.code) return errorResponse(res, 'BlueCard exige o cliente identificado na venda', 400, 'BLUECARD_SEM_CLIENTE');
+          const n = parseInt(p.parcelas, 10) || 1;
+          if (n < 1 || n > BLUECARD_MAX_PARCELAS) return errorResponse(res, `BlueCard: de 1 a ${BLUECARD_MAX_PARCELAS} parcelas`, 400, 'BLUECARD_PARCELAS');
+        }
         pagamentos.push({
           forma,
           valor,
-          parcelas: forma === 'credito' ? Math.max(1, parseInt(p.parcelas, 10) || 1) : 1,
+          parcelas: forma === 'credito' || forma === 'bluecard' ? Math.max(1, parseInt(p.parcelas, 10) || 1) : 1,
           bandeira: p.bandeira || null,
           nsu: p.nsu ? String(p.nsu).trim() : null,
           autorizacao: p.autorizacao ? String(p.autorizacao).trim() : null,

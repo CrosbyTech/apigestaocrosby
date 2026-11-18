@@ -44,6 +44,14 @@ const maisDias = (iso, n) => {
   d.setUTCDate(d.getUTCDate() + Number(n || 0));
   return d.toISOString().slice(0, 10);
 };
+// mesmo dia do mês, n meses depois (31/01 + 1 mês = 28 ou 29/02)
+const maisMeses = (iso, n) => {
+  const [a, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  const alvo = new Date(Date.UTC(a, m - 1 + Number(n || 0), 1, 12));
+  const ultimo = new Date(Date.UTC(alvo.getUTCFullYear(), alvo.getUTCMonth() + 1, 0, 12)).getUTCDate();
+  alvo.setUTCDate(Math.min(d, ultimo));
+  return alvo.toISOString().slice(0, 10);
+};
 const diasEntre = (a, b) => Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12:00:00Z`)) / 86400000);
 const ehData = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const num = (v) => {
@@ -208,20 +216,34 @@ export function montarTitulos(venda, cfg, extra = {}) {
     if (forma === 'vale_troca') continue; // crédito da própria troca
     const valor = round2(forma === 'dinheiro' ? Number(p.valor || 0) - Number(p.troco || 0) : Number(p.valor || 0));
     if (!(valor > 0)) continue;
+    // BLUECARD (crediário, Yago 18/11/2026): na venda tem nome próprio; aqui vira
+    // BOLETO / FATURA em aberto, portador BLUECARD, uma parcela por mês.
+    const bluecard = forma === 'bluecard';
+    const formaTitulo = bluecard ? 'boleto' : forma;
     const comum = {
       ...base,
       pagamento_id: p.id ?? null,
-      forma,
-      tipo_documento: TIPO_DOCUMENTO[forma] ?? null,
-      portador: portadorDo(p),
+      forma: formaTitulo,
+      tipo_documento: TIPO_DOCUMENTO[formaTitulo] ?? null,
+      portador: bluecard ? 'BLUECARD' : portadorDo(p),
+      ...(bluecard ? { observacao: 'BlueCard' } : {}),
       bandeira: p.bandeira || p.cartao_totvs?.bandeira || null,
       nsu: p.nsu || null,
       autorizacao: p.autorizacao || null,
       parcelas_cartao: forma === 'credito' ? Math.max(1, Number(p.parcelas || p.cartao_totvs?.parcelas || 1)) : null,
     };
-    if (forma === 'boleto') {
+    if (formaTitulo === 'boleto') {
       // parcelas do pedido (cobranca.parcelas); sem elas, parcelas iguais a cada 30 dias
-      let parcs = Array.isArray(venda.cobranca?.parcelas) && venda.cobranca.parcelas.length ? venda.cobranca.parcelas : null;
+      let parcs = !bluecard && Array.isArray(venda.cobranca?.parcelas) && venda.cobranca.parcelas.length ? venda.cobranca.parcelas : null;
+      if (bluecard) {
+        // BlueCard: parcelas mensais no mesmo dia do mês (1ª um mês depois da compra).
+        // Como no TOTVS (FATURA - BLUECARD: 400,00 em 3x = 134 + 133 + 133): as parcelas
+        // saem em reais inteiros e a diferença vai na 1ª.
+        const n = Math.max(1, Number(p.parcelas) || 1);
+        // (compra menor que R$ 1,00 por parcela: divide em centavos, para não sair parcela zerada)
+        const vn = Math.floor(valor / n) >= 1 ? Math.floor(valor / n) : Math.floor((valor / n) * 100) / 100;
+        parcs = Array.from({ length: n }, (_, i) => ({ vencimento: maisMeses(emissao, i + 1), valor: i === 0 ? round2(valor - vn * (n - 1)) : vn }));
+      }
       if (!parcs) {
         const n = Math.max(1, Number(p.parcelas) || 1);
         const v1 = round2(valor / n);

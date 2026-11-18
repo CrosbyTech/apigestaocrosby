@@ -67,6 +67,8 @@ const TPAG = {
   credito: '03',
   debito: '04',
   credito_loja: '05',
+  // BlueCard = crediário da loja: "crédito loja", a prazo (como nas notas do TOTVS da mesma loja)
+  bluecard: '05',
   adiantamento: '05',
   vale_troca: '05',
 };
@@ -533,7 +535,7 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
       if (!(valor > 0)) continue;
       const cartao = p.forma === 'credito' || p.forma === 'debito';
       const d = {
-        indPag: p.forma === 'credito' && Number(p.parcelas || 1) > 1 ? '1' : p.forma === 'credito' ? '1' : '0',
+        indPag: p.forma === 'credito' || p.forma === 'bluecard' ? '1' : '0',
         tPag: TPAG[p.forma] || '99',
         vPag: f2(valor),
       };
