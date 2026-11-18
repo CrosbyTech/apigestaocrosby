@@ -21,6 +21,9 @@
 import supabase from '../config/supabase.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
 import { empresasDoUsuario } from './hcCaixa.js';
+// Boleto Pagar.me já emitido (Remessa) por título: marca a tarifa de 2,99 na
+// coluna Taxa da tela (verde) quando o boleto do título foi emitido. (João, 18/11/2026)
+import { boletosAtivosPorTitulo, ACRESCIMO_BOLETO } from './pagarmeBoletos.js';
 
 export class CrError extends Error {
   constructor(message, code = 'HC_CR', status = 400) {
@@ -389,6 +392,14 @@ export async function listarTitulos(user, f = {}) {
     }
     return qy.order(campo, { ascending: false }).order('fatura', { ascending: false }).order('parcela');
   });
+  // Boletos já emitidos na Pagar.me (Remessa): chave empresa-fatura-parcela.
+  let boletoAtivo = {};
+  try {
+    const nrFat = rows.filter((t) => t.forma === 'boleto').map((t) => Number(t.fatura));
+    if (nrFat.length) boletoAtivo = (await boletosAtivosPorTitulo(nrFat))?.mapa || {};
+  } catch (e) {
+    console.warn(`⚠️ [hc-cr] boletos emitidos: ${e.message}`);
+  }
   const totais = { qtd: 0, valor: 0, aberto: 0, abertoAtualizado: 0, vencido: 0, pago: 0, recebido: 0, taxa: 0, liquido: 0, aConciliar: 0, cancelado: 0 };
   const titulos = rows.map((t) => {
     const at = valoresAtualizados(t, cfg, hoje);
@@ -409,7 +420,15 @@ export async function listarTitulos(user, f = {}) {
         if (t.precisa_conciliar && !t.conciliado_em) totais.aConciliar = round2(totais.aConciliar + v);
       }
     }
-    return { ...t, atualizado: at };
+    const chaveB = `${t.empresa}-${Number(t.fatura)}-${t.parcela ?? 1}`;
+    const bol = t.forma === 'boleto' ? boletoAtivo[chaveB] || null : null;
+    return {
+      ...t,
+      atualizado: at,
+      boleto_emitido: Boolean(bol),
+      taxa_boleto: bol ? ACRESCIMO_BOLETO : 0,
+      boleto_pagarme: bol || null,
+    };
   });
   return { titulos, totais, empresas: lista, config: cfg, hoje };
 }
