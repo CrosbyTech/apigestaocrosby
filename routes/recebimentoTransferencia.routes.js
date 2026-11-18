@@ -5,11 +5,13 @@
 //   GET  /transferencias/:id            peças da transferência (para conferir) + recebimento
 //   POST /transferencias/:id/receber    { epcs[], manuais: { productCode: qtd }, observacao }
 //   GET  /estoque?empresa&busca         saldo da loja por produto
+//   GET  /entradas?empresa&de&ate       entradas de mercadoria (recebimentos) no período
+//   POST /entradas/:id/cancelar         { motivo } — estorna o estoque e volta a transferência para "a receber"
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
-import { RecebimentoError, listarTransferencias, detalheTransferencia, receberTransferencia, estoque } from '../services/recebimentoTransferencia.js';
+import { RecebimentoError, listarTransferencias, detalheTransferencia, receberTransferencia, estoque, listarEntradas, cancelarEntrada } from '../services/recebimentoTransferencia.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -33,5 +35,7 @@ router.post(
   rota((req) => receberTransferencia(req.user, req.params.id, req.body || {}), (r) => `Mercadoria recebida: ${r.qtd_recebida} peça(s) no estoque${r.qtd_faltando ? ` · faltaram ${r.qtd_faltando}` : ''}`),
 );
 router.get('/estoque', rota((req) => estoque(req.user, req.query || {}), 'Estoque'));
+router.get('/entradas', rota((req) => listarEntradas(req.user, req.query || {}), 'Entradas de mercadoria'));
+router.post('/entradas/:id/cancelar', rota((req) => cancelarEntrada(req.user, req.params.id, req.body || {}), 'Entrada de mercadoria cancelada'));
 
 export default router;

@@ -17,6 +17,8 @@
 //
 // Transações de devolução (aba Transações — o que foi recebido / faltou / sobrou):
 //   POST /transacoes                    registra a transação gerada na Devolução RFID
+//   GET  /transacoes/:id/cancelamento   prévia do cancelamento (Credev que sai) — só nota do cliente (FISFP082)
+//   POST /transacoes/:id/cancelar       { motivo, por } cancela e tira o Credev — só nota do cliente (18/11/2026)
 //   GET  /transacoes                    lista (de, ate, empresa, busca)
 //   GET  /transacoes/:id                detalhe com as três listas
 //   POST /transacoes/:id/status         atualiza a situação vinda do TOTVS
@@ -35,7 +37,7 @@ import {
   sincronizarChamados,
   registrarTransacao,
 } from '../services/devolucoesMercadoria.js';
-import { devolucaoEmSegundoPlano } from '../services/hcSaldosClientes.js';
+import { devolucaoEmSegundoPlano, creditarDevolucao } from '../services/hcSaldosClientes.js';
 
 const router = express.Router();
 
@@ -310,6 +312,99 @@ router.get(
         },
       },
       `${items.length} transação(ões)`,
+    );
+  }),
+);
+
+// ─── Cancelar a devolução com NOTA DO CLIENTE (Yago, 18/11/2026) ─────────────
+// Recebimento FISFP082: não existe transação no TOTVS — cancelar aqui é marcar a
+// situação 6 (cancelada) e tirar o Credev que ela gerou (até o que ainda estiver
+// no saldo do cliente). Usado pela tela Cancelamento de Transação.
+async function previaCancelamentoDevolucao(id) {
+  const { data: trx, error } = await supabase.from('devolucoes_transacoes').select('*').eq('id', id).maybeSingle();
+  if (error) throw error;
+  if (!trx) return null;
+  const { data: movs } = await supabase.from('hc_cliente_saldos_mov').select('movimento, valor').eq('devolucao_trx_id', id);
+  const creditado = (movs || []).filter((m) => m.movimento === 'devolucao').reduce((s, m) => s + Number(m.valor), 0);
+  const desfeito = (movs || []).filter((m) => m.movimento === 'devolucao_cancelada').reduce((s, m) => s - Number(m.valor), 0);
+  let saldoCredev = null;
+  if (trx.cliente_code) {
+    const { data: sal } = await supabase.from('hc_cliente_saldos').select('saldo').eq('cliente_code', trx.cliente_code).eq('empresa', trx.empresa).eq('tipo', 'credev').maybeSingle();
+    saldoCredev = sal ? Number(sal.saldo) : 0;
+  }
+  const pendente = Math.max(0, Math.round((creditado - desfeito) * 100) / 100);
+  const vaiSair = saldoCredev == null ? 0 : Math.round(Math.min(pendente, saldoCredev) * 100) / 100;
+  let bloqueio = null;
+  if (trx.origem !== 'fisfp082') bloqueio = `Esta devolução tem a transação ${trx.empresa}/${trx.transacao_code} no TOTVS: cancele-a no TOTVS.`;
+  else if (Number(trx.transacao_status) === 6) bloqueio = 'Esta devolução já está cancelada.';
+  const avisos = [];
+  if (!bloqueio && pendente > 0) {
+    avisos.push(
+      vaiSair < pendente
+        ? `Esta devolução gerou R$ ${pendente.toFixed(2).replace('.', ',')} de Credev, mas só R$ ${vaiSair.toFixed(2).replace('.', ',')} ainda estão no saldo do cliente: é o que sai.`
+        : `O Credev de R$ ${pendente.toFixed(2).replace('.', ',')} que esta devolução gerou sai do saldo do cliente.`,
+    );
+  }
+  if (!bloqueio && trx.devolucao_id) avisos.push(`A solicitação de devolução nº ${trx.devolucao_id} não muda: se for o caso, reabra-a na tela de Devoluções.`);
+  return { trx, credev: { creditado: pendente, saldo: saldoCredev, vaiSair }, avisos, bloqueio, podeCancelar: !bloqueio };
+}
+
+router.get(
+  '/transacoes/:id/cancelamento',
+  asyncHandler(async (req, res) => {
+    const p = await previaCancelamentoDevolucao(parseInt(req.params.id, 10));
+    if (!p) return errorResponse(res, 'Devolução não encontrada', 404, 'NOT_FOUND');
+    return successResponse(res, p, 'Prévia do cancelamento');
+  }),
+);
+
+router.post(
+  '/transacoes/:id/cancelar',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const motivo = String(req.body?.motivo || '').trim();
+    const por = req.body?.por || null;
+    if (motivo.length < 15) return errorResponse(res, 'Escreva o motivo do cancelamento (pelo menos 15 caracteres)', 400, 'MOTIVO_CURTO');
+    const p = await previaCancelamentoDevolucao(id);
+    if (!p) return errorResponse(res, 'Devolução não encontrada', 404, 'NOT_FOUND');
+    if (p.bloqueio) return errorResponse(res, p.bloqueio, 409, 'NAO_CANCELA');
+    const { data: trx, error } = await supabase
+      .from('devolucoes_transacoes')
+      .update({ transacao_status: 6 })
+      .eq('id', id)
+      .neq('transacao_status', 6)
+      .select('*')
+      .maybeSingle();
+    if (error) return erroTrx(res, error);
+    if (!trx) return errorResponse(res, 'Esta devolução acabou de ser cancelada por outra pessoa', 409, 'JA_CANCELADA');
+    let credev = { acao: 'nada' };
+    try {
+      credev = await creditarDevolucao(trx, { por });
+    } catch (e) {
+      credev = { acao: 'erro', erro: e.message };
+    }
+    console.log(`🚫 [Devoluções] devolução nº ${id} (NF do cliente ${trx.nf_numero || '—'}, ${trx.cliente_nome || trx.cliente_code}) cancelada por ${por || '—'}: ${motivo} · Credev ${credev.acao}`);
+    const brl = (n) => `R$ ${Number(n).toFixed(2).replace('.', ',')}`;
+    return successResponse(
+      res,
+      {
+        passos: [
+          { nome: 'Devolução', ok: true, detalhe: `nº ${id} cancelada (NF ${trx.nf_numero || '—'} do cliente)` },
+          {
+            nome: 'Credev do cliente',
+            ok: credev.acao !== 'erro',
+            detalhe:
+              credev.acao === 'descreditada'
+                ? `${brl(p.credev.vaiSair)} saíram do saldo do cliente`
+                : credev.acao === 'erro'
+                  ? `não consegui tirar agora (${credev.erro}); o sistema tenta de novo sozinho`
+                  : p.credev.creditado > 0
+                    ? 'o Credev desta devolução já tinha sido usado: nada a tirar'
+                    : 'esta devolução não tinha gerado Credev',
+          },
+        ],
+      },
+      'Devolução cancelada',
     );
   }),
 );

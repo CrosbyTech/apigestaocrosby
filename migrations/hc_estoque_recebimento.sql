@@ -76,6 +76,18 @@ CREATE TRIGGER hc_receb_trf_sem_delete BEFORE DELETE ON hc_recebimentos_transfer
 DROP TRIGGER IF EXISTS hc_estoque_mov_sem_delete ON hc_estoque_movimentos;
 CREATE TRIGGER hc_estoque_mov_sem_delete BEFORE DELETE ON hc_estoque_movimentos FOR EACH ROW EXECUTE FUNCTION hc_estoque_proibir_delete();
 
+-- 18/11/2026: a entrada de mercadoria pode ser CANCELADA (Financeiro › Cancelamento
+-- de Transação). O recebimento fica marcado (não se apaga), as peças saem do estoque
+-- por movimento de estorno e a loja pode receber de novo (só um recebimento VALENDO
+-- por transferência).
+ALTER TABLE hc_recebimentos_transferencia ADD COLUMN IF NOT EXISTS cancelado_em TIMESTAMPTZ;
+ALTER TABLE hc_recebimentos_transferencia ADD COLUMN IF NOT EXISTS cancelado_por TEXT;
+ALTER TABLE hc_recebimentos_transferencia ADD COLUMN IF NOT EXISTS cancelamento_motivo TEXT;
+ALTER TABLE hc_recebimentos_transferencia DROP CONSTRAINT IF EXISTS hc_recebimentos_transferencia_transferencia_transacao_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS hc_receb_trf_um_valendo ON hc_recebimentos_transferencia (transferencia_transacao_id) WHERE cancelado_em IS NULL;
+ALTER TABLE hc_estoque_movimentos DROP CONSTRAINT IF EXISTS hc_estoque_movimentos_tipo_check;
+ALTER TABLE hc_estoque_movimentos ADD CONSTRAINT hc_estoque_movimentos_tipo_check CHECK (tipo IN ('recebimento_transferencia', 'estorno_recebimento'));
+
 -- só o servidor acessa
 ALTER TABLE hc_recebimentos_transferencia ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hc_estoque_movimentos ENABLE ROW LEVEL SECURITY;

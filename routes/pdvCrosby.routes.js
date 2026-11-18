@@ -61,7 +61,7 @@ import {
 } from '../services/hcSaldosClientes.js';
 import { aoCancelarVenda } from '../services/saldoBonus.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
-import { conferirTroca, TrocaError } from '../services/pdvTroca.js';
+import { conferirTroca, conferirTrocaPorCupom, cupomParaTroca, TrocaError } from '../services/pdvTroca.js';
 import {
   PromocaoPdvError,
   listarPromocoes,
@@ -487,7 +487,22 @@ router.get(
 );
 
 // ─── Troca: o cliente comprou a peça? qual nota referenciar? ─────────────────
+// GET /troca/cupom/:codigo  — troca de PRESENTE: o cupom, o comprador e o que
+// ainda dá para trocar de cada peça (18/11/2026)
+router.get(
+  '/troca/cupom/:codigo',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await cupomParaTroca(req.params.codigo), 'Cupom de troca');
+    } catch (err) {
+      if (err instanceof TrocaError) return errorResponse(res, err.message, err.status, err.code);
+      return errorResponse(res, `Não consegui ler o cupom: ${err.message}`, 502, 'TROCA_CUPOM');
+    }
+  }),
+);
+
 // POST /troca/conferir { empresa, clienteCode, itens:[{ productCode, quantidade }] }
+//                      com { cupom } confere contra a venda do CUPOM DE TROCA
 // Procura as compras do cliente (TOTVS + HeadCoach), desconta o que ele já
 // devolveu e devolve, por peça, a nota de origem e o valor pago (services/pdvTroca.js).
 router.post(
@@ -495,7 +510,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const b = req.body || {};
     try {
-      const r = await conferirTroca({ empresa: b.empresa, clienteCode: b.clienteCode, itens: b.itens });
+      const r = b.cupom
+        ? await conferirTrocaPorCupom({ empresa: b.empresa, codigo: b.cupom, itens: b.itens })
+        : await conferirTroca({ empresa: b.empresa, clienteCode: b.clienteCode, itens: b.itens });
       return successResponse(res, r, r.ok ? 'Peças conferidas nas compras do cliente' : 'Há peça que não pode ser trocada');
     } catch (err) {
       if (err instanceof TrocaError) return errorResponse(res, err.message, err.status, err.code);
@@ -522,7 +539,10 @@ router.post(
     let troca = null;
     if (tipoVenda === 'troca') {
       try {
-        troca = await conferirTroca({ empresa, clienteCode: b.cliente.code, itens: b.itens });
+        // troca de presente: confere contra a venda do cupom (quem troca não é o comprador)
+        troca = b.cupomTroca
+          ? await conferirTrocaPorCupom({ empresa, codigo: b.cupomTroca, itens: b.itens })
+          : await conferirTroca({ empresa, clienteCode: b.cliente.code, itens: b.itens });
       } catch (err) {
         if (err instanceof TrocaError) return errorResponse(res, err.message, err.status, err.code);
         return errorResponse(res, `Não consegui conferir as compras do cliente: ${err.message}`, 502, 'TROCA_CONFERIR');
@@ -670,6 +690,8 @@ router.post(
           conferidoEm: new Date().toISOString(),
           itens: troca.itens.map((i) => ({ productCode: i.productCode, quantidade: i.quantidade, valorUnit: i.valorUnit, notas: i.notas })),
         },
+        // troca de presente: o cupom e quem comprou
+        ...(troca.cupom ? { cupomTroca: troca.cupom.codigo, comprador: troca.comprador } : {}),
       };
     }
     // VENDA | TROCA (17/11/2026): venda fechada no mesmo atendimento de uma troca,
@@ -710,10 +732,31 @@ router.post(
       itens: itensGravados || [],
       tipo: tipoVenda === 'troca' ? 'devolucao' : 'venda',
     });
-    console.log(`🛍️ [PDV Crosby] Venda ${venda.id} registrada: empresa ${empresa}, ${tipoVenda}, ${qtd} pç, R$ ${total.toFixed(2)}`);
+    // troca pelo cupom: anota no cupom o que foi trocado (a troca cancelada libera de novo)
+    if (troca?.cupom) {
+      try {
+        const { data: cp } = await supabase.from('pdv_cupons_troca').select('id, usos').eq('codigo', troca.cupom.codigo).maybeSingle();
+        if (cp) {
+          const novos = troca.itens.map((i) => ({ productCode: Number(i.productCode), quantity: Number(i.quantidade), transacao_code: venda.id, empresa, em: new Date().toISOString(), por: b.criadoPor || null }));
+          await supabase.from('pdv_cupons_troca').update({ usos: [...(cp.usos || []), ...novos] }).eq('id', cp.id);
+        }
+      } catch (e) {
+        console.warn(`⚠️ [PDV Crosby] troca ${venda.id}: não anotei o uso do cupom ${troca.cupom.codigo}: ${e.message}`);
+      }
+    }
+    console.log(`🛍️ [PDV Crosby] Venda ${venda.id} registrada: empresa ${empresa}, ${tipoVenda}, ${qtd} pç, R$ ${total.toFixed(2)}${troca?.cupom ? ` · cupom ${troca.cupom.codigo}` : ''}`);
     return successResponse(res, await carregarVenda(venda.id), 'Venda registrada', 201);
   }),
 );
+
+// tipo da transação para a tela de cancelamento (18/11/2026)
+export function grupoDaVenda(v) {
+  if (v.canal === 'devolucao' || v.origem === 'devolucao') return 'devolucao';
+  if (v.canal === 'transferencia') return 'transferencia';
+  if (v.origem === 'expedicao') return String(v.pedido_chave || '').startsWith('BRJ:') ? 'brejinho' : 'faturamento';
+  return 'pdv';
+}
+const GRUPOS_VENDA = ['pdv', 'faturamento', 'brejinho', 'transferencia', 'devolucao'];
 
 router.get(
   '/vendas',
@@ -739,9 +782,16 @@ router.get(
     if (status) q = q.eq('status', status);
     // ?origem=pdv → só as transações feitas no PDV Crosby (sem o faturamento da expedição)
     if (String(req.query.origem || '').toLowerCase() === 'pdv') q = q.eq('origem', 'pdv');
+    // ?grupo=pdv|faturamento|brejinho|transferencia|devolucao (tela de cancelamento)
+    const grupo = String(req.query.grupo || '').toLowerCase();
+    if (grupo === 'pdv') q = q.eq('origem', 'pdv');
+    else if (grupo === 'transferencia') q = q.eq('canal', 'transferencia');
+    else if (grupo === 'devolucao') q = q.eq('canal', 'devolucao');
+    else if (grupo === 'faturamento' || grupo === 'brejinho') q = q.eq('origem', 'expedicao');
 
-    const { data: vendas, error } = await q;
+    const { data: lidas, error } = await q;
     if (error) return errorResponse(res, error.message, 500, 'DB_ERROR');
+    const vendas = GRUPOS_VENDA.includes(grupo) ? (lidas || []).filter((v) => grupoDaVenda(v) === grupo) : lidas;
 
     const ids = (vendas || []).map((v) => v.id);
     let notas = [];
@@ -782,6 +832,7 @@ router.get(
 
     const items = (vendas || []).map((v) => ({
       ...v,
+      grupo: grupoDaVenda(v),
       nota: primeiraNota.get(v.id) || null,
       pagamentos: pagPorVenda.get(v.id) || [],
       qtd_epcs: (epcPorVenda.get(v.id) || []).length,
@@ -1329,10 +1380,31 @@ async function previaDoCancelamento(vendaId) {
   if (Number(venda.cashback_usado) > 0) avisos.push(`O cashback usado nesta venda (R$ ${Number(venda.cashback_usado).toFixed(2).replace('.', ',')}) não volta sozinho: reponha no TOTVS se for o caso.`);
   if (venda.tipo_venda !== 'troca' && venda.cliente_code && notaAutorizada) avisos.push('O cashback que esta venda gerou para o cliente no TOTVS não é retirado daqui.');
   if (venda.totvs_transacao_code) avisos.push(`A transação ${venda.totvs_transacao_code} do TOTVS (espelho desta venda) não é cancelada daqui: cancele no TOTVS.`);
+  // Faturamento / Brejinho / Transferência / Devolução (18/11/2026)
+  const grupo = grupoDaVenda(venda);
+  if (!bloqueio && (grupo === 'faturamento' || grupo === 'brejinho')) {
+    avisos.push(`O pedido ${venda.numero_site || ''} volta a poder ser faturado (sai da lista de faturados).`.replace('  ', ' '));
+    if ((venda.pagamentos || []).some((p) => p.forma === 'boleto')) avisos.push('Esta venda tem boleto: a duplicata/boleto já enviados ao cliente não são cancelados sozinhos — avise o cliente e o financeiro.');
+  }
+  if (!bloqueio && grupo === 'transferencia') {
+    const { data: trf } = await supabase.from('transferencias_transacoes').select('id, empresa_destino').eq('venda_id', venda.id).maybeSingle();
+    if (trf) {
+      let rq = supabase.from('hc_recebimentos_transferencia').select('id, empresa, recebido_por, recebido_em').eq('transferencia_transacao_id', trf.id);
+      const { error: semColuna } = await supabase.from('hc_recebimentos_transferencia').select('cancelado_em').limit(1);
+      if (!semColuna) rq = rq.is('cancelado_em', null);
+      const { data: recs } = await rq;
+      const rec = (recs || [])[0];
+      if (rec) {
+        bloqueio = `A loja ${rec.empresa} já deu entrada desta transferência (entrada de mercadoria nº ${rec.id}, por ${rec.recebido_por || '—'}). Cancele primeiro a entrada de mercadoria e depois a transferência.`;
+      }
+      avisos.push('A solicitação de transferência volta para a fila ("aguardando transferência").');
+      avisos.push('Se a entrada desta transferência já foi lançada no estoque das lojas do Dryland (referência HC-TRF), ela não é desfeita daqui: avise o Estoquista.');
+    }
+  }
   if (titulos.some((t) => t.conciliado_em && t.situacao !== 'cancelado')) avisos.push('Há título desta transação já conciliado no contas a receber: ele também será cancelado.');
   if (caixa && caixa.status !== 'aberto') avisos.push(`A transação é do caixa nº ${caixa.id} (${String(caixa.data_caixa).slice(0, 10).split('-').reverse().join('/')}), que já está fechado: o resumo desse caixa muda.`);
   return {
-    venda,
+    venda: { ...venda, grupo: grupoDaVenda(venda) },
     nota,
     titulos,
     caixa,
@@ -1366,6 +1438,11 @@ router.post(
     if (justificativa.length < 15) return errorResponse(res, 'Escreva o motivo do cancelamento (pelo menos 15 caracteres)', 400, 'JUSTIFICATIVA_CURTA');
     const venda = await carregarVenda(id);
     if (!venda) return errorResponse(res, 'Transação não encontrada', 404, 'NOT_FOUND');
+    // transferência que a loja já recebeu: cancela antes a entrada de mercadoria
+    if (grupoDaVenda(venda) === 'transferencia' && venda.status !== 'cancelada') {
+      const prev = await previaDoCancelamento(id);
+      if (prev?.bloqueio) return errorResponse(res, prev.bloqueio, 409, 'TRANSFERENCIA_RECEBIDA');
+    }
     // venda atendida acima do limite: alguém do financeiro digita e-mail + senha
     let autorizadoPor = null;
     if (precisaAutorizacaoParaCancelar(venda)) {

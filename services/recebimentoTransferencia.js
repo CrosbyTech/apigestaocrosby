@@ -80,6 +80,21 @@ async function empresasPorPessoa(codes = null) {
 const destinoDe = (t, porPessoa) => Number(t.empresa_destino) || porPessoa.get(Number(t.cliente_code)) || 0;
 
 // transferência que já saiu: nota autorizada (99 pelo HeadCoach) ou transação atendida no TOTVS
+// a coluna de cancelamento da entrada existe? (migração de 18/11/2026; antes dela
+// o recebimento continua funcionando, só não dá para cancelar)
+let colunaCancelamento = null;
+async function temCancelamento() {
+  if (colunaCancelamento === null) {
+    const { error } = await supabase.from('hc_recebimentos_transferencia').select('cancelado_em').limit(1);
+    colunaCancelamento = !error;
+  }
+  return colunaCancelamento;
+}
+// só o recebimento que VALE (o cancelado fica guardado, mas não conta).
+// Síncrono de propósito: o construtor de consulta do Supabase executa ao ser
+// aguardado, então ele nunca pode sair de uma função async.
+const valendo = (qy, tem) => (tem ? qy.is('cancelado_em', null) : qy);
+
 const saiu = (t) => (t.venda_id ? t.nf_status === 'autorizada' : Number(t.transacao_status) === 4);
 const cancelada = (t) => t.nf_status === 'cancelada' || Number(t.transacao_status) === 6;
 const esperadoDe = (itens) => (itens || []).reduce((s, i) => s + (Number(i.quantidade) || 0), 0);
@@ -105,7 +120,7 @@ export async function listarTransferencias(user, f = {}) {
   const recs = new Map();
   for (let i = 0; i < validas.length; i += 200) {
     const ids = validas.slice(i, i + 200).map((t) => t.id);
-    const rs = await q(supabase.from('hc_recebimentos_transferencia').select('id, transferencia_transacao_id, qtd_esperada, qtd_recebida, qtd_faltando, qtd_fora, recebido_por, recebido_em').in('transferencia_transacao_id', ids));
+    const rs = await q(valendo(supabase.from('hc_recebimentos_transferencia').select('id, transferencia_transacao_id, qtd_esperada, qtd_recebida, qtd_faltando, qtd_fora, recebido_por, recebido_em').in('transferencia_transacao_id', ids), await temCancelamento()));
     for (const r of rs || []) recs.set(Number(r.transferencia_transacao_id), r);
   }
   const nomes = Object.fromEntries(lista.map((e) => [e.code, e.nome]));
@@ -131,7 +146,8 @@ export async function detalheTransferencia(user, id) {
   if (!Number(t.empresa_destino)) t.empresa_destino = destinoDe(t, await empresasPorPessoa());
   if (!t.empresa_destino) throw new RecebimentoError('Esta nota não é para uma loja do grupo: não há o que receber', 'SEM_LOJA_DESTINO', 404);
   const { lista } = await empresasPermitidas(user, t.empresa_destino);
-  const recebimento = await q(supabase.from('hc_recebimentos_transferencia').select('*').eq('transferencia_transacao_id', t.id).maybeSingle());
+  const tem = await temCancelamento();
+  const recebimento = await q(valendo(supabase.from('hc_recebimentos_transferencia').select('*').eq('transferencia_transacao_id', t.id), tem).order('id', { ascending: false }).limit(1).maybeSingle());
   const itens = (t.itens || []).map((i) => ({
     productCode: Number(i.productCode),
     name: i.name || null,
@@ -245,6 +261,95 @@ export async function receberTransferencia(user, id, b = {}) {
   }
   console.log(`📦 [recebimento] transferência ${t.id} (NF ${t.nf_numero || '—'}) recebida na empresa ${empresa}: ${qtdRecebida}/${t.qtd_esperada} pç, faltando ${qtdFaltando}, de fora ${fora.length} · ${quem(user)}`);
   return rec;
+}
+
+// ─── ENTRADA DE MERCADORIA: lista e cancelamento (18/11/2026) ──────────────
+// Tela Financeiro › Cancelamento de Transação. Cancelar a entrada: o recebimento
+// fica marcado (não se apaga), cada peça que entrou sai do estoque por um
+// movimento de estorno, as etiquetas deixam de estar na loja e a transferência
+// volta para "a receber" (a loja pode receber de novo).
+
+/** Entradas de mercadoria das lojas do usuário no período (?empresa&de&ate). */
+export async function listarEntradas(user, f = {}) {
+  const { codes } = await empresasPermitidas(user, f.empresa);
+  if (!codes.length) return { entradas: [], cancelamentoLiberado: await temCancelamento() };
+  const ehData = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+  const rows = await todas(() => {
+    let qy = supabase.from('hc_recebimentos_transferencia').select('*').in('empresa', codes).order('id', { ascending: false });
+    if (ehData(f.de)) qy = qy.gte('recebido_em', `${f.de}T00:00:00-03:00`);
+    if (ehData(f.ate)) qy = qy.lte('recebido_em', `${f.ate}T23:59:59.999-03:00`);
+    return qy;
+  });
+  return {
+    cancelamentoLiberado: await temCancelamento(),
+    entradas: rows.map((r) => ({
+      id: r.id,
+      transferenciaId: r.transferencia_transacao_id,
+      solicitacaoId: r.transferencia_id,
+      empresa: r.empresa,
+      empresaOrigem: r.empresa_origem,
+      nf: r.nf_numero,
+      qtdEsperada: r.qtd_esperada,
+      qtdRecebida: r.qtd_recebida,
+      qtdFaltando: r.qtd_faltando,
+      qtdFora: r.qtd_fora,
+      observacao: r.observacao,
+      recebidoPor: r.recebido_por,
+      recebidoEm: r.recebido_em,
+      canceladoEm: r.cancelado_em || null,
+      canceladoPor: r.cancelado_por || null,
+      cancelamentoMotivo: r.cancelamento_motivo || null,
+      itens: (r.itens || []).map((i) => ({ productCode: i.productCode, name: i.name, esperado: i.esperado, recebido: i.recebido })),
+    })),
+  };
+}
+
+/** Cancela uma entrada de mercadoria: { motivo }. */
+export async function cancelarEntrada(user, id, b = {}) {
+  if (!(await temCancelamento())) {
+    throw new RecebimentoError('O cancelamento da entrada ainda não está liberado: rode "node scripts/migrar-hc-estoque-recebimento.mjs" na pasta da API.', 'MIGRATION_PENDING', 503);
+  }
+  const rec = await q(supabase.from('hc_recebimentos_transferencia').select('*').eq('id', Number(id)).maybeSingle());
+  if (!rec) throw new RecebimentoError('Entrada de mercadoria não encontrada', 'NOT_FOUND', 404);
+  await empresasPermitidas(user, rec.empresa);
+  if (rec.cancelado_em) throw new RecebimentoError(`Esta entrada já foi cancelada por ${rec.cancelado_por || '—'}`, 'JA_CANCELADA', 409);
+  const motivo = String(b.motivo || '').trim();
+  if (motivo.length < 15) throw new RecebimentoError('Escreva o motivo do cancelamento (pelo menos 15 caracteres)', 'MOTIVO_CURTO');
+  const agora = new Date().toISOString();
+  const { data: marcado, error } = await supabase
+    .from('hc_recebimentos_transferencia')
+    .update({ cancelado_em: agora, cancelado_por: quem(user), cancelamento_motivo: motivo })
+    .eq('id', rec.id)
+    .is('cancelado_em', null)
+    .select()
+    .maybeSingle();
+  if (error) throw falhaDb(error);
+  if (!marcado) throw new RecebimentoError('Esta entrada acabou de ser cancelada por outra pessoa', 'JA_CANCELADA', 409);
+  // as peças que entraram saem do estoque (estorno com a quantidade negativa)
+  const movs = await todas(() => supabase.from('hc_estoque_movimentos').select('*').eq('recebimento_id', rec.id).eq('tipo', 'recebimento_transferencia').order('id'));
+  const estornos = movs.map((m) => ({ empresa: m.empresa, product_code: m.product_code, nome: m.nome, quantidade: -Number(m.quantidade), epc: m.epc, tipo: 'estorno_recebimento', recebimento_id: rec.id, por: quem(user) }));
+  for (let k = 0; k < estornos.length; k += 500) await q(supabase.from('hc_estoque_movimentos').insert(estornos.slice(k, k + 500)));
+  const pecas = estornos.reduce((s, m) => s - m.quantidade, 0);
+  // as etiquetas deixam de estar na loja
+  const { data: tiradas } = await supabase.from('hc_estoque_epcs').delete().eq('recebimento_id', rec.id).select('epc');
+  // a solicitação volta a "em transferência" (mercadoria em trânsito)
+  if (rec.transferencia_id) {
+    await supabase
+      .from('transferencias_mercadoria')
+      .update({ status: 'em_transferencia', local: 'em_transito', local_por: quem(user), local_em: agora, atualizado_em: agora })
+      .eq('id', rec.transferencia_id)
+      .eq('status', 'concluida');
+  }
+  console.log(`🚫 [recebimento] entrada ${rec.id} (transferência ${rec.transferencia_transacao_id}, NF ${rec.nf_numero || '—'}) cancelada na empresa ${rec.empresa}: ${pecas} pç estornada(s) · ${quem(user)} · ${motivo}`);
+  return {
+    entrada: marcado,
+    passos: [
+      { nome: 'Entrada de mercadoria', ok: true, detalhe: `entrada nº ${rec.id} cancelada (fica registrada como cancelada)` },
+      { nome: 'Estoque da loja', ok: true, detalhe: `${pecas} peça(s) saíram do estoque da loja ${rec.empresa}` },
+      { nome: 'Etiquetas', ok: true, detalhe: `${(tiradas || []).length} etiqueta(s) deixaram de estar na loja` },
+      { nome: 'Transferência', ok: true, detalhe: 'volta para "a receber": a loja pode conferir e receber de novo' },
+    ],
+  };
 }
 
 /** Estoque da loja: saldo por produto (só o que entrou por recebimento, por enquanto). */

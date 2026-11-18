@@ -48,6 +48,8 @@ const confere = await Promise.all(
     return `${t}: ${error ? error.message : 'ok'}`;
   }),
 );
+const canc = await supabase.from('hc_recebimentos_transferencia').select('id, cancelado_em, cancelado_por, cancelamento_motivo').limit(1);
+confere.push(`cancelamento da entrada: ${canc.error ? canc.error.message : 'ok'}`);
 console.log(`
 ${confere.join(' · ')}`);
 console.log(!falhas && confere.every((c) => c.endsWith('ok')) ? 'PRONTO: tabelas do recebimento e do estoque criadas.' : 'TERMINOU COM ERRO: rode de novo (a conexão pode ter caído).');
