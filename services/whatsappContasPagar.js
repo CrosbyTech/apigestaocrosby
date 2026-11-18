@@ -300,7 +300,8 @@ function resumirMensagem(m) {
   };
 }
 
-export async function buscarMensagens({ chatid, number, limit = 50, offset = 0, trackSource } = {}) {
+// comConteudo: devolve também o conteúdo cru (botões, formulários, pagamento) de cada mensagem
+export async function buscarMensagens({ chatid, number, limit = 50, offset = 0, trackSource, comConteudo = false } = {}) {
   let cid = chatid;
   if (!cid && number) {
     const n = normalizarNumero(number);
@@ -311,7 +312,7 @@ export async function buscarMensagens({ chatid, number, limit = 50, offset = 0, 
   if (trackSource) body.track_source = trackSource;
   const data = await chamar('post', '/message/find', { body, contexto: 'buscar mensagens' });
   const msgs = Array.isArray(data?.messages) ? data.messages : [];
-  return { mensagens: msgs.map(resumirMensagem), paginacao: data?.pagination || null };
+  return { mensagens: msgs.map((m) => (comConteudo ? { ...resumirMensagem(m), conteudo: m.content ?? null } : resumirMensagem(m))), paginacao: data?.pagination || null };
 }
 
 export async function baixarMidia(id, { base64 = false } = {}) {

@@ -610,6 +610,185 @@ Esquemas:
 - `reconciledBy` (string) — Quem conciliou.
 - `reconciliationDate` (date-time) — Quando foi conciliado.
 
+## AccountsPayable — `accounts-payable`
+
+Contas a pagar do HeadCoach: duplicatas de fornecedor com documento fiscal, portador, despesa e rateio por centro de custo. A duplicata é um número por empresa + fornecedor e cada lançamento é uma parcela dela: 1/11 e 1/12 são a duplicata 1, parcelas 11 e 12 (em conta mensal, a parcela é o mês do vencimento).
+
+### GET /api/headcoach/accounts-payable/v1/documents
+
+Duplicatas a pagar — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.
+
+Parâmetros:
+- `branchCodeList` (string) — Empresas, separadas por vírgula.
+- `status` (string) — Situação (aceita lista). Valores: Open, Paid, Canceled.
+- `supplierCode` (integer) — Código do fornecedor.
+- `supplierCpfCnpj` (string) — CPF ou CNPJ do fornecedor.
+- `duplicateCode` (integer) — Número da duplicata (use junto com empresa e fornecedor): traz todas as parcelas dela.
+- `installmentCode` (integer) — Parcela.
+- `fiscalDocument` (string) — Documento fiscal exato.
+- `batchId` (string) — Parcelas incluídas na mesma vez.
+- `expenseCode` (string) — Despesa, em qualquer linha do rateio.
+- `costCenterCode` (string) — Centro de custo, em qualquer linha do rateio.
+- `bearerCode` (integer) — Código do portador.
+- `paymentMethod` (string) — Forma de pagamento (aceita lista). Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
+- `forecastType` (string) — Conta real ou previsão. Valores: Real, Forecast.
+- `startIssueDate` (string) — Emitidas a partir de (AAAA-MM-DD).
+- `endIssueDate` (string) — Emitidas até (AAAA-MM-DD).
+- `startDueDate` (string) — Vencimento a partir de (AAAA-MM-DD).
+- `endDueDate` (string) — Vencimento até (AAAA-MM-DD).
+- `startPaymentDate` (string) — Pagas a partir de (AAAA-MM-DD).
+- `endPaymentDate` (string) — Pagas até (AAAA-MM-DD).
+- `startChangeDate` (string) — Alteradas a partir de (AAAA-MM-DD) — para sincronização.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+- `expand` (string) — Listas extras para trazer junto, separadas por vírgula: settlements.
+
+Resposta: página de `PayableDocument`
+
+### GET /api/headcoach/accounts-payable/v1/documents/{documentId}
+
+Duplicatas a pagar — um registro — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.
+
+Parâmetros:
+- `documentId` (caminho, obrigatório) — Identificador da parcela.
+- `expand` (string) — Listas extras para trazer junto, separadas por vírgula: settlements.
+
+Resposta:  `PayableDocument`
+
+### GET /api/headcoach/accounts-payable/v1/settlements
+
+Baixas (pagamentos) — Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.
+
+Parâmetros:
+- `documentId` (integer) — Baixas de uma duplicata.
+- `startPaymentDate` (string) — Pagas a partir de (AAAA-MM-DD).
+- `endPaymentDate` (string) — Pagas até (AAAA-MM-DD).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `PayableSettlement`
+
+### GET /api/headcoach/accounts-payable/v1/expenses
+
+Despesas — Plano de despesas usado nas duplicatas.
+
+Parâmetros:
+- `expenseName` (string) — Parte do nome.
+- `isActive` (boolean) — Só as em uso (true).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `PayableExpense`
+
+### GET /api/headcoach/accounts-payable/v1/expenses/{expenseCode}
+
+Despesas — um registro — Plano de despesas usado nas duplicatas.
+
+Parâmetros:
+- `expenseCode` (caminho, obrigatório) — Código da despesa.
+
+Resposta:  `PayableExpense`
+
+### GET /api/headcoach/accounts-payable/v1/cost-centers
+
+Centros de custo — Centros de custo do rateio: por empresa (loja, matriz) ou por setor.
+
+Parâmetros:
+- `costCenterType` (string) — Tipo (aceita lista). Valores: Branch, Department, Other.
+- `isActive` (boolean) — Só os em uso (true).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `PayableCostCenter`
+
+### GET /api/headcoach/accounts-payable/v1/cost-centers/{costCenterCode}
+
+Centros de custo — um registro — Centros de custo do rateio: por empresa (loja, matriz) ou por setor.
+
+Parâmetros:
+- `costCenterCode` (caminho, obrigatório) — Código do centro de custo.
+
+Resposta:  `PayableCostCenter`
+
+Esquemas:
+
+**PayableSettlement** — Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.
+
+- `settlementId` (integer) — Identificador da baixa.
+- `documentId` (integer) — Duplicata baixada (documentId em /documents).
+- `paymentDate` (date) — Data do pagamento.
+- `documentValue` (number) — Valor original da duplicata.
+- `interestValue` (number) — Juros pagos.
+- `fineValue` (number) — Multa paga.
+- `discountValue` (number) — Desconto obtido.
+- `paidValue` (number) — Valor pago.
+- `paymentMethod` (string) — Como foi pago. Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
+- `account` (string) — Banco / conta de onde saiu.
+- `observation` (string) — Observação.
+- `settledBy` (string) — Usuário que baixou.
+- `settlementDate` (date-time) — Quando a baixa foi lançada.
+
+**PayableDocument** — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.
+
+- `documentId` (integer) — Identificador interno da parcela.
+- `branchCode` (integer) — Empresa.
+- `supplierCode` (integer) — Código do fornecedor (pessoa).
+- `supplierName` (string) — Nome do fornecedor.
+- `supplierCpfCnpj` (string) — CPF ou CNPJ do fornecedor.
+- `duplicateCode` (integer) — Número da duplicata, por empresa + fornecedor.
+- `installmentCode` (integer) — Parcela dentro da duplicata (conta mensal: o mês do vencimento).
+- `duplicateLabel` (string) — Duplicata / parcela, como aparece na tela.
+- `fiscalDocument` (string) — Documento fiscal: número da nota / fatura do fornecedor.
+- `batchId` (string) — Lote: parcelas incluídas na mesma vez.
+- `documentType` (string) — Tipo de documento. Valores: Duplicate, Invoice, BankSlip, Receipt, Other.
+- `bearerCode` (integer) — Código do portador.
+- `bearerName` (string) — Portador.
+- `paymentMethod` (string) — Forma de pagamento prevista. Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
+- `pixKey` (string) — Chave Pix ou Pix copia e cola.
+- `barcode` (string) — Linha digitável do boleto.
+- `expenseCode` (integer) — Despesa (a da linha principal do rateio).
+- `expenseName` (string) — Nome da despesa.
+- `costCenterCode` (integer) — Centro de custo (o da linha principal do rateio).
+- `costCenterName` (string) — Nome do centro de custo.
+- `apportionment` (array) — Rateio por despesa e centro de custo.
+- `forecastType` (string) — Conta real ou previsão. Valores: Real, Forecast.
+- `issueDate` (date) — Emissão.
+- `entryDate` (date) — Entrada (quando foi lançada).
+- `dueDate` (date) — Vencimento.
+- `reference` (string) — Competência (ex.: 10/2026).
+- `value` (number) — Valor da duplicata.
+- `status` (string) — Situação. Vencida = Open com dueDate anterior a hoje. Valores: Open, Paid, Canceled.
+- `paymentDate` (date) — Data do pagamento.
+- `interestValue` (number) — Juros pagos na baixa.
+- `fineValue` (number) — Multa paga na baixa.
+- `discountValue` (number) — Desconto obtido na baixa.
+- `paidValue` (number) — Valor pago.
+- `paymentAccount` (string) — Banco / conta de onde saiu o pagamento.
+- `observation` (string) — Observação.
+- `origin` (string) — De onde veio: manual (tela) ou o robô que capturou a conta (ex.: bot-cosern-whatsapp).
+- `originReference` (string) — Identificador na origem.
+- `createdBy` (string) — Quem incluiu.
+- `createDate` (date-time) — Quando foi incluída.
+- `settledBy` (string) — Quem baixou.
+- `settledDate` (date-time) — Quando foi baixada.
+- `cancelDate` (date-time) — Quando foi cancelada.
+- `cancelReason` (string) — Motivo do cancelamento.
+- `lastChangeDate` (date-time) — Última alteração.
+- `settlements` (array de PayableSettlement) — Baixas da duplicata (só vem com expand=settlements)
+
+**PayableExpense** — Plano de despesas usado nas duplicatas.
+
+- `expenseCode` (integer) — Código da despesa.
+- `expenseName` (string) — Nome da despesa.
+- `isActive` (boolean) — Em uso.
+
+**PayableCostCenter** — Centros de custo do rateio: por empresa (loja, matriz) ou por setor.
+
+- `costCenterCode` (integer) — Código do centro de custo.
+- `costCenterName` (string) — Nome do centro de custo.
+- `costCenterType` (string) — Empresa, setor ou outro. Valores: Branch, Department, Other.
+- `isActive` (boolean) — Em uso.
+
 ## CustomerBalance — `customer-balance`
 
 Saldos dos clientes no HeadCoach, por empresa: Credev (crédito de devolução e troca), adiantamento e cashback, com o extrato de cada movimento. O saldo vale só na empresa em que foi gerado.

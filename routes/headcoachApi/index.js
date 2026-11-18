@@ -16,6 +16,7 @@ import general from './general.js';
 import transaction from './transaction.js';
 import fiscal from './fiscal.js';
 import accountsReceivable from './accountsReceivable.js';
+import accountsPayable from './accountsPayable.js';
 import customerBalance from './customerBalance.js';
 import cashier from './cashier.js';
 import billing from './billing.js';
@@ -25,7 +26,7 @@ import stock from './stock.js';
 import salePanel from './salePanel.js';
 
 // a ordem daqui é a ordem em que os módulos aparecem na documentação
-export const MODULOS = [general, transaction, fiscal, accountsReceivable, customerBalance, cashier, billing, returns, transfer, goodsReceipt, stock, salePanel];
+export const MODULOS = [general, transaction, fiscal, accountsReceivable, accountsPayable, customerBalance, cashier, billing, returns, transfer, goodsReceipt, stock, salePanel];
 
 const router = express.Router();
 

@@ -1,0 +1,5 @@
+# sessão do WhatsApp Web do bot — nunca versionar
+perfil-chrome/
+# prints e mapas das telas (têm dados das contas)
+capturas/
+*.log

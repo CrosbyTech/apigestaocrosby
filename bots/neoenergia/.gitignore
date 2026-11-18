@@ -1,0 +1,5 @@
+# sessão do Chrome logada na Agência Virtual
+perfil-chrome/
+# chamadas gravadas do portal (têm dados das contas)
+mapa/
+*.log

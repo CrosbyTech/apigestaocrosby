@@ -28,6 +28,10 @@
       "description": "Contas a receber do HeadCoach: um título por forma de pagamento da transação (boleto e BlueCard, um por parcela). Fatura = 9.000.000.000 + número da transação."
     },
     {
+      "name": "AccountsPayable",
+      "description": "Contas a pagar do HeadCoach: duplicatas de fornecedor com documento fiscal, portador, despesa e rateio por centro de custo. A duplicata é um número por empresa + fornecedor e cada lançamento é uma parcela dela: 1/11 e 1/12 são a duplicata 1, parcelas 11 e 12 (em conta mensal, a parcela é o mês do vencimento)."
+    },
+    {
       "name": "CustomerBalance",
       "description": "Saldos dos clientes no HeadCoach, por empresa: Credev (crédito de devolução e troca), adiantamento e cashback, com o extrato de cada movimento. O saldo vale só na empresa em que foi gerado."
     },
@@ -1520,6 +1524,454 @@
             "type": "string",
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
+      "PayableSettlement": {
+        "type": "object",
+        "description": "Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.",
+        "properties": {
+          "settlementId": {
+            "description": "Identificador da baixa.",
+            "type": "integer",
+            "nullable": true
+          },
+          "documentId": {
+            "description": "Duplicata baixada (documentId em /documents).",
+            "type": "integer",
+            "nullable": true
+          },
+          "paymentDate": {
+            "description": "Data do pagamento.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "documentValue": {
+            "description": "Valor original da duplicata.",
+            "type": "number",
+            "nullable": true
+          },
+          "interestValue": {
+            "description": "Juros pagos.",
+            "type": "number",
+            "nullable": true
+          },
+          "fineValue": {
+            "description": "Multa paga.",
+            "type": "number",
+            "nullable": true
+          },
+          "discountValue": {
+            "description": "Desconto obtido.",
+            "type": "number",
+            "nullable": true
+          },
+          "paidValue": {
+            "description": "Valor pago.",
+            "type": "number",
+            "nullable": true
+          },
+          "paymentMethod": {
+            "description": "Como foi pago.",
+            "type": "string",
+            "enum": [
+              "Pix",
+              "BankSlip",
+              "Transfer",
+              "DirectDebit",
+              "Card",
+              "Cash",
+              "Other"
+            ],
+            "nullable": true
+          },
+          "account": {
+            "description": "Banco / conta de onde saiu.",
+            "type": "string",
+            "nullable": true
+          },
+          "observation": {
+            "description": "Observação.",
+            "type": "string",
+            "nullable": true
+          },
+          "settledBy": {
+            "description": "Usuário que baixou.",
+            "type": "string",
+            "nullable": true
+          },
+          "settlementDate": {
+            "description": "Quando a baixa foi lançada.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
+      "PayableDocument": {
+        "type": "object",
+        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.",
+        "properties": {
+          "documentId": {
+            "description": "Identificador interno da parcela.",
+            "type": "integer",
+            "nullable": true
+          },
+          "branchCode": {
+            "description": "Empresa.",
+            "type": "integer",
+            "example": 87,
+            "nullable": true
+          },
+          "supplierCode": {
+            "description": "Código do fornecedor (pessoa).",
+            "type": "integer",
+            "example": 184,
+            "nullable": true
+          },
+          "supplierName": {
+            "description": "Nome do fornecedor.",
+            "type": "string",
+            "nullable": true
+          },
+          "supplierCpfCnpj": {
+            "description": "CPF ou CNPJ do fornecedor.",
+            "type": "string",
+            "nullable": true
+          },
+          "duplicateCode": {
+            "description": "Número da duplicata, por empresa + fornecedor.",
+            "type": "integer",
+            "example": 1,
+            "nullable": true
+          },
+          "installmentCode": {
+            "description": "Parcela dentro da duplicata (conta mensal: o mês do vencimento).",
+            "type": "integer",
+            "example": 12,
+            "nullable": true
+          },
+          "duplicateLabel": {
+            "description": "Duplicata / parcela, como aparece na tela.",
+            "type": "string",
+            "example": "1/12",
+            "nullable": true
+          },
+          "fiscalDocument": {
+            "description": "Documento fiscal: número da nota / fatura do fornecedor.",
+            "type": "string",
+            "example": "169814411",
+            "nullable": true
+          },
+          "batchId": {
+            "description": "Lote: parcelas incluídas na mesma vez.",
+            "type": "string",
+            "nullable": true
+          },
+          "documentType": {
+            "description": "Tipo de documento.",
+            "type": "string",
+            "enum": [
+              "Duplicate",
+              "Invoice",
+              "BankSlip",
+              "Receipt",
+              "Other"
+            ],
+            "nullable": true
+          },
+          "bearerCode": {
+            "description": "Código do portador.",
+            "type": "integer",
+            "nullable": true
+          },
+          "bearerName": {
+            "description": "Portador.",
+            "type": "string",
+            "nullable": true
+          },
+          "paymentMethod": {
+            "description": "Forma de pagamento prevista.",
+            "type": "string",
+            "enum": [
+              "Pix",
+              "BankSlip",
+              "Transfer",
+              "DirectDebit",
+              "Card",
+              "Cash",
+              "Other"
+            ],
+            "nullable": true
+          },
+          "pixKey": {
+            "description": "Chave Pix ou Pix copia e cola.",
+            "type": "string",
+            "nullable": true
+          },
+          "barcode": {
+            "description": "Linha digitável do boleto.",
+            "type": "string",
+            "nullable": true
+          },
+          "expenseCode": {
+            "description": "Despesa (a da linha principal do rateio).",
+            "type": "integer",
+            "example": 6010,
+            "nullable": true
+          },
+          "expenseName": {
+            "description": "Nome da despesa.",
+            "type": "string",
+            "nullable": true
+          },
+          "costCenterCode": {
+            "description": "Centro de custo (o da linha principal do rateio).",
+            "type": "integer",
+            "nullable": true
+          },
+          "costCenterName": {
+            "description": "Nome do centro de custo.",
+            "type": "string",
+            "nullable": true
+          },
+          "apportionment": {
+            "description": "Rateio por despesa e centro de custo.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Linha do rateio (chaves em português, como gravado na tela).",
+              "properties": {
+                "despesa_code": {
+                  "type": "integer",
+                  "description": "Código da despesa."
+                },
+                "despesa_nome": {
+                  "type": "string",
+                  "description": "Nome da despesa."
+                },
+                "centro_custo_code": {
+                  "type": "integer",
+                  "description": "Código do centro de custo."
+                },
+                "centro_custo_nome": {
+                  "type": "string",
+                  "description": "Nome do centro de custo."
+                },
+                "percentual": {
+                  "type": "number",
+                  "description": "Percentual da linha (a soma é 100)."
+                },
+                "valor": {
+                  "type": "number",
+                  "description": "Valor da linha (a soma é o valor da duplicata)."
+                }
+              }
+            },
+            "nullable": true
+          },
+          "forecastType": {
+            "description": "Conta real ou previsão.",
+            "type": "string",
+            "enum": [
+              "Real",
+              "Forecast"
+            ],
+            "nullable": true
+          },
+          "issueDate": {
+            "description": "Emissão.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "entryDate": {
+            "description": "Entrada (quando foi lançada).",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "dueDate": {
+            "description": "Vencimento.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "reference": {
+            "description": "Competência (ex.: 10/2026).",
+            "type": "string",
+            "nullable": true
+          },
+          "value": {
+            "description": "Valor da duplicata.",
+            "type": "number",
+            "nullable": true
+          },
+          "status": {
+            "description": "Situação. Vencida = Open com dueDate anterior a hoje.",
+            "type": "string",
+            "enum": [
+              "Open",
+              "Paid",
+              "Canceled"
+            ],
+            "nullable": true
+          },
+          "paymentDate": {
+            "description": "Data do pagamento.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "interestValue": {
+            "description": "Juros pagos na baixa.",
+            "type": "number",
+            "nullable": true
+          },
+          "fineValue": {
+            "description": "Multa paga na baixa.",
+            "type": "number",
+            "nullable": true
+          },
+          "discountValue": {
+            "description": "Desconto obtido na baixa.",
+            "type": "number",
+            "nullable": true
+          },
+          "paidValue": {
+            "description": "Valor pago.",
+            "type": "number",
+            "nullable": true
+          },
+          "paymentAccount": {
+            "description": "Banco / conta de onde saiu o pagamento.",
+            "type": "string",
+            "nullable": true
+          },
+          "observation": {
+            "description": "Observação.",
+            "type": "string",
+            "nullable": true
+          },
+          "origin": {
+            "description": "De onde veio: manual (tela) ou o robô que capturou a conta (ex.: bot-cosern-whatsapp).",
+            "type": "string",
+            "nullable": true
+          },
+          "originReference": {
+            "description": "Identificador na origem.",
+            "type": "string",
+            "nullable": true
+          },
+          "createdBy": {
+            "description": "Quem incluiu.",
+            "type": "string",
+            "nullable": true
+          },
+          "createDate": {
+            "description": "Quando foi incluída.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "settledBy": {
+            "description": "Quem baixou.",
+            "type": "string",
+            "nullable": true
+          },
+          "settledDate": {
+            "description": "Quando foi baixada.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "cancelDate": {
+            "description": "Quando foi cancelada.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "cancelReason": {
+            "description": "Motivo do cancelamento.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastChangeDate": {
+            "description": "Última alteração.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "settlements": {
+            "type": "array",
+            "description": "Baixas da duplicata (só vem com expand=settlements)",
+            "items": {
+              "$ref": "#/components/schemas/PayableSettlement"
+            }
+          }
+        }
+      },
+      "PayableExpense": {
+        "type": "object",
+        "description": "Plano de despesas usado nas duplicatas.",
+        "properties": {
+          "expenseCode": {
+            "description": "Código da despesa.",
+            "type": "integer",
+            "example": 6010,
+            "nullable": true
+          },
+          "expenseName": {
+            "description": "Nome da despesa.",
+            "type": "string",
+            "nullable": true
+          },
+          "isActive": {
+            "description": "Em uso.",
+            "type": "boolean",
+            "nullable": true
+          }
+        }
+      },
+      "PayableCostCenter": {
+        "type": "object",
+        "description": "Centros de custo do rateio: por empresa (loja, matriz) ou por setor.",
+        "properties": {
+          "costCenterCode": {
+            "description": "Código do centro de custo.",
+            "type": "integer",
+            "nullable": true
+          },
+          "costCenterName": {
+            "description": "Nome do centro de custo.",
+            "type": "string",
+            "nullable": true
+          },
+          "costCenterType": {
+            "description": "Empresa, setor ou outro.",
+            "type": "string",
+            "enum": [
+              "Branch",
+              "Department",
+              "Other"
+            ],
+            "nullable": true
+          },
+          "isActive": {
+            "description": "Em uso.",
+            "type": "boolean",
             "nullable": true
           }
         }
@@ -7066,6 +7518,1066 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReceivableReconciliation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/documents": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Duplicatas a pagar",
+        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.",
+        "parameters": [
+          {
+            "name": "branchCodeList",
+            "in": "query",
+            "required": false,
+            "description": "Empresas, separadas por vírgula.",
+            "schema": {
+              "type": "string",
+              "example": "95,99"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Situação (aceita lista). Valores: Open, Paid, Canceled.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Open",
+                "Paid",
+                "Canceled"
+              ]
+            }
+          },
+          {
+            "name": "supplierCode",
+            "in": "query",
+            "required": false,
+            "description": "Código do fornecedor.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "supplierCpfCnpj",
+            "in": "query",
+            "required": false,
+            "description": "CPF ou CNPJ do fornecedor.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "duplicateCode",
+            "in": "query",
+            "required": false,
+            "description": "Número da duplicata (use junto com empresa e fornecedor): traz todas as parcelas dela.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "installmentCode",
+            "in": "query",
+            "required": false,
+            "description": "Parcela.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "fiscalDocument",
+            "in": "query",
+            "required": false,
+            "description": "Documento fiscal exato.",
+            "schema": {
+              "type": "string",
+              "example": "169814411"
+            }
+          },
+          {
+            "name": "batchId",
+            "in": "query",
+            "required": false,
+            "description": "Parcelas incluídas na mesma vez.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expenseCode",
+            "in": "query",
+            "required": false,
+            "description": "Despesa, em qualquer linha do rateio.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "costCenterCode",
+            "in": "query",
+            "required": false,
+            "description": "Centro de custo, em qualquer linha do rateio.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bearerCode",
+            "in": "query",
+            "required": false,
+            "description": "Código do portador.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "paymentMethod",
+            "in": "query",
+            "required": false,
+            "description": "Forma de pagamento (aceita lista). Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pix",
+                "BankSlip",
+                "Transfer",
+                "DirectDebit",
+                "Card",
+                "Cash",
+                "Other"
+              ]
+            }
+          },
+          {
+            "name": "forecastType",
+            "in": "query",
+            "required": false,
+            "description": "Conta real ou previsão. Valores: Real, Forecast.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Real",
+                "Forecast"
+              ]
+            }
+          },
+          {
+            "name": "startIssueDate",
+            "in": "query",
+            "required": false,
+            "description": "Emitidas a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endIssueDate",
+            "in": "query",
+            "required": false,
+            "description": "Emitidas até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "startDueDate",
+            "in": "query",
+            "required": false,
+            "description": "Vencimento a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endDueDate",
+            "in": "query",
+            "required": false,
+            "description": "Vencimento até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "startPaymentDate",
+            "in": "query",
+            "required": false,
+            "description": "Pagas a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endPaymentDate",
+            "in": "query",
+            "required": false,
+            "description": "Pagas até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "startChangeDate",
+            "in": "query",
+            "required": false,
+            "description": "Alteradas a partir de (AAAA-MM-DD) — para sincronização.",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "expand",
+            "in": "query",
+            "required": false,
+            "description": "Listas extras para trazer junto, separadas por vírgula: settlements.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PayableDocument"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/documents/{documentId}": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Duplicatas a pagar — um registro",
+        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "required": true,
+            "description": "Identificador da parcela.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "expand",
+            "in": "query",
+            "required": false,
+            "description": "Listas extras para trazer junto, separadas por vírgula: settlements.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayableDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/settlements": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Baixas (pagamentos)",
+        "description": "Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "query",
+            "required": false,
+            "description": "Baixas de uma duplicata.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "startPaymentDate",
+            "in": "query",
+            "required": false,
+            "description": "Pagas a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endPaymentDate",
+            "in": "query",
+            "required": false,
+            "description": "Pagas até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PayableSettlement"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/expenses": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Despesas",
+        "description": "Plano de despesas usado nas duplicatas.",
+        "parameters": [
+          {
+            "name": "expenseName",
+            "in": "query",
+            "required": false,
+            "description": "Parte do nome.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "isActive",
+            "in": "query",
+            "required": false,
+            "description": "Só as em uso (true).",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PayableExpense"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/expenses/{expenseCode}": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Despesas — um registro",
+        "description": "Plano de despesas usado nas duplicatas.",
+        "parameters": [
+          {
+            "name": "expenseCode",
+            "in": "path",
+            "required": true,
+            "description": "Código da despesa.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayableExpense"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/cost-centers": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Centros de custo",
+        "description": "Centros de custo do rateio: por empresa (loja, matriz) ou por setor.",
+        "parameters": [
+          {
+            "name": "costCenterType",
+            "in": "query",
+            "required": false,
+            "description": "Tipo (aceita lista). Valores: Branch, Department, Other.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Branch",
+                "Department",
+                "Other"
+              ]
+            }
+          },
+          {
+            "name": "isActive",
+            "in": "query",
+            "required": false,
+            "description": "Só os em uso (true).",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PayableCostCenter"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/cost-centers/{costCenterCode}": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Centros de custo — um registro",
+        "description": "Centros de custo do rateio: por empresa (loja, matriz) ou por setor.",
+        "parameters": [
+          {
+            "name": "costCenterCode",
+            "in": "path",
+            "required": true,
+            "description": "Código do centro de custo.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayableCostCenter"
                 }
               }
             }
