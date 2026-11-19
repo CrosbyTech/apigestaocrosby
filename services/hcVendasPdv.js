@@ -40,7 +40,7 @@ export async function vendasPdvHeadcoach({ dmin, dmax, empresas = null }) {
   for (let ini = 0; ; ini += 1000) {
     let q = supabase
       .from('pdv_vendas')
-      .select('id, empresa, tipo_venda, status, total, qtd_pecas, cliente_code, cliente_nome, vendedor_code, vendedor_nome, criado_em, caixa_id, pdv_notas_fiscais(numero, serie, status)')
+      .select('id, empresa, empresa_nome, tipo_venda, status, total, qtd_pecas, cliente_code, cliente_nome, vendedor_code, vendedor_nome, criado_em, caixa_id, pdv_notas_fiscais(numero, serie, status)')
       .eq('origem', 'pdv')
       .eq('status', 'autorizada')
       .gte('criado_em', `${somaDias(de, -3)}T00:00:00Z`)
@@ -76,6 +76,7 @@ export async function vendasPdvHeadcoach({ dmin, dmax, empresas = null }) {
     out.push({
       id: v.id,
       empresa: Number(v.empresa),
+      empresa_nome: v.empresa_nome || null,
       tipo: troca ? 'troca' : 'venda',
       valor: troca ? -total : total,
       qtd: troca ? 0 : 1,
@@ -91,7 +92,8 @@ export async function vendasPdvHeadcoach({ dmin, dmax, empresas = null }) {
   return out;
 }
 
-/** { [empresa]: { invoice_qty, invoice_value, itens_qty } } — o formato do ranking por filial. */
+/** { [empresa]: { invoice_qty, invoice_value, itens_qty, branch_name } } — o formato do ranking por filial.
+ * `branch_name` serve para a loja que só vendeu pelo PDV Crosby no período (o TOTVS não a devolve). */
 export function pdvPorFilial(vendas) {
   const agg = {};
   for (const v of vendas || []) {
@@ -99,6 +101,7 @@ export function pdvPorFilial(vendas) {
     a.invoice_qty += v.qtd;
     a.invoice_value = round2(a.invoice_value + v.valor);
     a.itens_qty += v.pecas;
+    if (v.empresa_nome && !a.branch_name) a.branch_name = v.empresa_nome;
   }
   return agg;
 }

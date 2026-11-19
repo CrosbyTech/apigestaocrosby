@@ -153,7 +153,7 @@ function mergeNonSalesIntoDataRow(dataRow, agg) {
     else {
       map.set(codeNum, {
         branch_code: String(codeNum),
-        branch_name: '',
+        branch_name: extra.branch_name || '',
         invoice_qty: extra.invoice_qty,
         invoice_value: extra.invoice_value,
         itens_qty: extra.itens_qty,
@@ -1080,6 +1080,13 @@ const HC_VAZIO = () => ({
 });
 const FAT_VEND_CACHE = new Map();
 const FAT_VEND_TTL = 30 * 60 * 1000;
+/** Esvazia o cache do faturamento por vendedor (usado quando o vendedor de uma
+ * transação do HeadCoach é trocado: o próximo pedido recalcula). */
+export function limparCacheFaturamentoVendedor() {
+  const n = FAT_VEND_CACHE.size;
+  FAT_VEND_CACHE.clear();
+  return n;
+}
 
 router.post(
   '/sale-panel/faturamento-vendedor',
