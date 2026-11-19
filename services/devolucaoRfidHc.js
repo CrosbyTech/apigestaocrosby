@@ -96,7 +96,14 @@ export async function xmlDaNota(chave) {
       });
       xml = r.data?.mainInvoiceXml ? Buffer.from(r.data.mainInvoiceXml, 'base64').toString('utf8') : null;
     } catch (e) {
-      throw new DevolucaoRfidError(`O TOTVS não entregou o XML da nota ${k.slice(25, 34).replace(/^0+/, '')} (${e.response?.status || e.message})`, 'XML_INDISPONIVEL', 502);
+      const nNota = k.slice(25, 34).replace(/^0+/, '');
+      throw new DevolucaoRfidError(
+        e.response?.status === 404
+          ? `A nota ${nNota} não tem XML no TOTVS (registro sem nota autorizada na SEFAZ): tire essa nota e escolha outra`
+          : `O TOTVS não entregou o XML da nota ${nNota} (${e.response?.status || e.message})`,
+        'XML_INDISPONIVEL',
+        502,
+      );
     }
     origem = 'totvs';
   }
@@ -252,9 +259,32 @@ export async function listarNotasDeVenda({ empresa, cliente, de, ate }) {
       })),
     });
   }
+  // Número/série que o HeadCoach já usou nesta empresa (qualquer situação): a nota
+  // do TOTVS com o mesmo número e outra chave é só registro, sem XML na SEFAZ
+  // (19/11/2026: NF 16494 da 99 no TOTVS dava 404 e travava a devolução).
+  const numerosHc = new Set();
+  const numerosTotvs = [...new Set(totvs.map((n) => Number(n.invoiceCode)).filter(Boolean))];
+  if (numerosTotvs.length) {
+    const { data: usados } = await supabase
+      .from('pdv_notas_fiscais')
+      .select('numero, serie, chave')
+      .eq('empresa', emp)
+      .in('numero', numerosTotvs);
+    for (const u of usados || []) numerosHc.add(`${Number(u.numero)}|${Number(u.serie)}|${String(u.chave || '')}`);
+  }
+  const ehSombraDoHc = (n) =>
+    [...numerosHc].some((k) => {
+      const [num, serie, chave] = k.split('|');
+      return Number(num) === Number(n.invoiceCode) && Number(serie) === Number(n.serialCode) && chave !== String(n.accessKey);
+    });
   let semChave = 0;
+  let sombras = 0;
   for (const n of totvs) {
     if (n.accessKey && chavesHc.has(String(n.accessKey))) continue;
+    if (ehSombraDoHc(n)) {
+      sombras += 1;
+      continue;
+    }
     if (!n.accessKey && n.transactionCode && espelhadas.has(Number(n.transactionCode))) continue;
     if (!chaveValida(n.accessKey)) {
       semChave += 1;
@@ -280,6 +310,7 @@ export async function listarNotasDeVenda({ empresa, cliente, de, ate }) {
     });
   }
   if (semChave) avisos.push(`${semChave} nota(s) do cliente não têm chave eletrônica e não podem ser referenciadas.`);
+  if (sombras) avisos.push(`${sombras} nota(s) do TOTVS ficaram fora: o número já é de uma nota emitida pelo HeadCoach, então o registro do TOTVS não tem XML.`);
   notas.sort((a, b) => String(b.data).localeCompare(String(a.data)) || b.numero - a.numero);
   return { periodo: { de: ini, ate: fim }, avisos, notas };
 }
