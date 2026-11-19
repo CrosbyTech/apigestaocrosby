@@ -4,14 +4,16 @@
 //   • ORIGEM = a loja de quem está logado (owner/admin escolhem qualquer ativa);
 //   • DESTINO = uma das lojas ATIVAS (LOJAS_ATIVAS), diferente da origem;
 //   • as peças são bipadas com o LEITOR RFID de mesa (a loja não tem portal);
-//   • a operação segue o POP "Transferências entre empresas - Varejo", a mesma
-//     regra da tela Transferências (operacaoPop, pela raiz do CNPJ):
-//       7272 mesmo grupo            → TRANSFERÊNCIA (CFOP 5152 / 6152, PIS/COFINS 08)
-//       7273 Crosby → Fábio         → VENDA entre empresas (5102 / 6102)
-//       7280 qualquer um com Irmãos → VENDA entre empresas (5102 / 6102)
-//       o que o POP não prevê (ex.: Fábio → Crosby) NÃO emite;
-//     loja fora dos grupos do POP (98 Shopping Recife) recebe VENDA, como já
-//     acontece na transferência da matriz (decisão de 17/11/2026);
+//   • a operação é decidida pela RAIZ DO CNPJ das duas lojas (regra do Yago,
+//     19/11/2026 — todas são lojas próprias, então nenhum par fica de fora):
+//       MESMA raiz (mesma empresa)   → TRANSFERÊNCIA (CFOP 5152 / 6152, PIS/COFINS 08)
+//       raiz DIFERENTE (outra empresa) → VENDA entre empresas, igual à venda normal
+//                                        (CFOP 5102 / 6102, PIS/COFINS 01)
+//     Ex.: Cidade Jardim (FA MODA) → Ayrton Senna (FERREIRA COMÉRCIO) é VENDA.
+//     O número da operação do POP fica só como referência no registro:
+//     7272 transferência; 7273 venda entre Crosby e Fábio (nos dois sentidos, como
+//     as lojas já faziam no TOTVS); 7280 venda com as empresas dos Irmãos; sem
+//     número quando uma das lojas está fora dos grupos do POP (98 Shopping Recife);
 //   • a NF-e sai pelo HeadCoach, NA EMPRESA DE ORIGEM, pelo mesmo motor da
 //     transferência da matriz (services/transferenciaNota.js → pdvFiscal.js).
 //     Gabarito conferido nas notas que as lojas emitiam no TOTVS (2, 5, 55, 65,
@@ -29,17 +31,20 @@ import axios from 'axios';
 import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
-import { TransferenciaError, operacaoPop, raizCnpj, GRUPOS_POP, OPERACOES_POP } from './transferenciasMercadoria.js';
+import { TransferenciaError, raizCnpj, GRUPOS_POP, OPERACOES_POP } from './transferenciasMercadoria.js';
 import { processarTransferenciaNota } from './transferenciaNota.js';
 import { buscarEmitente, buscarClienteFiscal, buscarProdutoFiscal, buscarConfig, cenarioExpedicao, cfopTransferencia } from './pdvFiscal.js';
 import { registrarEpcs } from '../routes/pdvCrosby.routes.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 
-/** Lojas do varejo que estão ativas (Yago, 19/11/2026). */
-export const LOJAS_ATIVAS = [2, 5, 55, 65, 87, 93, 94, 95, 97, 98];
+/** Lojas do varejo que estão ativas (Yago, 19/11/2026). A 90 (Ayrton Senna) entrou no mesmo dia,
+ * pelo exemplo que ele deu ao corrigir a regra (Cidade Jardim → Ayrton Senna). */
+export const LOJAS_ATIVAS = [2, 5, 55, 65, 87, 90, 93, 94, 95, 97, 98];
 
-// raízes de CNPJ do Simples Nacional (conferido nos XML das notas do TOTVS em 19/11/2026)
-const RAIZES_SIMPLES = ['33592092', '53661116'];
+// raízes de CNPJ das empresas dos Irmãos (Irmãos CR e Irmãos Varejo): são do Simples Nacional
+// (conferido nos XML das notas do TOTVS em 19/11/2026) e, no POP, a venda com elas é a 7280
+const RAIZES_IRMAOS = ['33592092', '53661116'];
+const RAIZES_SIMPLES = RAIZES_IRMAOS;
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const hojeBrasil = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife' }).format(new Date());
@@ -68,33 +73,40 @@ export async function lojasAtivas() {
 }
 
 /**
- * Regra da operação entre duas lojas (POP da tela Transferências).
- * → { permitido, natureza: 'transferencia'|'venda', operacao: 7272|7273|7280|null, descricao, motivo }
+ * Regra da operação entre duas lojas, pela raiz do CNPJ (Yago, 19/11/2026):
+ * mesma raiz → transferência; raiz diferente → venda entre empresas. Só não deixa
+ * a loja transferir para ela mesma.
+ * → { permitido, natureza: 'transferencia'|'venda', operacao: 7272|7273|7280|null, descricao, aplicacao, motivo }
  */
 export function regraEntreLojas(origem, destino) {
   if (!origem || !destino) return { permitido: false, motivo: 'Escolha a loja de origem e a de destino' };
   if (origem.code === destino.code) return { permitido: false, motivo: 'A loja de destino é a própria origem' };
-  // loja fora dos grupos do POP (98): não é transferência, é venda entre empresas
-  if (!GRUPOS_POP[origem.raiz] || !GRUPOS_POP[destino.raiz]) {
+  const grupoOrigem = GRUPOS_POP[origem.raiz] || null;
+  const grupoDestino = GRUPOS_POP[destino.raiz] || null;
+  if (origem.raiz === destino.raiz) {
+    const operacao = grupoOrigem ? 7272 : null;
     return {
       permitido: true,
-      natureza: 'venda',
-      operacao: null,
-      foraDoPop: true,
-      descricao: 'VENDA ENTRE EMPRESAS (loja fora dos grupos do POP)',
-      aplicacao: `${(!GRUPOS_POP[origem.raiz] ? origem : destino).nome} não está nos grupos do POP: a mercadoria vai por venda`,
+      natureza: 'transferencia',
+      operacao,
+      descricao: operacao ? OPERACOES_POP[operacao] : 'TRANSFERÊNCIA ENTRE LOJAS DA MESMA EMPRESA',
+      aplicacao: `As duas lojas são da mesma empresa${grupoOrigem ? ` (${grupoOrigem})` : ''}: transferência`,
+      grupoOrigem,
+      grupoDestino,
     };
   }
-  const pop = operacaoPop(origem.cnpj, destino.cnpj);
-  if (!pop.permitido) return { permitido: false, motivo: pop.motivo, grupoOrigem: pop.grupoOrigem, grupoDestino: pop.grupoDestino };
+  // empresas diferentes: a mercadoria vai por VENDA, como uma venda normal entre empresas
+  const foraDoPop = !grupoOrigem || !grupoDestino;
+  const operacao = foraDoPop ? null : RAIZES_IRMAOS.includes(origem.raiz) || RAIZES_IRMAOS.includes(destino.raiz) ? 7280 : 7273;
   return {
     permitido: true,
-    natureza: Number(pop.operacao) === 7272 ? 'transferencia' : 'venda',
-    operacao: pop.operacao,
-    descricao: OPERACOES_POP[pop.operacao],
-    aplicacao: pop.aplicacao,
-    grupoOrigem: pop.grupoOrigem,
-    grupoDestino: pop.grupoDestino,
+    natureza: 'venda',
+    operacao,
+    foraDoPop,
+    descricao: operacao ? OPERACOES_POP[operacao] : 'VENDA ENTRE EMPRESAS',
+    aplicacao: `Empresas diferentes (${grupoOrigem || origem.nome} → ${grupoDestino || destino.nome}): a mercadoria vai por venda`,
+    grupoOrigem,
+    grupoDestino,
   };
 }
 
@@ -219,7 +231,7 @@ export async function transferirVarejo(user, b = {}) {
   if (!Number(b.vendedorCode)) throw new TransferenciaError('Escolha quem está fazendo a transferência (vendedor)', 'SEM_VENDEDOR');
   if (!Array.isArray(b.itens) || !b.itens.length) throw new TransferenciaError('Nenhuma peça lida', 'SEM_ITENS');
   const { origem, destino, regra } = await lojasDoPar(user, b.origem, b.destino);
-  if (!regra.permitido) throw new TransferenciaError(regra.motivo, 'POP_NAO_PERMITE', 422);
+  if (!regra.permitido) throw new TransferenciaError(regra.motivo, 'PAR_INVALIDO', 422);
   const { emit, cliente, cen, pendencias } = await fiscalDoPar(origem, destino, regra);
   if (pendencias.length) throw new TransferenciaError(pendencias.join(' '), 'DESTINO_INCOMPLETO', 422);
 
