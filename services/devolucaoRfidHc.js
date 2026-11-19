@@ -9,7 +9,8 @@
 // Gabarito da NF-e: as 209 devoluções que a empresa 99 emitiu pelo TOTVS nas
 // operações 7243 / 7244 / 7245 (jun–nov/2026; ex.: NF 12322 × venda 12176):
 //   ide ..... natOp DEVOLUCAO DE VENDA DE PRODUCAO DO ESTABELECIMENTO, tpNF 0,
-//             finNFe 4, indPres 0, idDest/indFinal da venda, uma NFref por nota
+//             finNFe 4, indPres 0, idDest/indFinal da venda, UMA NFref (a SEFAZ
+//             rejeita mais de uma: 255); as demais notas vão no infCpl
 //   itens ... o item da nota de venda (mesmo valor unitário, desconto e alíquotas):
 //             CFOP 5101→1201, 5102→1202, 6101/6107→2201, 6102/6108→2202;
 //             ICMS igual; IPI IPINT CST 03; PIS/COFINS viram Outr CST 50 com os
@@ -758,6 +759,7 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
   const csts = new Set();
   let temIbs = false;
   let temDifal = false;
+  const valorPorChave = new Map(); // valor devolvido por nota referenciada
   for (const a of plano.alocacao) {
     const nota = notas.get(String(a.modeloChave || a.chave));
     const linha = nota.linhas.find((l) => l.nItem === Number(a.nItem));
@@ -767,11 +769,21 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
     dets.push(det);
     for (const k of ['vProd', 'vDesc', 'vBC', 'vICMS', 'vPIS', 'vCOFINS', 'vICMSUFRemet', 'vFCPUFDest', 'vBCIBSCBS', 'vIBSUF', 'vIBSMun', 'vCBS']) tot[k] = r2(tot[k] + soma[k]);
     tot.vNF = r2(tot.vNF + liq);
+    valorPorChave.set(String(a.chave), (valorPorChave.get(String(a.chave)) || 0) + liq);
     aliquotas.add(soma.pICMS);
     csts.add(soma.cstIcms);
     temIbs = temIbs || soma.temIbs;
     temDifal = temDifal || !!det.imposto.ICMSUFDest;
   }
+
+  // A SEFAZ rejeita a devolução com mais de uma NFref (255 "NF-e possui mais de
+  // uma NF referenciada", 19/11/2026: toda devolução com 2+ notas caiu nela).
+  // Vai uma só: a nota do cliente com mais valor devolvido; todas as notas
+  // seguem no infCpl ("DEVOLUCAO REFERENTE A NF. ...").
+  const candidatas = chaves.filter((c) => !avulsasPlano.has(c));
+  const refPrincipal = (candidatas.length ? candidatas : chaves).reduce((m, c) =>
+    (valorPorChave.get(c) || 0) > (valorPorChave.get(m) || 0) ? c : m,
+  );
 
   const ideO = primeira.inf.ide;
   const dhEmi = agoraBrasil();
@@ -825,7 +837,7 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
     indPres: '0',
     procEmi: '0',
     verProc: VERSAO_APLICACAO,
-    NFref: chaves.length === 1 ? { refNFe: chaves[0] } : chaves.map((c) => ({ refNFe: c })),
+    NFref: { refNFe: refPrincipal },
   };
 
   const ICMSTot = {
