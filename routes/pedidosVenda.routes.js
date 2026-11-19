@@ -111,7 +111,9 @@ function linhaDoCard(c, sep, anexo, fats) {
     loja: c.loja,
     forma_pagamento: anexo?.pagamento_manual?.forma || c.forma_pagamento,
     parcelamento: c.parcelamento,
-    valor: c.valor_pedido != null ? Number(c.valor_pedido) : sep ? Number(sep.valor_total) : null,
+    // pedido pago com crédito da loja virtual: o card traz só o que entrou em dinheiro
+    // (pode ser zero); o valor do pedido é o pago + o crédito que o Dryland informa
+    valor: c.valor_pedido != null ? Math.round((Number(c.valor_pedido) + (Number(sep?.pagamento_info?.credito_lv) || 0)) * 100) / 100 : sep ? Number(sep.valor_total) : null,
     nf_numero: c.nf_numero,
     tem_nsu: !!(c.cartao_nsu || c.pix_e2e || anexo?.pagamento_manual?.nsu),
     nsu: anexo?.pagamento_manual?.nsu || c.cartao_nsu || null,

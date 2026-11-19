@@ -186,7 +186,10 @@ function mapearFormas(forma) {
   const f = String(forma || '').toUpperCase();
   const out = [];
   if (/BOLETO/.test(f)) out.push('boleto');
-  if (/CREDEV|CREDITO_LV/.test(f)) out.push('credito_loja');
+  if (/CREDEV/.test(f)) out.push('credito_loja');
+  // crédito da loja virtual (peça não achada na separação de outro pedido): no HeadCoach
+  // esse crédito é o ADIANTAMENTO do cliente na 99 (chamados "Crédito Loja Virtual")
+  if (/CREDITO_LV/.test(f)) out.push('adiantamento');
   if (/PIX/.test(f)) out.push('pix');
   if (/DEBITO|DÉBITO/.test(f)) out.push('debito');
   else if (/CART/.test(f)) out.push('credito');
