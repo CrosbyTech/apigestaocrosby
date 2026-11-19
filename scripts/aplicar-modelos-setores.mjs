@@ -34,7 +34,7 @@ const MODELOS = {
   },
   varejo: {
     setores: ['VAREJO'],
-    paginas: [...BASE, ...CAIXA, '/varejo/recebimento-mercadoria', '/balanco-rfid/arquivos', '/headcoach/estoque', '/tecnologia/pdv-crosby', '/ranking-faturamento'],
+    paginas: [...BASE, ...CAIXA, '/varejo/transferencia-lojas', '/varejo/recebimento-mercadoria', '/balanco-rfid/arquivos', '/headcoach/estoque', '/tecnologia/pdv-crosby', '/ranking-faturamento'],
   },
   expedicao: {
     setores: ['EXPEDICAO'],

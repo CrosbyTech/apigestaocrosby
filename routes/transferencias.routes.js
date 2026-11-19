@@ -18,6 +18,12 @@
 //   GET  /transacoes                    lista (de, ate, empresa, busca)
 //   GET  /transacoes/:id                detalhe com os itens e EPCs
 //   POST /transacoes/:id/status         atualiza a situação vinda do TOTVS
+//
+// Transferência entre lojas do varejo (tela /varejo/transferencia-lojas, exige login):
+//   GET  /varejo/contexto               lojas de origem do usuário e lojas de destino (ativas)
+//   GET  /varejo/preparar?origem=&destino=   regra do POP, CFOP e pendências do par
+//   POST /varejo                        grava e emite a NF-e pela loja de origem
+//   GET  /varejo/ultimas?origem=        últimas transferências das lojas do usuário
 // ============================================================================
 import express from 'express';
 import supabase from '../config/supabase.js';
@@ -38,6 +44,8 @@ import {
 import { prepararTransferenciaNota, transferirComNota, processarTransferenciaNota, EMPRESA_ORIGEM_NOTA } from '../services/transferenciaNota.js';
 import { FiscalError } from '../services/pdvFiscal.js';
 import { empresasRestritasDoUsuario, usuarioDaRequisicao } from '../utils/empresasUsuario.js';
+import { requireAuth } from '../middlewares/auth.js';
+import { contextoVarejo, prepararVarejo, transferirVarejo, ultimasDoVarejo } from '../services/transferenciaVarejo.js';
 
 // vendedor só vê as transferências da(s) própria(s) loja(s), como origem ou
 // destino (Yago, 13/11/2026). null = sem restrição (owner/admin, sem login).
@@ -258,6 +266,59 @@ router.post(
     try {
       const r = await processarTransferenciaNota(parseInt(req.params.vendaId, 10));
       return successResponse(res, r, mensagemNota(r));
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+
+// ─── Transferência entre lojas do varejo (services/transferenciaVarejo.js) ───
+// A loja manda mercadoria para outra loja ativa, bipando com o leitor RFID; a
+// NF-e sai pela loja de origem e nada vai ao TOTVS. Exige login: a origem é a
+// loja de quem está logado.
+router.get(
+  '/varejo/contexto',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await contextoVarejo(req.user);
+      return successResponse(res, r, `${r.origens.length} loja(s) de origem`);
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+router.get(
+  '/varejo/preparar',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await prepararVarejo(req.user, { origem: parseInt(req.query.origem, 10), destino: parseInt(req.query.destino, 10) });
+      return successResponse(res, r, r.regra.permitido ? `${r.naturezaNome}: ${r.origem.nome} → ${r.destino.nome}` : r.regra.motivo);
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+router.get(
+  '/varejo/ultimas',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      const itens = await ultimasDoVarejo(req.user, { origem: parseInt(req.query.origem, 10) || null, limite: parseInt(req.query.limite, 10) || 30 });
+      return successResponse(res, { itens }, `${itens.length} transferência(s)`);
+    } catch (err) {
+      return responder(res, err);
+    }
+  }),
+);
+router.post(
+  '/varejo',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await transferirVarejo(req.user, req.body || {});
+      return successResponse(res, r, mensagemNota(r), 201);
     } catch (err) {
       return responder(res, err);
     }
