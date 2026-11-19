@@ -778,12 +778,17 @@ export async function montarXmlDevolucaoRfid({ venda, cfg, emit, cliente, numero
 
   // A SEFAZ rejeita a devolução com mais de uma NFref (255 "NF-e possui mais de
   // uma NF referenciada", 19/11/2026: toda devolução com 2+ notas caiu nela).
-  // Vai uma só: a nota do cliente com mais valor devolvido; todas as notas
-  // seguem no infCpl ("DEVOLUCAO REFERENTE A NF. ...").
+  // Vai uma só; todas as notas seguem no infCpl ("DEVOLUCAO REFERENTE A NF. ...").
+  // A referenciada precisa ter total >= o da devolução (545 "valor total superior
+  // a NF-e devolvida"): entre as que cobrem, a do cliente com mais valor
+  // devolvido; se nenhuma cobre, a de maior total.
+  const totalDaNota = (c) => num(notas.get(c)?.inf?.total?.ICMSTot?.vNF);
   const candidatas = chaves.filter((c) => !avulsasPlano.has(c));
-  const refPrincipal = (candidatas.length ? candidatas : chaves).reduce((m, c) =>
-    (valorPorChave.get(c) || 0) > (valorPorChave.get(m) || 0) ? c : m,
-  );
+  const universo = candidatas.length ? candidatas : chaves;
+  const cobrem = universo.filter((c) => totalDaNota(c) >= tot.vNF);
+  const refPrincipal = cobrem.length
+    ? cobrem.reduce((m, c) => ((valorPorChave.get(c) || 0) > (valorPorChave.get(m) || 0) ? c : m))
+    : [...universo, ...chaves].reduce((m, c) => (totalDaNota(c) > totalDaNota(m) ? c : m));
 
   const ideO = primeira.inf.ide;
   const dhEmi = agoraBrasil();
