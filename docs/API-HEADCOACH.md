@@ -214,6 +214,32 @@ Parâmetros:
 
 Resposta: página de `TransactionRfidMovement`
 
+### GET /api/headcoach/transaction/v1/seller-changes
+
+Trocas de vendedor das transações — Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.
+
+Parâmetros:
+- `source` (string) — Sale ou Return. Valores: Sale, Return.
+- `transactionCode` (integer) — Trocas de uma transação (use junto com source).
+- `branchCodeList` (string) — Empresas, separadas por vírgula.
+- `sellerCode` (integer) — Trocas que passaram a venda PARA este vendedor.
+- `previousSellerCode` (integer) — Trocas que tiraram a venda DESTE vendedor.
+- `startDate` (string) — Trocadas a partir de (AAAA-MM-DD).
+- `endDate` (string) — Trocadas até (AAAA-MM-DD).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `TransactionSellerChange`
+
+### GET /api/headcoach/transaction/v1/seller-changes/{changeId}
+
+Trocas de vendedor das transações — um registro — Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.
+
+Parâmetros:
+- `changeId` (caminho, obrigatório) — Identificador da troca.
+
+Resposta:  `TransactionSellerChange`
+
 Esquemas:
 
 **TransactionItem** — Uma linha por produto da transação, com a quantidade, o valor e as etiquetas RFID lidas.
@@ -310,7 +336,7 @@ Esquemas:
 - `customerCode` (integer) — Código do cliente (o mesmo do TOTVS). Nulo em NFC-e sem cliente.
 - `customerName` (string) — Nome do cliente.
 - `customerCpfCnpj` (string) — CPF ou CNPJ do cliente, só dígitos.
-- `sellerCode` (integer) — Código do vendedor.
+- `sellerCode` (integer) — Código do vendedor. O owner pode trocar o vendedor depois (histórico em transaction/seller-changes); aqui vem sempre o atual.
 - `sellerName` (string) — Nome do vendedor.
 - `itemQuantity` (number) — Quantidade de peças.
 - `grossValue` (number) — Valor bruto (antes dos descontos).
@@ -334,6 +360,21 @@ Esquemas:
 - `payments` (array de TransactionPayment) — Pagamentos da transação (só vem com expand=payments)
 - `invoices` (array de Invoice) — Notas fiscais da transação (só vem com expand=invoices)
 - `rfidMovements` (array de TransactionRfidMovement) — Etiquetas RFID movimentadas (só vem com expand=rfidMovements)
+
+**TransactionSellerChange** — Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.
+
+- `changeId` (integer) — Identificador da troca.
+- `source` (string) — Onde está a transação. Valores: Sale, Return.
+- `transactionCode` (integer) — Número da transação (Sale) ou da devolução (Return).
+- `transactionReference` (string) — Como a tela de Transações mostra: V + número (venda, faturamento, transferência) ou D + número (devolução).
+- `branchCode` (integer) — Empresa da transação.
+- `previousSellerCode` (integer) — Vendedor anterior.
+- `previousSellerName` (string) — Nome do vendedor anterior.
+- `sellerCode` (integer) — Vendedor novo.
+- `sellerName` (string) — Nome do vendedor novo.
+- `reason` (string) — Motivo informado por quem trocou.
+- `changedBy` (string) — Quem trocou.
+- `changeDate` (date-time) — Quando foi trocado.
 
 ## Fiscal — `fiscal`
 
@@ -1324,7 +1365,7 @@ Resposta:  `TransferRequest`
 
 ### GET /api/headcoach/transfer/v1/transfers
 
-Transferências efetivadas — Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).
+Transferências efetivadas — Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).
 
 Parâmetros:
 - `branchCodeList` (string) — Empresas de origem, separadas por vírgula.
@@ -1346,7 +1387,7 @@ Resposta: página de `Transfer`
 
 ### GET /api/headcoach/transfer/v1/transfers/{transferId}
 
-Transferências efetivadas — um registro — Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).
+Transferências efetivadas — um registro — Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).
 
 Parâmetros:
 - `transferId` (caminho, obrigatório) — Identificador da transferência.
@@ -1356,7 +1397,7 @@ Resposta:  `Transfer`
 
 Esquemas:
 
-**GoodsReceipt** — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.
+**GoodsReceipt** — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).
 
 - `receiptId` (integer) — Identificador do recebimento.
 - `transferId` (integer) — Transferência recebida (transfer/transfers).
@@ -1374,8 +1415,11 @@ Esquemas:
 - `observation` (string) — Observação.
 - `receivedBy` (string) — Quem recebeu.
 - `receiptDate` (date-time) — Quando foi recebido.
+- `canceledDate` (date-time) — Quando o recebimento foi cancelado. Nulo = recebimento valendo.
+- `canceledBy` (string) — Quem cancelou o recebimento.
+- `cancellationReason` (string) — Motivo do cancelamento do recebimento.
 
-**Transfer** — Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).
+**Transfer** — Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).
 
 - `transferId` (integer) — Identificador da transferência.
 - `requestId` (integer) — Solicitação de origem (/requests).
@@ -1405,7 +1449,7 @@ Esquemas:
 - `createdBy` (string) — Quem fez.
 - `transferDate` (date-time) — Data e hora da transferência.
 - `lastChangeDate` (date-time) — Última alteração.
-- `receipts` (array de GoodsReceipt) — Recebimento na loja de destino (só vem com expand=receipts)
+- `receipts` (array de GoodsReceipt) — Recebimentos na loja de destino (o cancelado vem com canceledDate preenchido; vale o que tem canceledDate nulo) (só vem com expand=receipts)
 
 **TransferRequest** — Pedido de transferência entre empresas. Os pedidos de transferência do varejo no Dryland entram aqui sozinhos (`source` = dryland, `sourceKey` = chave do pedido lá). Quando a mercadoria sai, a solicitação ganha a transação e a nota e aparece em /transfers.
 
@@ -1444,7 +1488,7 @@ Entrada de mercadoria nas lojas: a loja confere o que chegou (por etiqueta RFID 
 
 ### GET /api/headcoach/goods-receipt/v1/receipts
 
-Recebimentos de mercadoria — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.
+Recebimentos de mercadoria — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).
 
 Parâmetros:
 - `branchCodeList` (string) — Lojas que receberam, separadas por vírgula.
@@ -1453,6 +1497,7 @@ Parâmetros:
 - `invoiceCode` (integer) — Número da nota.
 - `startDate` (string) — Recebidos a partir de (AAAA-MM-DD).
 - `endDate` (string) — Recebidos até (AAAA-MM-DD).
+- `isCanceled` (string) — false = só os recebimentos valendo; true = só os cancelados. Sem o filtro vêm os dois.
 - `page` (integer) — Página (começa em 1).
 - `pageSize` (integer) — Itens por página (até 1000).
 
@@ -1460,7 +1505,7 @@ Resposta: página de `GoodsReceipt`
 
 ### GET /api/headcoach/goods-receipt/v1/receipts/{receiptId}
 
-Recebimentos de mercadoria — um registro — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.
+Recebimentos de mercadoria — um registro — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).
 
 Parâmetros:
 - `receiptId` (caminho, obrigatório) — Identificador do recebimento.
@@ -1469,7 +1514,7 @@ Resposta:  `GoodsReceipt`
 
 Esquemas:
 
-**GoodsReceipt** — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.
+**GoodsReceipt** — Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).
 
 - `receiptId` (integer) — Identificador do recebimento.
 - `transferId` (integer) — Transferência recebida (transfer/transfers).
@@ -1487,6 +1532,9 @@ Esquemas:
 - `observation` (string) — Observação.
 - `receivedBy` (string) — Quem recebeu.
 - `receiptDate` (date-time) — Quando foi recebido.
+- `canceledDate` (date-time) — Quando o recebimento foi cancelado. Nulo = recebimento valendo.
+- `canceledBy` (string) — Quem cancelou o recebimento.
+- `cancellationReason` (string) — Motivo do cancelamento do recebimento.
 
 ## Stock — `stock`
 
@@ -1506,13 +1554,13 @@ Resposta: página de `StockBalance`
 
 ### GET /api/headcoach/stock/v1/movements
 
-Movimentos de estoque — Cada entrada no estoque da loja. Hoje o único tipo é a entrada pelo Recebimento de Mercadoria (TransferReceipt).
+Movimentos de estoque — Cada movimento no estoque da loja: `TransferReceipt` é a entrada pelo Recebimento de Mercadoria; `ReceiptReversal` é o estorno, com quantidade negativa, quando esse recebimento é cancelado (goods-receipt/receipts com `canceledDate`).
 
 Parâmetros:
 - `branchCodeList` (string) — Empresas, separadas por vírgula.
 - `productCode` (integer) — Produto.
 - `receiptId` (integer) — Movimentos de um recebimento.
-- `movementType` (string) — Tipo do movimento. Valores: TransferReceipt.
+- `movementType` (string) — Tipo do movimento. Valores: TransferReceipt, ReceiptReversal.
 - `startDate` (string) — A partir de (AAAA-MM-DD).
 - `endDate` (string) — Até (AAAA-MM-DD).
 - `page` (integer) — Página (começa em 1).
@@ -1596,7 +1644,7 @@ Esquemas:
 - `rfidTagQuantity` (integer) — Etiquetas RFID deste produto que entraram na loja.
 - `lastMovementDate` (date-time) — 
 
-**StockMovement** — Cada entrada no estoque da loja. Hoje o único tipo é a entrada pelo Recebimento de Mercadoria (TransferReceipt).
+**StockMovement** — Cada movimento no estoque da loja: `TransferReceipt` é a entrada pelo Recebimento de Mercadoria; `ReceiptReversal` é o estorno, com quantidade negativa, quando esse recebimento é cancelado (goods-receipt/receipts com `canceledDate`).
 
 - `movementId` (integer) — Identificador do movimento.
 - `branchCode` (integer) — Empresa.
@@ -1604,7 +1652,7 @@ Esquemas:
 - `productName` (string) — Nome do produto.
 - `quantity` (number) — Quantidade (positivo entra).
 - `rfidTag` (string) — Etiqueta RFID, quando a peça foi lida.
-- `movementType` (string) — Tipo do movimento. Valores: TransferReceipt.
+- `movementType` (string) — Tipo do movimento. Valores: TransferReceipt, ReceiptReversal.
 - `receiptId` (integer) — Recebimento que gerou (goods-receipt/receipts).
 - `createdBy` (string) — Quem fez.
 - `movementDate` (date-time) — Quando aconteceu.
@@ -1708,7 +1756,7 @@ Resposta: página de `SaleTotalsDay`
 
 ### GET /api/headcoach/sale-panel/v1/exchange-coupons
 
-Cupons de troca — Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.
+Cupons de troca — Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.
 
 Parâmetros:
 - `branchCodeList` (string) — Empresas, separadas por vírgula.
@@ -1723,7 +1771,7 @@ Resposta: página de `ExchangeCoupon`
 
 ### GET /api/headcoach/sale-panel/v1/exchange-coupons/{couponCode}
 
-Cupons de troca — um registro — Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.
+Cupons de troca — um registro — Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.
 
 Parâmetros:
 - `couponCode` (caminho, obrigatório) — Código impresso no cupom.
@@ -1806,7 +1854,7 @@ Esquemas:
 - `averageTicket` (number) — Ticket médio (valor das vendas ÷ número de vendas).
 - `itemsPerSale` (number) — Peças por venda.
 
-**ExchangeCoupon** — Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.
+**ExchangeCoupon** — Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.
 
 - `couponCode` (string) — Código impresso no cupom.
 - `branchCode` (integer) — Empresa da venda.
@@ -1818,7 +1866,7 @@ Esquemas:
 - `sellerCode` (integer) — Vendedor.
 - `sellerName` (string) — Nome do vendedor.
 - `items` (array) — Peças da venda.
-- `uses` (array) — Peças já trocadas com este cupom.
+- `uses` (array) — Peças já trocadas com este cupom (troca de presente), uma linha por peça de cada troca, com as chaves como gravado na tela. O uso de uma troca cancelada ou rejeitada continua na lista, mas não conta: confira a situação da transação em `transacao_code`.
 - `createdBy` (string) — Quem gerou.
 - `createdDate` (date-time) — Quando foi gerado.
 

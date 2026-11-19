@@ -1,7 +1,7 @@
 // API HEADCOACH › transaction — toda transação que o HeadCoach registra.
 import { criarModulo, f, q } from './_engine.js';
 import { INVOICE } from './fiscal.js';
-import { TRANSACTION_STATUS, TRANSACTION_INTERNAL_STATUS, SALE_TYPE, CHANNEL, PAYMENT_METHOD, RFID_MOVEMENT, inverso } from './_maps.js';
+import { TRANSACTION_STATUS, TRANSACTION_INTERNAL_STATUS, SALE_TYPE, CHANNEL, PAYMENT_METHOD, RFID_MOVEMENT, SELLER_CHANGE_SOURCE, inverso } from './_maps.js';
 
 const modulo = criarModulo({
   nome: 'transaction',
@@ -143,7 +143,7 @@ modulo.recurso({
     f('customerCode', 'cliente_code', 'integer', 'Código do cliente (o mesmo do TOTVS). Nulo em NFC-e sem cliente.'),
     f('customerName', 'cliente_nome', 'string', 'Nome do cliente.'),
     f('customerCpfCnpj', 'cliente_cpf_cnpj', 'string', 'CPF ou CNPJ do cliente, só dígitos.'),
-    f('sellerCode', 'vendedor_code', 'integer', 'Código do vendedor.'),
+    f('sellerCode', 'vendedor_code', 'integer', 'Código do vendedor. O owner pode trocar o vendedor depois (histórico em transaction/seller-changes); aqui vem sempre o atual.'),
     f('sellerName', 'vendedor_nome', 'string', 'Nome do vendedor.'),
     f('itemQuantity', 'qtd_pecas', 'number', 'Quantidade de peças.'),
     f('grossValue', 'subtotal', 'number', 'Valor bruto (antes dos descontos).'),
@@ -198,6 +198,43 @@ modulo.recurso({
     { path: '/payments', resource: PAYMENT, fk: 'venda_id', summary: 'Pagamentos de uma transação' },
     { path: '/invoices', resource: INVOICE, fk: 'venda_id', summary: 'Notas fiscais de uma transação' },
     { path: '/rfid-movements', resource: RFID, fk: 'venda_id', summary: 'Etiquetas RFID de uma transação' },
+  ],
+});
+
+// Trocas de vendedor feitas pelo owner na tela de Transações (Yago, 19/11/2026).
+// A tabela guarda vendas (pdv_vendas) e devoluções (devolucoes_transacoes) juntas,
+// por isso é um recurso próprio e não um expand de /transactions.
+modulo.recurso({
+  name: 'TransactionSellerChange',
+  path: '/seller-changes',
+  table: 'hc_transacoes_vendedor_alteracoes',
+  summary: 'Trocas de vendedor das transações',
+  description:
+    'Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.',
+  key: [{ param: 'changeId', col: 'id', type: 'integer', description: 'Identificador da troca.' }],
+  order: [['id', false]],
+  fields: [
+    f('changeId', 'id', 'integer', 'Identificador da troca.'),
+    f('source', 'fonte', 'string', 'Onde está a transação.', { map: SELLER_CHANGE_SOURCE }),
+    f('transactionCode', 'transacao_id', 'integer', 'Número da transação (Sale) ou da devolução (Return).', { example: 244 }),
+    f('transactionReference', 'transacao', 'string', 'Como a tela de Transações mostra: V + número (venda, faturamento, transferência) ou D + número (devolução).', { example: 'V244' }),
+    f('branchCode', 'empresa', 'integer', 'Empresa da transação.', { example: 95 }),
+    f('previousSellerCode', 'de_code', 'integer', 'Vendedor anterior.'),
+    f('previousSellerName', 'de_nome', 'string', 'Nome do vendedor anterior.'),
+    f('sellerCode', 'para_code', 'integer', 'Vendedor novo.'),
+    f('sellerName', 'para_nome', 'string', 'Nome do vendedor novo.'),
+    f('reason', 'motivo', 'string', 'Motivo informado por quem trocou.'),
+    f('changedBy', 'alterado_por', 'string', 'Quem trocou.'),
+    f('changeDate', 'alterado_em', 'date-time', 'Quando foi trocado.'),
+  ],
+  filters: [
+    q('source', 'enum', 'fonte', 'Sale ou Return.', { map: inverso(SELLER_CHANGE_SOURCE) }),
+    q('transactionCode', 'int', 'transacao_id', 'Trocas de uma transação (use junto com source).'),
+    q('branchCodeList', 'intList', 'empresa', 'Empresas, separadas por vírgula.'),
+    q('sellerCode', 'int', 'para_code', 'Trocas que passaram a venda PARA este vendedor.'),
+    q('previousSellerCode', 'int', 'de_code', 'Trocas que tiraram a venda DESTE vendedor.'),
+    q('startDate', 'startDate', 'alterado_em', 'Trocadas a partir de (AAAA-MM-DD).'),
+    q('endDate', 'endDate', 'alterado_em', 'Trocadas até (AAAA-MM-DD).'),
   ],
 });
 

@@ -21,7 +21,7 @@ const RECEIPT = {
   path: '/receipts',
   table: 'hc_recebimentos_transferencia',
   summary: 'Recebimentos de mercadoria',
-  description: 'Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.',
+  description: 'Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).',
   key: [{ param: 'receiptId', col: 'id', type: 'integer', description: 'Identificador do recebimento.' }],
   order: [['id', false]],
   fields: [
@@ -41,6 +41,9 @@ const RECEIPT = {
     f('observation', 'observacao', 'string', 'Observação.'),
     f('receivedBy', 'recebido_por', 'string', 'Quem recebeu.'),
     f('receiptDate', 'recebido_em', 'date-time', 'Quando foi recebido.'),
+    f('canceledDate', 'cancelado_em', 'date-time', 'Quando o recebimento foi cancelado. Nulo = recebimento valendo.'),
+    f('canceledBy', 'cancelado_por', 'string', 'Quem cancelou o recebimento.'),
+    f('cancellationReason', 'cancelamento_motivo', 'string', 'Motivo do cancelamento do recebimento.'),
   ],
   filters: [
     q('branchCodeList', 'intList', 'empresa', 'Lojas que receberam, separadas por vírgula.'),
@@ -49,6 +52,12 @@ const RECEIPT = {
     q('invoiceCode', 'int', 'nf_numero', 'Número da nota.'),
     q('startDate', 'startDate', 'recebido_em', 'Recebidos a partir de (AAAA-MM-DD).'),
     q('endDate', 'endDate', 'recebido_em', 'Recebidos até (AAAA-MM-DD).'),
+    q('isCanceled', 'custom', null, 'false = só os recebimentos valendo; true = só os cancelados. Sem o filtro vêm os dois.', {
+      apply: (qy, v, ruim) => {
+        if (!/^(true|false|1|0)$/i.test(v)) ruim('Esperado true ou false.');
+        return /^(true|1)$/i.test(v) ? qy.not('cancelado_em', 'is', null) : qy.is('cancelado_em', null);
+      },
+    }),
   ],
 };
 
@@ -58,7 +67,7 @@ const TRANSFER = {
   table: 'transferencias_transacoes',
   summary: 'Transferências efetivadas',
   description:
-    'Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).',
+    'Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).',
   key: [{ param: 'transferId', col: 'id', type: 'integer', description: 'Identificador da transferência.' }],
   order: [['id', false]],
   fields: [
@@ -104,7 +113,7 @@ const TRANSFER = {
     q('endDate', 'endDate', 'criado_em', 'Feitas até (AAAA-MM-DD).'),
     q('startChangeDate', 'startDate', 'atualizado_em', 'Alteradas a partir de (AAAA-MM-DD) — para sincronização.'),
   ],
-  expand: { receipts: { resource: RECEIPT, fk: 'transferencia_transacao_id', description: 'Recebimento na loja de destino' } },
+  expand: { receipts: { resource: RECEIPT, fk: 'transferencia_transacao_id', description: 'Recebimentos na loja de destino (o cancelado vem com canceledDate preenchido; vale o que tem canceledDate nulo)' } },
 };
 
 transfer.recurso({

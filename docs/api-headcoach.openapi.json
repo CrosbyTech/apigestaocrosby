@@ -797,7 +797,7 @@
             "nullable": true
           },
           "sellerCode": {
-            "description": "Código do vendedor.",
+            "description": "Código do vendedor. O owner pode trocar o vendedor depois (histórico em transaction/seller-changes); aqui vem sempre o atual.",
             "type": "integer",
             "nullable": true
           },
@@ -966,6 +966,81 @@
             "items": {
               "$ref": "#/components/schemas/TransactionRfidMovement"
             }
+          }
+        }
+      },
+      "TransactionSellerChange": {
+        "type": "object",
+        "description": "Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.",
+        "properties": {
+          "changeId": {
+            "description": "Identificador da troca.",
+            "type": "integer",
+            "nullable": true
+          },
+          "source": {
+            "description": "Onde está a transação.",
+            "type": "string",
+            "enum": [
+              "Sale",
+              "Return"
+            ],
+            "nullable": true
+          },
+          "transactionCode": {
+            "description": "Número da transação (Sale) ou da devolução (Return).",
+            "type": "integer",
+            "example": 244,
+            "nullable": true
+          },
+          "transactionReference": {
+            "description": "Como a tela de Transações mostra: V + número (venda, faturamento, transferência) ou D + número (devolução).",
+            "type": "string",
+            "example": "V244",
+            "nullable": true
+          },
+          "branchCode": {
+            "description": "Empresa da transação.",
+            "type": "integer",
+            "example": 95,
+            "nullable": true
+          },
+          "previousSellerCode": {
+            "description": "Vendedor anterior.",
+            "type": "integer",
+            "nullable": true
+          },
+          "previousSellerName": {
+            "description": "Nome do vendedor anterior.",
+            "type": "string",
+            "nullable": true
+          },
+          "sellerCode": {
+            "description": "Vendedor novo.",
+            "type": "integer",
+            "nullable": true
+          },
+          "sellerName": {
+            "description": "Nome do vendedor novo.",
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "description": "Motivo informado por quem trocou.",
+            "type": "string",
+            "nullable": true
+          },
+          "changedBy": {
+            "description": "Quem trocou.",
+            "type": "string",
+            "nullable": true
+          },
+          "changeDate": {
+            "description": "Quando foi trocado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
           }
         }
       },
@@ -3340,7 +3415,7 @@
       },
       "GoodsReceipt": {
         "type": "object",
-        "description": "Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.",
+        "description": "Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).",
         "properties": {
           "receiptId": {
             "description": "Identificador do recebimento.",
@@ -3433,12 +3508,29 @@
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
             "nullable": true
+          },
+          "canceledDate": {
+            "description": "Quando o recebimento foi cancelado. Nulo = recebimento valendo.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "canceledBy": {
+            "description": "Quem cancelou o recebimento.",
+            "type": "string",
+            "nullable": true
+          },
+          "cancellationReason": {
+            "description": "Motivo do cancelamento do recebimento.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
       "Transfer": {
         "type": "object",
-        "description": "Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).",
+        "description": "Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).",
         "properties": {
           "transferId": {
             "description": "Identificador da transferência.",
@@ -3613,7 +3705,7 @@
           },
           "receipts": {
             "type": "array",
-            "description": "Recebimento na loja de destino (só vem com expand=receipts)",
+            "description": "Recebimentos na loja de destino (o cancelado vem com canceledDate preenchido; vale o que tem canceledDate nulo) (só vem com expand=receipts)",
             "items": {
               "$ref": "#/components/schemas/GoodsReceipt"
             }
@@ -3826,7 +3918,7 @@
       },
       "StockMovement": {
         "type": "object",
-        "description": "Cada entrada no estoque da loja. Hoje o único tipo é a entrada pelo Recebimento de Mercadoria (TransferReceipt).",
+        "description": "Cada movimento no estoque da loja: `TransferReceipt` é a entrada pelo Recebimento de Mercadoria; `ReceiptReversal` é o estorno, com quantidade negativa, quando esse recebimento é cancelado (goods-receipt/receipts com `canceledDate`).",
         "properties": {
           "movementId": {
             "description": "Identificador do movimento.",
@@ -3862,7 +3954,8 @@
             "description": "Tipo do movimento.",
             "type": "string",
             "enum": [
-              "TransferReceipt"
+              "TransferReceipt",
+              "ReceiptReversal"
             ],
             "nullable": true
           },
@@ -4261,7 +4354,7 @@
       },
       "ExchangeCoupon": {
         "type": "object",
-        "description": "Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.",
+        "description": "Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.",
         "properties": {
           "couponCode": {
             "description": "Código impresso no cupom.",
@@ -4330,11 +4423,38 @@
             "nullable": true
           },
           "uses": {
-            "description": "Peças já trocadas com este cupom.",
+            "description": "Peças já trocadas com este cupom (troca de presente), uma linha por peça de cada troca, com as chaves como gravado na tela. O uso de uma troca cancelada ou rejeitada continua na lista, mas não conta: confira a situação da transação em `transacao_code`.",
             "type": "array",
             "items": {
               "type": "object",
-              "additionalProperties": true
+              "properties": {
+                "productCode": {
+                  "type": "integer",
+                  "description": "Produto trocado."
+                },
+                "quantity": {
+                  "type": "number",
+                  "description": "Quantidade trocada."
+                },
+                "transacao_code": {
+                  "type": "integer",
+                  "description": "Transação da troca no HeadCoach (transaction/transactions)."
+                },
+                "empresa": {
+                  "type": "integer",
+                  "description": "Loja onde a troca foi feita."
+                },
+                "em": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Quando foi trocado."
+                },
+                "por": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Quem fez a troca."
+                }
+              }
             },
             "nullable": true
           },
@@ -6151,6 +6271,290 @@
                 "example": {
                   "code": "Unauthorized",
                   "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/transaction/v1/seller-changes": {
+      "get": {
+        "tags": [
+          "Transaction"
+        ],
+        "summary": "Trocas de vendedor das transações",
+        "description": "Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "description": "Sale ou Return. Valores: Sale, Return.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Sale",
+                "Return"
+              ]
+            }
+          },
+          {
+            "name": "transactionCode",
+            "in": "query",
+            "required": false,
+            "description": "Trocas de uma transação (use junto com source).",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "branchCodeList",
+            "in": "query",
+            "required": false,
+            "description": "Empresas, separadas por vírgula.",
+            "schema": {
+              "type": "string",
+              "example": "95,99"
+            }
+          },
+          {
+            "name": "sellerCode",
+            "in": "query",
+            "required": false,
+            "description": "Trocas que passaram a venda PARA este vendedor.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "previousSellerCode",
+            "in": "query",
+            "required": false,
+            "description": "Trocas que tiraram a venda DESTE vendedor.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": false,
+            "description": "Trocadas a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": false,
+            "description": "Trocadas até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TransactionSellerChange"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/transaction/v1/seller-changes/{changeId}": {
+      "get": {
+        "tags": [
+          "Transaction"
+        ],
+        "summary": "Trocas de vendedor das transações — um registro",
+        "description": "Histórico de quando o vendedor de uma transação foi trocado pela tela de Transações (só o owner troca). A troca vale para o ranking, o New Forecast e o contas a receber: `sellerCode` de transaction/transactions e de accounts-receivable/documents já vem com o vendedor NOVO. `source` diz onde está a transação: Sale = transaction/transactions (`transactionCode`); Return = return/returns (`transactionCode` é o `returnId`). Para sincronizar, leia por `startDate` (data da troca): a transação cancelada e a devolução não mudam de `lastChangeDate` quando o vendedor é trocado.",
+        "parameters": [
+          {
+            "name": "changeId",
+            "in": "path",
+            "required": true,
+            "description": "Identificador da troca.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionSellerChange"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
                   "detailedMessage": null
                 }
               }
@@ -11549,7 +11953,7 @@
           "Transfer"
         ],
         "summary": "Transferências efetivadas",
-        "description": "Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).",
+        "description": "Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -11798,7 +12202,7 @@
           "Transfer"
         ],
         "summary": "Transferências efetivadas — um registro",
-        "description": "Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja).",
+        "description": "Saída de mercadoria de uma empresa para outra, com a nota emitida pelo HeadCoach. `nature` diz se saiu como transferência ou como venda da matriz para a loja (lojas de outro CNPJ recebem por venda). `destinationBranchCode` 0 significa destino fora do cadastro de empresas: nesse caso o destino é achado pelo `customerCode` (a pessoa da loja). Desde 19/11/2026 a origem (`branchCode`) também pode ser uma LOJA do varejo (tela Transferência entre Lojas): a nota sai pela loja de origem e `operationCode` traz a operação do POP (7272 transferência no mesmo grupo de CNPJ; 7273 e 7280 venda entre empresas; nulo quando o destino está fora dos grupos do POP). Nas saídas da matriz (99) `operationCode` é 8400 (transferência) ou 8405 (venda).",
         "parameters": [
           {
             "name": "transferId",
@@ -11899,7 +12303,7 @@
           "GoodsReceipt"
         ],
         "summary": "Recebimentos de mercadoria",
-        "description": "Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.",
+        "description": "Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -11958,6 +12362,15 @@
               "type": "string",
               "format": "date",
               "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "isCanceled",
+            "in": "query",
+            "required": false,
+            "description": "false = só os recebimentos valendo; true = só os cancelados. Sem o filtro vêm os dois.",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -12078,7 +12491,7 @@
           "GoodsReceipt"
         ],
         "summary": "Recebimentos de mercadoria — um registro",
-        "description": "Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements.",
+        "description": "Conferência feita pela loja de destino. `missingQuantity` é o que a nota trazia e não chegou; `unexpectedQuantity` é o que chegou sem estar na nota. Cada recebimento gera os movimentos de estoque em stock/movements. Recebimento cancelado continua na lista, com `canceledDate` preenchido: o estoque dele é estornado (stock/movements, `ReceiptReversal`), as etiquetas saem da loja e a transferência volta a ficar a receber — por isso uma transferência pode ter mais de um recebimento, e só vale o que tem `canceledDate` nulo (`isCanceled=false`).",
         "parameters": [
           {
             "name": "receiptId",
@@ -12306,7 +12719,7 @@
           "Stock"
         ],
         "summary": "Movimentos de estoque",
-        "description": "Cada entrada no estoque da loja. Hoje o único tipo é a entrada pelo Recebimento de Mercadoria (TransferReceipt).",
+        "description": "Cada movimento no estoque da loja: `TransferReceipt` é a entrada pelo Recebimento de Mercadoria; `ReceiptReversal` é o estorno, com quantidade negativa, quando esse recebimento é cancelado (goods-receipt/receipts com `canceledDate`).",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -12340,11 +12753,12 @@
             "name": "movementType",
             "in": "query",
             "required": false,
-            "description": "Tipo do movimento. Valores: TransferReceipt.",
+            "description": "Tipo do movimento. Valores: TransferReceipt, ReceiptReversal.",
             "schema": {
               "type": "string",
               "enum": [
-                "TransferReceipt"
+                "TransferReceipt",
+                "ReceiptReversal"
               ]
             }
           },
@@ -13712,7 +14126,7 @@
           "SalePanel"
         ],
         "summary": "Cupons de troca",
-        "description": "Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.",
+        "description": "Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -13882,7 +14296,7 @@
           "SalePanel"
         ],
         "summary": "Cupons de troca — um registro",
-        "description": "Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.",
+        "description": "Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.",
         "parameters": [
           {
             "name": "couponCode",

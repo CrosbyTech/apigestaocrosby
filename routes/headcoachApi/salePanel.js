@@ -134,7 +134,7 @@ modulo.recurso({
   path: '/exchange-coupons',
   table: 'pdv_cupons_troca',
   summary: 'Cupons de troca',
-  description: 'Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS.',
+  description: 'Cupom entregue ao cliente junto com a nota da venda (serve para presente: não mostra valores). `transactionCode` é a transação do HeadCoach nos cupons novos; nos antigos, do tempo em que a venda ia ao TOTVS, é a transação do TOTVS. Na troca de presente o caixa lê o código do cupom: a troca é conferida contra a venda do cupom e cada peça trocada fica anotada em `uses`.',
   key: [{ param: 'couponCode', col: 'codigo', type: 'string', description: 'Código impresso no cupom.' }],
   order: [['id', false]],
   fields: [
@@ -148,7 +148,19 @@ modulo.recurso({
     f('sellerCode', 'vendedor_code', 'integer', 'Vendedor.'),
     f('sellerName', 'vendedor_nome', 'string', 'Nome do vendedor.'),
     f('items', 'itens', 'array', 'Peças da venda.', { items: { type: 'object', properties: { productCode: { type: 'integer' }, name: { type: 'string' }, quantity: { type: 'number' } } } }),
-    f('uses', 'usos', 'array', 'Peças já trocadas com este cupom.', { items: { type: 'object', additionalProperties: true } }),
+    f('uses', 'usos', 'array', 'Peças já trocadas com este cupom (troca de presente), uma linha por peça de cada troca, com as chaves como gravado na tela. O uso de uma troca cancelada ou rejeitada continua na lista, mas não conta: confira a situação da transação em `transacao_code`.', {
+      items: {
+        type: 'object',
+        properties: {
+          productCode: { type: 'integer', description: 'Produto trocado.' },
+          quantity: { type: 'number', description: 'Quantidade trocada.' },
+          transacao_code: { type: 'integer', description: 'Transação da troca no HeadCoach (transaction/transactions).' },
+          empresa: { type: 'integer', description: 'Loja onde a troca foi feita.' },
+          em: { type: 'string', format: 'date-time', description: 'Quando foi trocado.' },
+          por: { type: 'string', nullable: true, description: 'Quem fez a troca.' },
+        },
+      },
+    }),
     f('createdBy', 'criado_por', 'string', 'Quem gerou.'),
     f('createdDate', 'criado_em', 'date-time', 'Quando foi gerado.'),
   ],

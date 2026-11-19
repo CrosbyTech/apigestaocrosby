@@ -30,6 +30,8 @@ export const PAYMENT_METHOD_INFO = [
 
 export const TRANSACTION_STATUS = { registrada: 'InProgress', emitindo: 'InProgress', rejeitada: 'InProgress', autorizada: 'Attended', cancelada: 'Canceled' };
 export const TRANSACTION_INTERNAL_STATUS = { registrada: 'Registered', emitindo: 'Issuing', rejeitada: 'InvoiceRejected', autorizada: 'InvoiceAuthorized', cancelada: 'Canceled' };
+// troca de vendedor: onde está a transação (pdv_vendas ou devolucoes_transacoes)
+export const SELLER_CHANGE_SOURCE = { venda: 'Sale', devolucao: 'Return' };
 export const SALE_TYPE = { nfce: 'NFCe', nfe: 'NFe', troca: 'Exchange' };
 export const CHANNEL = { revenda: 'Reseller', franquias: 'Franchise', varejo: 'Retail', mtm: 'Multibrand', transferencia: 'Transfer', devolucao: 'Return', geral: 'General' };
 
@@ -66,7 +68,7 @@ export const TRANSFER_REQUEST_STATUS = { aguardando_transferencia: 'AwaitingTran
 export const TRANSFER_LOCATION = { origem: 'Origin', em_transito: 'InTransit', destino: 'Destination' };
 export const TRANSFER_NATURE = { venda: 'Sale', transferencia: 'Transfer' };
 
-export const STOCK_MOVEMENT = { recebimento_transferencia: 'TransferReceipt' };
+export const STOCK_MOVEMENT = { recebimento_transferencia: 'TransferReceipt', estorno_recebimento: 'ReceiptReversal' };
 export const RFID_MOVEMENT = { venda: 'Sale', devolucao: 'Return', estorno: 'Reversal' };
 
 /** ValorDaApi → [valores do banco] (para filtros do tipo enum). */

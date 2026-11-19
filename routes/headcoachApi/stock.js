@@ -63,7 +63,7 @@ modulo.recurso({
   path: '/movements',
   table: 'hc_estoque_movimentos',
   summary: 'Movimentos de estoque',
-  description: 'Cada entrada no estoque da loja. Hoje o único tipo é a entrada pelo Recebimento de Mercadoria (TransferReceipt).',
+  description: 'Cada movimento no estoque da loja: `TransferReceipt` é a entrada pelo Recebimento de Mercadoria; `ReceiptReversal` é o estorno, com quantidade negativa, quando esse recebimento é cancelado (goods-receipt/receipts com `canceledDate`).',
   order: [['id', false]],
   fields: [
     f('movementId', 'id', 'integer', 'Identificador do movimento.'),
