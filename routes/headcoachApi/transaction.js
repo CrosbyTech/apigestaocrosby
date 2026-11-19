@@ -43,6 +43,32 @@ const cancelamento = (v) => {
   return c ? { canceledBy: c.por || null, reason: c.motivo || null, date: c.em || null, authorizedBy: c.autorizadoPor || null } : null;
 };
 
+// cashback usado na venda que voltou para o cliente no cancelamento (services/cashbackEstornoTotvs.js)
+const cashbackDevolvido = (v) => {
+  const c = v.pedido_info?.cashbackDevolvido;
+  if (!c || !(Number(c.valor) > 0)) return null;
+  const lojas = Array.isArray(c.partes) && c.partes.length ? c.partes : [{ branchCode: c.empresa, valor: c.valor }];
+  return {
+    value: Number(c.valor),
+    branchCode: c.empresa ?? null,
+    branches: lojas.map((l) => ({ branchCode: Number(l.branchCode), value: Number(l.valor) })),
+    validUntil: c.valeAte || null,
+    date: c.em || null,
+    refundedBy: c.por || null,
+  };
+};
+// o que a rota de baixa anotou que saiu do saldo bônus do TOTVS para pagar o desconto de cashback
+const cashbackBaixado = (v) => {
+  const b = v.pedido_info?.cashbackBaixa;
+  if (!b) return null;
+  return {
+    value: Number(b.total) || 0,
+    branches: (b.totvs || []).map((l) => ({ branchCode: Number(l.branchCode), value: Number(l.valor) })),
+    date: b.em || null,
+    error: b.erro || null,
+  };
+};
+
 const ITEM = {
   name: 'TransactionItem',
   path: '/items',
@@ -157,6 +183,12 @@ modulo.recurso({
     f('linkedExchangeTransactionCode', (v) => v.pedido_info?.trocaVendaId ?? null, 'integer', 'Troca feita no mesmo atendimento desta venda (VENDA | TROCA).'),
     f('cancellation', cancelamento, 'object', 'Quem cancelou e por quê (só transação cancelada pela tela de cancelamento).', {
       properties: { canceledBy: { type: 'string', nullable: true }, reason: { type: 'string', nullable: true }, date: { type: 'string', format: 'date-time', nullable: true }, authorizedBy: { type: 'string', nullable: true } },
+    }),
+    f('usedCashbackWriteOff', cashbackBaixado, 'object', 'Baixa do cashback usado na venda: quanto saiu de fato do saldo bônus do TOTVS e de que lojas (`branches`). `value` zero com `error` preenchido = o desconto ficou na venda mas a baixa não aconteceu. Nulo nas vendas anteriores a 19/11/2026, que não têm esse registro.', {
+      properties: { value: { type: 'number' }, branches: { type: 'array', items: { type: 'object', properties: { branchCode: { type: 'integer' }, value: { type: 'number' } } } }, date: { type: 'string', format: 'date-time', nullable: true }, error: { type: 'string', nullable: true } },
+    }),
+    f('usedCashbackRefund', cashbackDevolvido, 'object', 'Cashback que a venda tinha usado e voltou para o cliente quando ela foi cancelada (nulo se não houve devolução). O valor volta no saldo bônus do TOTVS, nas lojas de onde tinha saído (`branches`), valendo até `validUntil`. `branchCode` é a loja da venda.', {
+      properties: { value: { type: 'number', nullable: true }, branchCode: { type: 'integer', nullable: true }, branches: { type: 'array', items: { type: 'object', properties: { branchCode: { type: 'integer' }, value: { type: 'number' } } } }, validUntil: { type: 'string', format: 'date', nullable: true }, date: { type: 'string', format: 'date-time', nullable: true }, refundedBy: { type: 'string', nullable: true } },
     }),
     f('paymentSchedule', (v) => (Array.isArray(v.cobranca?.parcelas) ? v.cobranca.parcelas.map((p) => ({ dueDate: p.vencimento ? String(p.vencimento).slice(0, 10) : null, value: p.valor ?? null })) : []), 'array', 'Parcelas combinadas no pedido para o boleto (faturamento).', {
       cols: ['cobranca'],

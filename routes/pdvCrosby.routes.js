@@ -70,6 +70,9 @@ import {
   alterarPromocao,
 } from '../services/pdvPromocoes.js';
 
+import { requireAuth, requireRole } from '../middlewares/auth.js';
+import { devolverCashbackTotvsDaVenda, cashbackPendenteDeDevolucao, situacaoDoCashbackUsado, CashbackEstornoError } from '../services/cashbackEstornoTotvs.js';
+
 const router = express.Router();
 
 const TIPOS = ['nfce', 'nfe', 'troca'];
@@ -601,7 +604,7 @@ router.post(
       });
     }
     const cashbackUsado = round2(b.cashbackUsado || 0);
-    const total = round2(subtotal - desconto);
+    let total = round2(subtotal - desconto);
 
     // Pagamentos
     const pagamentos = [];
@@ -635,6 +638,27 @@ router.post(
         soma += valor;
       }
       const troco = round2(pagamentos.reduce((s, p) => s + p.troco, 0));
+      // CENTAVO DO RATEIO (19/11/2026 — venda 378 do Midway): o desconto por peça (cashback,
+      // desconto do caixa) é arredondado peça a peça e pode sobrar ou faltar 1 centavo contra o
+      // que foi cobrado. A diferença de 1 centavo era aceita aqui e a SEFAZ rejeitava a NFC-e
+      // (866: pagamentos maiores que o total). Agora o centavo sai/entra no desconto de uma
+      // peça de quantidade 1 (a venda fecha no valor PAGO); sem peça assim, vai no pagamento.
+      const dif = round2(round2(soma - troco) - total);
+      if (dif !== 0 && Math.abs(dif) <= 0.01) {
+        const alvo = itens.find((i) => Number(i.quantidade) === 1 && round2(i.desconto_unit - dif) >= 0 && round2(i.desconto_unit - dif) < i.valor_unit);
+        if (alvo) {
+          alvo.desconto_unit = round2(alvo.desconto_unit - dif);
+          alvo.total = round2(alvo.valor_unit - alvo.desconto_unit);
+          desconto = round2(desconto - dif);
+          total = round2(total + dif);
+        } else {
+          const maior = pagamentos.reduce((m, x) => (!m || x.valor > m.valor ? x : m), null);
+          if (maior) {
+            maior.valor = round2(maior.valor - dif);
+            soma = round2(soma - dif);
+          }
+        }
+      }
       if (Math.abs(round2(soma - troco) - total) > 0.01) {
         return errorResponse(res, `Pagamentos (R$ ${round2(soma - troco).toFixed(2)}) não fecham com o total da venda (R$ ${total.toFixed(2)})`, 400, 'PAYMENT_MISMATCH');
       }
@@ -962,8 +986,50 @@ router.post(
     await estornarSaldosDaVenda(venda.id, 'Venda cancelada', req.body?.por || null).catch((e) => {
       if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${venda.id}: ${e.message}`);
     });
+    // cashback do TOTVS que a venda usou volta para o cliente (se falhar, fica pendente: /cashback-pendente)
+    await devolverCashbackTotvsDaVenda(venda.id, { por: req.body?.por || null, motivo: 'Venda cancelada' }).catch((e) => console.warn(`⚠️ [cashback] venda ${venda.id}: devolução do cashback usado falhou (${e.message})`));
     await registrarEpcs({ venda, itens: venda.itens, tipo: 'estorno' });
     return successResponse(res, await carregarVenda(venda.id), 'Venda cancelada');
+  }),
+);
+
+// Cashback usado que ainda não voltou (vendas canceladas): lista e devolve.
+//   GET  /cashback-pendente?desde=AAAA-MM-DD&empresa=95
+//   POST /vendas/:id/devolver-cashback            { semRegistro? }  — financeiro, admin e owner
+// Venda sem o registro da baixa (anterior a 19/11/2026) só volta com semRegistro: true,
+// de owner ou admin, depois de conferido o saldo do cliente no TOTVS.
+const respondeCashback = (res, err) => (err instanceof CashbackEstornoError ? errorResponse(res, err.message, err.status, err.code) : errorResponse(res, err.message || 'Erro no cashback', 500, 'CASHBACK_ESTORNO'));
+router.get(
+  '/cashback-pendente',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      const empresa = parseInt(req.query.empresa, 10) || null;
+      const desde = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.desde || '')) ? `${req.query.desde}T00:00:00-03:00` : null;
+      const itens = await cashbackPendenteDeDevolucao({ desde, empresas: empresa ? [empresa] : null });
+      return successResponse(
+        res,
+        { itens, total: round2(itens.reduce((t, i) => t + i.aDevolver, 0)), aConferir: round2(itens.reduce((t, i) => t + i.aConferir, 0)) },
+        `${itens.length} venda(s) cancelada(s) com cashback a devolver ou a conferir`,
+      );
+    } catch (err) {
+      return respondeCashback(res, err);
+    }
+  }),
+);
+router.post(
+  '/vendas/:id/devolver-cashback',
+  requireAuth,
+  requireRole('owner', 'admin', 'user'),
+  asyncHandler(async (req, res) => {
+    try {
+      const semRegistro = req.body?.semRegistro === true;
+      if (semRegistro && !['owner', 'admin'].includes(req.user?.role)) return errorResponse(res, 'Devolver cashback sem o registro da baixa é só para owner ou admin', 403, 'FORBIDDEN');
+      const r = await devolverCashbackTotvsDaVenda(parseInt(req.params.id, 10), { por: req.user?.name || req.user?.email || null, motivo: 'Devolução do cashback de venda cancelada', semRegistro });
+      return successResponse(res, r, r.devolvido > 0 ? `R$ ${r.devolvido.toFixed(2).replace('.', ',')} de cashback de volta para o cliente` : `Nada devolvido: ${r.motivo}`);
+    } catch (err) {
+      return respondeCashback(res, err);
+    }
   }),
 );
 
@@ -1270,6 +1336,11 @@ export async function cancelarNotaFiscal(id, { justificativa = null, por = null 
       if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [saldos] venda ${vendaId}: ${e.message}`);
       return null;
     });
+    // cashback do TOTVS que a venda usou volta para o cliente
+    const cashbackTotvs = await devolverCashbackTotvsDaVenda(vendaId, { por, motivo: 'Nota fiscal da venda cancelada' }).catch((e) => {
+      console.warn(`⚠️ [cashback] venda ${vendaId}: devolução do cashback usado falhou (${e.message})`);
+      return { erro: e.message };
+    });
     // venda cancelada que devolveu CREDEV: se ele vinha de uma troca já cancelada, sai agora
     if (Number(saldosDevolvidos) > 0 && vendaDaNota?.cliente_code) {
       await acertarTrocasCanceladas({ cliente: vendaDaNota.cliente_code, empresa: vendaDaNota.empresa, por }).catch((e) => console.warn(`⚠️ [saldos] acerto de trocas canceladas: ${e.message}`));
@@ -1284,7 +1355,7 @@ export async function cancelarNotaFiscal(id, { justificativa = null, por = null 
     let etiquetas = 0;
     if (vendaCancelada) etiquetas = await registrarEpcs({ venda: vendaCancelada, itens: vendaCancelada.itens, tipo: 'estorno', nota: ctx.nota });
     console.log(`🚫 [PDV Crosby] Nota ${ctx.nota.chave} cancelada (${r.cStat} ${r.xMotivo})`);
-    return { vendaId, cStat: r.cStat, xMotivo: r.xMotivo, nProt: r.nProt, dhRegEvento: r.dhRegEvento, jaCancelada, titulos, saldosDevolvidos, credevRetirado, credevJaUsado, etiquetas };
+    return { vendaId, cStat: r.cStat, xMotivo: r.xMotivo, nProt: r.nProt, dhRegEvento: r.dhRegEvento, jaCancelada, titulos, saldosDevolvidos, cashbackTotvs, credevRetirado, credevJaUsado, etiquetas };
   } finally {
     cancelando.delete(id);
   }
@@ -1377,7 +1448,13 @@ async function previaDoCancelamento(vendaId) {
   if (venda.pedido_info?.trocaVendaId) {
     avisos.push(`Esta venda foi fechada junto com a troca nº ${venda.pedido_info.trocaVendaId}. A troca é outra transação e continua valendo; para desfazer tudo, cancele a troca depois desta.`);
   }
-  if (Number(venda.cashback_usado) > 0) avisos.push(`O cashback usado nesta venda (R$ ${Number(venda.cashback_usado).toFixed(2).replace('.', ',')}) não volta sozinho: reponha no TOTVS se for o caso.`);
+  if (Number(venda.cashback_usado) > 0) {
+    const cb = await situacaoDoCashbackUsado(venda).catch(() => null);
+    const fmtCb = (n) => `R$ ${Number(n).toFixed(2).replace('.', ',')}`;
+    if (cb?.aDevolver > 0) avisos.push(`O cashback usado nesta venda (${fmtCb(cb.aDevolver)}) volta para o cliente ao cancelar.`);
+    else if (cb?.jaDevolvido > 0) avisos.push(`O cashback usado nesta venda (${fmtCb(cb.jaDevolvido)}) já voltou para o cliente.`);
+    else if (cb?.aConferir > 0) avisos.push(`O cashback usado nesta venda (${fmtCb(cb.aConferir)}) NÃO volta sozinho: a venda é anterior ao registro da baixa. Avise o financeiro para conferir o saldo do cliente e devolver.`);
+  }
   if (venda.tipo_venda !== 'troca' && venda.cliente_code && notaAutorizada) avisos.push('O cashback que esta venda gerou para o cliente no TOTVS não é retirado daqui.');
   if (venda.totvs_transacao_code) avisos.push(`A transação ${venda.totvs_transacao_code} do TOTVS (espelho desta venda) não é cancelada daqui: cancele no TOTVS.`);
   // Faturamento / Brejinho / Transferência / Devolução (18/11/2026)
@@ -1484,8 +1561,13 @@ router.post(
         if (Number(saldosDevolvidos) > 0 && venda.cliente_code) {
           await acertarTrocasCanceladas({ cliente: venda.cliente_code, empresa: venda.empresa, por }).catch((e) => console.warn(`⚠️ [saldos] acerto de trocas canceladas: ${e.message}`));
         }
+        // cashback do TOTVS que a venda usou volta para o cliente
+        const cashbackTotvs = await devolverCashbackTotvsDaVenda(id, { por, motivo: 'Venda cancelada' }).catch((e) => {
+          console.warn(`⚠️ [cashback] venda ${id}: devolução do cashback usado falhou (${e.message})`);
+          return { erro: e.message };
+        });
         const etiquetas = await registrarEpcs({ venda, itens: venda.itens, tipo: 'estorno' });
-        feito = { saldosDevolvidos, etiquetas };
+        feito = { saldosDevolvidos, cashbackTotvs, etiquetas };
         passo('Nota fiscal', true, venda.notas.some((n) => n.status === 'cancelada') ? 'a nota já estava cancelada' : 'não havia nota autorizada');
       } else {
         passo('Nota fiscal', true, 'a nota já estava cancelada');
@@ -1508,6 +1590,15 @@ router.post(
       if (uso.credev > 0 || uso.adiantamento > 0) {
         passo('Saldo do cliente', feito?.saldosDevolvidos !== null, `R$ ${round2(uso.credev + uso.adiantamento).toFixed(2).replace('.', ',')} de Credev/adiantamento de volta para o cliente`);
       }
+      // cashback do TOTVS que a venda usou (services/cashbackEstornoTotvs.js)
+      if (feito?.cashbackTotvs?.erro) {
+        passo('Cashback usado', false, `não consegui devolver o cashback usado nesta venda agora (${feito.cashbackTotvs.erro}) — ficou pendente, avise o financeiro`);
+      } else if (Number(feito?.cashbackTotvs?.devolvido) > 0) {
+        const ate = String(feito.cashbackTotvs.valeAte || '').split('-').reverse().join('/');
+        passo('Cashback usado', true, `R$ ${Number(feito.cashbackTotvs.devolvido).toFixed(2).replace('.', ',')} de volta para o cliente${ate ? ` (vale até ${ate})` : ''}`);
+      } else if (Number(feito?.cashbackTotvs?.aConferir) > 0) {
+        passo('Cashback usado', false, `R$ ${Number(feito.cashbackTotvs.aConferir).toFixed(2).replace('.', ',')} de cashback usados nesta venda não voltaram sozinhos (venda anterior ao registro da baixa) — avise o financeiro para conferir e devolver`);
+      }
       if (venda.tipo_venda === 'troca' && (Number(feito?.credevRetirado) > 0 || Number(feito?.credevJaUsado) > 0)) {
         const brl = (n) => `R$ ${Number(n).toFixed(2).replace('.', ',')}`;
         passo(
@@ -1519,8 +1610,10 @@ router.post(
       if (Number(feito?.etiquetas) > 0) passo('Etiquetas', true, `${feito.etiquetas} peça(s) estornada(s)`);
       // quem cancelou e por quê (fica na transação)
       if (!venda.pedido_info?.cancelamento) {
+        // relê o que está gravado: a devolução do cashback (acima) já escreveu em pedido_info
+        const { data: gravada } = await supabase.from('pdv_vendas').select('pedido_info').eq('id', id).maybeSingle();
         const info = {
-          ...(venda.pedido_info || {}),
+          ...(gravada?.pedido_info || venda.pedido_info || {}),
           cancelamento: { por, motivo: justificativa, em: new Date().toISOString(), ...(autorizadoPor ? { autorizadoPor: autorizadoPor.nome, autorizadoPorEmail: autorizadoPor.email } : {}) },
         };
         await supabase.from('pdv_vendas').update({ pedido_info: info }).eq('id', id);

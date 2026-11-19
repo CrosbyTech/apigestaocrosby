@@ -349,6 +349,8 @@ Esquemas:
 - `referencedInvoiceKeys` (array) — Chaves das notas de origem (troca e devolução).
 - `linkedExchangeTransactionCode` (integer) — Troca feita no mesmo atendimento desta venda (VENDA | TROCA).
 - `cancellation` (object) — Quem cancelou e por quê (só transação cancelada pela tela de cancelamento).
+- `usedCashbackWriteOff` (object) — Baixa do cashback usado na venda: quanto saiu de fato do saldo bônus do TOTVS e de que lojas (`branches`). `value` zero com `error` preenchido = o desconto ficou na venda mas a baixa não aconteceu. Nulo nas vendas anteriores a 19/11/2026, que não têm esse registro.
+- `usedCashbackRefund` (object) — Cashback que a venda tinha usado e voltou para o cliente quando ela foi cancelada (nulo se não houve devolução). O valor volta no saldo bônus do TOTVS, nas lojas de onde tinha saído (`branches`), valendo até `validUntil`. `branchCode` é a loja da venda.
 - `paymentSchedule` (array) — Parcelas combinadas no pedido para o boleto (faturamento).
 - `shipping` (object) — Dados de transporte da nota (faturamento), com as chaves em português como gravado na tela (transportadora, volumes, peso…).
 - `paymentReceipts` (array) — Comprovantes de pagamento anexados (endereços dos arquivos).

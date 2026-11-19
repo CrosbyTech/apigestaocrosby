@@ -17,6 +17,7 @@ import {
 import { XMLParser } from 'fast-xml-parser';
 import QRCode from 'qrcode';
 import { getToken } from '../utils/totvsTokenManager.js';
+import { registrarBaixaDoCashback } from '../services/cashbackEstornoTotvs.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
 import { comandoVendasDoUrl, espelharEscritaVendas } from '../services/erp/vendas.js';
 import { promocaoVigente } from '../services/pdvPromocoes.js';
@@ -1861,6 +1862,8 @@ router.post(
       );
     }
     const valor = round2Bonus(usedValue);
+    // o que saiu de verdade fica anotado na venda: é o que volta se ela for cancelada
+    const anotarBaixa = (consumido, erro = null) => registrarBaixaDoCashback({ vendaId: req.body?.vendaId, personCode, usedValue: valor, consumido, erro });
     // de onde sai: [{ branchCode, valor }]
     let partes = [{ branchCode: parseInt(branchCode, 10), valor }];
     if (cpf) {
@@ -1868,9 +1871,11 @@ router.post(
       try {
         saldos = await saldosBonusDoCpf(cpf, branchCode);
       } catch (err) {
+        await anotarBaixa([], 'não consegui ler o saldo no TOTVS');
         return errorResponse(res, `Não consegui ler o cashback do cliente no TOTVS: ${err.response?.data?.message || err.message}`, 502, 'BONUS_BALANCE_ERROR');
       }
       if (saldos.total + 0.005 < valor) {
+        await anotarBaixa([], `cashback insuficiente (tinha R$ ${saldos.total.toFixed(2)})`);
         return errorResponse(res, `Cashback insuficiente: o cliente tem R$ ${saldos.total.toFixed(2)} somando as lojas e a venda usou R$ ${valor.toFixed(2)}`, 409, 'BONUS_INSUFICIENTE', saldos);
       }
       partes = [];
@@ -1893,7 +1898,8 @@ router.post(
       console.log(
         `💰 [Cashback] Consumido R$ ${valor} do cliente ${personCode} (venda na empresa ${branchCode}; saiu de ${consumido.map((p) => `${p.branchCode}: R$ ${p.valor}`).join(', ')})`,
       );
-      return successResponse(res, { consumido, total: valor }, 'Saldo consumido');
+      const vendaAnotada = await anotarBaixa(consumido);
+      return successResponse(res, { consumido, total: valor, vendaId: vendaAnotada }, 'Saldo consumido');
     } catch (err) {
       const detail = err.response?.data;
       const feito = round2Bonus(consumido.reduce((t, p) => t + p.valor, 0));
@@ -1902,6 +1908,7 @@ router.post(
         JSON.stringify(detail || err.message).slice(0, 300),
       );
       const msg = Array.isArray(detail) ? detail.map((d) => d.message).join('; ') : detail?.message || err.message;
+      await anotarBaixa(consumido, msg);
       return errorResponse(
         res,
         feito > 0 ? `${msg} — só R$ ${feito.toFixed(2)} de R$ ${valor.toFixed(2)} foram baixados (${consumido.map((p) => `empresa ${p.branchCode}`).join(', ')})` : msg,
