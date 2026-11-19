@@ -214,6 +214,21 @@ export class WhatsAppWeb {
     return true;
   }
 
+  /**
+   * Clica no ÚLTIMO botão da conversa com este texto. Serve para mensagem com
+   * vários botões lado a lado (clicarBotaoDaConversa só aceita botão que seja a
+   * última coisa da conversa). Quem chama garante que a mensagem dos botões é a
+   * mais recente — botão de mensagem antiga, já respondida, não faz nada.
+   * @returns {Promise<string|null>} o texto do botão clicado
+   */
+  async clicarUltimoBotao(re) {
+    const d = await this.interativos();
+    const alvo = (d?.itens || []).filter((it) => (it.tag === 'button' || it.role === 'button') && !it.desabilitado && re.test(it.texto) && it.texto.length <= 60).at(-1);
+    if (!alvo) return null;
+    await this.clicar(alvo.i);
+    return alvo.texto;
+  }
+
   /** O que há na tela quando algo não abre como esperado (para ajustar o bot). */
   diagnostico() {
     return this.page.evaluate(() => {

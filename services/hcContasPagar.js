@@ -433,7 +433,7 @@ export async function detalheTitulo(user, id) {
   const t = await tituloDoUsuario(user, id);
   const [baixas, irmas] = await Promise.all([
     q(supabase.from('hc_cp_baixas').select('*').eq('titulo_id', t.id).order('id')),
-    q(supabase.from('hc_cp_titulos').select('id, parcela, duplicata, valor, vencimento, situacao, data_pagamento').eq('empresa', t.empresa).eq('fornecedor_code', t.fornecedor_code).eq('duplicata', t.duplicata).order('vencimento').order('id')),
+    q(supabase.from('hc_cp_titulos').select('id, parcela, duplicata, documento_fiscal, referencia, valor, valor_pago, vencimento, situacao, data_pagamento').eq('empresa', t.empresa).eq('fornecedor_code', t.fornecedor_code).eq('duplicata', t.duplicata).order('vencimento').order('id')),
   ]);
   let anexoUrl = null;
   if (t.anexo_path) {

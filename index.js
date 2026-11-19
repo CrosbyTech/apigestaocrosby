@@ -49,6 +49,7 @@ import hcCaixaRoutes from './routes/hcCaixa.routes.js';
 import recebimentoTransferenciaRoutes from './routes/recebimentoTransferencia.routes.js';
 import hcContasReceberRoutes from './routes/hcContasReceber.routes.js';
 import hcContasPagarRoutes from './routes/hcContasPagar.routes.js';
+import contasFixasEmailRoutes from './routes/contasFixasEmail.routes.js';
 import hcSaldosClientesRoutes from './routes/hcSaldosClientes.routes.js';
 import drylandEstoqueRoutes from './routes/drylandEstoque.routes.js';
 import faturamentoExpedicaoRoutes from './routes/faturamentoExpedicao.routes.js';
@@ -262,6 +263,7 @@ app.use('/api/pedidos-venda', pedidosVendaRoutes); // Pedidos de venda do Drylan
 app.use('/api/dryland-estoque', drylandEstoqueRoutes); // HEADCOACH › ESTOQUE › Estoque Dryland: saldo, movimentos, grupos e fila pela porta estq_gw do Estoquista (só consulta; token em DRYLAND_ESTQ_TOKEN) — exige login
 app.use('/api/hc/saldos-clientes', hcSaldosClientesRoutes); // HEADCOACH › SALDOS DE CLIENTES: CREDEV e adiantamento próprios (carga do TOTVS da 99, uso no faturamento, devoluções) — exige login
 app.use('/api/hc/contas-pagar', hcContasPagarRoutes); // HEADCOACH › CONTAS A PAGAR: duplicatas próprias (fornecedor, fatura, parcela, portador, despesa), baixa e cancelamento — exige login, só financeiro
+app.use('/api/contas-fixas', contasFixasEmailRoutes); // DESPESAS FIXAS: entrada dos e-mails encaminhados pela caixa de Patrimônio (Cloudflare Email Worker, com segredo) — só guarda a mensagem
 app.use('/api/hc/contas-receber', hcContasReceberRoutes); // HEADCOACH › CONTAS A RECEBER: títulos próprios (fatura 9.000.000.000 + transação), baixa com juros/multa, conciliação D+1 — exige login
 app.use('/api/recebimento-mercadoria', recebimentoTransferenciaRoutes); // Varejo › Recebimento de Mercadoria: a loja confere a transferência e as peças entram no estoque dela — exige login
 app.use('/api/hc/caixa', hcCaixaRoutes); // HEADCOACH › CAIXA: abertura, suprimento/retirada, contagem, fechamento e encerramento diário (data de caixa) — exige login
