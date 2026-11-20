@@ -1815,6 +1815,48 @@ Parâmetros:
 
 Resposta: página de `PromotionItem`
 
+### GET /api/headcoach/sale-panel/v1/discount-limits
+
+Limite de desconto por vendedor — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.
+
+Parâmetros:
+- `userEmail` (string) — Trecho do e-mail.
+- `userName` (string) — Trecho do nome.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `DiscountLimit`
+
+### GET /api/headcoach/sale-panel/v1/discount-limits/{userId}
+
+Limite de desconto por vendedor — um registro — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.
+
+Parâmetros:
+- `userId` (caminho, obrigatório) — Usuário do HeadCoach (uuid).
+
+Resposta:  `DiscountLimit`
+
+### GET /api/headcoach/sale-panel/v1/discount-limit-changes
+
+Histórico do limite de desconto — Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).
+
+Parâmetros:
+- `userId` (string) — Usuário (uuid).
+- `scopeBranchCode` (integer) — Mudanças feitas para uma loja.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `DiscountLimitChange`
+
+### GET /api/headcoach/sale-panel/v1/discount-limit-changes/{changeId}
+
+Histórico do limite de desconto — um registro — Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).
+
+Parâmetros:
+- `changeId` (caminho, obrigatório) — Identificador da mudança.
+
+Resposta:  `DiscountLimitChange`
+
 Esquemas:
 
 **SaleTotalsBranch** — Totais de uma empresa no período.
@@ -1894,4 +1936,28 @@ Esquemas:
 - `createdDate` (date-time) — Criação.
 - `lastChangeDate` (date-time) — Última alteração.
 - `items` (array de PromotionItem) — Produtos da promoção (só vem com expand=items)
+
+**DiscountLimit** — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.
+
+- `userId` (string) — Usuário do HeadCoach (uuid).
+- `userName` (string) — Nome do usuário.
+- `userEmail` (string) — E-mail do usuário.
+- `branchCodes` (array) — Lojas configuradas para o usuário quando o limite foi gravado.
+- `discountPercentage` (number) — Limite de desconto, em % (0 a 100).
+- `changedBy` (string) — Quem definiu.
+- `lastChangeDate` (date-time) — Quando foi definido.
+
+**DiscountLimitChange** — Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).
+
+- `changeId` (integer) — Identificador da mudança.
+- `userId` (string) — Usuário que teve o limite mudado (uuid).
+- `userName` (string) — Nome do usuário.
+- `userEmail` (string) — E-mail do usuário.
+- `branchCodes` (array) — Lojas do usuário na hora da mudança.
+- `previousDiscountPercentage` (number) — Limite anterior, em %.
+- `discountPercentage` (number) — Limite novo, em %.
+- `scope` (string) — Como foi mudado. Valores: User, Branch, All.
+- `scopeBranchCode` (integer) — Loja escolhida, quando a mudança foi por loja.
+- `changedBy` (string) — Quem mudou.
+- `changeDate` (date-time) — Quando mudou.
 

@@ -4657,6 +4657,123 @@
             }
           }
         }
+      },
+      "DiscountLimit": {
+        "type": "object",
+        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.",
+        "properties": {
+          "userId": {
+            "description": "Usuário do HeadCoach (uuid).",
+            "type": "string",
+            "nullable": true
+          },
+          "userName": {
+            "description": "Nome do usuário.",
+            "type": "string",
+            "nullable": true
+          },
+          "userEmail": {
+            "description": "E-mail do usuário.",
+            "type": "string",
+            "nullable": true
+          },
+          "branchCodes": {
+            "description": "Lojas configuradas para o usuário quando o limite foi gravado.",
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "nullable": true
+          },
+          "discountPercentage": {
+            "description": "Limite de desconto, em % (0 a 100).",
+            "type": "number",
+            "nullable": true
+          },
+          "changedBy": {
+            "description": "Quem definiu.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastChangeDate": {
+            "description": "Quando foi definido.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
+      "DiscountLimitChange": {
+        "type": "object",
+        "description": "Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).",
+        "properties": {
+          "changeId": {
+            "description": "Identificador da mudança.",
+            "type": "integer",
+            "nullable": true
+          },
+          "userId": {
+            "description": "Usuário que teve o limite mudado (uuid).",
+            "type": "string",
+            "nullable": true
+          },
+          "userName": {
+            "description": "Nome do usuário.",
+            "type": "string",
+            "nullable": true
+          },
+          "userEmail": {
+            "description": "E-mail do usuário.",
+            "type": "string",
+            "nullable": true
+          },
+          "branchCodes": {
+            "description": "Lojas do usuário na hora da mudança.",
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "nullable": true
+          },
+          "previousDiscountPercentage": {
+            "description": "Limite anterior, em %.",
+            "type": "number",
+            "nullable": true
+          },
+          "discountPercentage": {
+            "description": "Limite novo, em %.",
+            "type": "number",
+            "nullable": true
+          },
+          "scope": {
+            "description": "Como foi mudado.",
+            "type": "string",
+            "enum": [
+              "User",
+              "Branch",
+              "All"
+            ],
+            "nullable": true
+          },
+          "scopeBranchCode": {
+            "description": "Loja escolhida, quando a mudança foi por loja.",
+            "type": "integer",
+            "nullable": true
+          },
+          "changedBy": {
+            "description": "Quem mudou.",
+            "type": "string",
+            "nullable": true
+          },
+          "changeDate": {
+            "description": "Quando mudou.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
       }
     }
   },
@@ -14821,6 +14938,466 @@
                 "example": {
                   "code": "Unauthorized",
                   "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/sale-panel/v1/discount-limits": {
+      "get": {
+        "tags": [
+          "SalePanel"
+        ],
+        "summary": "Limite de desconto por vendedor",
+        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.",
+        "parameters": [
+          {
+            "name": "userEmail",
+            "in": "query",
+            "required": false,
+            "description": "Trecho do e-mail.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userName",
+            "in": "query",
+            "required": false,
+            "description": "Trecho do nome.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DiscountLimit"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/sale-panel/v1/discount-limits/{userId}": {
+      "get": {
+        "tags": [
+          "SalePanel"
+        ],
+        "summary": "Limite de desconto por vendedor — um registro",
+        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "description": "Usuário do HeadCoach (uuid).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscountLimit"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/sale-panel/v1/discount-limit-changes": {
+      "get": {
+        "tags": [
+          "SalePanel"
+        ],
+        "summary": "Histórico do limite de desconto",
+        "description": "Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "description": "Usuário (uuid).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scopeBranchCode",
+            "in": "query",
+            "required": false,
+            "description": "Mudanças feitas para uma loja.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DiscountLimitChange"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/sale-panel/v1/discount-limit-changes/{changeId}": {
+      "get": {
+        "tags": [
+          "SalePanel"
+        ],
+        "summary": "Histórico do limite de desconto — um registro",
+        "description": "Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).",
+        "parameters": [
+          {
+            "name": "changeId",
+            "in": "path",
+            "required": true,
+            "description": "Identificador da mudança.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscountLimitChange"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
                   "detailedMessage": null
                 }
               }

@@ -216,4 +216,50 @@ modulo.recurso({
 });
 modulo.recurso(PROMO_ITEM);
 
+// Limite de desconto do PDV Crosby por usuário (tela Financeiro › Liberação de Desconto)
+modulo.recurso({
+  name: 'DiscountLimit',
+  path: '/discount-limits',
+  table: 'pdv_desconto_limites',
+  summary: 'Limite de desconto por vendedor',
+  description:
+    'Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.',
+  key: [{ param: 'userId', col: 'user_id', type: 'string', description: 'Usuário do HeadCoach (uuid).' }],
+  order: [['usuario_nome', true]],
+  fields: [
+    f('userId', 'user_id', 'string', 'Usuário do HeadCoach (uuid).'),
+    f('userName', 'usuario_nome', 'string', 'Nome do usuário.'),
+    f('userEmail', 'usuario_email', 'string', 'E-mail do usuário.'),
+    f('branchCodes', 'empresas', 'array', 'Lojas configuradas para o usuário quando o limite foi gravado.', { items: { type: 'integer' } }),
+    f('discountPercentage', 'pct', 'number', 'Limite de desconto, em % (0 a 100).'),
+    f('changedBy', 'atualizado_por', 'string', 'Quem definiu.'),
+    f('lastChangeDate', 'atualizado_em', 'date-time', 'Quando foi definido.'),
+  ],
+  filters: [q('userEmail', 'text', 'usuario_email', 'Trecho do e-mail.'), q('userName', 'text', 'usuario_nome', 'Trecho do nome.')],
+});
+
+modulo.recurso({
+  name: 'DiscountLimitChange',
+  path: '/discount-limit-changes',
+  table: 'pdv_desconto_limites_hist',
+  summary: 'Histórico do limite de desconto',
+  description: 'Uma linha por usuário a cada mudança do limite de desconto do PDV Crosby: de quanto para quanto, quem mudou e se foi só aquele usuário (`User`), todos de uma loja (`Branch`) ou todos (`All`).',
+  key: [{ param: 'changeId', col: 'id', type: 'integer', description: 'Identificador da mudança.' }],
+  order: [['id', false]],
+  fields: [
+    f('changeId', 'id', 'integer', 'Identificador da mudança.'),
+    f('userId', 'user_id', 'string', 'Usuário que teve o limite mudado (uuid).'),
+    f('userName', 'usuario_nome', 'string', 'Nome do usuário.'),
+    f('userEmail', 'usuario_email', 'string', 'E-mail do usuário.'),
+    f('branchCodes', 'empresas', 'array', 'Lojas do usuário na hora da mudança.', { items: { type: 'integer' } }),
+    f('previousDiscountPercentage', 'de_pct', 'number', 'Limite anterior, em %.'),
+    f('discountPercentage', 'para_pct', 'number', 'Limite novo, em %.'),
+    f('scope', 'escopo', 'string', 'Como foi mudado.', { map: { usuario: 'User', loja: 'Branch', todos: 'All' } }),
+    f('scopeBranchCode', 'escopo_empresa', 'integer', 'Loja escolhida, quando a mudança foi por loja.'),
+    f('changedBy', 'alterado_por', 'string', 'Quem mudou.'),
+    f('changeDate', 'alterado_em', 'date-time', 'Quando mudou.'),
+  ],
+  filters: [q('userId', 'string', 'user_id', 'Usuário (uuid).'), q('scopeBranchCode', 'int', 'escopo_empresa', 'Mudanças feitas para uma loja.')],
+});
+
 export default modulo;

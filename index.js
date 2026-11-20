@@ -97,6 +97,7 @@ import painelVendasRouter from './totvsrouter/painelVendas.js';
 import voucherRouter from './totvsrouter/voucher.js';
 import pdvRouter from './totvsrouter/pdv.js';
 import pdvCrosbyRoutes from './routes/pdvCrosby.routes.js';
+import pdvDescontoLimitesRoutes from './routes/pdvDescontoLimites.routes.js';
 import bluecredInadimplenciaRouter from './totvsrouter/bluecredInadimplencia.js';
 import remessaBoletosRouter from './totvsrouter/remessaBoletos.js';
 import mixCanaisRouter from './totvsrouter/mixCanais.js';
@@ -272,6 +273,7 @@ app.use('/api/faturamento-expedicao', faturamentoExpedicaoRoutes); // FATURAR da
 app.use('/api/balanco-rfid', balancoRfidRoutes); // Balanço RFID — arquivos de contagem do app Android (Urovo)
 app.use('/api/brejinho', brejinhoRoutes); // Expedição Brejinho — pedidos das franquias do Dryland /brejinho
 app.use('/api/devolucao-rfid', devolucaoRfidHcRoutes); // Devolução RFID 100% no HeadCoach — notas de venda do cliente, NF-e de devolução e CREDEV
+app.use('/api/pdv-crosby/descontos', pdvDescontoLimitesRoutes); // HEADCOACH › Financeiro › Liberação de Desconto: limite de desconto do PDV por vendedor — exige login
 app.use('/api/pdv-crosby', pdvCrosbyRoutes); // PDV Crosby — vendas no HeadCoach + emissão NFC-e/NF-e direta (SEFAZ)
 app.use('/api/headcoach', headcoachApiRoutes); // API HEADCOACH (somente leitura, padrão TOTVS): /api/headcoach/<módulo>/v1/<recurso> para o Dryland consultar; chave em HEADCOACH_API_KEYS; documentação em /api/headcoach/docs
 app.use('/api/erp', erpRoutes); // ERP HeadCoach (fase 0): sync de cadastros TOTVS→HeadCoach, outbox HeadCoach→TOTVS, modo por módulo, migrations
