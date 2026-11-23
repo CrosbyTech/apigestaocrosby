@@ -159,6 +159,7 @@ import fluxoSaldosRoutes from './routes/fluxoSaldos.routes.js';
 import { iniciarJobBoletoCobranca } from './jobs/boleto-cobranca.job.js';
 import { iniciarJobDrylandChamados } from './jobs/dryland-chamados-notificacao.job.js';
 import { iniciarJobDrylandComercial } from './jobs/dryland-chamados-comercial.job.js';
+import { iniciarJobCreditoLvChamados } from './jobs/credito-loja-virtual-chamados.job.js';
 import { iniciarJobDevolucoesSync } from './jobs/devolucoes-sync.job.js';
 import { iniciarJobPedidosVendaSync } from './jobs/pedidos-venda-sync.job.js';
 import { iniciarJobFaturamentoDuplicata } from './jobs/faturamento-duplicata.job.js';
@@ -365,6 +366,7 @@ app.listen(PORT, async () => {
   iniciarJobMetasSnapshot(); // snapshot da aba Metas Inadimplência (gera na subida se vazio + a cada 6h)
   iniciarJobPrevisao(); // snapshot semanal fixo da Previsão de Recebimento (João, 27/10/2026)
   iniciarJobDrylandComercial();
+  iniciarJobCreditoLvChamados(); // chamados "Crédito Loja Virtual" do Dryland → crédito do cliente + chamado concluído (1 em 1 hora)
   iniciarJobDevolucoesSync();
   iniciarJobPedidosVendaSync();
   iniciarJobFaturamentoDuplicata(); // assinatura das duplicatas enviadas pelo HeadCoach
