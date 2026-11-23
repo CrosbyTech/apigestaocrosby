@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { payloadDaSolicitacao, formaDoCp, tipoDocumentoDoCp, inclusaoDaSolicitacao, escolherFornecedor, observacaoDaSolicitacao } from '../utils/solicitacaoCp.js';
+import { payloadDaSolicitacao, formaDoCp, tipoDocumentoDoCp, inclusaoDaSolicitacao, escolherFornecedor, observacaoDaSolicitacao, STATUS_QUE_LIBERAM, ehPatrimonioProduto, motivoDeNaoLiberarSolicitacao, solicitacaoQuitada } from '../utils/solicitacaoCp.js';
 import { validarInclusao } from '../services/hcContasPagar.js';
 
 const HOJE = '2026-11-23';
@@ -112,5 +112,38 @@ describe('cadastros', () => {
     expect(escolherFornecedor([{ code: 2, is_fornecedor: true, inativo: true }]).code).toBe(2);
     expect(escolherFornecedor([{ code: 1, is_fornecedor: false }])).toBeNull();
     expect(escolherFornecedor([])).toBeNull();
+  });
+});
+
+describe('liberar a solicitação para pagamento (Liberação do HeadCoach)', () => {
+  it('libera a enviada ao contas a pagar e a de nota fiscal', () => {
+    expect(STATUS_QUE_LIBERAM).toEqual(['enviado_totvs', 'nota_fiscal']);
+    expect(motivoDeNaoLiberarSolicitacao(sol({ status: 'enviado_totvs' }))).toBeNull();
+    expect(motivoDeNaoLiberarSolicitacao(sol({ status: 'nota_fiscal', tem_nota_fiscal: true }))).toBeNull();
+  });
+
+  it('não libera antes do envio, nem a rejeitada', () => {
+    for (const status of ['pendente', 'aprovado_gestor', 'erro_envio', 'rejeitado', 'conciliado']) expect(motivoDeNaoLiberarSolicitacao(sol({ status }))).toMatch(/depois do envio/);
+  });
+
+  it('produto de patrimônio (já pago no cartão) nunca vai para a liberação', () => {
+    expect(ehPatrimonioProduto({ setor: ' patrimonio ', produto_servico: 'produto' })).toBe(true);
+    expect(ehPatrimonioProduto({ setor: 'PATRIMONIO', produto_servico: 'SERVICO' })).toBe(false);
+    expect(motivoDeNaoLiberarSolicitacao(sol({ status: 'enviado_totvs', setor: 'PATRIMONIO', produto_servico: 'PRODUTO' }))).toMatch(/cartão/);
+  });
+
+  it('já liberada na tela antiga, já paga ou inexistente: não', () => {
+    expect(motivoDeNaoLiberarSolicitacao(sol({ status: 'nota_fiscal', pagamento_liberacao_id: 'x' }))).toMatch(/antiga/);
+    expect(motivoDeNaoLiberarSolicitacao(sol({ status: 'nota_fiscal', pago_em: '2026-11-20T12:00:00Z' }))).toMatch(/paga/);
+    expect(motivoDeNaoLiberarSolicitacao(null)).toMatch(/não encontrada/);
+  });
+
+  it('a solicitação fica paga quando todas as duplicatas dela estão pagas (canceladas não contam)', () => {
+    expect(solicitacaoQuitada([{ situacao: 'pago' }])).toBe(true);
+    expect(solicitacaoQuitada([{ situacao: 'pago' }, { situacao: 'cancelado' }])).toBe(true);
+    expect(solicitacaoQuitada([{ situacao: 'pago' }, { situacao: 'aberto' }])).toBe(false);
+    expect(solicitacaoQuitada([{ situacao: 'cancelado' }])).toBe(false);
+    expect(solicitacaoQuitada([])).toBe(false);
+    expect(solicitacaoQuitada(null)).toBe(false);
   });
 });

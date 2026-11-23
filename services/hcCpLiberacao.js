@@ -17,6 +17,7 @@
 // =============================================================================
 import supabase from '../config/supabase.js';
 import { CpError, FORMAS, empresasPermitidas, conferirSenha, aplicarBaixa, saldoDoTitulo, rotuloDuplicata } from './hcContasPagar.js';
+import { solicitacoesAposDevolucao } from './solicitacaoVinculoHc.js';
 
 export const STATUS = { pendente: 'Pendente', previsao: 'Previsão', aprovado: 'Aprovado', incluido: 'Incluído', pago: 'Pago', cancelado: 'Devolvida' };
 export const EM_ANDAMENTO = ['pendente', 'previsao', 'aprovado', 'incluido']; // na ordem do fluxo
@@ -103,7 +104,7 @@ export function resumoDasLiberacoes(linhas) {
 }
 
 // ─── leitura ─────────────────────────────────────────────────────────────────
-const CAMPOS_TITULO = 'id, empresa, fornecedor_code, fornecedor_nome, fornecedor_cpf_cnpj, duplicata, parcela, documento_fiscal, despesa_code, despesa_nome, centro_custo_code, centro_custo_nome, rateio, emissao, vencimento, valor, valor_pago, juros, multa, desconto, situacao, forma_pagamento, chave_pix, codigo_barras, observacao, origem, anexo_path';
+const CAMPOS_TITULO = 'id, empresa, fornecedor_code, fornecedor_nome, fornecedor_cpf_cnpj, duplicata, parcela, documento_fiscal, despesa_code, despesa_nome, centro_custo_code, centro_custo_nome, rateio, emissao, vencimento, valor, valor_pago, juros, multa, desconto, situacao, forma_pagamento, chave_pix, codigo_barras, observacao, origem, origem_ref, anexo_path';
 const COM_TITULO = `*, titulo:hc_cp_titulos!inner(${CAMPOS_TITULO})`;
 
 const paraTela = (l) => ({ ...l, valor: Number(l.valor), titulo: l.titulo ? { ...l.titulo, rotulo: rotuloDuplicata(l.titulo), falta: saldoDoTitulo(l.titulo) } : null });
@@ -145,11 +146,12 @@ export async function listarLiberacoes(user, f = {}) {
  * LIBERAR PARA PAGAMENTO: as duplicatas selecionadas entram como PENDENTE, pelo
  * que falta pagar. As que não podem (pagas, canceladas, já liberadas) voltam em
  * "ignoradas", com o motivo.
+ * semConferirEmpresa: uso interno (liberação de uma Solicitação Crosby, em que a
+ * permissão já foi conferida pelo setor de quem liberou).
  */
-export async function liberarTitulos(user, b = {}) {
+export async function liberarTitulos(user, b = {}, { semConferirEmpresa = false } = {}) {
   const ids = idsDe(b.ids);
-  const { codes } = await empresasPermitidas(user);
-  const permitidas = new Set(codes);
+  const permitidas = semConferirEmpresa ? null : new Set((await empresasPermitidas(user)).codes);
   const [titulos, jaLiberadas] = await Promise.all([q(supabase.from('hc_cp_titulos').select('*').in('id', ids)), q(supabase.from('hc_cp_liberacoes').select('titulo_id').in('titulo_id', ids).in('status', EM_ANDAMENTO))]);
   const porId = new Map((titulos || []).map((t) => [Number(t.id), t]));
   const ocupadas = new Set((jaLiberadas || []).map((l) => Number(l.titulo_id)));
@@ -158,7 +160,7 @@ export async function liberarTitulos(user, b = {}) {
   const ignoradas = [];
   for (const id of ids) {
     const t = porId.get(id);
-    const motivo = t && !permitidas.has(Number(t.empresa)) ? 'você não tem acesso à empresa' : motivoDeNaoLiberar(t, { jaLiberada: ocupadas.has(id) });
+    const motivo = t && permitidas && !permitidas.has(Number(t.empresa)) ? 'você não tem acesso à empresa' : motivoDeNaoLiberar(t, { jaLiberada: ocupadas.has(id) });
     if (motivo) ignoradas.push({ id, rotulo: t ? `${t.fornecedor_nome} ${rotuloDuplicata(t)}` : `#${id}`, motivo });
     else novas.push({ titulo_id: id, status: 'pendente', valor: saldoDoTitulo(t), data_prevista: dataPrevista || String(t.vencimento).slice(0, 10), forma_pagamento: t.forma_pagamento || null, liberado_por: quem(user), atualizado_por: quem(user) });
   }
@@ -248,11 +250,16 @@ export async function devolverLiberacoes(user, b = {}) {
   const por = quem(user);
   let devolvidas = 0;
   const ignoradas = [];
+  const soltas = [];
   for (const l of linhas) {
     const ok = EM_ANDAMENTO.includes(l.status) ? await q(supabase.from('hc_cp_liberacoes').update({ status: 'cancelado', cancelado_por: por, cancelado_em: agora, cancelado_motivo: texto(b.motivo, 500) || 'Devolvida ao contas a pagar', atualizado_por: por, atualizado_em: agora }).eq('id', l.id).in('status', EM_ANDAMENTO).select('id').maybeSingle()) : null;
-    if (ok) devolvidas += 1;
-    else ignoradas.push({ id: l.id, rotulo: `${l.titulo.fornecedor_nome} ${rotuloDuplicata(l.titulo)}`, motivo: `está ${STATUS[l.status].toLowerCase()}` });
+    if (ok) {
+      devolvidas += 1;
+      soltas.push(l.titulo);
+    } else ignoradas.push({ id: l.id, rotulo: `${l.titulo.fornecedor_nome} ${rotuloDuplicata(l.titulo)}`, motivo: `está ${STATUS[l.status].toLowerCase()}` });
   }
+  // duplicata que veio de uma Solicitação Crosby: a solicitação volta a poder ser liberada
+  await solicitacoesAposDevolucao(soltas);
   return { devolvidas, ignoradas };
 }
 

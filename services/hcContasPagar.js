@@ -25,6 +25,7 @@ import supabase from '../config/supabase.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
 import { empresasDoUsuario } from './hcCaixa.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
+import { solicitacaoAposBaixa } from './solicitacaoVinculoHc.js';
 
 export class CpError extends Error {
   constructor(message, code = 'HC_CP', status = 400) {
@@ -668,6 +669,7 @@ export async function aplicarBaixa(t, b = {}, { por = null, porId = null, antesD
   );
   const baixa = baixas?.[0] || null;
   if (!semLiberacao) await liberacaoAposBaixa(atual, { quita, baixaId: baixa?.id || null, data, por });
+  if (quita) await solicitacaoAposBaixa(atual, { data, por, porId }); // veio de uma Solicitação Crosby: ela fica paga
   console.log(`💸 [contas a pagar] baixa${quita ? '' : ' PARCIAL'} ${t.fornecedor_nome} duplicata ${rotuloDuplicata(t)} (empresa ${t.empresa}) R$ ${pago.toFixed(2)}${quita ? '' : ` · falta R$ ${resta.toFixed(2)}`} · ${por}`);
   return { titulo: atual, baixa, saldo, pago, resta, quita, data };
 }

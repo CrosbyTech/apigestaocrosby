@@ -20,11 +20,12 @@
 //   POST /liberacoes/pagar              { ids, dataPagamento, banco, senha }  grava a baixa (sem estorno)
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
 //   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
+//   POST /solicitacoes/:id/liberar      Solicitação Crosby (enviada ou Nota Fiscal) → Liberação de Pagamento do HeadCoach (cria a duplicata se ainda não existir)
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
-import { enviarSolicitacaoAoCp } from '../services/solicitacaoContasPagar.js';
+import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../services/solicitacaoContasPagar.js';
 import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes } from '../services/hcCpLiberacao.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
 
@@ -54,6 +55,8 @@ router.post('/titulos/:id/baixar', rota((req) => baixarTitulo(req.user, req.para
 router.post('/titulos/:id/cancelar', rota((req) => cancelarTitulo(req.user, req.params.id, req.body || {}), 'Duplicata cancelada'));
 // Solicitações Crosby: o "Enviar ao Contas a Pagar HC" (no lugar do antigo envio ao TOTVS)
 router.post('/solicitacoes/:id/enviar', rota((req) => enviarSolicitacaoAoCp(req.user, req.params.id), (r) => (r.jaEnviada ? `Esta solicitação já estava no contas a pagar (duplicata ${r.rotulo})` : `Solicitação enviada ao contas a pagar — duplicata ${r.rotulo}`)));
+// Solicitações Crosby: o "Liberar para Pagamento" cai na Liberação de Pagamento do HeadCoach
+router.post('/solicitacoes/:id/liberar', rota((req) => liberarSolicitacaoParaPagamento(req.user, req.params.id), (r) => (r.jaLiberada ? `Esta solicitação já estava na Liberação de Pagamento (duplicata ${r.rotulo})` : `Solicitação liberada para pagamento — duplicata ${r.rotulo} na Liberação de Pagamento HeadCoach`)));
 
 // ─── Liberação de Pagamento ──────────────────────────────────────────────────
 const tantas = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;

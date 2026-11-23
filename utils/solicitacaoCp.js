@@ -107,6 +107,28 @@ export function inclusaoDaSolicitacao(sol, { empresa, fornecedorCode, hoje }) {
   };
 }
 
+/** Situações em que o financeiro libera a solicitação para pagamento. */
+export const STATUS_QUE_LIBERAM = ['enviado_totvs', 'nota_fiscal'];
+
+/** Patrimônio / produto: o cartão já pagou — nunca vai para a Liberação de Pagamento. */
+export const ehPatrimonioProduto = (sol) => String(sol?.setor || '').trim().toUpperCase() === 'PATRIMONIO' && String(sol?.produto_servico || '').toUpperCase() === 'PRODUTO';
+
+/** Por que a solicitação não pode ser liberada para pagamento (null = pode). */
+export function motivoDeNaoLiberarSolicitacao(sol) {
+  if (!sol) return 'Solicitação não encontrada';
+  if (ehPatrimonioProduto(sol)) return 'Produto de patrimônio já foi pago no cartão: não passa pela Liberação de Pagamento';
+  if (!STATUS_QUE_LIBERAM.includes(sol.status)) return 'Só dá para liberar depois do envio ao contas a pagar (ou no status Nota Fiscal)';
+  if (sol.pagamento_liberacao_id) return 'Esta solicitação já foi liberada antes, na Liberação de Pagamento antiga';
+  if (sol.pago_em) return 'Esta solicitação já está marcada como paga';
+  return null;
+}
+
+/** A solicitação está paga quando todas as duplicatas dela (fora as canceladas) estão pagas. */
+export function solicitacaoQuitada(titulos) {
+  const vivos = (titulos || []).filter((t) => t.situacao !== 'cancelado');
+  return vivos.length > 0 && vivos.every((t) => t.situacao === 'pago');
+}
+
 /** Entre as pessoas com o mesmo CPF/CNPJ, a que é fornecedor ativo. */
 export function escolherFornecedor(pessoas) {
   const lista = pessoas || [];

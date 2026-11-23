@@ -11,10 +11,16 @@
 //     antes, para a Liberação de Pagamento continuar igual) e guarda em
 //     totvs_response { destino: 'contas-pagar-headcoach', titulos: [...] };
 //   • Patrimônio/produto já pago no cartão e conciliado: a duplicata entra paga.
+//
+// LIBERAR PARA PAGAMENTO (Yago, 23/11/2026): a solicitação liberada cai na
+// Liberação de Pagamento do HEADCOACH (hc_cp_liberacoes), não mais na antiga.
+// A que ainda não tem duplicata no contas a pagar (status Nota Fiscal, que não
+// passa pelo envio) ganha a duplicata na hora de liberar.
 // =============================================================================
 import supabase from '../config/supabase.js';
 import { CpError, PERFIS_FINANCEIRO, validarInclusao, inserirTitulos, rotuloDuplicata } from './hcContasPagar.js';
-import { inclusaoDaSolicitacao, escolherFornecedor, ORIGEM_SOLICITACAO, DESTINO_HC, STATUS_QUE_ENVIAM } from '../utils/solicitacaoCp.js';
+import { liberarTitulos, EM_ANDAMENTO } from './hcCpLiberacao.js';
+import { inclusaoDaSolicitacao, escolherFornecedor, motivoDeNaoLiberarSolicitacao, ORIGEM_SOLICITACAO, DESTINO_HC, STATUS_QUE_ENVIAM } from '../utils/solicitacaoCp.js';
 
 const dig = (v) => String(v ?? '').replace(/\D+/g, '');
 const hojeBrasil = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife' }).format(new Date());
@@ -162,4 +168,39 @@ export async function enviarSolicitacaoAoCp(user, id) {
   const rotulo = criados.map(rotuloDuplicata).join(', ');
   console.log(`🧾 [solicitação → contas a pagar] ${sol.id} · ${criados[0]?.fornecedor_nome} · empresa ${criados[0]?.empresa} · duplicata ${rotulo}${sol.status === 'conciliado' ? ' (já paga)' : ''} · ${quem(user)}`);
   return { solicitacao: { ...sol, ...patch }, titulos: criados, rotulo, jaEnviada: false };
+}
+
+/**
+ * LIBERAR PARA PAGAMENTO de uma solicitação: as duplicatas dela entram como
+ * PENDENTE na Liberação de Pagamento do HeadCoach. A solicitação continua no
+ * mesmo status (Nota Fiscal segue Nota Fiscal) e fica marcada como liberada.
+ * @returns {{ solicitacao, titulos, rotulo, liberadas, criouDuplicata, jaLiberada }}
+ */
+export async function liberarSolicitacaoParaPagamento(user, id) {
+  await exigirFinanceiroDasSolicitacoes(user);
+  const sol = await q(supabase.from('solicitacoes_crosby').select('*').eq('id', id).maybeSingle());
+  if (!sol) throw new CpError('Solicitação não encontrada', 'NOT_FOUND', 404);
+  const motivo = motivoDeNaoLiberarSolicitacao(sol);
+  if (motivo) throw new CpError(motivo, 'NAO_LIBERA', 409);
+
+  // sem duplicata no contas a pagar (Nota Fiscal, ou enviada no modelo antigo): cria agora
+  let titulos = await titulosDaSolicitacao(sol.id);
+  const criouDuplicata = !titulos?.length;
+  if (criouDuplicata) titulos = await inserirTitulos(await prepararDuplicata(sol), { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id) });
+
+  const ids = titulos.map((t) => t.id);
+  const r = await liberarTitulos(user, { ids }, { semConferirEmpresa: true });
+  const emAndamento = await q(supabase.from('hc_cp_liberacoes').select('id, titulo_id, status').in('titulo_id', ids).in('status', EM_ANDAMENTO));
+  const rotulo = titulos.map(rotuloDuplicata).join(', ');
+  if (!emAndamento?.length) throw new CpError(`A duplicata ${rotulo} não foi para a Liberação de Pagamento: ${r.ignoradas?.[0]?.motivo || 'não tem valor em aberto'}`, 'NAO_LIBERA', 409);
+
+  const patch = {
+    liberado_pagamento_em: sol.liberado_pagamento_em || new Date().toISOString(),
+    liberado_pagamento_por: sol.liberado_pagamento_por || user?.id || null,
+    liberado_pagamento_por_nome: sol.liberado_pagamento_por_nome || quem(user),
+    totvs_response: { ...(sol.totvs_response && typeof sol.totvs_response === 'object' && !Array.isArray(sol.totvs_response) ? sol.totvs_response : {}), destino: DESTINO_HC, titulos: resumo(titulos), liberacoes: emAndamento.map((l) => l.id) },
+  };
+  await q(supabase.from('solicitacoes_crosby').update(patch).eq('id', sol.id));
+  console.log(`📤 [solicitação → liberação de pagamento] ${sol.id} · ${titulos[0]?.fornecedor_nome} · empresa ${titulos[0]?.empresa} · duplicata ${rotulo}${criouDuplicata ? ' (criada agora)' : ''} · ${quem(user)}`);
+  return { solicitacao: { ...sol, ...patch }, titulos, rotulo, liberadas: r.liberadas, criouDuplicata, jaLiberada: r.liberadas === 0 };
 }
