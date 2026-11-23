@@ -38,8 +38,9 @@ import { registrarEpcs } from '../routes/pdvCrosby.routes.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 
 /** Lojas do varejo que estão ativas (Yago, 19/11/2026). A 90 (Ayrton Senna) entrou no mesmo dia,
- * pelo exemplo que ele deu ao corrigir a regra (Cidade Jardim → Ayrton Senna). */
-export const LOJAS_ATIVAS = [2, 5, 55, 65, 87, 90, 93, 94, 95, 97, 98];
+ * pelo exemplo que ele deu ao corrigir a regra (Cidade Jardim → Ayrton Senna). A 88 (Shopping
+ * Guararapes) entrou em 23/11/2026: a Cidade Jardim não a encontrava para transferir. */
+export const LOJAS_ATIVAS = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
 
 // raízes de CNPJ das empresas dos Irmãos (Irmãos CR e Irmãos Varejo): são do Simples Nacional
 // (conferido nos XML das notas do TOTVS em 19/11/2026) e, no POP, a venda com elas é a 7280
