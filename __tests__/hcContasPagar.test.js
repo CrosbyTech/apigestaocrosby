@@ -83,9 +83,9 @@ describe('conta que vem todo mês', () => {
 
 describe('situacaoDeTela', () => {
   it('aberta com vencimento passado é vencida', () => {
-    expect(situacaoDeTela({ situacao: 'aberto', vencimento: '2026-11-16' }, HOJE)).toEqual({ situacao: 'vencido', diasAtraso: 2 });
-    expect(situacaoDeTela({ situacao: 'aberto', vencimento: '2026-11-18' }, HOJE)).toEqual({ situacao: 'aberto', diasAtraso: 0 });
-    expect(situacaoDeTela({ situacao: 'pago', vencimento: '2026-11-01' }, HOJE)).toEqual({ situacao: 'pago', diasAtraso: 0 });
+    expect(situacaoDeTela({ situacao: 'aberto', vencimento: '2026-11-16' }, HOJE)).toMatchObject({ situacao: 'vencido', diasAtraso: 2 });
+    expect(situacaoDeTela({ situacao: 'aberto', vencimento: '2026-11-18' }, HOJE)).toMatchObject({ situacao: 'aberto', diasAtraso: 0 });
+    expect(situacaoDeTela({ situacao: 'pago', vencimento: '2026-11-01' }, HOJE)).toMatchObject({ situacao: 'pago', diasAtraso: 0 });
   });
 });
 

@@ -1681,7 +1681,7 @@
       },
       "PayableSettlement": {
         "type": "object",
-        "description": "Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.",
+        "description": "Pagamentos das duplicatas, com juros, multa e desconto. Uma linha por pagamento: a duplicata paga em parte tem várias, e `documentValue` − (`paidValue` − juros − multa + desconto) é o que ficou em aberto depois de cada uma. Não há estorno de baixa.",
         "properties": {
           "settlementId": {
             "description": "Identificador da baixa.",
@@ -1701,7 +1701,7 @@
             "nullable": true
           },
           "documentValue": {
-            "description": "Valor original da duplicata.",
+            "description": "Quanto estava em aberto antes deste pagamento (na primeira baixa, o valor da duplicata).",
             "type": "number",
             "nullable": true
           },
@@ -1721,7 +1721,7 @@
             "nullable": true
           },
           "paidValue": {
-            "description": "Valor pago.",
+            "description": "Valor pago neste pagamento.",
             "type": "number",
             "nullable": true
           },
@@ -1765,7 +1765,7 @@
       },
       "PayableDocument": {
         "type": "object",
-        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.",
+        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual. Baixa parcial: a duplicata paga em parte continua `Open`, com `paidValue` = o que já saiu, `remainingValue` = o que falta e uma linha em /settlements por pagamento; para somar o que foi PAGO use `paidValue` (das Paid e das pagas em parte) e para o que está EM ABERTO use `remainingValue`. As duplicatas com `origin` = totvs vieram do contas a pagar do TOTVS já pagas (baixa de lá, conciliação do extrato ou Liberação de Pagamento): `fiscalDocument` guarda o número da duplicata no TOTVS e `settledBy` diz por onde foi paga.",
         "properties": {
           "documentId": {
             "description": "Identificador interno da parcela.",
@@ -1966,7 +1966,7 @@
             "nullable": true
           },
           "status": {
-            "description": "Situação. Vencida = Open com dueDate anterior a hoje.",
+            "description": "Situação. Vencida = Open com dueDate anterior a hoje. A duplicata paga em parte continua Open até zerar (veja isPartiallyPaid).",
             "type": "string",
             "enum": [
               "Open",
@@ -1976,7 +1976,7 @@
             "nullable": true
           },
           "paymentDate": {
-            "description": "Data do pagamento.",
+            "description": "Data do pagamento (do último, quando houve mais de um).",
             "type": "string",
             "format": "date",
             "example": "2026-11-18",
@@ -1998,8 +1998,19 @@
             "nullable": true
           },
           "paidValue": {
-            "description": "Valor pago.",
+            "description": "Valor pago até agora (soma das baixas; na duplicata paga em parte é o que já saiu).",
             "type": "number",
+            "nullable": true
+          },
+          "remainingValue": {
+            "description": "Quanto falta pagar: valor − (pago − juros − multa + desconto). Zero na paga e na cancelada.",
+            "type": "number",
+            "example": 5500,
+            "nullable": true
+          },
+          "isPartiallyPaid": {
+            "description": "Paga em parte: continua Open, com `paidValue` já pago e `remainingValue` em aberto.",
+            "type": "boolean",
             "nullable": true
           },
           "paymentAccount": {
@@ -2013,12 +2024,13 @@
             "nullable": true
           },
           "origin": {
-            "description": "De onde veio: manual (tela) ou o robô que capturou a conta (ex.: bot-cosern-whatsapp).",
+            "description": "De onde veio: manual (tela), o robô que capturou a conta (ex.: bot-cosern-whatsapp), solicitacao-crosby (Solicitação Crosby aprovada pelo financeiro; originReference = id da solicitação) ou totvs (duplicata já paga importada do contas a pagar do TOTVS — a marca TOTVS da tela).",
             "type": "string",
+            "example": "totvs",
             "nullable": true
           },
           "originReference": {
-            "description": "Identificador na origem.",
+            "description": "Identificador na origem. Nas importadas do TOTVS: empresa|fornecedor|duplicata|parcela de lá.",
             "type": "string",
             "nullable": true
           },
@@ -8188,7 +8200,7 @@
           "AccountsPayable"
         ],
         "summary": "Duplicatas a pagar",
-        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.",
+        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual. Baixa parcial: a duplicata paga em parte continua `Open`, com `paidValue` = o que já saiu, `remainingValue` = o que falta e uma linha em /settlements por pagamento; para somar o que foi PAGO use `paidValue` (das Paid e das pagas em parte) e para o que está EM ABERTO use `remainingValue`. As duplicatas com `origin` = totvs vieram do contas a pagar do TOTVS já pagas (baixa de lá, conciliação do extrato ou Liberação de Pagamento): `fiscalDocument` guarda o número da duplicata no TOTVS e `settledBy` diz por onde foi paga.",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -8267,6 +8279,26 @@
             "description": "Parcelas incluídas na mesma vez.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "isPartiallyPaid",
+            "in": "query",
+            "required": false,
+            "description": "true = só as pagas em parte (em aberto com pagamento lançado); false = todas as outras.",
+            "schema": {
+              "type": "string",
+              "example": "true"
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": false,
+            "description": "Origem exata (ex.: totvs = só as importadas do TOTVS; manual = só as incluídas na tela).",
+            "schema": {
+              "type": "string",
+              "example": "totvs"
             }
           },
           {
@@ -8531,7 +8563,7 @@
           "AccountsPayable"
         ],
         "summary": "Duplicatas a pagar — um registro",
-        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.",
+        "description": "Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela (\"1/12\" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual. Baixa parcial: a duplicata paga em parte continua `Open`, com `paidValue` = o que já saiu, `remainingValue` = o que falta e uma linha em /settlements por pagamento; para somar o que foi PAGO use `paidValue` (das Paid e das pagas em parte) e para o que está EM ABERTO use `remainingValue`. As duplicatas com `origin` = totvs vieram do contas a pagar do TOTVS já pagas (baixa de lá, conciliação do extrato ou Liberação de Pagamento): `fiscalDocument` guarda o número da duplicata no TOTVS e `settledBy` diz por onde foi paga.",
         "parameters": [
           {
             "name": "documentId",
@@ -8632,7 +8664,7 @@
           "AccountsPayable"
         ],
         "summary": "Baixas (pagamentos)",
-        "description": "Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.",
+        "description": "Pagamentos das duplicatas, com juros, multa e desconto. Uma linha por pagamento: a duplicata paga em parte tem várias, e `documentValue` − (`paidValue` − juros − multa + desconto) é o que ficou em aberto depois de cada uma. Não há estorno de baixa.",
         "parameters": [
           {
             "name": "documentId",

@@ -24,6 +24,7 @@ import crypto from 'node:crypto';
 import supabase from '../config/supabase.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
 import { empresasDoUsuario } from './hcCaixa.js';
+import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 
 export class CpError extends Error {
   constructor(message, code = 'HC_CP', status = 400) {
@@ -33,7 +34,7 @@ export class CpError extends Error {
   }
 }
 
-const PERFIS_FINANCEIRO = ['owner', 'admin', 'user']; // user = financeiro
+export const PERFIS_FINANCEIRO = ['owner', 'admin', 'user']; // user = financeiro
 const BUCKET_ANEXOS = 'extratos-bancarios';
 
 export const FORMAS = {
@@ -97,9 +98,22 @@ async function conferirSenha(email, senha) {
 function exigirFinanceiro(user) {
   if (!PERFIS_FINANCEIRO.includes(user?.role)) throw new CpError('O contas a pagar é só para owner, admin e financeiro', 'SEM_PERMISSAO', 403);
 }
+// As duplicatas importadas do TOTVS e as que vêm das Solicitações podem ser de empresa
+// que não é loja própria (franquia, serviços integrados). Quem enxerga todas as empresas
+// vê essas também — senão a duplicata ficaria gravada e fora da tela.
+async function empresasComImportadas(user, lista) {
+  if ((await empresasRestritasDoUsuario(user)) !== null) return lista;
+  const fora = await q(supabase.from('hc_cp_titulos').select('empresa').not('empresa', 'in', `(${lista.map((e) => e.code).join(',') || 0})`).limit(1000));
+  const codes = [...new Set((fora || []).map((x) => Number(x.empresa)))];
+  if (!codes.length) return lista;
+  const extras = await q(supabase.from('erp_empresas').select('code, descricao, fantasia, uf').in('code', codes));
+  const nome = new Map((extras || []).map((e) => [Number(e.code), e]));
+  return [...lista, ...codes.map((c) => ({ code: c, nome: String(nome.get(c)?.descricao || '').replace(/^\s*\d+\s*-\s*/, '').trim() || nome.get(c)?.fantasia || `Empresa ${c}`, uf: nome.get(c)?.uf || null }))].sort((a, b) => a.code - b.code);
+}
+
 async function empresasPermitidas(user, empresa) {
   exigirFinanceiro(user);
-  const lista = await empresasDoUsuario(user);
+  const lista = await empresasComImportadas(user, await empresasDoUsuario(user));
   if (empresa) {
     const n = Number(empresa);
     if (!lista.some((e) => e.code === n)) throw new CpError(`Você não tem acesso à empresa ${n}`, 'SEM_ACESSO_EMPRESA', 403);
@@ -271,11 +285,46 @@ export function duplicataDaContaMensal(daConta, parcela) {
   return daConta.some((t) => Number(t.duplicata) === atual && Number(t.parcela) === Number(parcela)) ? null : atual;
 }
 
-/** Dias de atraso e situação de tela (vencido é "aberto" com vencimento passado). */
+// ─── baixa parcial ───────────────────────────────────────────────────────────
+// A duplicata paga em parte continua EM ABERTO, com o que já saiu em valor_pago
+// (juros, multa e desconto acumulados) e uma linha em hc_cp_baixas por pagamento.
+// O que falta = valor − (pago − juros − multa + desconto). Vira PAGA quando zera.
+/** Quanto do valor da duplicata já foi abatido pelos pagamentos (sem juros/multa, com o desconto). */
+export const abatidoDoTitulo = (t) => Math.max(0, round2(Number(t.valor_pago || 0) - Number(t.juros || 0) - Number(t.multa || 0) + Number(t.desconto || 0)));
+/** Quanto falta pagar. Duplicata paga ou cancelada não tem saldo. */
+export const saldoDoTitulo = (t) => (t.situacao !== 'aberto' ? 0 : Math.max(0, round2(Number(t.valor || 0) - abatidoDoTitulo(t))));
+/** Em aberto com pagamento já lançado. */
+export const ehParcial = (t) => t.situacao === 'aberto' && Number(t.valor_pago || 0) > 0;
+
+/**
+ * Conta de uma baixa. Sem `valorPago` paga tudo o que falta; com valor menor é
+ * baixa parcial e a duplicata continua em aberto pelo restante.
+ * @returns {{ saldo, pago, abatido, resta, quita }}
+ */
+export function calcularBaixa(t, { juros = 0, multa = 0, desconto = 0, valorPago = null } = {}) {
+  for (const [n, v] of [['juros', juros], ['multa', multa], ['desconto', desconto]]) {
+    if (!Number.isFinite(v) || v < 0) throw new CpError(`Valor inválido em ${n}`);
+  }
+  const saldo = saldoDoTitulo(t);
+  if (desconto > saldo + juros + multa) throw new CpError('O desconto é maior que o valor a pagar');
+  const cheio = round2(saldo + juros + multa - desconto);
+  const informado = valorPago !== null && valorPago !== undefined && valorPago !== '';
+  const pago = informado ? round2(valorPago) : cheio;
+  if (!Number.isFinite(pago) || pago < 0) throw new CpError('Valor pago inválido');
+  if (pago > cheio + 0.005) throw new CpError(`O valor pago é maior que o que falta pagar (R$ ${cheio.toFixed(2).replace('.', ',')})`);
+  const abatido = round2(pago - juros - multa + desconto);
+  if (abatido < 0) throw new CpError('O valor pago não cobre os juros e a multa informados');
+  const resta = round2(saldo - abatido);
+  const quita = resta <= 0.005;
+  if (!quita && !(pago > 0)) throw new CpError('Informe o valor pago');
+  return { saldo, pago, abatido, resta: quita ? 0 : resta, quita };
+}
+
+/** Dias de atraso e situação de tela (vencido é "aberto" com vencimento passado; parcial = em aberto com pagamento). */
 export function situacaoDeTela(t, hoje = hojeBrasil()) {
-  if (t.situacao !== 'aberto') return { situacao: t.situacao, diasAtraso: 0 };
+  if (t.situacao !== 'aberto') return { situacao: t.situacao, diasAtraso: 0, parcial: false, saldo: 0 };
   const dias = diasEntre(String(t.vencimento).slice(0, 10), hoje);
-  return { situacao: dias > 0 ? 'vencido' : 'aberto', diasAtraso: Math.max(0, dias) };
+  return { situacao: dias > 0 ? 'vencido' : 'aberto', diasAtraso: Math.max(0, dias), parcial: ehParcial(t), saldo: saldoDoTitulo(t) };
 }
 
 // ─── inclusão ────────────────────────────────────────────────────────────────
@@ -379,12 +428,16 @@ export async function listarTitulos(user, f = {}) {
     if (ehData(f.ate)) qy = qy.lte(campo, f.ate);
     if (f.situacao === 'vencido') qy = qy.eq('situacao', 'aberto').lt('vencimento', hoje);
     else if (f.situacao === 'a_vencer') qy = qy.eq('situacao', 'aberto').gte('vencimento', hoje);
-    else if (['aberto', 'pago', 'cancelado'].includes(f.situacao)) qy = qy.eq('situacao', f.situacao);
+    else if (f.situacao === 'pago') qy = qy.or('situacao.eq.pago,and(situacao.eq.aberto,valor_pago.gt.0)'); // as pagas + o que já foi pago das parciais
+    else if (f.situacao === 'parcial') qy = qy.eq('situacao', 'aberto').gt('valor_pago', 0);
+    else if (['aberto', 'cancelado'].includes(f.situacao)) qy = qy.eq('situacao', f.situacao); // em aberto inclui as parciais, pelo que falta
     if (f.forma && FORMAS[f.forma]) qy = qy.eq('forma_pagamento', f.forma);
     if (f.portador) qy = qy.eq('portador_code', Number(f.portador));
     if (f.despesa) qy = qy.contains('rateio', JSON.stringify([{ despesa_code: Number(f.despesa) }])); // jsonb: o filtro vai como texto JSON
     if (f.centroCusto) qy = qy.contains('rateio', JSON.stringify([{ centro_custo_code: Number(f.centroCusto) }]));
     if (['real', 'previsao'].includes(f.previsao)) qy = qy.eq('previsao', f.previsao);
+    if (f.origem === 'totvs') qy = qy.eq('origem', 'totvs'); // importadas do contas a pagar do TOTVS (marca TOTVS)
+    else if (f.origem === 'headcoach') qy = qy.neq('origem', 'totvs');
     const doc = String(f.documentoFiscal || '').trim();
     if (doc) qy = qy.eq('documento_fiscal', doc);
     const [dup, parc] = String(f.duplicata || '').split('/').map((s) => s.replace(/\D/g, '')); // "1" = a duplicata inteira; "1/12" = só a parcela 12
@@ -398,28 +451,39 @@ export async function listarTitulos(user, f = {}) {
     }
     return qy.order(campo, { ascending: true }).order('fornecedor_nome').order('duplicata').order('parcela');
   });
-  const totais = { qtd: 0, valor: 0, aberto: 0, vencido: 0, venceHoje: 0, pago: 0, valorPago: 0, encargos: 0, desconto: 0, cancelado: 0 };
-  const titulos = rows.map((t) => {
-    const tela = situacaoDeTela(t, hoje);
+  const titulos = rows.map((t) => ({ ...t, tela: situacaoDeTela(t, hoje) }));
+  return { titulos, totais: totaisDosTitulos(titulos, hoje), empresas: lista, hoje };
+}
+
+/**
+ * Totais da consulta. A duplicata paga em parte entra nos dois lados: o que já
+ * saiu soma em "pago" e só o que falta soma em "em aberto" (e em vencido / vence hoje).
+ */
+export function totaisDosTitulos(titulos, hoje = hojeBrasil()) {
+  const totais = { qtd: 0, valor: 0, aberto: 0, vencido: 0, venceHoje: 0, pago: 0, valorPago: 0, encargos: 0, desconto: 0, cancelado: 0, parciais: 0 };
+  for (const t of titulos) {
+    const tela = t.tela || situacaoDeTela(t, hoje);
     const v = round2(t.valor);
     totais.qtd += 1;
-    if (t.situacao === 'cancelado') totais.cancelado = round2(totais.cancelado + v);
-    else {
-      totais.valor = round2(totais.valor + v);
-      if (t.situacao === 'aberto') {
-        totais.aberto = round2(totais.aberto + v);
-        if (tela.diasAtraso > 0) totais.vencido = round2(totais.vencido + v);
-        if (String(t.vencimento).slice(0, 10) === hoje) totais.venceHoje = round2(totais.venceHoje + v);
-      } else {
-        totais.pago = round2(totais.pago + v);
-        totais.valorPago = round2(totais.valorPago + Number(t.valor_pago || 0));
-        totais.encargos = round2(totais.encargos + Number(t.juros || 0) + Number(t.multa || 0));
-        totais.desconto = round2(totais.desconto + Number(t.desconto || 0));
-      }
+    if (t.situacao === 'cancelado') {
+      totais.cancelado = round2(totais.cancelado + v);
+      continue;
     }
-    return { ...t, tela };
-  });
-  return { titulos, totais, empresas: lista, hoje };
+    totais.valor = round2(totais.valor + v);
+    if (t.situacao === 'aberto') {
+      const falta = saldoDoTitulo(t);
+      totais.aberto = round2(totais.aberto + falta);
+      if (tela.diasAtraso > 0) totais.vencido = round2(totais.vencido + falta);
+      if (String(t.vencimento).slice(0, 10) === hoje) totais.venceHoje = round2(totais.venceHoje + falta);
+      if (ehParcial(t)) totais.parciais += 1;
+    } else totais.pago = round2(totais.pago + v);
+    if (t.situacao === 'pago' || ehParcial(t)) {
+      totais.valorPago = round2(totais.valorPago + Number(t.valor_pago || 0));
+      totais.encargos = round2(totais.encargos + Number(t.juros || 0) + Number(t.multa || 0));
+      totais.desconto = round2(totais.desconto + Number(t.desconto || 0));
+    }
+  }
+  return totais;
 }
 
 async function tituloDoUsuario(user, id) {
@@ -464,6 +528,7 @@ export async function editarTitulo(user, id, b = {}) {
   if (b.valor !== undefined) {
     const valor = round2(num(b.valor));
     if (!Number.isFinite(valor) || valor <= 0) throw new CpError('Valor inválido');
+    if (ehParcial(t) && valor !== round2(t.valor) && valor <= abatidoDoTitulo(t)) throw new CpError(`Já foram pagos R$ ${abatidoDoTitulo(t).toFixed(2).replace('.', ',')} desta duplicata; o valor tem de ser maior que isso`, 'JA_TEM_PAGAMENTO', 409);
     patch.valor = valor;
   }
   if (b.formaPagamento !== undefined) {
@@ -519,30 +584,41 @@ export async function baixarTitulo(user, id, b = {}) {
   const juros = round2(num(b.juros));
   const multa = round2(num(b.multa));
   const desconto = round2(num(b.desconto));
-  for (const [n, v] of [['juros', juros], ['multa', multa], ['desconto', desconto]]) {
-    if (!Number.isFinite(v) || v < 0) throw new CpError(`Valor inválido em ${n}`);
-  }
-  const valor = round2(t.valor);
-  if (desconto > valor + juros + multa) throw new CpError('O desconto é maior que o valor a pagar');
+  // valorPago em branco = paga tudo o que falta; menor = baixa parcial (continua em aberto pelo restante)
+  const informado = b.valorPago !== undefined && b.valorPago !== null && String(b.valorPago).trim() !== '';
+  const { saldo, pago, resta, quita } = calcularBaixa(t, { juros, multa, desconto, valorPago: informado ? num(b.valorPago) : null });
   const forma = b.formaPagamento ? String(b.formaPagamento) : t.forma_pagamento;
   if (forma && !FORMAS[forma]) throw new CpError('Forma de pagamento inválida');
-  const pago = round2(valor + juros + multa - desconto);
   await conferirSenha(user?.email, b.senha);
   const agora = new Date().toISOString();
+  const jaPago = round2(t.valor_pago || 0);
   const { data: atual, error } = await supabase
     .from('hc_cp_titulos')
-    .update({ situacao: 'pago', data_pagamento: data, juros, multa, desconto, valor_pago: pago, forma_pagamento: forma || null, conta_pagamento: texto(b.conta, 120), baixado_por: quem(user), baixado_em: agora, atualizado_em: agora })
+    .update({
+      situacao: quita ? 'pago' : 'aberto',
+      data_pagamento: data,
+      juros: round2(Number(t.juros || 0) + juros),
+      multa: round2(Number(t.multa || 0) + multa),
+      desconto: round2(Number(t.desconto || 0) + desconto),
+      valor_pago: round2(jaPago + pago),
+      forma_pagamento: forma || null,
+      conta_pagamento: texto(b.conta, 120),
+      baixado_por: quem(user),
+      baixado_em: agora,
+      atualizado_em: agora,
+    })
     .eq('id', t.id)
     .eq('situacao', 'aberto')
+    .eq('valor_pago', jaPago) // ninguém lançou outro pagamento no meio
     .select()
     .maybeSingle();
   if (error) throw falhaDb(error);
-  if (!atual) throw new CpError('Esta duplicata acabou de ser baixada por outra pessoa', 'JA_BAIXADA', 409);
+  if (!atual) throw new CpError('Esta duplicata acabou de receber outra baixa; abra de novo e confira', 'JA_BAIXADA', 409);
   await q(
     supabase.from('hc_cp_baixas').insert({
       titulo_id: t.id,
       data_pagamento: data,
-      valor_titulo: valor,
+      valor_titulo: saldo, // o que estava em aberto antes deste pagamento
       juros,
       multa,
       desconto,
@@ -554,14 +630,15 @@ export async function baixarTitulo(user, id, b = {}) {
       por: quem(user),
     }),
   );
-  console.log(`💸 [contas a pagar] baixa ${t.fornecedor_nome} duplicata ${rotuloDuplicata(t)} (empresa ${t.empresa}) R$ ${pago.toFixed(2)} · ${quem(user)}`);
-  return atual;
+  console.log(`💸 [contas a pagar] baixa${quita ? '' : ' PARCIAL'} ${t.fornecedor_nome} duplicata ${rotuloDuplicata(t)} (empresa ${t.empresa}) R$ ${pago.toFixed(2)}${quita ? '' : ` · falta R$ ${resta.toFixed(2)}`} · ${quem(user)}`);
+  return { ...atual, tela: situacaoDeTela(atual), baixaParcial: !quita, faltaPagar: resta };
 }
 
 // ─── cancelamento (só em aberto, com motivo e senha) ─────────────────────────
 export async function cancelarTitulo(user, id, b = {}) {
   const t = await tituloDoUsuario(user, id);
   if (t.situacao !== 'aberto') throw new CpError(`Esta duplicata está ${t.situacao}; só dá para cancelar duplicata em aberto`, 'NAO_ABERTA', 409);
+  if (ehParcial(t)) throw new CpError('Esta duplicata já tem pagamento lançado e a baixa não tem estorno; para encerrar o que falta, baixe o restante com desconto', 'JA_TEM_PAGAMENTO', 409);
   const motivo = texto(b.motivo, 500);
   if (!motivo || motivo.length < 5) throw new CpError('Informe o motivo do cancelamento');
   await conferirSenha(user?.email, b.senha);

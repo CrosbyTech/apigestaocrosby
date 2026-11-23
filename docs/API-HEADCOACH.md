@@ -659,7 +659,7 @@ Contas a pagar do HeadCoach: duplicatas de fornecedor com documento fiscal, port
 
 ### GET /api/headcoach/accounts-payable/v1/documents
 
-Duplicatas a pagar — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.
+Duplicatas a pagar — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual. Baixa parcial: a duplicata paga em parte continua `Open`, com `paidValue` = o que já saiu, `remainingValue` = o que falta e uma linha em /settlements por pagamento; para somar o que foi PAGO use `paidValue` (das Paid e das pagas em parte) e para o que está EM ABERTO use `remainingValue`. As duplicatas com `origin` = totvs vieram do contas a pagar do TOTVS já pagas (baixa de lá, conciliação do extrato ou Liberação de Pagamento): `fiscalDocument` guarda o número da duplicata no TOTVS e `settledBy` diz por onde foi paga.
 
 Parâmetros:
 - `branchCodeList` (string) — Empresas, separadas por vírgula.
@@ -670,6 +670,8 @@ Parâmetros:
 - `installmentCode` (integer) — Parcela.
 - `fiscalDocument` (string) — Documento fiscal exato.
 - `batchId` (string) — Parcelas incluídas na mesma vez.
+- `isPartiallyPaid` (string) — true = só as pagas em parte (em aberto com pagamento lançado); false = todas as outras.
+- `origin` (string) — Origem exata (ex.: totvs = só as importadas do TOTVS; manual = só as incluídas na tela).
 - `expenseCode` (string) — Despesa, em qualquer linha do rateio.
 - `costCenterCode` (string) — Centro de custo, em qualquer linha do rateio.
 - `bearerCode` (integer) — Código do portador.
@@ -690,7 +692,7 @@ Resposta: página de `PayableDocument`
 
 ### GET /api/headcoach/accounts-payable/v1/documents/{documentId}
 
-Duplicatas a pagar — um registro — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.
+Duplicatas a pagar — um registro — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual. Baixa parcial: a duplicata paga em parte continua `Open`, com `paidValue` = o que já saiu, `remainingValue` = o que falta e uma linha em /settlements por pagamento; para somar o que foi PAGO use `paidValue` (das Paid e das pagas em parte) e para o que está EM ABERTO use `remainingValue`. As duplicatas com `origin` = totvs vieram do contas a pagar do TOTVS já pagas (baixa de lá, conciliação do extrato ou Liberação de Pagamento): `fiscalDocument` guarda o número da duplicata no TOTVS e `settledBy` diz por onde foi paga.
 
 Parâmetros:
 - `documentId` (caminho, obrigatório) — Identificador da parcela.
@@ -700,7 +702,7 @@ Resposta:  `PayableDocument`
 
 ### GET /api/headcoach/accounts-payable/v1/settlements
 
-Baixas (pagamentos) — Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.
+Baixas (pagamentos) — Pagamentos das duplicatas, com juros, multa e desconto. Uma linha por pagamento: a duplicata paga em parte tem várias, e `documentValue` − (`paidValue` − juros − multa + desconto) é o que ficou em aberto depois de cada uma. Não há estorno de baixa.
 
 Parâmetros:
 - `documentId` (integer) — Baixas de uma duplicata.
@@ -755,23 +757,23 @@ Resposta:  `PayableCostCenter`
 
 Esquemas:
 
-**PayableSettlement** — Pagamento de parcela que estava em aberto, com juros, multa e desconto. Não há estorno de baixa.
+**PayableSettlement** — Pagamentos das duplicatas, com juros, multa e desconto. Uma linha por pagamento: a duplicata paga em parte tem várias, e `documentValue` − (`paidValue` − juros − multa + desconto) é o que ficou em aberto depois de cada uma. Não há estorno de baixa.
 
 - `settlementId` (integer) — Identificador da baixa.
 - `documentId` (integer) — Duplicata baixada (documentId em /documents).
 - `paymentDate` (date) — Data do pagamento.
-- `documentValue` (number) — Valor original da duplicata.
+- `documentValue` (number) — Quanto estava em aberto antes deste pagamento (na primeira baixa, o valor da duplicata).
 - `interestValue` (number) — Juros pagos.
 - `fineValue` (number) — Multa paga.
 - `discountValue` (number) — Desconto obtido.
-- `paidValue` (number) — Valor pago.
+- `paidValue` (number) — Valor pago neste pagamento.
 - `paymentMethod` (string) — Como foi pago. Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
 - `account` (string) — Banco / conta de onde saiu.
 - `observation` (string) — Observação.
 - `settledBy` (string) — Usuário que baixou.
 - `settlementDate` (date-time) — Quando a baixa foi lançada.
 
-**PayableDocument** — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual.
+**PayableDocument** — Uma linha por parcela. `duplicateCode` é o número da duplicata da empresa com aquele fornecedor (1, 2, 3…), `installmentCode` é a parcela dentro dela e `duplicateLabel` é como aparecem na tela ("1/12" = duplicata 1, parcela 12). Conta que vem todo mês (energia, aluguel) fica na mesma duplicata, com o mês do vencimento como parcela. `fiscalDocument` é a nota / fatura do fornecedor, muda a cada parcela e pode vir vazio (aluguel, recibo). Quando a despesa é rateada, `apportionment` traz as linhas, e `expenseCode` / `costCenterCode` são os da linha de maior percentual. Baixa parcial: a duplicata paga em parte continua `Open`, com `paidValue` = o que já saiu, `remainingValue` = o que falta e uma linha em /settlements por pagamento; para somar o que foi PAGO use `paidValue` (das Paid e das pagas em parte) e para o que está EM ABERTO use `remainingValue`. As duplicatas com `origin` = totvs vieram do contas a pagar do TOTVS já pagas (baixa de lá, conciliação do extrato ou Liberação de Pagamento): `fiscalDocument` guarda o número da duplicata no TOTVS e `settledBy` diz por onde foi paga.
 
 - `documentId` (integer) — Identificador interno da parcela.
 - `branchCode` (integer) — Empresa.
@@ -800,16 +802,18 @@ Esquemas:
 - `dueDate` (date) — Vencimento.
 - `reference` (string) — Competência (ex.: 10/2026).
 - `value` (number) — Valor da duplicata.
-- `status` (string) — Situação. Vencida = Open com dueDate anterior a hoje. Valores: Open, Paid, Canceled.
-- `paymentDate` (date) — Data do pagamento.
+- `status` (string) — Situação. Vencida = Open com dueDate anterior a hoje. A duplicata paga em parte continua Open até zerar (veja isPartiallyPaid). Valores: Open, Paid, Canceled.
+- `paymentDate` (date) — Data do pagamento (do último, quando houve mais de um).
 - `interestValue` (number) — Juros pagos na baixa.
 - `fineValue` (number) — Multa paga na baixa.
 - `discountValue` (number) — Desconto obtido na baixa.
-- `paidValue` (number) — Valor pago.
+- `paidValue` (number) — Valor pago até agora (soma das baixas; na duplicata paga em parte é o que já saiu).
+- `remainingValue` (number) — Quanto falta pagar: valor − (pago − juros − multa + desconto). Zero na paga e na cancelada.
+- `isPartiallyPaid` (boolean) — Paga em parte: continua Open, com `paidValue` já pago e `remainingValue` em aberto.
 - `paymentAccount` (string) — Banco / conta de onde saiu o pagamento.
 - `observation` (string) — Observação.
-- `origin` (string) — De onde veio: manual (tela) ou o robô que capturou a conta (ex.: bot-cosern-whatsapp).
-- `originReference` (string) — Identificador na origem.
+- `origin` (string) — De onde veio: manual (tela), o robô que capturou a conta (ex.: bot-cosern-whatsapp), solicitacao-crosby (Solicitação Crosby aprovada pelo financeiro; originReference = id da solicitação) ou totvs (duplicata já paga importada do contas a pagar do TOTVS — a marca TOTVS da tela).
+- `originReference` (string) — Identificador na origem. Nas importadas do TOTVS: empresa|fornecedor|duplicata|parcela de lá.
 - `createdBy` (string) — Quem incluiu.
 - `createDate` (date-time) — Quando foi incluída.
 - `settledBy` (string) — Quem baixou.
