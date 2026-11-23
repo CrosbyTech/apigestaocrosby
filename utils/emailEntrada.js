@@ -27,12 +27,13 @@ export function htmlParaTexto(html) {
  */
 export function codigoDoEmail(assunto, texto) {
   const tudo = `${assunto || ''}\n${texto || ''}`;
-  const PALAVRA = '(?:c[oó]digo|code|token|senha tempor[aá]ria|verifica[çc][aã]o|confirma[çc][aã]o|autentica[çc][aã]o)';
+  // palavra inteira e número solto: dentro de um Pix copia e cola há "…pix2568qrcodepix…", que não é código nenhum
+  const PALAVRA = '(?<![A-Za-zÀ-ÿ0-9])(?:c[oó]digo|code|token|senha tempor[aá]ria|verifica[çc][aã]o|confirma[çc][aã]o|autentica[çc][aã]o)(?![A-Za-zÀ-ÿ0-9])';
   // "código: 123456", "código de verificação é 123456", "seu código 12 34 56"
-  const depois = tudo.match(new RegExp(`${PALAVRA}[^\\d\\n]{0,60}?(\\d(?:[\\s-]?\\d){3,9})(?!\\d)`, 'i'));
+  const depois = tudo.match(new RegExp(`${PALAVRA}[^\\d\\n]{0,60}?(?<![A-Za-z0-9.])(\\d(?:[\\s-]?\\d){3,9})(?![A-Za-z0-9])`, 'i'));
   if (depois) return depois[1].replace(/\D/g, '');
   // "123456 é o seu código"
-  const antes = tudo.match(new RegExp(`(?<!\\d)(\\d{4,10})(?!\\d)[^\\d\\n]{0,40}?${PALAVRA}`, 'i'));
+  const antes = tudo.match(new RegExp(`(?<![A-Za-z0-9.])(\\d{4,10})(?![A-Za-z0-9])[^\\d\\n]{0,40}?${PALAVRA}`, 'i'));
   if (antes) return antes[1];
   // código sozinho numa linha, num e-mail que fala de código
   if (new RegExp(PALAVRA, 'i').test(tudo)) {

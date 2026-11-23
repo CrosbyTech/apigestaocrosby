@@ -1,5 +1,5 @@
 // ============================================================
-// FATURAS DAS DESPESAS FIXAS — o que os bots capturam (energia da Cosern, Energisa e Equatorial e água da CAERN e da Cagepa, pelo WhatsApp).
+// FATURAS DAS DESPESAS FIXAS — o que os bots capturam (energia da Cosern, Energisa e Equatorial e água da CAERN e da Cagepa, pelo WhatsApp; internet da Alares e da Lanservi, pelo e-mail).
 //
 // Guarda a fatura (valor, vencimento, Pix copia e cola, PDF) e, quando acha UM
 // título correspondente na Liberação de Pagamento, preenche nele a forma PIX e
@@ -17,6 +17,8 @@ import { lerFaturaEnergisaPdf } from '../utils/faturaEnergisaPdf.js';
 import { lerFaturaEquatorialPdf } from '../utils/faturaEquatorialPdf.js';
 import { lerFaturaCaernPdf } from '../utils/faturaCaernPdf.js';
 import { lerFaturaCagepaPdf } from '../utils/faturaCagepaPdf.js';
+import { lerFaturaAlaresPdf, boletoEhDaAlares } from '../utils/faturaAlaresEmail.js';
+import { lerFaturaLanserviPdf, boletoEhDaLanservi } from '../utils/faturaLanserviEmail.js';
 
 const T = { fat: 'contas_fixas_faturas', lib: 'pagamentos_liberacao' };
 const agora = () => new Date().toISOString();
@@ -73,7 +75,7 @@ export async function salvarFatura(f) {
 
 // ─── duplicata no HEADCOACH › CONTAS A PAGAR ─────────────────────────────────
 // centro de custo de cada empresa (hc_cp_centros_custo): a conta de luz é da própria loja
-export const CENTRO_CUSTO_DA_EMPRESA = { 1: 10, 2: 2, 5: 5, 55: 16, 65: 15, 87: 41, 90: 37, 93: 32, 99: 18 };
+export const CENTRO_CUSTO_DA_EMPRESA = { 1: 10, 2: 2, 5: 5, 55: 16, 65: 15, 87: 41, 90: 37, 93: 32, 98: 34, 99: 18 };
 
 const mesmoValor = (a, b) => Math.abs(Number(a) - Number(b)) < 0.005;
 
@@ -128,6 +130,28 @@ async function lerCagepa(pdf, f) {
   return { documentoFiscal: lida.notaFiscal, emissao: lida.emissao, referencia: lida.referencia, linhaDigitavel: lida.linhaDigitavel, detalhe: `nota fiscal ${lida.notaFiscal}${lida.serie ? ` série ${lida.serie}` : ''}` };
 }
 
+/** Alares: boleto + documento auxiliar da nota fiscal de comunicação, que chegam por e-mail. */
+async function lerAlares(pdf, f) {
+  const lida = await lerFaturaAlaresPdf(pdf);
+  if (!lida.notaFiscal || !lida.emissao || !lida.linhaDigitavel) return { motivo: 'não achei o número da nota, a emissão ou a linha digitável no PDF' };
+  if (lida.cnpjEmitente !== '02952192000161') return { motivo: `a nota não é da Alares (CNPJ ${lida.cnpjEmitente})` };
+  if (!boletoEhDaAlares(lida.linhaDigitavel)) return { motivo: 'o boleto não é de uma conta de recebimento conhecida da Alares' };
+  if (lida.codigoCliente !== String(f.codigo_cliente)) return { motivo: `o PDF é do código de cliente ${lida.codigoCliente}, não do ${f.codigo_cliente}` };
+  if (!mesmoValor(lida.valor, f.valor) || lida.vencimento !== String(f.vencimento).slice(0, 10)) return { motivo: 'valor ou vencimento do boleto diferentes dos da fatura salva' };
+  return { documentoFiscal: lida.notaFiscal, emissao: lida.emissao, referencia: lida.referencia, linhaDigitavel: lida.linhaDigitavel, detalhe: `nota fiscal ${lida.notaFiscal}${lida.serie ? ` série ${lida.serie}` : ''}${lida.instalacao ? ` · instalação: ${lida.instalacao}` : ''}${lida.cnpjCliente ? ` · nota no CNPJ ${lida.cnpjCliente}` : ''}` };
+}
+
+/** Lanservi: carnê (boleto do mês, sem nota fiscal), que chega por e-mail. */
+async function lerLanservi(pdf, f) {
+  const lida = await lerFaturaLanserviPdf(pdf);
+  if (!lida.documento || !lida.emissao || !lida.linhaDigitavel) return { motivo: 'não achei o número do documento, a data do documento ou a linha digitável no PDF' };
+  if (lida.cnpjEmitente !== '19567776000116') return { motivo: `o boleto não é da Lanservi (CNPJ ${lida.cnpjEmitente})` };
+  if (!boletoEhDaLanservi(lida.linhaDigitavel)) return { motivo: 'o boleto não é de uma conta de recebimento conhecida da Lanservi' };
+  if (lida.codigoCliente !== String(f.codigo_cliente)) return { motivo: `o PDF é do cliente ${lida.codigoCliente}, não do ${f.codigo_cliente}` };
+  if (!mesmoValor(lida.valor, f.valor) || lida.vencimento !== String(f.vencimento).slice(0, 10)) return { motivo: 'valor ou vencimento do boleto diferentes dos da fatura salva' };
+  return { documentoFiscal: lida.documento, emissao: lida.emissao, referencia: lida.referencia, linhaDigitavel: lida.linhaDigitavel, detalhe: `fatura ${lida.documento}${lida.instalacao ? ` · instalação: ${lida.instalacao}` : ''}${lida.cnpjCliente ? ` · boleto no CNPJ ${lida.cnpjCliente}` : ''}` };
+}
+
 /** Sala (ou outro rótulo) da conta, pela observação da Controle de Filiais. */
 async function rotuloDaContaEnergisa(f) {
   const { data } = await supabase.from('despesas_fixas_filial').select('observacao, nm_fornecedor').eq('tipo_despesa', 'ENERGIA').eq('cd_filial', String(f.cd_filial));
@@ -139,9 +163,11 @@ async function rotuloDaContaEnergisa(f) {
 }
 
 // Fornecedor, despesa e portador de cada concessionária, iguais aos que o financeiro
-// usa no TOTVS (despesa 6010 ENERGIA ELETRICA ou 6011 AGUA E ESGOTO, portador 5 BOLETO).
+// usa no TOTVS (despesa 6010 ENERGIA ELETRICA, 6011 AGUA E ESGOTO ou 6028 INTERNET, portador 5 BOLETO).
 export const CP_DA_CONCESSIONARIA = {
   COSERN: { nome: 'Cosern', fornecedorCode: 184, despesaCode: 6010, portadorCode: 5, origem: 'bot-cosern-whatsapp', tipoDocumento: 'nota_fiscal', ler: lerCosern },
+  ALARES: { nome: 'Alares', conta: 'Internet', captura: 'fatura recebida pelo e-mail da Alares', por: 'E-mail Alares', fornecedorCode: 96, despesaCode: 6028, portadorCode: 5, origem: 'email-alares', tipoDocumento: 'nota_fiscal', ler: lerAlares },
+  LANSERVI: { nome: 'Lanservi', conta: 'Internet', captura: 'boleto recebido pelo e-mail da Lanservi', por: 'E-mail Lanservi', fornecedorCode: 78887, despesaCode: 6028, portadorCode: 5, origem: 'email-lanservi', tipoDocumento: 'boleto', ler: lerLanservi },
   CAGEPA: { nome: 'Cagepa', conta: 'Água', rotuloCodigo: 'matrícula', fornecedorCode: 99808, despesaCode: 6011, portadorCode: 5, origem: 'bot-cagepa-whatsapp', tipoDocumento: 'nota_fiscal', ler: lerCagepa },
   CAERN: { nome: 'CAERN', conta: 'Água', rotuloCodigo: 'matrícula', fornecedorCode: 20519, despesaCode: 6011, portadorCode: 5, origem: 'bot-caern-whatsapp', tipoDocumento: 'nota_fiscal', ler: lerCaern },
   EQUATORIAL: { nome: 'Equatorial', fornecedorCode: 21889, despesaCode: 6010, portadorCode: 5, origem: 'bot-equatorial-whatsapp', tipoDocumento: 'nota_fiscal', ler: lerEquatorial },
@@ -200,12 +226,12 @@ export async function gerarDuplicataCp(faturaId, { por } = {}) {
     emissao: lida.emissao,
     entrada: String(f.capturado_em).slice(0, 10),
     referencia: lida.referencia,
-    observacao: `${cfg.conta || 'Energia'} ${lida.referencia || ''}${rotulo ? ` · ${rotulo}` : ''} · ${cfg.rotuloCodigo || 'código do cliente'} ${f.codigo_cliente} · ${lida.detalhe} · fatura capturada pelo bot da ${cfg.nome} no WhatsApp`.replace(/\s+/g, ' '),
+    observacao: `${cfg.conta || 'Energia'} ${lida.referencia || ''}${rotulo ? ` · ${rotulo}` : ''} · ${cfg.rotuloCodigo || 'código do cliente'} ${f.codigo_cliente} · ${lida.detalhe} · ${cfg.captura || `fatura capturada pelo bot da ${cfg.nome} no WhatsApp`}`.replace(/\s+/g, ' '),
     parcela,
     vencimento: String(f.vencimento).slice(0, 10),
     valor: Number(f.valor),
   });
-  const [titulo] = await inserirTitulos(dados, { por: por || `Bot ${cfg.nome} (WhatsApp)`, origem: cfg.origem, origemRef: String(f.id), anexoPath: f.pdf_path });
+  const [titulo] = await inserirTitulos(dados, { por: por || cfg.por || `Bot ${cfg.nome} (WhatsApp)`, origem: cfg.origem, origemRef: String(f.id), anexoPath: f.pdf_path });
   return { criada: true, titulo };
 }
 

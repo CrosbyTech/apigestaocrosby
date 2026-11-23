@@ -17,6 +17,11 @@ describe('código de confirmação no e-mail', () => {
     expect(codigoDoEmail('Promoção', 'Ligue 0800 123 4567 e ganhe 500 mega.')).toBeNull();
     expect(codigoDoEmail(null, null)).toBeNull();
   });
+
+  it('aviso de fatura com Pix copia e cola não é confundido com código (caso real da Alares, 19/11/2026)', () => {
+    const texto = 'Até o momento não identificamos o pagamento da fatura com vencimento em 09/11/26 no valor de R$ 124,12.\nPix copia e cola:\n00020101021226900014br.gov.bcb.pix2568qrcodepix.bb.com.br/pix/v2/cobv/9b2328db-0000-4000-8000-0000000000005204000053039865406124.125802BR5906ALARES6005NATAL62070503***6304D6CD\n00190.00009 03805.454000 01250.380175 2 16250000012412';
+    expect(codigoDoEmail('Fwd: [Alares] Sua fatura venceu!', texto)).toBeNull();
+  });
 });
 
 describe('remetente', () => {
@@ -74,5 +79,19 @@ describe('texto do e-mail', () => {
     expect(e.anexos).toHaveLength(1);
     expect(e.anexos[0]).toMatchObject({ nome: 'fatura.pdf', tipo: 'application/pdf' });
     expect(e.anexos[0].conteudo.toString()).toBe('%PDF-1.4 exemplo');
+  });
+});
+
+describe('e-mail encaminhado como anexo (.eml)', () => {
+  it('o e-mail de dentro chega como anexo message/rfc822, com o conteúdo inteiro para ser lido à parte', async () => {
+    const dentro = ['From: Alares Internet <fatura@fatura.minhaalares.com.br>', 'To: patrimonio@exemplo.com', 'Subject: A fatura digital da sua internet chegou!', 'Message-ID: <dentro-1@minhaalares.com.br>', 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8', '', 'Vencimento no dia 08/11/26 no valor de R$ 170,32', ''].join('\r\n');
+    const fora = ['From: Patrimonio <patrimonio@exemplo.com>', 'To: contas-fixas@crosbytech.com.br', 'Message-ID: <fora-1@exemplo.com>', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="Y"', '', '--Y', 'Content-Type: text/plain; charset=UTF-8', '', 'seguem', '--Y', 'Content-Type: message/rfc822; name="A fatura digital da sua internet chegou!.eml"', 'Content-Disposition: attachment; filename="A fatura digital da sua internet chegou!.eml"', '', dentro, '--Y--', ''].join('\r\n');
+    const e = await interpretarEmail(Buffer.from(fora));
+    expect(e.de).toBe('patrimonio@exemplo.com');
+    expect(e.anexos).toHaveLength(1);
+    expect(e.anexos[0].tipo).toBe('message/rfc822');
+    const filho = await interpretarEmail(e.anexos[0].conteudo);
+    expect(filho).toMatchObject({ de: 'fatura@fatura.minhaalares.com.br', assunto: 'A fatura digital da sua internet chegou!', messageId: '<dentro-1@minhaalares.com.br>' });
+    expect(filho.texto).toContain('R$ 170,32');
   });
 });

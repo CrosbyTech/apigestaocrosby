@@ -26,7 +26,7 @@ export async function interpretarEmail(bruto) {
     assunto: m.subject || null,
     dataEnvio: m.date ? new Date(m.date).toISOString() : null,
     messageId: m.messageId || null,
-    texto: texto ? texto.slice(0, 20000) : null,
+    texto: texto ? texto.slice(0, 60000) : null, // conversa inteira encaminhada traz várias mensagens
     codigo: codigoDoEmail(m.subject, texto),
     anexos: (m.attachments || []).map((a) => ({ nome: a.filename || 'anexo', tipo: a.mimeType || '', conteudo: Buffer.from(a.content) })),
   };
@@ -36,19 +36,27 @@ export async function interpretarEmail(bruto) {
  * Guarda uma mensagem recebida. A mesma mensagem entregue duas vezes não duplica.
  * @param bruto Buffer com a mensagem crua
  * @param envelope { de, para } como a Cloudflare recebeu
- * @returns {{ id, nova, de, assunto, codigo: boolean, anexos: number }}
+ * @returns {{ id, nova, de, assunto, codigo: boolean, anexos: number, filhos: [{ id, nova }] }}
  */
-export async function receberEmail(bruto, envelope = {}) {
+export async function receberEmail(bruto, envelope = {}, nivel = 0) {
   const e = await interpretarEmail(bruto);
   if (e.messageId) {
     const { data: ja } = await supabase.from(T).select('id').eq('message_id', e.messageId).maybeSingle();
-    if (ja) return { id: ja.id, nova: false, de: e.de, assunto: e.assunto, codigo: Boolean(e.codigo), anexos: 0 };
+    if (ja) return { id: ja.id, nova: false, de: e.de, assunto: e.assunto, codigo: Boolean(e.codigo), anexos: 0, filhos: [] };
   }
   const anexos = [];
+  const filhos = []; // e-mails que vieram anexados dentro deste ("encaminhar como anexo")
   for (const a of e.anexos) {
     const ehPdf = /pdf/i.test(a.tipo) || /\.pdf$/i.test(a.nome);
+    const ehEmail = /message\/rfc822/i.test(a.tipo) || /\.eml$/i.test(a.nome);
     const item = { nome: a.nome, tipo: a.tipo, tamanho: a.conteudo.length, path: null };
     if (ehPdf && a.conteudo.length <= MAX_ANEXO) item.path = await guardarArquivoExtrato(a.conteudo, { nome: a.nome, pasta: 'contas-fixas-email' });
+    if (ehEmail && nivel < 2) {
+      // cada e-mail anexado é guardado como uma mensagem própria, com o remetente e os anexos originais
+      const filho = await receberEmail(a.conteudo, envelope, nivel + 1);
+      item.email_id = filho.id;
+      filhos.push({ id: filho.id, nova: filho.nova }, ...filho.filhos);
+    }
     anexos.push(item);
   }
   const { data, error } = await supabase
@@ -69,7 +77,7 @@ export async function receberEmail(bruto, envelope = {}) {
     .select('id')
     .single();
   if (error) throw new Error(error.message);
-  return { id: data.id, nova: true, de: e.de, assunto: e.assunto, codigo: Boolean(e.codigo), anexos: anexos.length };
+  return { id: data.id, nova: true, de: e.de, assunto: e.assunto, codigo: Boolean(e.codigo), anexos: anexos.length, filhos };
 }
 
 /**

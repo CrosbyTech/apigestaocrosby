@@ -28,4 +28,9 @@ create unique index if not exists contas_fixas_emails_msgid on contas_fixas_emai
 create index if not exists contas_fixas_emails_recebido on contas_fixas_emails (recebido_em desc);
 create index if not exists contas_fixas_emails_de on contas_fixas_emails (de, recebido_em desc);
 
+-- leitura de fatura (services/contasFixasEmailFaturas.js): o que foi feito com o e-mail
+alter table contas_fixas_emails add column if not exists processado_em timestamptz;
+alter table contas_fixas_emails add column if not exists resultado text;
+alter table contas_fixas_emails add column if not exists fatura_id bigint;
+
 alter table contas_fixas_emails enable row level security;

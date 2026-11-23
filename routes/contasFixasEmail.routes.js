@@ -7,11 +7,14 @@
 //
 // Sem login: quem chama é o Email Worker, que se identifica pelo segredo
 // CONTAS_FIXAS_EMAIL_SECRET (variável de ambiente; sem ela a rota fica fechada).
-// A rota só guarda a mensagem — não lança nada no financeiro.
+// Depois de guardar, o e-mail passa pelo leitor de faturas (contasFixasEmailFaturas):
+// só vira parcela no Contas a Pagar a fatura de operadora conhecida que passa em
+// todas as conferências; o resto fica guardado com o motivo.
 // ============================================================
 import crypto from 'node:crypto';
 import express from 'express';
 import { receberEmail } from '../services/contasFixasEmail.js';
+import { processarEmail } from '../services/contasFixasEmailFaturas.js';
 
 const router = express.Router();
 
@@ -30,6 +33,19 @@ router.post('/email-entrada', express.raw({ type: () => true, limit: '25mb' }), 
   try {
     const r = await receberEmail(bruto, { de: req.get('x-email-de'), para: req.get('x-email-para') });
     console.log(`📧 [contas fixas] e-mail ${r.nova ? 'recebido' : 'repetido'} #${r.id} de ${r.de || '?'}${r.codigo ? ' · com código' : ''}${r.anexos ? ` · ${r.anexos} anexo(s)` : ''}`);
+    // a entrega já está garantida: o lançamento roda depois e não derruba o recebimento
+    // o próprio e-mail e os que vieram anexados dentro dele; um por vez, para duas faturas da mesma conta não se atropelarem
+    const novos = [...(r.nova ? [r.id] : []), ...(r.filhos || []).filter((f) => f.nova).map((f) => f.id)];
+    (async () => {
+      for (const id of novos) {
+        try {
+          const p = await processarEmail(id);
+          console.log(`📧 [contas fixas] e-mail #${id}: ${p.ok ? `fatura lançada (${p.concessionaria})` : `não lançado — ${p.motivo}`}`);
+        } catch (e) {
+          console.error(`📧 [contas fixas] e-mail #${id}: erro ao ler a fatura — ${e.message}`);
+        }
+      }
+    })();
     return res.json({ success: true, id: r.id, nova: r.nova });
   } catch (e) {
     console.error('📧 [contas fixas] falha ao guardar e-mail:', e.message);
