@@ -8,6 +8,8 @@ const PAYABLE_DOCUMENT_TYPE = { duplicata: 'Duplicate', nota_fiscal: 'Invoice', 
 const PAYABLE_PAYMENT_METHOD = { pix: 'Pix', boleto: 'BankSlip', transferencia: 'Transfer', debito_automatico: 'DirectDebit', cartao: 'Card', dinheiro: 'Cash', outro: 'Other' };
 const FORECAST_TYPE = { real: 'Real', previsao: 'Forecast' };
 const COST_CENTER_TYPE = { empresa: 'Branch', setor: 'Department', outro: 'Other' };
+// etapas da Liberação de Pagamento (HEADCOACH › FINANCEIRO)
+const PAYMENT_RELEASE_STATUS = { pendente: 'Pending', previsao: 'Scheduled', aprovado: 'Approved', incluido: 'Included', pago: 'Paid', cancelado: 'Returned' };
 
 const linhaRateio = {
   type: 'object',
@@ -150,6 +152,51 @@ modulo.recurso({
 });
 
 modulo.recurso(SETTLEMENT);
+
+modulo.recurso({
+  name: 'PayablePaymentRelease',
+  path: '/payment-releases',
+  table: 'hc_cp_liberacoes',
+  summary: 'Liberação de pagamento',
+  description:
+    'Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.',
+  key: [{ param: 'releaseId', col: 'id', type: 'integer', description: 'Identificador da liberação.' }],
+  order: [['id', false]],
+  fields: [
+    f('releaseId', 'id', 'integer', 'Identificador da liberação.'),
+    f('documentId', 'titulo_id', 'integer', 'Duplicata liberada (documentId em /documents).'),
+    f('status', 'status', 'string', 'Etapa da liberação.', { map: PAYMENT_RELEASE_STATUS }),
+    f('value', 'valor', 'number', 'Quanto vai ser (ou foi) pago nesta liberação.'),
+    f('scheduledDate', 'data_prevista', 'date', 'Dia previsto para pagar.'),
+    f('bankAccount', 'banco', 'string', 'Banco / conta de onde o pagamento sai.', { example: 'STONE 0116' }),
+    f('paymentMethod', 'forma_pagamento', 'string', 'Forma de pagamento.', { map: PAYABLE_PAYMENT_METHOD }),
+    f('observation', 'observacao', 'string', 'Observação.'),
+    f('releasedBy', 'liberado_por', 'string', 'Quem liberou para pagamento.'),
+    f('releaseDate', 'liberado_em', 'date-time', 'Quando foi liberada.'),
+    f('approvedBy', 'aprovado_por', 'string', 'Quem aprovou.'),
+    f('approvalDate', 'aprovado_em', 'date-time', 'Quando foi aprovada.'),
+    f('includedBy', 'incluido_por', 'string', 'Quem incluiu o pagamento no banco.'),
+    f('inclusionDate', 'incluido_em', 'date-time', 'Quando foi incluída no banco.'),
+    f('paidBy', 'pago_por', 'string', 'Quem marcou como paga.'),
+    f('paymentDate', 'data_pagamento', 'date', 'Data do pagamento.'),
+    f('settlementId', 'baixa_id', 'integer', 'Baixa gravada na duplicata (settlementId em /settlements).'),
+    f('returnedBy', 'cancelado_por', 'string', 'Quem devolveu ao contas a pagar.'),
+    f('returnDate', 'cancelado_em', 'date-time', 'Quando foi devolvida.'),
+    f('returnReason', 'cancelado_motivo', 'string', 'Motivo da devolução.'),
+    f('lastChangeDate', 'atualizado_em', 'date-time', 'Última alteração.'),
+  ],
+  filters: [
+    q('documentId', 'int', 'titulo_id', 'Liberações de uma duplicata.'),
+    q('status', 'enum', 'status', 'Etapa (aceita lista).', { map: inverso(PAYMENT_RELEASE_STATUS) }),
+    q('bankAccount', 'string', 'banco', 'Banco / conta exata.', { example: 'STONE 0116' }),
+    q('paymentMethod', 'enum', 'forma_pagamento', 'Forma de pagamento (aceita lista).', { map: inverso(PAYABLE_PAYMENT_METHOD) }),
+    q('startScheduledDate', 'startDay', 'data_prevista', 'Previstas a partir de (AAAA-MM-DD).'),
+    q('endScheduledDate', 'endDay', 'data_prevista', 'Previstas até (AAAA-MM-DD).'),
+    q('startPaymentDate', 'startDay', 'data_pagamento', 'Pagas a partir de (AAAA-MM-DD).'),
+    q('endPaymentDate', 'endDay', 'data_pagamento', 'Pagas até (AAAA-MM-DD).'),
+    q('startChangeDate', 'startDate', 'atualizado_em', 'Alteradas a partir de (AAAA-MM-DD) — para sincronização.'),
+  ],
+});
 
 modulo.recurso({
   name: 'PayableExpense',

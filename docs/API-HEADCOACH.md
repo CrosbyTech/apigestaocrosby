@@ -713,6 +713,34 @@ Parâmetros:
 
 Resposta: página de `PayableSettlement`
 
+### GET /api/headcoach/accounts-payable/v1/payment-releases
+
+Liberação de pagamento — Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.
+
+Parâmetros:
+- `documentId` (integer) — Liberações de uma duplicata.
+- `status` (string) — Etapa (aceita lista). Valores: Pending, Scheduled, Approved, Included, Paid, Returned.
+- `bankAccount` (string) — Banco / conta exata.
+- `paymentMethod` (string) — Forma de pagamento (aceita lista). Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
+- `startScheduledDate` (string) — Previstas a partir de (AAAA-MM-DD).
+- `endScheduledDate` (string) — Previstas até (AAAA-MM-DD).
+- `startPaymentDate` (string) — Pagas a partir de (AAAA-MM-DD).
+- `endPaymentDate` (string) — Pagas até (AAAA-MM-DD).
+- `startChangeDate` (string) — Alteradas a partir de (AAAA-MM-DD) — para sincronização.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `PayablePaymentRelease`
+
+### GET /api/headcoach/accounts-payable/v1/payment-releases/{releaseId}
+
+Liberação de pagamento — um registro — Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.
+
+Parâmetros:
+- `releaseId` (caminho, obrigatório) — Identificador da liberação.
+
+Resposta:  `PayablePaymentRelease`
+
 ### GET /api/headcoach/accounts-payable/v1/expenses
 
 Despesas — Plano de despesas usado nas duplicatas.
@@ -822,6 +850,30 @@ Esquemas:
 - `cancelReason` (string) — Motivo do cancelamento.
 - `lastChangeDate` (date-time) — Última alteração.
 - `settlements` (array de PayableSettlement) — Baixas da duplicata (só vem com expand=settlements)
+
+**PayablePaymentRelease** — Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.
+
+- `releaseId` (integer) — Identificador da liberação.
+- `documentId` (integer) — Duplicata liberada (documentId em /documents).
+- `status` (string) — Etapa da liberação. Valores: Pending, Scheduled, Approved, Included, Paid, Returned.
+- `value` (number) — Quanto vai ser (ou foi) pago nesta liberação.
+- `scheduledDate` (date) — Dia previsto para pagar.
+- `bankAccount` (string) — Banco / conta de onde o pagamento sai.
+- `paymentMethod` (string) — Forma de pagamento. Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
+- `observation` (string) — Observação.
+- `releasedBy` (string) — Quem liberou para pagamento.
+- `releaseDate` (date-time) — Quando foi liberada.
+- `approvedBy` (string) — Quem aprovou.
+- `approvalDate` (date-time) — Quando foi aprovada.
+- `includedBy` (string) — Quem incluiu o pagamento no banco.
+- `inclusionDate` (date-time) — Quando foi incluída no banco.
+- `paidBy` (string) — Quem marcou como paga.
+- `paymentDate` (date) — Data do pagamento.
+- `settlementId` (integer) — Baixa gravada na duplicata (settlementId em /settlements).
+- `returnedBy` (string) — Quem devolveu ao contas a pagar.
+- `returnDate` (date-time) — Quando foi devolvida.
+- `returnReason` (string) — Motivo da devolução.
+- `lastChangeDate` (date-time) — Última alteração.
 
 **PayableExpense** — Plano de despesas usado nas duplicatas.
 

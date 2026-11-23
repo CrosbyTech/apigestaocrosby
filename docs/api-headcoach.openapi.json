@@ -2086,6 +2086,149 @@
           }
         }
       },
+      "PayablePaymentRelease": {
+        "type": "object",
+        "description": "Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.",
+        "properties": {
+          "releaseId": {
+            "description": "Identificador da liberação.",
+            "type": "integer",
+            "nullable": true
+          },
+          "documentId": {
+            "description": "Duplicata liberada (documentId em /documents).",
+            "type": "integer",
+            "nullable": true
+          },
+          "status": {
+            "description": "Etapa da liberação.",
+            "type": "string",
+            "enum": [
+              "Pending",
+              "Scheduled",
+              "Approved",
+              "Included",
+              "Paid",
+              "Returned"
+            ],
+            "nullable": true
+          },
+          "value": {
+            "description": "Quanto vai ser (ou foi) pago nesta liberação.",
+            "type": "number",
+            "nullable": true
+          },
+          "scheduledDate": {
+            "description": "Dia previsto para pagar.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "bankAccount": {
+            "description": "Banco / conta de onde o pagamento sai.",
+            "type": "string",
+            "example": "STONE 0116",
+            "nullable": true
+          },
+          "paymentMethod": {
+            "description": "Forma de pagamento.",
+            "type": "string",
+            "enum": [
+              "Pix",
+              "BankSlip",
+              "Transfer",
+              "DirectDebit",
+              "Card",
+              "Cash",
+              "Other"
+            ],
+            "nullable": true
+          },
+          "observation": {
+            "description": "Observação.",
+            "type": "string",
+            "nullable": true
+          },
+          "releasedBy": {
+            "description": "Quem liberou para pagamento.",
+            "type": "string",
+            "nullable": true
+          },
+          "releaseDate": {
+            "description": "Quando foi liberada.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "approvedBy": {
+            "description": "Quem aprovou.",
+            "type": "string",
+            "nullable": true
+          },
+          "approvalDate": {
+            "description": "Quando foi aprovada.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "includedBy": {
+            "description": "Quem incluiu o pagamento no banco.",
+            "type": "string",
+            "nullable": true
+          },
+          "inclusionDate": {
+            "description": "Quando foi incluída no banco.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "paidBy": {
+            "description": "Quem marcou como paga.",
+            "type": "string",
+            "nullable": true
+          },
+          "paymentDate": {
+            "description": "Data do pagamento.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "settlementId": {
+            "description": "Baixa gravada na duplicata (settlementId em /settlements).",
+            "type": "integer",
+            "nullable": true
+          },
+          "returnedBy": {
+            "description": "Quem devolveu ao contas a pagar.",
+            "type": "string",
+            "nullable": true
+          },
+          "returnDate": {
+            "description": "Quando foi devolvida.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "returnReason": {
+            "description": "Motivo da devolução.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastChangeDate": {
+            "description": "Última alteração.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
       "PayableExpense": {
         "type": "object",
         "description": "Plano de despesas usado nas duplicatas.",
@@ -8786,6 +8929,327 @@
                 "example": {
                   "code": "Unauthorized",
                   "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/payment-releases": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Liberação de pagamento",
+        "description": "Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "query",
+            "required": false,
+            "description": "Liberações de uma duplicata.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Etapa (aceita lista). Valores: Pending, Scheduled, Approved, Included, Paid, Returned.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pending",
+                "Scheduled",
+                "Approved",
+                "Included",
+                "Paid",
+                "Returned"
+              ]
+            }
+          },
+          {
+            "name": "bankAccount",
+            "in": "query",
+            "required": false,
+            "description": "Banco / conta exata.",
+            "schema": {
+              "type": "string",
+              "example": "STONE 0116"
+            }
+          },
+          {
+            "name": "paymentMethod",
+            "in": "query",
+            "required": false,
+            "description": "Forma de pagamento (aceita lista). Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pix",
+                "BankSlip",
+                "Transfer",
+                "DirectDebit",
+                "Card",
+                "Cash",
+                "Other"
+              ]
+            }
+          },
+          {
+            "name": "startScheduledDate",
+            "in": "query",
+            "required": false,
+            "description": "Previstas a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endScheduledDate",
+            "in": "query",
+            "required": false,
+            "description": "Previstas até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "startPaymentDate",
+            "in": "query",
+            "required": false,
+            "description": "Pagas a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endPaymentDate",
+            "in": "query",
+            "required": false,
+            "description": "Pagas até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "startChangeDate",
+            "in": "query",
+            "required": false,
+            "description": "Alteradas a partir de (AAAA-MM-DD) — para sincronização.",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PayablePaymentRelease"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/accounts-payable/v1/payment-releases/{releaseId}": {
+      "get": {
+        "tags": [
+          "AccountsPayable"
+        ],
+        "summary": "Liberação de pagamento — um registro",
+        "description": "Duplicatas que o financeiro liberou para pagamento, no fluxo Pending (pendente) → Scheduled (previsão) → Approved (aprovado) → Included (incluído no banco) → Paid (pago). Returned = devolvida ao contas a pagar sem pagar. Uma duplicata tem no máximo uma liberação em andamento; `value` é quanto vai ser pago nela (menor que o que falta = pagamento parcial). Ao pagar, `settlementId` aponta a baixa em /settlements.",
+        "parameters": [
+          {
+            "name": "releaseId",
+            "in": "path",
+            "required": true,
+            "description": "Identificador da liberação.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayablePaymentRelease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
                   "detailedMessage": null
                 }
               }

@@ -87,7 +87,7 @@ async function todas(montar) {
   }
   return out;
 }
-async function conferirSenha(email, senha) {
+export async function conferirSenha(email, senha) {
   try {
     return await verificarSenhaAutorizador(email, senha, PERFIS_FINANCEIRO);
   } catch (e) {
@@ -111,7 +111,7 @@ async function empresasComImportadas(user, lista) {
   return [...lista, ...codes.map((c) => ({ code: c, nome: String(nome.get(c)?.descricao || '').replace(/^\s*\d+\s*-\s*/, '').trim() || nome.get(c)?.fantasia || `Empresa ${c}`, uf: nome.get(c)?.uf || null }))].sort((a, b) => a.code - b.code);
 }
 
-async function empresasPermitidas(user, empresa) {
+export async function empresasPermitidas(user, empresa) {
   exigirFinanceiro(user);
   const lista = await empresasComImportadas(user, await empresasDoUsuario(user));
   if (empresa) {
@@ -451,7 +451,9 @@ export async function listarTitulos(user, f = {}) {
     }
     return qy.order(campo, { ascending: true }).order('fornecedor_nome').order('duplicata').order('parcela');
   });
-  const titulos = rows.map((t) => ({ ...t, tela: situacaoDeTela(t, hoje) }));
+  // liberação de pagamento em andamento de cada duplicata (pendente, previsão, aprovado ou incluído)
+  const emLiberacao = new Map((await todas(() => supabase.from('hc_cp_liberacoes').select('id, titulo_id, status, valor, data_prevista, banco').not('status', 'in', LIB_EM_ANDAMENTO).order('id'))).map((l) => [Number(l.titulo_id), l]));
+  const titulos = rows.map((t) => ({ ...t, tela: situacaoDeTela(t, hoje), liberacao: emLiberacao.get(Number(t.id)) || null }));
   return { titulos, totais: totaisDosTitulos(titulos, hoje), empresas: lista, hoje };
 }
 
@@ -504,7 +506,8 @@ export async function detalheTitulo(user, id) {
     const { data } = await supabase.storage.from(BUCKET_ANEXOS).createSignedUrl(t.anexo_path, 600);
     anexoUrl = data?.signedUrl || null;
   }
-  return { titulo: { ...t, tela: situacaoDeTela(t) }, baixas: baixas || [], parcelas: irmas || [], anexoUrl };
+  const liberacoes = await q(supabase.from('hc_cp_liberacoes').select('*').eq('titulo_id', t.id).order('id'));
+  return { titulo: { ...t, tela: situacaoDeTela(t), liberacao: (liberacoes || []).find((l) => !['pago', 'cancelado'].includes(l.status)) || null }, baixas: baixas || [], parcelas: irmas || [], liberacoes: liberacoes || [], anexoUrl };
 }
 
 // ─── alteração (só em aberto) ────────────────────────────────────────────────
@@ -571,12 +574,42 @@ export async function editarTitulo(user, id, b = {}) {
     .maybeSingle();
   if (error) throw falhaDb(error);
   if (!data) throw new CpError('Esta duplicata acabou de ser baixada ou cancelada', 'NAO_ABERTA', 409);
+  if (patch.valor !== undefined && patch.valor !== round2(t.valor)) {
+    // liberada pelo valor cheio (ou por mais do que passou a faltar): a liberação acompanha
+    const lib = await liberacaoEmAndamento(t.id);
+    const falta = saldoDoTitulo(data);
+    if (lib && (Number(lib.valor) > falta || Math.abs(Number(lib.valor) - saldoDoTitulo(t)) < 0.005)) await q(supabase.from('hc_cp_liberacoes').update({ valor: falta, atualizado_por: quem(user), atualizado_em: new Date().toISOString() }).eq('id', lib.id));
+  }
   return data;
 }
 
+// ─── Liberação de Pagamento: a liberação em andamento acompanha a duplicata ──
+// (a tela e as regras da liberação ficam em services/hcCpLiberacao.js; aqui só o
+// que a própria duplicata provoca: baixa direta, cancelamento e mudança de valor)
+const LIB_EM_ANDAMENTO = '(pago,cancelado)';
+const liberacaoEmAndamento = async (tituloId) => (await q(supabase.from('hc_cp_liberacoes').select('*').eq('titulo_id', tituloId).not('status', 'in', LIB_EM_ANDAMENTO).limit(1)))?.[0] || null;
+
+/** Baixa lançada direto no contas a pagar: quitou → a liberação fica paga; parcial → ela passa a valer só o que falta. */
+async function liberacaoAposBaixa(titulo, { quita, baixaId, data, por }) {
+  const lib = await liberacaoEmAndamento(titulo.id);
+  if (!lib) return;
+  const agora = new Date().toISOString();
+  if (quita) await q(supabase.from('hc_cp_liberacoes').update({ status: 'pago', pago_por: por, pago_em: agora, data_pagamento: data, baixa_id: baixaId, observacao: [lib.observacao, 'baixada direto no contas a pagar'].filter(Boolean).join(' · ').slice(0, 1000), atualizado_por: por, atualizado_em: agora }).eq('id', lib.id));
+  else {
+    const falta = saldoDoTitulo(titulo);
+    if (Number(lib.valor) > falta) await q(supabase.from('hc_cp_liberacoes').update({ valor: falta, atualizado_por: por, atualizado_em: agora }).eq('id', lib.id));
+  }
+}
+
 // ─── baixa (pagamento) — sem estorno ─────────────────────────────────────────
-export async function baixarTitulo(user, id, b = {}) {
-  const t = await tituloDoUsuario(user, id);
+/**
+ * Lança um pagamento na duplicata. Não pede senha: quem chama já conferiu (a
+ * baixa da tela, abaixo, e o PAGAR da Liberação de Pagamento).
+ * b: { dataPagamento, valorPago (em branco = tudo o que falta; menor = baixa parcial), juros, multa, desconto, formaPagamento, conta, observacao }
+ * opts: { por, porId, antesDeGravar (função chamada depois de conferir os dados e antes de gravar), semLiberacao (a liberação é atualizada por quem chamou) }
+ * @returns {{ titulo, baixa, saldo, pago, resta, quita }}
+ */
+export async function aplicarBaixa(t, b = {}, { por = null, porId = null, antesDeGravar = null, semLiberacao = false } = {}) {
   if (t.situacao !== 'aberto') throw new CpError(`Esta duplicata já está ${t.situacao}`, 'JA_BAIXADA', 409);
   const hoje = hojeBrasil();
   const data = ehData(b.dataPagamento) ? b.dataPagamento : hoje;
@@ -589,7 +622,7 @@ export async function baixarTitulo(user, id, b = {}) {
   const { saldo, pago, resta, quita } = calcularBaixa(t, { juros, multa, desconto, valorPago: informado ? num(b.valorPago) : null });
   const forma = b.formaPagamento ? String(b.formaPagamento) : t.forma_pagamento;
   if (forma && !FORMAS[forma]) throw new CpError('Forma de pagamento inválida');
-  await conferirSenha(user?.email, b.senha);
+  if (antesDeGravar) await antesDeGravar();
   const agora = new Date().toISOString();
   const jaPago = round2(t.valor_pago || 0);
   const { data: atual, error } = await supabase
@@ -603,7 +636,7 @@ export async function baixarTitulo(user, id, b = {}) {
       valor_pago: round2(jaPago + pago),
       forma_pagamento: forma || null,
       conta_pagamento: texto(b.conta, 120),
-      baixado_por: quem(user),
+      baixado_por: por,
       baixado_em: agora,
       atualizado_em: agora,
     })
@@ -614,24 +647,36 @@ export async function baixarTitulo(user, id, b = {}) {
     .maybeSingle();
   if (error) throw falhaDb(error);
   if (!atual) throw new CpError('Esta duplicata acabou de receber outra baixa; abra de novo e confira', 'JA_BAIXADA', 409);
-  await q(
-    supabase.from('hc_cp_baixas').insert({
-      titulo_id: t.id,
-      data_pagamento: data,
-      valor_titulo: saldo, // o que estava em aberto antes deste pagamento
-      juros,
-      multa,
-      desconto,
-      valor_pago: pago,
-      forma_pagamento: forma || null,
-      conta: texto(b.conta, 120),
-      observacao: texto(b.observacao, 1000),
-      por_id: user?.id || null,
-      por: quem(user),
-    }),
+  const baixas = await q(
+    supabase
+      .from('hc_cp_baixas')
+      .insert({
+        titulo_id: t.id,
+        data_pagamento: data,
+        valor_titulo: saldo, // o que estava em aberto antes deste pagamento
+        juros,
+        multa,
+        desconto,
+        valor_pago: pago,
+        forma_pagamento: forma || null,
+        conta: texto(b.conta, 120),
+        observacao: texto(b.observacao, 1000),
+        por_id: porId,
+        por,
+      })
+      .select(),
   );
-  console.log(`💸 [contas a pagar] baixa${quita ? '' : ' PARCIAL'} ${t.fornecedor_nome} duplicata ${rotuloDuplicata(t)} (empresa ${t.empresa}) R$ ${pago.toFixed(2)}${quita ? '' : ` · falta R$ ${resta.toFixed(2)}`} · ${quem(user)}`);
-  return { ...atual, tela: situacaoDeTela(atual), baixaParcial: !quita, faltaPagar: resta };
+  const baixa = baixas?.[0] || null;
+  if (!semLiberacao) await liberacaoAposBaixa(atual, { quita, baixaId: baixa?.id || null, data, por });
+  console.log(`💸 [contas a pagar] baixa${quita ? '' : ' PARCIAL'} ${t.fornecedor_nome} duplicata ${rotuloDuplicata(t)} (empresa ${t.empresa}) R$ ${pago.toFixed(2)}${quita ? '' : ` · falta R$ ${resta.toFixed(2)}`} · ${por}`);
+  return { titulo: atual, baixa, saldo, pago, resta, quita, data };
+}
+
+/** Baixa da tela do contas a pagar: confere a senha de quem baixa. */
+export async function baixarTitulo(user, id, b = {}) {
+  const t = await tituloDoUsuario(user, id);
+  const r = await aplicarBaixa(t, b, { por: quem(user), porId: user?.id || null, antesDeGravar: () => conferirSenha(user?.email, b.senha) });
+  return { ...r.titulo, tela: situacaoDeTela(r.titulo), baixaParcial: !r.quita, faltaPagar: r.resta };
 }
 
 // ─── cancelamento (só em aberto, com motivo e senha) ─────────────────────────
@@ -652,6 +697,8 @@ export async function cancelarTitulo(user, id, b = {}) {
     .maybeSingle();
   if (error) throw falhaDb(error);
   if (!data) throw new CpError('Esta duplicata acabou de ser baixada ou cancelada', 'NAO_ABERTA', 409);
+  const lib = await liberacaoEmAndamento(t.id);
+  if (lib) await q(supabase.from('hc_cp_liberacoes').update({ status: 'cancelado', cancelado_por: quem(user), cancelado_em: agora, cancelado_motivo: 'Duplicata cancelada no contas a pagar', atualizado_por: quem(user), atualizado_em: agora }).eq('id', lib.id));
   console.log(`🚫 [contas a pagar] cancelada ${t.fornecedor_nome} duplicata ${rotuloDuplicata(t)} (empresa ${t.empresa}) · ${quem(user)}: ${motivo}`);
   return data;
 }

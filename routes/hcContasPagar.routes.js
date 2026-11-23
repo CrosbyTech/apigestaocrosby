@@ -11,12 +11,21 @@
 //   POST /titulos/:id/baixar            { dataPagamento, valorPago?, juros, multa, desconto, formaPagamento, conta, observacao, senha }  (sem estorno)
 //                                       valorPago em branco = tudo o que falta; menor = BAIXA PARCIAL (continua em aberto pelo restante)
 //   POST /titulos/:id/cancelar          { motivo, senha }  (só em aberto)
+//   — Liberação de Pagamento (HEADCOACH › FINANCEIRO): pendente → previsão → aprovado → incluído → pago —
+//   GET  /liberacoes/opcoes             empresas, etapas, bancos e formas
+//   GET  /liberacoes?empresa&de&ate     tudo o que está em andamento + pagos do período (de/ate = data do pagamento)
+//   POST /liberacoes                    { ids (duplicatas), dataPrevista? }  LIBERAR PARA PAGAMENTO (entra como pendente)
+//   PUT  /liberacoes/:id                { dataPrevista, banco, formaPagamento, valor, observacao }
+//   POST /liberacoes/status             { ids, status: pendente|previsao|aprovado|incluido, dataPrevista? }
+//   POST /liberacoes/pagar              { ids, dataPagamento, banco, senha }  grava a baixa (sem estorno)
+//   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
 //   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import { enviarSolicitacaoAoCp } from '../services/solicitacaoContasPagar.js';
+import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes } from '../services/hcCpLiberacao.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
 
 const router = express.Router();
@@ -45,5 +54,16 @@ router.post('/titulos/:id/baixar', rota((req) => baixarTitulo(req.user, req.para
 router.post('/titulos/:id/cancelar', rota((req) => cancelarTitulo(req.user, req.params.id, req.body || {}), 'Duplicata cancelada'));
 // Solicitações Crosby: o "Enviar ao Contas a Pagar HC" (no lugar do antigo envio ao TOTVS)
 router.post('/solicitacoes/:id/enviar', rota((req) => enviarSolicitacaoAoCp(req.user, req.params.id), (r) => (r.jaEnviada ? `Esta solicitação já estava no contas a pagar (duplicata ${r.rotulo})` : `Solicitação enviada ao contas a pagar — duplicata ${r.rotulo}`)));
+
+// ─── Liberação de Pagamento ──────────────────────────────────────────────────
+const tantas = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
+const comIgnoradas = (texto, r) => (r.ignoradas?.length ? `${texto} · ${tantas(r.ignoradas.length, 'ficou de fora', 'ficaram de fora')} (${r.ignoradas[0].rotulo}: ${r.ignoradas[0].motivo}${r.ignoradas.length > 1 ? '…' : ''})` : texto);
+router.get('/liberacoes/opcoes', rota((req) => opcoesDaLiberacao(req.user), 'Opções da liberação'));
+router.get('/liberacoes', rota((req) => listarLiberacoes(req.user, req.query || {}), 'Liberação de pagamento'));
+router.post('/liberacoes', rota((req) => liberarTitulos(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.liberadas, 'duplicata liberada', 'duplicatas liberadas')} para pagamento`, r)));
+router.post('/liberacoes/status', rota((req) => mudarStatus(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.alteradas, 'liberação movida', 'liberações movidas')}`, r)));
+router.post('/liberacoes/pagar', rota((req) => pagarLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.pagas, 'duplicata paga', 'duplicatas pagas')} · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r)));
+router.post('/liberacoes/devolver', rota((req) => devolverLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.devolvidas, 'devolvida', 'devolvidas')} ao contas a pagar`, r)));
+router.put('/liberacoes/:id', rota((req) => editarLiberacao(req.user, req.params.id, req.body || {}), 'Liberação alterada'));
 
 export default router;
