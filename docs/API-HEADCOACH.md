@@ -1821,7 +1821,7 @@ Resposta: página de `PromotionItem`
 
 ### GET /api/headcoach/sale-panel/v1/discount-limits
 
-Limite de desconto por vendedor — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.
+Limite de desconto por vendedor — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.
 
 Parâmetros:
 - `userEmail` (string) — Trecho do e-mail.
@@ -1833,7 +1833,7 @@ Resposta: página de `DiscountLimit`
 
 ### GET /api/headcoach/sale-panel/v1/discount-limits/{userId}
 
-Limite de desconto por vendedor — um registro — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.
+Limite de desconto por vendedor — um registro — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.
 
 Parâmetros:
 - `userId` (caminho, obrigatório) — Usuário do HeadCoach (uuid).
@@ -1941,7 +1941,7 @@ Esquemas:
 - `lastChangeDate` (date-time) — Última alteração.
 - `items` (array de PromotionItem) — Produtos da promoção (só vem com expand=items)
 
-**DiscountLimit** — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.
+**DiscountLimit** — Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.
 
 - `userId` (string) — Usuário do HeadCoach (uuid).
 - `userName` (string) — Nome do usuário.

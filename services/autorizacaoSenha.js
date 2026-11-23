@@ -20,8 +20,9 @@ export class AutorizacaoError extends Error {
 const NOMES_ROLE = { manager: 'gerente', admin: 'admin', owner: 'owner', user: 'financeiro' };
 const tentativas = new Map(); // email -> [timestamps]
 
+// roles = lista de perfis aceitos; null = qualquer usuário (quem chama decide o que ele pode autorizar)
 export async function verificarSenhaAutorizador(email, senha, roles) {
-  const quem = roles.map((r) => NOMES_ROLE[r] || r).join(', ').replace(/, ([^,]*)$/, ' ou $1');
+  const quem = roles ? roles.map((r) => NOMES_ROLE[r] || r).join(', ').replace(/, ([^,]*)$/, ' ou $1') : 'quem autoriza';
   const e = String(email || '').trim().toLowerCase();
   if (!e || !senha) throw new AutorizacaoError(`Informe o e-mail e a senha do ${quem}`, 'CREDENCIAIS_AUSENTES');
   const agora = Date.now();
@@ -40,10 +41,10 @@ export async function verificarSenhaAutorizador(email, senha, roles) {
   } catch {
     /* sessão só em memória */
   }
-  const role = data.user.user_metadata?.role;
-  if (!roles.includes(role)) {
+  const role = data.user.user_metadata?.role || 'guest';
+  if (roles && !roles.includes(role)) {
     throw new AutorizacaoError(`Esse usuário não é ${quem}`, 'SEM_PERMISSAO', 403);
   }
   tentativas.delete(e);
-  return { email: e, nome: data.user.user_metadata?.name || e, role };
+  return { id: data.user.id, email: e, nome: data.user.user_metadata?.name || e, role };
 }

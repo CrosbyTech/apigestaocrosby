@@ -4672,7 +4672,7 @@
       },
       "DiscountLimit": {
         "type": "object",
-        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.",
+        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.",
         "properties": {
           "userId": {
             "description": "Usuário do HeadCoach (uuid).",
@@ -14999,7 +14999,7 @@
           "SalePanel"
         ],
         "summary": "Limite de desconto por vendedor",
-        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.",
+        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.",
         "parameters": [
           {
             "name": "userEmail",
@@ -15137,7 +15137,7 @@
           "SalePanel"
         ],
         "summary": "Limite de desconto por vendedor — um registro",
-        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.",
+        "description": "Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.",
         "parameters": [
           {
             "name": "userId",

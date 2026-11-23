@@ -6,8 +6,12 @@
 // Agora o limite é de cada usuário:
 //   • quem aparece na tela: usuários do setor VAREJO (membro ou gestor) com
 //     loja configurada (user_companies)
-//   • quem não tem limite gravado: DESCONTO_PADRAO_PCT (15%)
+//   • quem não tem limite gravado: DESCONTO_PADRAO_PCT (15%); gerente (perfil
+//     manager): DESCONTO_GERENTE_PCT (30%) automático
 //   • owner e admin: sem limite, como sempre
+// Desconto acima do limite de quem está vendendo: outro usuário digita e-mail e
+// senha e autoriza ATÉ O LIMITE DELE (autorizarDesconto) — não precisa ser
+// owner/admin: basta ter aquele desconto liberado (Yago, 19/11/2026).
 // A mudança pode ser de um usuário, de todos os de uma loja ou de todos.
 // Quem tem mais de MAX_LOJAS_VENDEDOR lojas configuradas é supervisor (há usuário
 // com todas as empresas): não conta nem muda na mudança POR LOJA — só na
@@ -16,8 +20,12 @@
 // (migrations/pdv_desconto_limites.sql).
 // ============================================================================
 import supabase from '../config/supabase.js';
+import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.js';
 
 export const DESCONTO_PADRAO_PCT = 15;
+export const DESCONTO_GERENTE_PCT = 30;
+/** Limite de quem nunca teve o seu gravado: gerente 30%, os demais 15%. */
+export const padraoDoPerfil = (role) => (role === 'manager' ? DESCONTO_GERENTE_PCT : DESCONTO_PADRAO_PCT);
 export const MAX_LOJAS_VENDEDOR = 3;
 const PERFIS_SEM_LIMITE = ['owner', 'admin'];
 const r2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
@@ -105,7 +113,8 @@ export async function listarLimites({ fresco = false } = {}) {
       role: u.role,
       empresas: u.empresas,
       variasLojas: u.empresas.length > MAX_LOJAS_VENDEDOR, // supervisor: fora da mudança por loja
-      pct: g ? Number(g.pct) : DESCONTO_PADRAO_PCT,
+      pct: g ? Number(g.pct) : padraoDoPerfil(u.role),
+      padrao: padraoDoPerfil(u.role), // o que vale para ele sem limite gravado (gerente: 30%)
       proprio: !!g, // false = nunca foi mudado (está no padrão)
       semLimite: PERFIS_SEM_LIMITE.includes(u.role), // owner/admin não são limitados pelo PDV
       atualizadoPor: g?.atualizado_por || null,
@@ -123,7 +132,7 @@ export async function listarLimites({ fresco = false } = {}) {
       porLoja.set(e, l);
     }
   }
-  return { padrao: DESCONTO_PADRAO_PCT, usuarios, lojas: [...porLoja.values()].sort((a, b) => a.empresa - b.empresa) };
+  return { padrao: DESCONTO_PADRAO_PCT, padraoGerente: DESCONTO_GERENTE_PCT, usuarios, lojas: [...porLoja.values()].sort((a, b) => a.empresa - b.empresa) };
 }
 
 /** Limite de quem está logado (o PDV Crosby pergunta ao abrir). Nunca falha: na dúvida, o padrão. */
@@ -132,10 +141,10 @@ export async function limiteDoUsuario(user) {
   try {
     const { data, error } = await supabase.from('pdv_desconto_limites').select('pct').eq('user_id', user?.id || '00000000-0000-0000-0000-000000000000').maybeSingle();
     if (error) throw error;
-    return { pct: data ? Number(data.pct) : DESCONTO_PADRAO_PCT, semLimite: false, padrao: DESCONTO_PADRAO_PCT };
+    return { pct: data ? Number(data.pct) : padraoDoPerfil(user?.role), semLimite: false, padrao: padraoDoPerfil(user?.role) };
   } catch (e) {
-    console.warn(`⚠️ [desconto] não consegui ler o limite de ${user?.email || '?'}: ${e.message} — usando o padrão de ${DESCONTO_PADRAO_PCT}%`);
-    return { pct: DESCONTO_PADRAO_PCT, semLimite: false, padrao: DESCONTO_PADRAO_PCT };
+    console.warn(`⚠️ [desconto] não consegui ler o limite de ${user?.email || '?'}: ${e.message} — usando o padrão de ${padraoDoPerfil(user?.role)}%`);
+    return { pct: padraoDoPerfil(user?.role), semLimite: false, padrao: padraoDoPerfil(user?.role) };
   }
 }
 
@@ -174,7 +183,7 @@ export async function definirLimite({ escopo, userId = null, empresa = null, pct
   let iguais = 0;
   for (const u of alvo) {
     const g = gravados.get(u.id);
-    const de = g ? Number(g.pct) : DESCONTO_PADRAO_PCT;
+    const de = g ? Number(g.pct) : padraoDoPerfil(u.role);
     if (g && de === valor) {
       iguais += 1;
       continue;
@@ -200,6 +209,31 @@ export async function definirLimite({ escopo, userId = null, empresa = null, pct
     console.log(`🏷️ [desconto] limite de desconto → ${valor}% (${escopo}${escopo === 'loja' ? ` ${loja}` : ''}) por ${por?.nome || '?'}: ${alterados.map((a) => `${a.nome} ${a.de}%→${a.para}%`).join('; ').slice(0, 600)}`);
   }
   return { pct: valor, escopo, empresa: escopo === 'loja' ? loja : null, alterados, iguais };
+}
+
+/**
+ * Desconto acima do limite de quem está vendendo: outro usuário autoriza com o
+ * e-mail e a senha dele, até o limite DELE (owner/admin: qualquer desconto).
+ * @returns {{ nome, email, role, pct, semLimite }} pct = até quanto ele liberou nesta venda
+ */
+export async function autorizarDesconto({ email, senha, pct, empresa = null, pedidoPor = null } = {}) {
+  const pedido = r2(pct);
+  if (!Number.isFinite(pedido) || pedido <= 0 || pedido > 100) throw new DescontoLimiteError('Informe o desconto a liberar', 'PCT_INVALIDO');
+  let quem;
+  try {
+    quem = await verificarSenhaAutorizador(email, senha, null);
+  } catch (e) {
+    if (e instanceof AutorizacaoError) throw new DescontoLimiteError(e.message, e.code, e.status);
+    throw e;
+  }
+  const limite = await limiteDoUsuario(quem);
+  const fmt = (n) => `${String(n).replace('.', ',')}%`;
+  if (!limite.semLimite && pedido > limite.pct + 0.0001) {
+    console.log(`🔒 [desconto] ${quem.email} (${quem.role}, até ${limite.pct}%) NÃO pôde liberar ${pedido}% para ${pedidoPor || '?'} na empresa ${empresa ?? '?'}`);
+    throw new DescontoLimiteError(`${quem.nome} só pode liberar até ${fmt(limite.pct)} de desconto, e o desconto pedido é de ${fmt(pedido)}`, 'LIMITE_DO_AUTORIZADOR', 403);
+  }
+  console.log(`🔓 [desconto] ${pedido}% liberado por ${quem.email} (${quem.role}, ${limite.semLimite ? 'sem limite' : `até ${limite.pct}%`}) para ${pedidoPor || '?'} na empresa ${empresa ?? '?'}`);
+  return { nome: quem.nome, email: quem.email, role: quem.role, pct: limite.semLimite ? 100 : limite.pct, semLimite: limite.semLimite };
 }
 
 /** Últimas mudanças (mais recentes primeiro). */

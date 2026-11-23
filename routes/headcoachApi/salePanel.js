@@ -223,7 +223,7 @@ modulo.recurso({
   table: 'pdv_desconto_limites',
   summary: 'Limite de desconto por vendedor',
   description:
-    'Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15%**. Owner e admin não têm limite.',
+    'Percentual máximo de desconto que cada usuário do setor Varejo pode dar no PDV Crosby sem a senha de um owner/admin (tela Financeiro › Liberação de Desconto). Só traz quem já teve o limite gravado: **usuário que não aparece aqui usa o padrão de 15% (gerente: 30%)**. Owner e admin não têm limite. Acima do próprio limite, outro usuário pode autorizar com a senha dele, até o limite dele.',
   key: [{ param: 'userId', col: 'user_id', type: 'string', description: 'Usuário do HeadCoach (uuid).' }],
   order: [['usuario_nome', true]],
   fields: [
