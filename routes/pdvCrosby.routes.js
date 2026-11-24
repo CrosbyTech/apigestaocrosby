@@ -1054,10 +1054,27 @@ export async function emitirVendaPdv(id) {
     const cfg = await buscarConfig(venda.empresa);
     const emit = await buscarEmitente(venda.empresa);
     const cert = certificadoPara(emit.cnpj);
-    const cliente = venda.cliente_code ? await buscarClienteFiscal(venda.cliente_code) : null;
-    if (venda.cliente_code && !cliente) throw new FiscalError(`Cliente ${venda.cliente_code} não encontrado no TOTVS`, 'DEST_NOT_FOUND');
-
     const modelo = venda.tipo_venda === 'nfce' ? 65 : 55;
+    let cliente = null;
+    if (venda.cliente_code) {
+      let falha = null;
+      try {
+        cliente = await buscarClienteFiscal(venda.cliente_code);
+      } catch (e) {
+        falha = e;
+      }
+      if (!cliente) {
+        // NF-e (troca, venda com nota cheia) precisa do cadastro completo do cliente
+        if (modelo !== 65) throw falha || new FiscalError(`Cliente ${venda.cliente_code} não encontrado no TOTVS`, 'DEST_NOT_FOUND');
+        // NFC-e não depende do cadastro: a venda do balcão não pode ficar sem nota porque a
+        // consulta não respondeu. Sai com o CPF/CNPJ gravado na venda ou sem destinatário.
+        const doc = String(venda.cliente_cpf_cnpj || '').replace(/\D/g, '');
+        const nome = String(venda.cliente_nome || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').slice(0, 60) || 'CONSUMIDOR';
+        cliente = doc.length === 11 ? { code: Number(venda.cliente_code), nome, cpf: doc, cnpj: null } : doc.length === 14 ? { code: Number(venda.cliente_code), nome, cpf: null, cnpj: doc, ie: null } : null;
+        console.warn(`⚠️ [PDV Crosby] venda ${id}: cadastro do cliente ${venda.cliente_code} indisponível (${falha?.message || 'não encontrado'}) — NFC-e ${cliente ? 'com o documento da venda' : 'sem destinatário'}`);
+      }
+    }
+
     const serie = modelo === 65 ? cfg.serie_nfce : cfg.serie_nfe;
 
     // Reaproveita a numeração de uma tentativa rejeitada/erro da mesma venda

@@ -225,17 +225,38 @@ export async function buscarEmitente(empresa) {
 }
 
 // Cliente (PF ou PJ) com endereço — usado no <dest>
+// Cadastro do cliente. Devolve null quando o cliente NÃO EXISTE; quando a consulta não
+// responde (queda, limite, demora), tenta de novo e, persistindo, lança DEST_LOOKUP_FAILED
+// — antes a falha virava "cliente não encontrado" e ficava guardada por 30 minutos
+// (venda 584 da Ayrton Senna, 24/11/2026: ficou sem nota por isso).
 export async function buscarClienteFiscal(code) {
-  return cached(`cli:${code}`, async () => {
-    const payload = { filter: { personCodeList: [Number(code)] }, expand: 'addresses,phones,emails', page: 1, pageSize: 1 };
-    const [pf, pj] = await Promise.allSettled([
+  const chave = `cli:${code}`;
+  const guardado = cache.get(chave);
+  if (guardado && Date.now() - guardado.at < TTL) return guardado.value;
+  const payload = { filter: { personCodeList: [Number(code)] }, expand: 'addresses,phones,emails', page: 1, pageSize: 1 };
+  const consultar = () =>
+    Promise.allSettled([
       callTotvs('post', `${TOTVS_BASE_URL}/person/v2/individuals/search`, { data: payload }),
       callTotvs('post', `${TOTVS_BASE_URL}/person/v2/legal-entities/search`, { data: payload }),
     ]);
+  let [pf, pj] = await consultar();
+  const achou = () => (pf.status === 'fulfilled' && pf.value.data?.items?.[0]) || (pj.status === 'fulfilled' && pj.value.data?.items?.[0]) || null;
+  const falhou = () => pf.status === 'rejected' || pj.status === 'rejected';
+  if (!achou() && falhou()) {
+    await new Promise((r) => setTimeout(r, 1500));
+    [pf, pj] = await consultar();
+  }
+  if (!achou()) {
+    if (falhou()) {
+      const motivo = [pf, pj].find((x) => x.status === 'rejected')?.reason;
+      throw new FiscalError(`O cadastro do cliente ${code} não respondeu agora (${String(motivo?.response?.status || motivo?.code || motivo?.message || 'sem resposta').slice(0, 60)}) — tente de novo`, 'DEST_LOOKUP_FAILED');
+    }
+    return null; // não existe (não fica guardado: o cadastro pode ter acabado de ser feito)
+  }
+  const value = await (async () => {
     const ind = pf.status === 'fulfilled' ? pf.value.data?.items?.[0] : null;
     const leg = pj.status === 'fulfilled' ? pj.value.data?.items?.[0] : null;
     const item = ind || leg;
-    if (!item) return null;
     const addr = item.addresses?.[0];
     const email = (item.emails || []).find((e) => e.isDefault)?.email || item.emails?.[0]?.email;
     const fone = (item.phones || []).find((p) => p.isDefault) || item.phones?.[0];
@@ -253,7 +274,9 @@ export async function buscarClienteFiscal(code) {
       fone: fone ? digits(fone.number) : null,
       endereco: enderecoDe(addr),
     };
-  });
+  })();
+  cache.set(chave, { at: Date.now(), value });
+  return value;
 }
 
 // Produto: NCM / CEST / origem (products/search com option.branchInfoCode)
