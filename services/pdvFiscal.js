@@ -1015,13 +1015,18 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
     const parcelas = venda.cobranca?.parcelas || [];
     if (!parcelas.length) throw new FiscalError('Boleto sem parcelas/vencimentos', 'BOLETO_SEM_PARCELAS');
     const somaDup = round2(parcelas.reduce((s, d) => s + Number(d.valor), 0));
-    if (Math.abs(somaDup - round2(tot.vNF)) > 0.01) {
-      throw new FiscalError(`Parcelas do boleto (R$ ${brl(somaDup)}) não fecham com o total da nota (R$ ${brl(tot.vNF)})`, 'BOLETO_MISMATCH');
+    // A cobrança é só da parte em BOLETO: o que o cliente pagou em Pix, cartão, Credev… fica
+    // apenas no grupo de pagamento. (Até 24/11/2026 as parcelas tinham de somar o total da nota
+    // e o pedido com boleto + outra forma não emitia — RV1623, boleto de R$ 500,00 + Pix.)
+    // Igual ao TOTVS: NF 12322/3 da 99, nota de R$ 934,98 com fatura de R$ 471,65.
+    const vBoleto = round2(pagamentos.filter((p) => p.forma === 'boleto').reduce((s, p) => s + Number(p.valor || 0), 0));
+    if (Math.abs(somaDup - vBoleto) > 0.01) {
+      throw new FiscalError(`Parcelas do boleto (R$ ${brl(somaDup)}) não fecham com o valor em boleto (R$ ${brl(vBoleto)})`, 'BOLETO_MISMATCH');
     }
     const dups = parcelas
       .map((d, i) => `<dup><nDup>${String(i + 1).padStart(3, '0')}</nDup><dVenc>${String(d.vencimento).slice(0, 10)}</dVenc><vDup>${f2(d.valor)}</vDup></dup>`)
       .join('');
-    const cobr = `<cobr><fat><nFat>${numero}</nFat><vOrig>${f2(tot.vNF)}</vOrig><vDesc>0.00</vDesc><vLiq>${f2(tot.vNF)}</vLiq></fat>${dups}</cobr>`;
+    const cobr = `<cobr><fat><nFat>${numero}</nFat><vOrig>${f2(vBoleto)}</vOrig><vDesc>0.00</vDesc><vLiq>${f2(vBoleto)}</vLiq></fat>${dups}</cobr>`;
     if (!xml.includes('<pag>')) throw new FiscalError('XML sem grupo <pag> para inserir a cobrança', 'XML_COBR');
     xml = xml.replace('<pag>', `${cobr}<pag>`);
   }
