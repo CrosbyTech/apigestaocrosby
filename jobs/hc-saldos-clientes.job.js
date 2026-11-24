@@ -8,6 +8,7 @@
  */
 import cron from 'node-cron';
 import { sincronizarDevolucoes, sincronizarTrocas } from '../services/hcSaldosClientes.js';
+import { sincronizarCashbackDasVendas } from '../services/cashbackHc.js';
 
 let rodando = false;
 async function rodar() {
@@ -21,6 +22,9 @@ async function rodar() {
     // trocas do PDV Crosby autorizadas que ficaram sem o CREDEV
     const t = await sincronizarTrocas();
     if (t.creditadas || t.erros.length) console.log(`💳 [hc-saldos-clientes] trocas do PDV: ${t.creditadas} CREDEV gerado(s), ${t.erros.length} erro(s)`);
+    // vendas do PDV Crosby autorizadas que ficaram sem o cashback do HeadCoach
+    const c = await sincronizarCashbackDasVendas().catch((e) => ({ geradas: 0, erros: [{ erro: e.message }] }));
+    if (c.geradas || c.erros.length) console.log(`🎁 [hc-saldos-clientes] cashback: ${c.geradas} venda(s) acertada(s), ${c.erros.length} erro(s)${c.erros[0] ? ` — ${c.erros[0].erro}` : ''}`);
   } catch (e) {
     if (e.code !== 'MIGRATION_PENDING') console.error('[hc-saldos-clientes]', e.message);
   } finally {

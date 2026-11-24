@@ -33,7 +33,7 @@
     },
     {
       "name": "CustomerBalance",
-      "description": "Saldos dos clientes no HeadCoach, por empresa: Credev (crédito de devolução e troca), adiantamento e cashback, com o extrato de cada movimento. O saldo vale só na empresa em que foi gerado."
+      "description": "Saldos dos clientes no HeadCoach, por empresa: Credev (crédito de devolução e troca), adiantamento e cashback, com o extrato de cada movimento. O saldo vale só na empresa em que foi gerado. O cashback gerado no HeadCoach (cashback-grants e cashback-movements) é à parte: vale em qualquer empresa, tem carência e validade."
     },
     {
       "name": "Cashier",
@@ -846,12 +846,22 @@
             "nullable": true
           },
           "discountValue": {
-            "description": "Descontos (inclui o cashback usado).",
+            "description": "Tudo o que saiu do valor bruto: desconto dado na venda + cashback usado.",
+            "type": "number",
+            "nullable": true
+          },
+          "discountWithoutCashbackValue": {
+            "description": "Só o desconto dado na venda (discountValue menos o cashback usado).",
             "type": "number",
             "nullable": true
           },
           "cashbackUsedValue": {
-            "description": "Cashback usado na venda.",
+            "description": "Cashback que o cliente usou nesta venda.",
+            "type": "number",
+            "nullable": true
+          },
+          "cashbackGeneratedValue": {
+            "description": "Cashback que esta venda gerou para o cliente (customer-balance/cashback-grants). Zero se a venda foi cancelada.",
             "type": "number",
             "nullable": true
           },
@@ -2527,6 +2537,208 @@
           },
           "createdDate": {
             "description": "Quando foi lançado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
+      "CashbackGrant": {
+        "type": "object",
+        "description": "Uma linha por cashback gerado: toda venda do PDV Crosby com cliente identificado gera 20% do valor. Só pode ser usado a partir de `releaseDate` (3 dias depois da venda) e até `expirationDate` (dia 93), em qualquer empresa. Depois de vencido deixa de contar no saldo, mas a linha continua aqui e pode ser reativada (`reactivationDate`). Saldo do cliente = soma de `balanceValue` das linhas com `status=Available`.",
+        "properties": {
+          "grantId": {
+            "description": "Identificador do cashback gerado.",
+            "type": "integer",
+            "nullable": true
+          },
+          "customerCode": {
+            "description": "Código do cliente (o mesmo do TOTVS).",
+            "type": "integer",
+            "nullable": true
+          },
+          "customerName": {
+            "description": "Nome do cliente.",
+            "type": "string",
+            "nullable": true
+          },
+          "customerCpfCnpj": {
+            "description": "CPF ou CNPJ, só dígitos.",
+            "type": "string",
+            "nullable": true
+          },
+          "branchCode": {
+            "description": "Empresa da venda que gerou (o cashback vale em qualquer empresa).",
+            "type": "integer",
+            "nullable": true
+          },
+          "origin": {
+            "description": "De onde veio.",
+            "type": "string",
+            "enum": [
+              "Sale",
+              "Adjustment"
+            ],
+            "nullable": true
+          },
+          "transactionCode": {
+            "description": "Venda que gerou (transaction/transactions).",
+            "type": "integer",
+            "nullable": true
+          },
+          "baseValue": {
+            "description": "Valor da venda sobre o qual o cashback foi calculado.",
+            "type": "number",
+            "nullable": true
+          },
+          "percentage": {
+            "description": "Percentual aplicado.",
+            "type": "number",
+            "nullable": true
+          },
+          "value": {
+            "description": "Valor gerado.",
+            "type": "number",
+            "nullable": true
+          },
+          "usedValue": {
+            "description": "Quanto já foi usado.",
+            "type": "number",
+            "nullable": true
+          },
+          "balanceValue": {
+            "description": "Quanto resta (value menos usedValue).",
+            "type": "number",
+            "nullable": true
+          },
+          "status": {
+            "description": "Situação hoje: em carência, disponível, vencido, usado por inteiro ou cancelado.",
+            "type": "string",
+            "enum": [
+              "GracePeriod",
+              "Available",
+              "Expired",
+              "Used",
+              "Canceled"
+            ],
+            "nullable": true
+          },
+          "grantDate": {
+            "description": "Quando foi gerado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "releaseDate": {
+            "description": "Primeiro dia em que pode ser usado.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "expirationDate": {
+            "description": "Último dia em que pode ser usado.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "cancellationDate": {
+            "description": "Quando foi cancelado (venda cancelada).",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "cancellationReason": {
+            "description": "Motivo do cancelamento.",
+            "type": "string",
+            "nullable": true
+          },
+          "reactivationDate": {
+            "description": "Última reativação depois de vencido.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "reactivatedBy": {
+            "description": "Quem reativou.",
+            "type": "string",
+            "nullable": true
+          },
+          "observation": {
+            "description": "Descrição.",
+            "type": "string",
+            "nullable": true
+          },
+          "createdBy": {
+            "description": "Quem registrou a venda.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CashbackMovement": {
+        "type": "object",
+        "description": "Histórico de geração e uso do cashback do HeadCoach: geração na venda, uso em outra venda, volta do uso quando a venda é cancelada, cancelamento do cashback gerado por venda cancelada e reativação do vencido. `value` positivo entra, negativo sai; `grantId` aponta o cashback gerado (cashback-grants) de onde saiu ou para onde voltou.",
+        "properties": {
+          "movementId": {
+            "description": "Identificador do movimento.",
+            "type": "integer",
+            "nullable": true
+          },
+          "grantId": {
+            "description": "Cashback gerado a que o movimento pertence (cashback-grants).",
+            "type": "integer",
+            "nullable": true
+          },
+          "customerCode": {
+            "description": "Código do cliente.",
+            "type": "integer",
+            "nullable": true
+          },
+          "branchCode": {
+            "description": "Empresa em que aconteceu (no uso: a loja da venda que usou).",
+            "type": "integer",
+            "nullable": true
+          },
+          "movementType": {
+            "description": "Tipo do movimento.",
+            "type": "string",
+            "enum": [
+              "Grant",
+              "Use",
+              "UseReversal",
+              "Cancellation",
+              "Reactivation"
+            ],
+            "nullable": true
+          },
+          "value": {
+            "description": "Valor (positivo entra, negativo sai).",
+            "type": "number",
+            "nullable": true
+          },
+          "transactionCode": {
+            "description": "Venda ligada: a que gerou ou a que usou.",
+            "type": "integer",
+            "nullable": true
+          },
+          "observation": {
+            "description": "Descrição do movimento.",
+            "type": "string",
+            "nullable": true
+          },
+          "createdBy": {
+            "description": "Quem fez.",
+            "type": "string",
+            "nullable": true
+          },
+          "movementDate": {
+            "description": "Quando aconteceu.",
             "type": "string",
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
@@ -10252,6 +10464,411 @@
                       "type": "array",
                       "items": {
                         "$ref": "#/components/schemas/BillingBonus"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/customer-balance/v1/cashback-grants": {
+      "get": {
+        "tags": [
+          "CustomerBalance"
+        ],
+        "summary": "Cashback gerado (HeadCoach)",
+        "description": "Uma linha por cashback gerado: toda venda do PDV Crosby com cliente identificado gera 20% do valor. Só pode ser usado a partir de `releaseDate` (3 dias depois da venda) e até `expirationDate` (dia 93), em qualquer empresa. Depois de vencido deixa de contar no saldo, mas a linha continua aqui e pode ser reativada (`reactivationDate`). Saldo do cliente = soma de `balanceValue` das linhas com `status=Available`.",
+        "parameters": [
+          {
+            "name": "customerCode",
+            "in": "query",
+            "required": false,
+            "description": "Código do cliente.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "customerCpfCnpj",
+            "in": "query",
+            "required": false,
+            "description": "CPF ou CNPJ do cliente.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "branchCodeList",
+            "in": "query",
+            "required": false,
+            "description": "Empresas da venda que gerou, separadas por vírgula.",
+            "schema": {
+              "type": "string",
+              "example": "95,99"
+            }
+          },
+          {
+            "name": "transactionCode",
+            "in": "query",
+            "required": false,
+            "description": "Cashback gerado por uma venda.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Situação hoje: GracePeriod, Available, Expired, Used ou Canceled.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": false,
+            "description": "Gerados a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": false,
+            "description": "Gerados até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "startExpirationDate",
+            "in": "query",
+            "required": false,
+            "description": "Vencem a partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endExpirationDate",
+            "in": "query",
+            "required": false,
+            "description": "Vencem até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CashbackGrant"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/customer-balance/v1/cashback-movements": {
+      "get": {
+        "tags": [
+          "CustomerBalance"
+        ],
+        "summary": "Extrato do cashback (HeadCoach)",
+        "description": "Histórico de geração e uso do cashback do HeadCoach: geração na venda, uso em outra venda, volta do uso quando a venda é cancelada, cancelamento do cashback gerado por venda cancelada e reativação do vencido. `value` positivo entra, negativo sai; `grantId` aponta o cashback gerado (cashback-grants) de onde saiu ou para onde voltou.",
+        "parameters": [
+          {
+            "name": "customerCode",
+            "in": "query",
+            "required": false,
+            "description": "Código do cliente.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "grantId",
+            "in": "query",
+            "required": false,
+            "description": "Movimentos de um cashback gerado.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "branchCodeList",
+            "in": "query",
+            "required": false,
+            "description": "Empresas, separadas por vírgula.",
+            "schema": {
+              "type": "string",
+              "example": "95,99"
+            }
+          },
+          {
+            "name": "movementType",
+            "in": "query",
+            "required": false,
+            "description": "Tipo do movimento (aceita lista). Valores: Grant, Use, UseReversal, Cancellation, Reactivation.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Grant",
+                "Use",
+                "UseReversal",
+                "Cancellation",
+                "Reactivation"
+              ]
+            }
+          },
+          {
+            "name": "transactionCode",
+            "in": "query",
+            "required": false,
+            "description": "Movimentos de uma venda.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": false,
+            "description": "A partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": false,
+            "description": "Até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CashbackMovement"
                       }
                     },
                     "count": {

@@ -20,6 +20,7 @@
 // CANCELADA (cancelamento).
 // ============================================================================
 import supabase from '../config/supabase.js';
+import { loteDaVenda, cashbackHcUsadoNaVenda } from './cashbackHc.js';
 
 export class HcTransacaoError extends Error {
   constructor(message, code = 'HC_TRANSACAO', status = 400) {
@@ -165,7 +166,12 @@ function linhaDaVenda(v) {
     vendedor: { code: v.vendedor_code, nome: v.vendedor_nome },
     qtdPecas: Number(v.qtd_pecas) || 0,
     valorBruto: round2(v.subtotal),
+    // `desconto` é tudo o que saiu do bruto (o cashback usado entra como desconto nos itens);
+    // `descontoSemCashback` é só o desconto dado na venda
     desconto: round2(Number(v.desconto || 0)),
+    descontoSemCashback: round2(Math.max(0, Number(v.desconto || 0) - Number(v.cashback_usado || 0))),
+    cashbackUsado: round2(v.cashback_usado || 0),
+    cashbackGerado: round2(v.cashback_gerado || 0),
     frete: round2(v.frete || 0),
     valor: round2(v.total),
     formas: [...new Set(pags.map((p) => p.forma))].map((f) => FORMAS[f] || f).join(' + ') || null,
@@ -196,6 +202,9 @@ function linhaDaDevolucao(d) {
     qtdPecas: Number(d.qtd_recebida) || 0,
     valorBruto: round2(d.total),
     desconto: 0,
+    descontoSemCashback: 0,
+    cashbackUsado: 0,
+    cashbackGerado: 0,
     frete: 0,
     valor: round2(d.total),
     formas: null,
@@ -334,7 +343,7 @@ export async function listarTransacoes(query = {}) {
   const filtradas = todas.filter((l) => passa(l, f)).sort((a, b) => String(b.data).localeCompare(String(a.data)));
 
   // resumo do que passou no filtro (o valor só conta o que não foi cancelado)
-  const resumo = { transacoes: filtradas.length, pecas: 0, valor: 0, desconto: 0, porSituacao: { andamento: 0, atendida: 0, cancelada: 0 }, entradas: 0, saidas: 0 };
+  const resumo = { transacoes: filtradas.length, pecas: 0, valor: 0, desconto: 0, descontoSemCashback: 0, cashbackUsado: 0, cashbackGerado: 0, porSituacao: { andamento: 0, atendida: 0, cancelada: 0 }, entradas: 0, saidas: 0 };
   for (const l of filtradas) {
     resumo.porSituacao[l.situacao] += 1;
     if (l.tipoOperacao === 'E') resumo.entradas += 1;
@@ -344,9 +353,15 @@ export async function listarTransacoes(query = {}) {
     resumo.pecas += l.qtdPecas;
     resumo.valor += l.valor;
     resumo.desconto += l.desconto;
+    resumo.descontoSemCashback += l.descontoSemCashback || 0;
+    resumo.cashbackUsado += l.cashbackUsado || 0;
+    resumo.cashbackGerado += l.cashbackGerado || 0;
   }
   resumo.valor = round2(resumo.valor);
   resumo.desconto = round2(resumo.desconto);
+  resumo.descontoSemCashback = round2(resumo.descontoSemCashback);
+  resumo.cashbackUsado = round2(resumo.cashbackUsado);
+  resumo.cashbackGerado = round2(resumo.cashbackGerado);
 
   // listas para os campos de escolha da tela (do período, antes dos demais filtros)
   const opcoes = {
@@ -389,11 +404,22 @@ async function detalheDaVenda(id) {
   const docInterno = Number(v.operacao_doc_interno) || null;
   const opsExtra = await operacoesPor([docInterno]);
   const info = v.pedido_info || {};
+  // cashback: o que a venda usou (do HeadCoach e do saldo antigo do TOTVS) e o lote que ela gerou
+  const [cashbackLote, cashbackUsadoHc] = await Promise.all([loteDaVenda(v.id).catch(() => null), cashbackHcUsadoNaVenda(v.id).catch(() => 0)]);
+  const cashbackUsadoTotal = round2(v.cashback_usado || 0);
   return {
     ...linha,
     observacao: v.observacao || null,
-    cashbackUsado: round2(v.cashback_usado || 0),
+    cashbackUsado: cashbackUsadoTotal,
     cashbackGerado: round2(v.cashback_gerado || 0),
+    cashback: {
+      usado: cashbackUsadoTotal,
+      usadoHeadcoach: round2(Math.min(cashbackUsadoTotal, cashbackUsadoHc)),
+      usadoTotvs: round2(Math.max(0, cashbackUsadoTotal - cashbackUsadoHc)),
+      gerado: cashbackLote
+        ? { valor: cashbackLote.valor, usado: cashbackLote.usado, saldo: cashbackLote.saldo, pct: cashbackLote.pct, liberaEm: cashbackLote.liberaEm, expiraEm: cashbackLote.expiraEm, situacao: cashbackLote.situacao, canceladoEm: cashbackLote.canceladoEm }
+        : null,
+    },
     dataCaixa: v.data_caixa || null,
     atualizadoEm: v.atualizado_em,
     nfReferenciada: v.nf_referenciada || null,
@@ -487,6 +513,7 @@ async function detalheDaDevolucao(id) {
     observacao: sol?.observacao || null,
     cashbackUsado: 0,
     cashbackGerado: 0,
+    cashback: null,
     dataCaixa: null,
     atualizadoEm: d.atualizado_em,
     nfReferenciada: d.nf_chave || null,

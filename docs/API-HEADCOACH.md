@@ -341,8 +341,10 @@ Esquemas:
 - `sellerName` (string) — Nome do vendedor.
 - `itemQuantity` (number) — Quantidade de peças.
 - `grossValue` (number) — Valor bruto (antes dos descontos).
-- `discountValue` (number) — Descontos (inclui o cashback usado).
-- `cashbackUsedValue` (number) — Cashback usado na venda.
+- `discountValue` (number) — Tudo o que saiu do valor bruto: desconto dado na venda + cashback usado.
+- `discountWithoutCashbackValue` (number) — Só o desconto dado na venda (discountValue menos o cashback usado).
+- `cashbackUsedValue` (number) — Cashback que o cliente usou nesta venda.
+- `cashbackGeneratedValue` (number) — Cashback que esta venda gerou para o cliente (customer-balance/cashback-grants). Zero se a venda foi cancelada.
 - `freightValue` (number) — Frete.
 - `totalValue` (number) — Valor total da transação.
 - `orderKey` (string) — Chave do pedido no Dryland (faturamento). BRJ:… = Brejinho; AVULSO:… = sem pedido.
@@ -891,7 +893,7 @@ Esquemas:
 
 ## CustomerBalance — `customer-balance`
 
-Saldos dos clientes no HeadCoach, por empresa: Credev (crédito de devolução e troca), adiantamento e cashback, com o extrato de cada movimento. O saldo vale só na empresa em que foi gerado.
+Saldos dos clientes no HeadCoach, por empresa: Credev (crédito de devolução e troca), adiantamento e cashback, com o extrato de cada movimento. O saldo vale só na empresa em que foi gerado. O cashback gerado no HeadCoach (cashback-grants e cashback-movements) é à parte: vale em qualquer empresa, tem carência e validade.
 
 ### GET /api/headcoach/customer-balance/v1/balances
 
@@ -941,6 +943,42 @@ Parâmetros:
 
 Resposta: página de `BillingBonus`
 
+### GET /api/headcoach/customer-balance/v1/cashback-grants
+
+Cashback gerado (HeadCoach) — Uma linha por cashback gerado: toda venda do PDV Crosby com cliente identificado gera 20% do valor. Só pode ser usado a partir de `releaseDate` (3 dias depois da venda) e até `expirationDate` (dia 93), em qualquer empresa. Depois de vencido deixa de contar no saldo, mas a linha continua aqui e pode ser reativada (`reactivationDate`). Saldo do cliente = soma de `balanceValue` das linhas com `status=Available`.
+
+Parâmetros:
+- `customerCode` (integer) — Código do cliente.
+- `customerCpfCnpj` (string) — CPF ou CNPJ do cliente.
+- `branchCodeList` (string) — Empresas da venda que gerou, separadas por vírgula.
+- `transactionCode` (integer) — Cashback gerado por uma venda.
+- `status` (string) — Situação hoje: GracePeriod, Available, Expired, Used ou Canceled.
+- `startDate` (string) — Gerados a partir de (AAAA-MM-DD).
+- `endDate` (string) — Gerados até (AAAA-MM-DD).
+- `startExpirationDate` (string) — Vencem a partir de (AAAA-MM-DD).
+- `endExpirationDate` (string) — Vencem até (AAAA-MM-DD).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `CashbackGrant`
+
+### GET /api/headcoach/customer-balance/v1/cashback-movements
+
+Extrato do cashback (HeadCoach) — Histórico de geração e uso do cashback do HeadCoach: geração na venda, uso em outra venda, volta do uso quando a venda é cancelada, cancelamento do cashback gerado por venda cancelada e reativação do vencido. `value` positivo entra, negativo sai; `grantId` aponta o cashback gerado (cashback-grants) de onde saiu ou para onde voltou.
+
+Parâmetros:
+- `customerCode` (integer) — Código do cliente.
+- `grantId` (integer) — Movimentos de um cashback gerado.
+- `branchCodeList` (string) — Empresas, separadas por vírgula.
+- `movementType` (string) — Tipo do movimento (aceita lista). Valores: Grant, Use, UseReversal, Cancellation, Reactivation.
+- `transactionCode` (integer) — Movimentos de uma venda.
+- `startDate` (string) — A partir de (AAAA-MM-DD).
+- `endDate` (string) — Até (AAAA-MM-DD).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `CashbackMovement`
+
 Esquemas:
 
 **CustomerBalance** — Uma linha por cliente + empresa + tipo de saldo. Por padrão vêm também os saldos zerados; use `onlyPositive=true` para trazer só quem tem saldo.
@@ -985,6 +1023,44 @@ Esquemas:
 - `reason` (string) — Motivo.
 - `createdBy` (string) — Quem lançou.
 - `createdDate` (date-time) — Quando foi lançado.
+
+**CashbackGrant** — Uma linha por cashback gerado: toda venda do PDV Crosby com cliente identificado gera 20% do valor. Só pode ser usado a partir de `releaseDate` (3 dias depois da venda) e até `expirationDate` (dia 93), em qualquer empresa. Depois de vencido deixa de contar no saldo, mas a linha continua aqui e pode ser reativada (`reactivationDate`). Saldo do cliente = soma de `balanceValue` das linhas com `status=Available`.
+
+- `grantId` (integer) — Identificador do cashback gerado.
+- `customerCode` (integer) — Código do cliente (o mesmo do TOTVS).
+- `customerName` (string) — Nome do cliente.
+- `customerCpfCnpj` (string) — CPF ou CNPJ, só dígitos.
+- `branchCode` (integer) — Empresa da venda que gerou (o cashback vale em qualquer empresa).
+- `origin` (string) — De onde veio. Valores: Sale, Adjustment.
+- `transactionCode` (integer) — Venda que gerou (transaction/transactions).
+- `baseValue` (number) — Valor da venda sobre o qual o cashback foi calculado.
+- `percentage` (number) — Percentual aplicado.
+- `value` (number) — Valor gerado.
+- `usedValue` (number) — Quanto já foi usado.
+- `balanceValue` (number) — Quanto resta (value menos usedValue).
+- `status` (string) — Situação hoje: em carência, disponível, vencido, usado por inteiro ou cancelado. Valores: GracePeriod, Available, Expired, Used, Canceled.
+- `grantDate` (date-time) — Quando foi gerado.
+- `releaseDate` (date) — Primeiro dia em que pode ser usado.
+- `expirationDate` (date) — Último dia em que pode ser usado.
+- `cancellationDate` (date-time) — Quando foi cancelado (venda cancelada).
+- `cancellationReason` (string) — Motivo do cancelamento.
+- `reactivationDate` (date-time) — Última reativação depois de vencido.
+- `reactivatedBy` (string) — Quem reativou.
+- `observation` (string) — Descrição.
+- `createdBy` (string) — Quem registrou a venda.
+
+**CashbackMovement** — Histórico de geração e uso do cashback do HeadCoach: geração na venda, uso em outra venda, volta do uso quando a venda é cancelada, cancelamento do cashback gerado por venda cancelada e reativação do vencido. `value` positivo entra, negativo sai; `grantId` aponta o cashback gerado (cashback-grants) de onde saiu ou para onde voltou.
+
+- `movementId` (integer) — Identificador do movimento.
+- `grantId` (integer) — Cashback gerado a que o movimento pertence (cashback-grants).
+- `customerCode` (integer) — Código do cliente.
+- `branchCode` (integer) — Empresa em que aconteceu (no uso: a loja da venda que usou).
+- `movementType` (string) — Tipo do movimento. Valores: Grant, Use, UseReversal, Cancellation, Reactivation.
+- `value` (number) — Valor (positivo entra, negativo sai).
+- `transactionCode` (integer) — Venda ligada: a que gerou ou a que usou.
+- `observation` (string) — Descrição do movimento.
+- `createdBy` (string) — Quem fez.
+- `movementDate` (date-time) — Quando aconteceu.
 
 ## Cashier — `cashier`
 

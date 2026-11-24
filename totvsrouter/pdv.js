@@ -22,6 +22,8 @@ import { httpsAgent, httpAgent, TOTVS_BASE_URL } from './totvsHelper.js';
 import { comandoVendasDoUrl, espelharEscritaVendas } from '../services/erp/vendas.js';
 import { promocaoVigente } from '../services/pdvPromocoes.js';
 import { LOJAS_CASHBACK } from '../services/hcCashback.js';
+import supabaseCashback from '../config/supabase.js';
+import { saldoCashbackHc, usarCashbackHc, gerarCashbackDaVenda, CashbackHcError, CASHBACK_HC } from '../services/cashbackHc.js';
 
 const router = express.Router();
 
@@ -1808,6 +1810,12 @@ router.get(
 // guardado por empresa (a loja onde a venda gerou), mas o cliente pode usar em
 // qualquer uma: o saldo mostrado é a SOMA das lojas e o consumo sai primeiro da
 // loja da venda e depois das outras, da maior para a menor.
+//
+// CASHBACK NOVO NO HEADCOACH (Yago, 18/11/2026): o que é gerado a partir de agora
+// fica em hc_cashback_lotes (services/cashbackHc.js) — carência de 3 dias, vale
+// até o dia 93, com histórico de geração e uso. O saldo ANTIGO do TOTVS continua
+// valendo: o saldo do cliente é TOTVS antigo + HeadCoach liberado, e a baixa sai
+// primeiro do TOTVS (que vence antes) e depois do HeadCoach.
 const round2Bonus = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 async function saldosBonusDoCpf(cpf, lojaDaVenda) {
   const lojas = [...new Set([Number(lojaDaVenda), ...LOJAS_CASHBACK].filter(Boolean))];
@@ -1821,33 +1829,76 @@ async function saldosBonusDoCpf(cpf, lojaDaVenda) {
   return { porEmpresa, total: round2Bonus(porEmpresa.reduce((t, b) => t + b.balance, 0)) };
 }
 
-// GET /pdv/bonus?cpf=06537964474&branch=95 — cashback do cliente: total de todas
-// as lojas (balance) + quanto está em cada uma (porEmpresa)
+// GET /pdv/bonus?cpf=06537964474&branch=95[&cliente=123] — cashback do cliente:
+// balance = o que ele pode usar AGORA (TOTVS antigo de todas as lojas + HeadCoach
+// já liberado); porEmpresa = o antigo do TOTVS por loja; headcoach = o novo
+// (disponível, em carência e próxima liberação).
 router.get(
   '/pdv/bonus',
   asyncHandler(async (req, res) => {
     const cpf = String(req.query.cpf || '').replace(/\D/g, '');
     const branch = parseInt(req.query.branch, 10);
-    if (!cpf || !branch) {
-      return errorResponse(res, 'Informe ?cpf=&branch=', 400, 'MISSING_PARAMS');
+    const cliente = parseInt(req.query.cliente, 10) || null;
+    if ((!cpf && !cliente) || !branch) {
+      return errorResponse(res, 'Informe ?cpf=&branch= (ou ?cliente=&branch=)', 400, 'MISSING_PARAMS');
     }
-    const { porEmpresa, total } = await saldosBonusDoCpf(cpf, branch);
+    const [totvsSaldo, hc] = await Promise.all([
+      // sem CPF não há como ler o saldo antigo do TOTVS: fica só o do HeadCoach
+      cpf ? saldosBonusDoCpf(cpf, branch) : { porEmpresa: [], total: 0 },
+      saldoCashbackHc({ cliente, cpf }).catch((e) => {
+        if (e.code !== 'MIGRATION_PENDING') console.warn(`⚠️ [Cashback] saldo do HeadCoach indisponível: ${e.message}`);
+        return { disponivel: 0, emCarencia: 0, vencido: 0, proximaLiberacao: null, proximoVencimento: null };
+      }),
+    ]);
+    const { porEmpresa, total } = totvsSaldo;
     return successResponse(
       res,
       {
         branchCode: branch,
-        balance: total,
+        balance: round2Bonus(total + hc.disponivel),
         balanceNaEmpresa: porEmpresa.find((b) => b.branchCode === branch)?.balance || 0,
         porEmpresa,
+        totvs: total,
+        headcoach: {
+          disponivel: hc.disponivel,
+          emCarencia: hc.emCarencia,
+          proximaLiberacao: hc.proximaLiberacao,
+          proximoVencimento: hc.proximoVencimento,
+          vencido: hc.vencido,
+        },
+        regras: CASHBACK_HC,
       },
-      'Saldo bônus',
+      'Saldo de cashback',
     );
   }),
 );
 
-// POST /pdv/bonus/consume — consome o cashback usado como desconto na venda.
-// Body: { personCode, branchCode, usedValue, cpf? }. Com o cpf, o valor sai do
-// saldo de qualquer loja (primeiro o da loja da venda); sem ele, só o da branchCode.
+// Venda do PDV Crosby a que a baixa/geração se refere: a informada ou (telas
+// antigas, que não mandam o número) a mais recente do cliente com aquele valor.
+async function vendaDoCashback({ vendaId, personCode, usedValue = null }) {
+  const cols = 'id, empresa, origem, tipo_venda, status, total, cashback_usado, cashback_gerado, cliente_code, cliente_nome, cliente_cpf_cnpj, criado_por, criado_em';
+  const id = parseInt(vendaId, 10);
+  if (id) {
+    const { data } = await supabaseCashback.from('pdv_vendas').select(cols).eq('id', id).maybeSingle();
+    return data || null;
+  }
+  if (!personCode || !(usedValue > 0)) return null;
+  const desde = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const { data } = await supabaseCashback
+    .from('pdv_vendas')
+    .select(cols)
+    .eq('cliente_code', parseInt(personCode, 10))
+    .eq('cashback_usado', round2Bonus(usedValue))
+    .gte('criado_em', desde)
+    .order('id', { ascending: false })
+    .limit(1);
+  return data?.[0] || null;
+}
+
+// POST /pdv/bonus/consume — baixa o cashback usado como desconto na venda.
+// Body: { personCode, branchCode, usedValue, cpf?, vendaId? }.
+// Sai primeiro do saldo ANTIGO do TOTVS (com o cpf: de qualquer loja, a da venda
+// primeiro; sem ele: só da branchCode) e o que faltar sai do cashback do HeadCoach.
 router.post(
   '/pdv/bonus/consume',
   asyncHandler(async (req, res) => {
@@ -1862,24 +1913,39 @@ router.post(
       );
     }
     const valor = round2Bonus(usedValue);
-    // o que saiu de verdade fica anotado na venda: é o que volta se ela for cancelada
-    const anotarBaixa = (consumido, erro = null) => registrarBaixaDoCashback({ vendaId: req.body?.vendaId, personCode, usedValue: valor, consumido, erro });
-    // de onde sai: [{ branchCode, valor }]
-    let partes = [{ branchCode: parseInt(branchCode, 10), valor }];
+    const venda = await vendaDoCashback({ vendaId: req.body?.vendaId, personCode, usedValue: valor }).catch(() => null);
+    // o que saiu do TOTVS de verdade fica anotado na venda: é o que volta se ela for cancelada
+    const anotarBaixa = (consumido, erro = null) => registrarBaixaDoCashback({ vendaId: venda?.id || req.body?.vendaId, personCode, usedValue: valor, consumido, erro });
+    // saldos: TOTVS antigo (por loja) e HeadCoach liberado
+    let saldos = { porEmpresa: [], total: 0 };
     if (cpf) {
-      let saldos;
       try {
         saldos = await saldosBonusDoCpf(cpf, branchCode);
       } catch (err) {
         await anotarBaixa([], 'não consegui ler o saldo no TOTVS');
         return errorResponse(res, `Não consegui ler o cashback do cliente no TOTVS: ${err.response?.data?.message || err.message}`, 502, 'BONUS_BALANCE_ERROR');
       }
-      if (saldos.total + 0.005 < valor) {
-        await anotarBaixa([], `cashback insuficiente (tinha R$ ${saldos.total.toFixed(2)})`);
-        return errorResponse(res, `Cashback insuficiente: o cliente tem R$ ${saldos.total.toFixed(2)} somando as lojas e a venda usou R$ ${valor.toFixed(2)}`, 409, 'BONUS_INSUFICIENTE', saldos);
-      }
-      partes = [];
-      let falta = valor;
+    }
+    const hc = await saldoCashbackHc({ cliente: personCode }).catch(() => ({ disponivel: 0 }));
+    // sem CPF (tela antiga) e sem cashback no HeadCoach: comportamento de antes — baixa na loja da venda
+    const semCpfSoTotvs = !cpf && !(hc.disponivel > 0);
+    if (!semCpfSoTotvs && saldos.total + hc.disponivel + 0.005 < valor) {
+      await anotarBaixa([], `cashback insuficiente (podia usar R$ ${round2Bonus(saldos.total + hc.disponivel).toFixed(2)})`);
+      return errorResponse(
+        res,
+        `Cashback insuficiente: o cliente pode usar R$ ${round2Bonus(saldos.total + hc.disponivel).toFixed(2)} e a venda usou R$ ${valor.toFixed(2)}`,
+        409,
+        'BONUS_INSUFICIENTE',
+        { totvs: saldos, headcoach: hc.disponivel },
+      );
+    }
+    // de onde sai no TOTVS: [{ branchCode, valor }]
+    let partes = [];
+    let falta = valor;
+    if (semCpfSoTotvs) {
+      partes = [{ branchCode: parseInt(branchCode, 10), valor }];
+      falta = 0;
+    } else {
       for (const b of saldos.porEmpresa) {
         if (falta <= 0) break;
         const usa = round2Bonus(Math.min(falta, b.balance));
@@ -1888,6 +1954,7 @@ router.post(
       }
     }
     const consumido = [];
+    let doHeadcoach = 0;
     try {
       for (const p of partes) {
         await callTotvs('post', `${TOTVS_BASE_URL}/person/v2/bonus-consume`, {
@@ -1895,33 +1962,46 @@ router.post(
         });
         consumido.push(p);
       }
+      if (falta > 0) {
+        doHeadcoach = await usarCashbackHc({
+          cliente: personCode,
+          valor: falta,
+          vendaId: venda?.id || null,
+          empresa: branchCode,
+          por: venda?.criado_por || null,
+        });
+      }
       console.log(
-        `💰 [Cashback] Consumido R$ ${valor} do cliente ${personCode} (venda na empresa ${branchCode}; saiu de ${consumido.map((p) => `${p.branchCode}: R$ ${p.valor}`).join(', ')})`,
+        `💰 [Cashback] Consumido R$ ${valor} do cliente ${personCode} (venda ${venda?.id || '?'} na empresa ${branchCode}; TOTVS ${consumido.map((p) => `${p.branchCode}: R$ ${p.valor}`).join(', ') || '—'}; HeadCoach R$ ${doHeadcoach})`,
       );
       const vendaAnotada = await anotarBaixa(consumido);
-      return successResponse(res, { consumido, total: valor, vendaId: vendaAnotada }, 'Saldo consumido');
+      return successResponse(res, { consumido, headcoach: doHeadcoach, total: valor, vendaId: venda?.id || vendaAnotada || null }, 'Cashback baixado');
     } catch (err) {
       const detail = err.response?.data;
-      const feito = round2Bonus(consumido.reduce((t, p) => t + p.valor, 0));
+      const feito = round2Bonus(consumido.reduce((t, p) => t + p.valor, 0) + doHeadcoach);
       console.error(
         `❌ [Cashback] Erro ao consumir (cliente ${personCode}, já saiu R$ ${feito} de ${valor}):`,
         JSON.stringify(detail || err.message).slice(0, 300),
       );
-      const msg = Array.isArray(detail) ? detail.map((d) => d.message).join('; ') : detail?.message || err.message;
+      const msg = err instanceof CashbackHcError ? err.message : Array.isArray(detail) ? detail.map((d) => d.message).join('; ') : detail?.message || err.message;
       await anotarBaixa(consumido, msg);
       return errorResponse(
         res,
-        feito > 0 ? `${msg} — só R$ ${feito.toFixed(2)} de R$ ${valor.toFixed(2)} foram baixados (${consumido.map((p) => `empresa ${p.branchCode}`).join(', ')})` : msg,
-        err.response?.status || 502,
+        feito > 0 ? `${msg} — só R$ ${feito.toFixed(2)} de R$ ${valor.toFixed(2)} foram baixados` : msg,
+        err instanceof CashbackHcError ? err.status : err.response?.status || 502,
         'BONUS_CONSUME_ERROR',
-        { detail, consumido, faltou: round2Bonus(valor - feito) },
+        { detail, consumido, headcoach: doHeadcoach, faltou: round2Bonus(valor - feito) },
       );
     }
   }),
 );
 
-// POST /pdv/bonus/add — gera o cashback da venda (após atendida no TOTVS)
-// Body: { personCode, branchCode, value, transactionCode?, transactionDate?, historic? }
+// POST /pdv/bonus/add — gera o cashback da venda.
+// Body: { personCode, branchCode, value, vendaId?, transactionCode?, transactionDate?, historic? }
+// Venda do HeadCoach (vendaId, ou "venda HeadCoach 123" no historic das telas
+// antigas): o cashback nasce no HEADCOACH, com carência e validade — nada vai ao
+// TOTVS. O servidor já gera sozinho quando a nota é autorizada; aqui só confirma
+// (não duplica) e devolve as datas para a tela mostrar.
 router.post(
   '/pdv/bonus/add',
   asyncHandler(async (req, res) => {
@@ -1933,6 +2013,19 @@ router.post(
       transactionDate,
       historic,
     } = req.body || {};
+    const vendaHc = parseInt(req.body?.vendaId, 10) || parseInt(String(historic || '').match(/venda HeadCoach (\d+)/i)?.[1], 10) || null;
+    if (vendaHc) {
+      try {
+        const venda = await vendaDoCashback({ vendaId: vendaHc });
+        if (!venda) return errorResponse(res, `Venda ${vendaHc} não encontrada`, 404, 'NOT_FOUND');
+        const r = await gerarCashbackDaVenda(venda);
+        if (!r.gerado) return errorResponse(res, `Cashback não gerado: ${r.motivo}`, 409, 'BONUS_NAO_GERADO');
+        return successResponse(res, { headcoach: true, vendaId: venda.id, valor: r.valor, liberaEm: r.liberaEm, expiraEm: r.expiraEm, loteId: r.loteId }, 'Cashback gerado');
+      } catch (err) {
+        console.error(`❌ [Cashback] Erro ao gerar no HeadCoach (venda ${vendaHc}):`, err.message);
+        return errorResponse(res, err.message, err.status || 500, err.code || 'BONUS_ADD_ERROR');
+      }
+    }
     if (!personCode || !branchCode || !(value > 0)) {
       return errorResponse(
         res,

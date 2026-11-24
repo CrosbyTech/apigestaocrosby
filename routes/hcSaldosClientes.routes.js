@@ -6,6 +6,10 @@
 //   POST /sincronizar-devolucoes        credita as devoluções atendidas que faltam (owner/admin)
 //   POST /sincronizar-cashback          acerta o cashback pelo saldo bônus do TOTVS agora, em segundo plano (owner/admin)
 //   POST /gerar                         { empresa, clienteCode, clienteNome, tipo: credev|adiantamento, valor, motivo, senha } (owner/admin)
+//   Cashback do HeadCoach (services/cashbackHc.js — gerado nas vendas do PDV Crosby, carência de 3 dias, vale até o dia 93):
+//   GET  /cashback?busca                totais (gerado, usado, disponível, em carência, vencido) + clientes
+//   GET  /cashback/cliente/:code        saldo, gerações (lotes) e extrato do cliente
+//   POST /cashback/reativar             { lotes: [ids] | cliente | todos: true, dias, motivo, senha } (owner/admin)
 // ============================================================================
 import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
@@ -13,6 +17,8 @@ import { requireAuth } from '../middlewares/auth.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes, gerarCredito } from '../services/hcSaldosClientes.js';
 import { rodarCashback } from '../jobs/hc-cashback.job.js';
+import { CashbackHcError, resumoCashbackHc, historicoCashbackHc, reativarCashbackHc } from '../services/cashbackHc.js';
+import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -23,7 +29,7 @@ const rota = (fn, msg) =>
       const r = await fn(req);
       return successResponse(res, r, typeof msg === 'function' ? msg(r) : msg);
     } catch (err) {
-      if (err instanceof SaldoClienteError) return errorResponse(res, err.message, err.status, err.code);
+      if (err instanceof SaldoClienteError || err instanceof CashbackHcError || err instanceof AutorizacaoError) return errorResponse(res, err.message, err.status, err.code);
       console.error('[hc/saldos-clientes]', err);
       return errorResponse(res, err.message || 'Erro nos saldos de clientes', 500, 'HC_SALDOS');
     }
@@ -77,6 +83,42 @@ router.post(
 router.post(
   '/gerar',
   rota((req) => gerarCredito(req.user, req.body || {}), (r) => `${r.tipo === 'credev' ? 'CREDEV' : 'Adiantamento'} de R$ ${r.valor.toFixed(2).replace('.', ',')} gerado — saldo agora R$ ${Number(r.saldo).toFixed(2).replace('.', ',')}`),
+);
+
+// ─── CASHBACK DO HEADCOACH ───────────────────────────────────────────────────
+router.get(
+  '/cashback',
+  rota(async (req) => {
+    const codes = await permitidas(req);
+    return resumoCashbackHc({ empresas: codes, busca: req.query.busca || '' });
+  }, (r) => `${r.clientes.length} cliente(s) com cashback do HeadCoach`),
+);
+router.get(
+  '/cashback/cliente/:code',
+  rota(async (req) => {
+    await permitidas(req);
+    return historicoCashbackHc({ cliente: req.params.code });
+  }, 'Cashback do cliente'),
+);
+// Reativa cashback vencido: volta a valer por `dias` a partir de hoje (nada é apagado quando vence)
+router.post(
+  '/cashback/reativar',
+  rota(async (req) => {
+    if (!['owner', 'admin'].includes(req.user?.role)) throw new SaldoClienteError('Só owner ou admin reativa cashback', 'SEM_PERMISSAO', 403);
+    const b = req.body || {};
+    const motivo = String(b.motivo || '').trim();
+    if (motivo.length < 5) throw new SaldoClienteError('Informe o motivo');
+    await verificarSenhaAutorizador(req.user?.email, b.senha, ['owner', 'admin']);
+    const quem = req.user?.name || req.user?.email || null;
+    return reativarCashbackHc({
+      lotes: Array.isArray(b.lotes) ? b.lotes : null,
+      cliente: b.cliente || null,
+      todos: b.todos === true,
+      dias: b.dias,
+      por: quem,
+      observacao: `Reativado por ${quem}: ${motivo}`,
+    });
+  }, (r) => `${r.lotes} geração(ões) de ${r.clientes} cliente(s) reativada(s): R$ ${Number(r.valor).toFixed(2).replace('.', ',')}, valendo até ${String(r.expiraEm).split('-').reverse().join('/')}`),
 );
 
 export default router;
