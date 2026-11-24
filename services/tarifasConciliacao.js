@@ -204,6 +204,41 @@ export async function fornecedorPorCodigo(codigo) {
   return null;
 }
 
+/**
+ * Fornecedor para o Contas a Pagar HeadCoach (cópia local erp_pessoas). Se não
+ * estiver na cópia, lê o cadastro (só leitura) e grava a cópia.
+ * @returns { code, nome, cpf_cnpj, naoFornecedor? } | null
+ */
+async function fornecedorHc({ code = null, cnpj = null }) {
+  const doc = soDig(cnpj);
+  let q = supabase.from('erp_pessoas').select('code,nome,cpf_cnpj,is_fornecedor,inativo');
+  q = code ? q.eq('code', code) : q.eq('cpf_cnpj', doc);
+  let { data } = await q;
+  if (!data?.length) {
+    try {
+      const [{ totvs }, { mapPessoa }] = await Promise.all([import('./erp/totvsClient.js'), import('./erp/sync/entidades.js')]);
+      for (const [rota, tipo] of [['legal-entities', 'PJ'], ['individuals', 'PF']]) {
+        const filtro = code ? { personCodeList: [code] } : tipo === 'PJ' ? { cnpjList: [doc] } : { cpfList: [doc] };
+        if (!code && (tipo === 'PJ') !== (doc.length === 14)) continue;
+        const r = await totvs('POST', `/person/v2/${rota}/search`, { data: { filter: filtro, expand: 'phones,emails,addresses,classifications', page: 1, pageSize: 10 }, timeout: 30000 });
+        const itens = r?.items || r?.data?.items || [];
+        if (itens.length) {
+          const linhas = itens.map((x) => mapPessoa(x, tipo));
+          await supabase.from('erp_pessoas').upsert(linhas, { onConflict: 'code' });
+          data = linhas;
+          break;
+        }
+      }
+    } catch {
+      /* sem cadastro */
+    }
+  }
+  if (!data?.length) return null;
+  const ativos = data.filter((x) => !x.inativo);
+  const escolhido = ativos.find((x) => x.is_fornecedor) || ativos[0] || data[0];
+  return { code: Number(escolhido.code), nome: escolhido.nome, cpf_cnpj: escolhido.cpf_cnpj, ...(escolhido.is_fornecedor ? {} : { naoFornecedor: true }) };
+}
+
 /** Saídas PENDENTES de todas as contas no período (mesma regra da tela), com a conta. */
 export async function saidasPendentes({ de, ate, escopo = 'crosby', sentido = 'SAIDA' }) {
   const { anexarConciliacoes } = await import('./fluxoCaixaConciliacao.js');
@@ -406,101 +441,81 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
       contasCache.set(l.conta_id, c);
     }
     const conta = contasCache.get(l.conta_id);
-    let forn = FORNECEDOR_BANCO[String(conta?.banco || '').toUpperCase()];
+    // Desde 24/11/2026 (Titia): a duplicata da tarifa/saída nasce no CONTAS A PAGAR DO
+    // HEADCOACH (não mais no TOTVS + Solicitação) e a saída é conciliada com ela — a
+    // conciliação dá a baixa automática (origem HC_CP).
     let despesaCodigo = DESPESA_TARIFA.codigo;
+    let fornHc = null;
     if (temEscolha) {
-      const p = await fornecedorPorCodigo(esc.fornecedorCodigo).catch(() => null);
-      if (!p?.doc) {
-        out.recusadas.push({ ...base, motivo: `Fornecedor ${esc.fornecedorCodigo} não encontrado no TOTVS (ou sem CPF/CNPJ).` });
+      fornHc = await fornecedorHc({ code: Number(soDig(esc.fornecedorCodigo)) });
+      if (!fornHc) {
+        out.recusadas.push({ ...base, motivo: `Fornecedor ${esc.fornecedorCodigo} não encontrado no cadastro de fornecedores.` });
         continue;
       }
-      // a pessoa existe mas não é FORNECEDOR no cadastro do TOTVS → o contas a
-      // pagar recusa ("SupplierCpfCnpj not found"). Ex.: 81298 ANTONIO PAULINO, 10/11/2026
-      if (p.fornecedor === false) {
-        out.recusadas.push({ ...base, motivo: `${p.code} ${p.nome} não está marcado como FORNECEDOR no cadastro de pessoas do TOTVS — marque como fornecedor e tente de novo.` });
+      if (fornHc.naoFornecedor) {
+        out.recusadas.push({ ...base, motivo: `${fornHc.code} ${fornHc.nome} não está marcado como FORNECEDOR no cadastro — marque como fornecedor e tente de novo.` });
         continue;
       }
-      forn = { cnpj: p.doc, nome: p.nome };
       despesaCodigo = Number(soDig(esc.despesaCodigo));
+    } else {
+      const fb = FORNECEDOR_BANCO[String(conta?.banco || '').toUpperCase()];
+      fornHc = fb ? await fornecedorHc({ cnpj: fb.cnpj }) : null;
+      if (fornHc?.naoFornecedor) fornHc = null;
     }
-    if (!forn) {
-      out.recusadas.push({ ...base, motivo: `Banco ${conta?.banco || '?'} sem fornecedor de tarifa cadastrado no HeadCoach — informe o código do fornecedor.` });
+    if (!fornHc) {
+      out.recusadas.push({ ...base, motivo: `Banco ${conta?.banco || '?'} sem fornecedor de tarifa no cadastro — informe o código do fornecedor.` });
       continue;
     }
     const branchCnpj = soDig(conta.titular_cnpj);
     const filial = (mapa?.get(branchCnpj) || [])[0] || null;
+    if (!filial?.code) {
+      out.recusadas.push({ ...base, motivo: `Não achei a empresa da conta ${conta.apelido} (CNPJ ${branchCnpj}).` });
+      continue;
+    }
     const valor = round2(Math.abs(Number(l.valor)));
     const texto = `${l.descricao || ''}${l.memo && l.memo !== l.descricao ? ` · ${l.memo}` : ''}`.trim();
-    const observacao = `Tarifa ${fmtData(l.data)} - Conciliacao HeadCoach (${conta.apelido})`;
     if (simular) {
-      out.criadas.push({ ...base, banco: conta.banco, fornecedor: forn.nome, despesa: despesaCodigo, empresa: filial?.code ?? null, simulado: true });
+      out.criadas.push({ ...base, banco: conta.banco, fornecedor: fornHc.nome, despesa: despesaCodigo, empresa: filial.code, simulado: true });
       out.total = round2(out.total + valor);
       continue;
     }
     try {
-      // 1) TOTVS
-      const dup = await criarNoTotvs({ branchCnpj, supplierCpfCnpj: forn.cnpj, valor, data: l.data, observacao, despesaCodigo });
-      // 2) Solicitação Crosby (registro + rastreio da origem)
-      const agora = new Date().toISOString();
-      const { data: sol, error: eSol } = await supabase
-        .from('solicitacoes_crosby')
-        .insert({
-          cd_empresa: filial?.code ?? null,
-          nm_empresa: filial?.nome || conta.titular_nome || null,
-          solicitante: 'Conciliação HeadCoach',
-          tipo_solicitacao: 'pagamento',
-          nivel_urgencia: 'normal',
-          setor: 'FINANCEIRO',
-          produto_servico: 'SERVICO',
-          descricao: `${temEscolha ? 'Saída' : 'Tarifa bancária'} do extrato ${conta.apelido} em ${fmtData(l.data)}: ${texto}`.slice(0, 500),
-          observacao: 'Criada automaticamente pela Conciliação HeadCoach (tarifa/encargo do extrato), já enviada ao TOTVS e conciliada com a saída.',
-          status: 'enviado_totvs',
-          branch_cnpj: branchCnpj,
-          supplier_cpf_cnpj: forn.cnpj,
-          supplier_name: forn.nome,
-          duplicate_code: dup.duplicateCode,
-          valor_total: valor,
-          dt_emissao: l.data,
-          dt_vencimento: l.data,
-          despesa_code: despesaCodigo,
-          cost_center_code: DESPESA_TARIFA.centroCusto,
-          rateio_percentual: 100,
-          forma_pagamento: 'debito_em_conta',
-          payload_totvs: dup.payload,
-          totvs_response: dup.resposta,
-          enviado_totvs_em: agora,
-          aprovado_financeiro_em: agora,
-          aprovado_financeiro_por_nome: usuario || 'Conciliação HeadCoach',
-          pago_em: `${l.data}T12:00:00`,
-          pago_por_nome: usuario || 'Conciliação HeadCoach',
-          data_solicitacao: agora,
-        })
-        .select('id')
-        .single();
-      if (eSol) throw new Error(`duplicata ${dup.duplicateCode} criada no TOTVS, mas a Solicitação falhou: ${eSol.message}`);
-      // 3) concilia a saída com a Solicitação
+      const { validarInclusao, inserirTitulos } = await import('./hcContasPagar.js');
+      const dados = validarInclusao({
+        empresa: filial.code,
+        fornecedorCode: fornHc.code,
+        documentoFiscal: `Extrato ${fmtData(l.data)}`.slice(0, 40),
+        tipoDocumento: 'outro',
+        formaPagamento: 'debito_automatico',
+        despesaCode: despesaCodigo,
+        centroCustoCode: DESPESA_TARIFA.centroCusto,
+        emissao: l.data,
+        vencimento: l.data,
+        valor,
+        observacao: `${temEscolha ? 'Saída' : 'Tarifa bancária'} do extrato ${conta.apelido} em ${fmtData(l.data)}: ${texto}`.slice(0, 1000),
+      });
+      const [titulo] = await inserirTitulos(dados, { por: usuario || 'Conciliação HeadCoach', origem: 'conciliacao-extrato', origemRef: String(l.id) });
       await salvarConciliacao({
         lancamentoId: l.id,
-        origem: 'SOLICITACAO',
+        origem: 'HC_CP',
         referencia: {
-          id: sol.id,
-          nome: forn.nome,
-          doc: forn.cnpj,
+          id: String(titulo.id),
+          nome: fornHc.nome,
+          doc: fornHc.cpf_cnpj || null,
           valor,
           valorDuplicata: valor,
           data: l.data,
           vencimento: l.data,
-          empresa: filial?.nome || conta.titular_nome || null,
-          detalhe: `${temEscolha ? 'Saída do extrato' : 'Tarifa bancária'} · dup ${dup.duplicateCode}/1 · despesa ${despesaCodigo}`,
-          duplicata: `${dup.duplicateCode}|1`,
+          empresa: `Empresa ${filial.code}`,
+          detalhe: `${temEscolha ? 'Saída do extrato' : 'Tarifa bancária'} · dup ${titulo.duplicata}/${titulo.parcela} · despesa ${despesaCodigo} · Contas a Pagar HeadCoach`,
+          duplicata: `${titulo.duplicata}|${titulo.parcela}`,
           motivos: ['duplicata criada pela Conciliação HeadCoach'],
         },
-        justificativa: `${temEscolha ? `${forn.nome} (despesa ${despesaCodigo})` : `Tarifa bancária ${conta.banco}`} — duplicata ${dup.duplicateCode} criada no TOTVS e na Solicitação Crosby pela Conciliação HeadCoach`,
+        justificativa: `${temEscolha ? `${fornHc.nome} (despesa ${despesaCodigo})` : `Tarifa bancária ${conta.banco}`} — duplicata ${titulo.duplicata}/${titulo.parcela} criada no Contas a Pagar HeadCoach pela Conciliação`,
         usuario: usuario || 'Conciliação HeadCoach',
         automatico: false,
-        permitirSolicitacao: true, // duplicata criada aqui mesmo, já enviada ao TOTVS e paga
       });
-      out.criadas.push({ ...base, banco: conta.banco, fornecedor: forn.nome, empresa: filial?.code ?? null, duplicata: dup.duplicateCode, solicitacaoId: sol.id });
+      out.criadas.push({ ...base, banco: conta.banco, fornecedor: fornHc.nome, empresa: filial.code, duplicata: `${titulo.duplicata}/${titulo.parcela}`, tituloId: titulo.id });
       out.total = round2(out.total + valor);
     } catch (e) {
       out.recusadas.push({ ...base, motivo: e.message });
