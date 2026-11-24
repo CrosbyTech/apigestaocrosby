@@ -133,6 +133,21 @@ manda o ping com `sessao_ok`. Depois de uma execução o contador reinicia.
 - Bot Stone no PC: `config.json → horarios: ["09:30","14:00","18:00"]`
   (substitui `horarioDiario`; o agente precisa ser reiniciado para ler).
 - Pagar.me no servidor 10 min antes: `PAGARME_SALDO_CRON="20 9 * * *;50 13 * * *;50 17 * * *"`.
+- **Saldo de hora em hora (24/11/2026, pedido do Yago).** De segunda a sexta, das
+  9h às 20h, nas horas cheias, o agente enfileira uma execução `origem: 'saldo'`
+  (`parametros.soSaldo` + `avisarGrupo`): consulta só o saldo das contas Stone (e
+  o servidor o da Pagar.me), sem extrato, PDF nem comprovantes. Ao terminar, o
+  servidor manda no grupo **CONTAS A PAGAR CROSBY OFC** a imagem do card "Saldo
+  Bancário" com a hora da atualização (`services/saldosGrupoWhatsapp.js`; texto
+  se o Chrome falhar), só nesse horário (`utils/saldoGrupo.js`). Quando a hora
+  cheia coincide com uma execução completa (`horarios`), vai uma execução só.
+  Agenda no `config.json` do bot: bloco `"saldo"` (`ativo`, `horarios`,
+  `diasSemana`); sem o bloco vale 09:00–20:00, seg–sex. Desligar o envio:
+  `SALDO_GRUPO_ENABLED=false` no servidor. **O agente precisa estar rodando no PC
+  (`iniciar-oculto.vbs`) com a sessão da Stone válida** — com o PC desligado não
+  sai mensagem (saldo velho não é enviado como novo). O mesmo saldo aparece no
+  card da Liberação de Pagamento do HeadCoach
+  (`GET /api/hc/contas-pagar/liberacoes/saldos`), com "Atualizado em".
 - **Relatório automático no WhatsApp: REMOVIDO em 24/11/2026** (pedido do Yago).
   Até então, ao fim de cada execução agendada do bot (e por cron às
   09:50/14:20/18:20) o servidor mandava no grupo **CONTAS A PAGAR CROSBY OFC** a

@@ -13,7 +13,9 @@
 // Agente local (bots/stone-extratos, header x-bot-token = STONE_BOT_TOKEN):
 //   POST   /agente/ping                         { host, versao, sessaoOk, proximaAgendada }
 //   GET    /agente/proxima?host                 → execução pendente (marca rodando) ou null
-//   POST   /agente/execucoes  { origem }        → cria execução (horário agendado do bot)
+//   POST   /agente/execucoes  { origem, avisarGrupo? } → cria execução (horário agendado do bot);
+//                                                origem 'saldo' = consulta de hora em hora, só o saldo;
+//                                                avisarGrupo = manda o saldo no grupo ao terminar (seg–sex, 9h–20h)
 //   POST   /agente/execucoes/:id/log            { linhas: [{t?, nivel?, msg}] }
 //   POST   /agente/execucoes/:id/pdf            multipart arquivo + meta (JSON)
 //   POST   /agente/execucoes/:id/extrato-json   { conta, entradas, saldo, periodo }
@@ -274,10 +276,13 @@ agente.post(
   asyncHandler(async (req, res) => {
     try {
       const { de, ate } = req.body || {};
+      // origem 'saldo' = consulta de hora em hora (só saldo, sem extrato); avisarGrupo = manda o saldo no grupo ao terminar
+      const soSaldo = req.body?.origem === 'saldo' || req.body?.soSaldo === true;
+      const parametros = { ...(dataIso(de) && dataIso(ate) ? { de, ate } : {}), ...(soSaldo ? { soSaldo: true } : {}), ...(req.body?.avisarGrupo === true ? { avisarGrupo: true } : {}) };
       const r = await bot.solicitarExecucao({
         solicitadoPor: req.body?.host ? `bot@${req.body.host}` : 'bot',
-        origem: req.body?.origem === 'agendado' ? 'agendado' : 'manual',
-        parametros: dataIso(de) && dataIso(ate) ? { de, ate } : null,
+        origem: soSaldo ? 'saldo' : req.body?.origem === 'agendado' ? 'agendado' : 'manual',
+        parametros: Object.keys(parametros).length ? parametros : null,
       });
       return successResponse(res, r);
     } catch (e) {
@@ -371,7 +376,7 @@ agente.post(
   asyncHandler(async (req, res) => {
     try {
       const { de, ate } = req.body || {};
-      const r = await executarPagarme({ execucaoId: Number(req.params.id), de: dataIso(de) || undefined, ate: dataIso(ate) || undefined });
+      const r = await executarPagarme({ execucaoId: Number(req.params.id), de: dataIso(de) || undefined, ate: dataIso(ate) || undefined, soSaldo: req.body?.soSaldo === true });
       return successResponse(res, r);
     } catch (e) {
       return tratar(res, e);

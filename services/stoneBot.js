@@ -151,6 +151,16 @@ export async function finalizarExecucao(id, { status = 'concluido', resumo = nul
     .select()
     .single();
   lancar(error);
+  // consulta de hora cheia (parametros.avisarGrupo) → saldo no grupo do WhatsApp,
+  // de segunda a sexta das 9h às 20h (não bloqueia a resposta ao bot)
+  if (data?.parametros?.avisarGrupo) {
+    import('./saldosGrupoWhatsapp.js')
+      .then((m) => m.aposExecucaoBot(data))
+      .then((r) => {
+        if (r?.ok) registrarLog(id, { nivel: 'ok', msg: `Saldo enviado no grupo do WhatsApp (${r.imagem ? 'imagem' : 'texto'})` }).catch(() => {});
+      })
+      .catch((e) => console.error('[stone-bot] saldo no grupo:', e.message));
+  }
   // botão "Rodar baixa" na tela Aprovados → ao terminar de importar, concilia os
   // APROVADOS com o extrato recém-puxado e marca PAGO; grava o resultado no resumo.
   if (ok === 'concluido' && data?.origem === 'baixa-aprovados') {
@@ -170,7 +180,7 @@ export async function finalizarExecucao(id, { status = 'concluido', resumo = nul
   }
   // extrato novo importado → títulos marcados PAGO na Liberação ganham a
   // conciliação da saída correspondente (Yago, 09/11/2026)
-  if (ok === 'concluido') {
+  if (ok === 'concluido' && !data?.parametros?.soSaldo) {
     import('./conciliacaoPropagacao.js')
       .then((m) => m.conciliarLiberacaoPagos({ dias: 15, usuario: 'Liberação PAGO → conciliação (bot Stone)' }))
       .then((r) => {

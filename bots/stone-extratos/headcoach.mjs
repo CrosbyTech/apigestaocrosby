@@ -59,8 +59,9 @@ export class HeadCoach {
     return this.req('POST', `/inclusoes/${id}/resultado`, { json: resultado, timeoutMs: 60000 });
   }
 
-  criarExecucao({ origem = 'manual', de, ate } = {}) {
-    return this.req('POST', '/execucoes', { json: { origem, host: this.host, de, ate }, timeoutMs: 30000 });
+  // origem 'saldo' = consulta de hora em hora (só o saldo); avisarGrupo = o HeadCoach manda o saldo no grupo ao terminar
+  criarExecucao({ origem = 'manual', de, ate, avisarGrupo = false } = {}) {
+    return this.req('POST', '/execucoes', { json: { origem, host: this.host, de, ate, avisarGrupo }, timeoutMs: 30000 });
   }
 
   log(execId, linhas) {
@@ -93,8 +94,8 @@ export class HeadCoach {
   }
 
   /** Saldo + extrato da Pagar.me: roda no servidor (as chaves ficam lá), com log nesta execução. */
-  pagarme(execId, { de, ate } = {}) {
-    return this.req('POST', `/execucoes/${execId}/pagarme`, { json: { de, ate }, timeoutMs: 300000 });
+  pagarme(execId, { de, ate, soSaldo = false } = {}) {
+    return this.req('POST', `/execucoes/${execId}/pagarme`, { json: { de, ate, soSaldo }, timeoutMs: 300000 });
   }
 
   finalizar(execId, { status, resumo, erro }) {

@@ -23,7 +23,7 @@ import { HeadCoach } from './headcoach.mjs';
 import { Stone, helpers, manterSessao } from './stone.mjs';
 import { incluirPix } from './inclusoes.mjs';
 
-const VERSAO = '1.0.0';
+const VERSAO = '1.1.0'; // 1.1.0: consulta só do saldo de hora em hora (seg–sex, 9h–20h)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { brDe, dormir, soDigitos } = helpers;
 
@@ -109,8 +109,11 @@ async function executar(exec, { visivel = false } = {}) {
   const stone = new Stone(cfg, dirs, log);
   let status = 'concluido';
   let erroGeral = null;
+  // consulta de hora em hora: só o saldo das contas (sem extrato, PDF nem comprovantes)
+  const soSaldo = exec.origem === 'saldo' || exec.parametros?.soSaldo === true;
+  if (soSaldo) resumo.soSaldo = true;
 
-  log(`Execução #${execId} (${exec.origem}) iniciada em ${host} · período ${brDe(de)} a ${brDe(ate)} · bot v${VERSAO}`);
+  log(soSaldo ? `Execução #${execId} (só saldo) iniciada em ${host} · bot v${VERSAO}` : `Execução #${execId} (${exec.origem}) iniciada em ${host} · período ${brDe(de)} a ${brDe(ate)} · bot v${VERSAO}`);
   try {
     await stone.abrir({ visivel });
     await stone.irParaInicio();
@@ -163,6 +166,7 @@ async function executar(exec, { visivel = false } = {}) {
         log(`${rot}: saldo FALHOU — ${e.message}`, 'erro');
       }
 
+      if (soSaldo) continue; // só o saldo: o extrato fica para as execuções completas
       // extrato: PDF oficial pelo roteiro; se falhar, JSON da API
       let importado = false;
       if (pdfLigado) {
@@ -228,7 +232,7 @@ async function executar(exec, { visivel = false } = {}) {
     }
 
     // comprovantes das saídas (Pix, boleto/conta, TED, Conta Stone) → Conciliação
-    if (cfg.comprovantes?.ativo !== false) {
+    if (!soSaldo && cfg.comprovantes?.ativo !== false) {
       const TIPOS_SAIDA = /pix|payment|internal|external|ted|transfer/i;
       const IGNORAR = /^fee$|prepaid|rent|card_payment|acquirer|blocked|investment|refund/i;
       for (const c of contas) {
@@ -277,8 +281,8 @@ async function executar(exec, { visivel = false } = {}) {
     // Pagar.me (adquirente/subconta da Stone): o servidor consulta a API dela e grava saldo + extrato
     if (cfg.pagarme?.ativo !== false) {
       try {
-        log('Pagar.me: consultando saldo e extrato pelo servidor…');
-        const r = await hc.pagarme(execId, { de, ate });
+        log(soSaldo ? 'Pagar.me: consultando o saldo pelo servidor…' : 'Pagar.me: consultando saldo e extrato pelo servidor…');
+        const r = await hc.pagarme(execId, { de, ate, soSaldo });
         resumo.pagarme = { contas: r?.contas ?? 0, importados: r?.importados ?? 0, falhas: r?.falhas ?? 0, disponivel: r?.disponivel ?? null, aReceber: r?.aReceber ?? null };
         if (r?.falhas) {
           resumo.falhas += r.falhas;
@@ -292,7 +296,8 @@ async function executar(exec, { visivel = false } = {}) {
     }
 
     if (resumo.falhas) status = 'erro';
-    log(`Fim: ${resumo.importados}/${resumo.contas} extrato(s) Stone importado(s) (${resumo.pdfs} PDF, ${resumo.viaApi} via API)${resumo.pagarme && !resumo.pagarme.erro ? ` · Pagar.me ${resumo.pagarme.importados}/${resumo.pagarme.contas}` : ''}, ${resumo.falhas} falha(s).`, resumo.falhas ? 'aviso' : 'ok');
+    if (soSaldo) log(`Fim: saldo de ${saldos.length}/${resumo.contas} conta(s) Stone${resumo.saldoTotal != null ? ` · R$ ${Number(resumo.saldoTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : ''}${resumo.falhas ? ` · ${resumo.falhas} falha(s)` : ''}`, resumo.falhas ? 'aviso' : 'ok');
+    else log(`Fim: ${resumo.importados}/${resumo.contas} extrato(s) Stone importado(s) (${resumo.pdfs} PDF, ${resumo.viaApi} via API)${resumo.pagarme && !resumo.pagarme.erro ? ` · Pagar.me ${resumo.pagarme.importados}/${resumo.pagarme.contas}` : ''}, ${resumo.falhas} falha(s).`, resumo.falhas ? 'aviso' : 'ok');
   } catch (e) {
     status = 'erro';
     erroGeral = e.message;
@@ -420,6 +425,7 @@ async function modoAgora() {
 async function modoAgente() {
   console.log(`Bot Stone Extratos v${VERSAO} — agente em ${host} → ${cfg.headcoachUrl}`);
   const listaHorarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : [cfg.horarioDiario]).filter(Boolean).join(', ');
+  console.log(`Saldo de hora em hora: ${cfg.saldo?.ativo === false ? '(desligado)' : 'seg–sex, das 9h às 20h (ou "saldo" no config.json)'}`);
   console.log(`Horários: ${listaHorarios || '(desligado)'} · keep-alive a cada ${cfg.sessao?.keepAliveMin ?? 20} min · fila a cada ${cfg.intervaloFilaSeg || 15}s · Ctrl+C para parar`);
   console.log(`Desafio de senha: ${(cfg.stone?.senha || process.env.STONE_SENHA) ? 'senha configurada' : 'NÃO configurada (se a Stone pedir, marca bloqueado)'}\n`);
   let ultimoPing = 0;
@@ -432,20 +438,29 @@ async function modoAgente() {
 
   // horários do dia: "horarios": ["09:30","14:00","18:00"] (ou o antigo "horarioDiario")
   const horarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : cfg.horarioDiario ? [cfg.horarioDiario] : []).map((h) => String(h).trim());
+  // saldo de hora em hora (Yago, 24/11/2026): de segunda a sexta, das 9h às 20h, o bot
+  // consulta só o saldo e o HeadCoach manda no grupo. "saldo": { "ativo": false } desliga;
+  // "saldo": { "horarios": [...], "diasSemana": [...] } troca a agenda (hora local do PC).
+  const horariosSaldo = cfg.saldo?.ativo === false ? [] : (Array.isArray(cfg.saldo?.horarios) && cfg.saldo.horarios.length ? cfg.saldo.horarios : Array.from({ length: 12 }, (_, i) => `${String(9 + i).padStart(2, '0')}:00`)).map((h) => String(h).trim());
+  const semanaSaldo = Array.isArray(cfg.saldo?.diasSemana) && cfg.saldo.diasSemana.length ? cfg.saldo.diasSemana : [1, 2, 3, 4, 5];
   const dispararAgendado = async () => {
-    if (!horarios.length) return;
+    if (!horarios.length && !horariosSaldo.length) return;
     const agora = new Date();
     const hh = `${String(agora.getHours()).padStart(2, '0')}:${String(agora.getMinutes()).padStart(2, '0')}`;
     const dia = hojeIso(agora);
     const semana = cfg.diasSemana || [0, 1, 2, 3, 4, 5, 6];
     const slot = `${dia} ${hh}`;
-    if (!horarios.includes(hh) || ultimoAgendado === slot || !semana.includes(agora.getDay())) return;
+    if (ultimoAgendado === slot) return;
+    const completa = horarios.includes(hh) && semana.includes(agora.getDay());
+    const saldo = horariosSaldo.includes(hh) && semanaSaldo.includes(agora.getDay());
+    if (!completa && !saldo) return;
     ultimoAgendado = slot;
     try {
-      const r = await hc.criarExecucao({ origem: 'agendado' });
-      console.log(`${hora()} ⏰ execução das ${hh} #${r.execucao.id} enfileirada`);
+      // execução completa na mesma hora do saldo: vai uma só (ela já traz o saldo) e avisa o grupo
+      const r = await hc.criarExecucao(completa ? { origem: 'agendado', avisarGrupo: saldo } : { origem: 'saldo', avisarGrupo: true });
+      console.log(`${hora()} ⏰ ${completa ? 'execução' : 'consulta do saldo'} das ${hh} #${r.execucao.id} enfileirada${r.reaproveitada ? ' (já havia uma em andamento)' : ''}`);
     } catch (e) {
-      console.error(`${hora()} ❌ não consegui enfileirar a execução das ${hh}: ${e.message}`);
+      console.error(`${hora()} ❌ não consegui enfileirar a ${completa ? 'execução' : 'consulta do saldo'} das ${hh}: ${e.message}`);
     }
   };
 

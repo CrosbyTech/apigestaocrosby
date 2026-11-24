@@ -13,6 +13,7 @@
 //   POST /titulos/:id/cancelar          { motivo, senha }  (só em aberto)
 //   — Liberação de Pagamento (HEADCOACH › FINANCEIRO): pendente → previsão → aprovado → incluído → pago —
 //   GET  /liberacoes/opcoes             empresas, etapas, bancos e formas
+//   GET  /liberacoes/saldos             saldo bancário (total, por banco, contas Stone, Pagar.me) e a hora da última atualização
 //   GET  /liberacoes?empresa&de&ate     tudo o que está em andamento + pagos do período (de/ate = data do pagamento)
 //   POST /liberacoes                    { ids (duplicatas), dataPrevista? }  LIBERAR PARA PAGAMENTO (entra como pendente)
 //   PUT  /liberacoes/:id                { dataPrevista, banco, formaPagamento, valor, observacao }
@@ -30,6 +31,7 @@ import { requireAuth } from '../middlewares/auth.js';
 import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../services/solicitacaoContasPagar.js';
 import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes } from '../services/hcCpLiberacao.js';
 import { baixaAutomatica } from '../services/hcCpBaixaAutomatica.js';
+import { montarSaldos } from '../services/relatorioSaldosWhatsapp.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
 
 const router = express.Router();
@@ -66,6 +68,14 @@ const tantas = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 const comIgnoradas = (texto, r) => (r.ignoradas?.length ? `${texto} · ${tantas(r.ignoradas.length, 'ficou de fora', 'ficaram de fora')} (${r.ignoradas[0].rotulo}: ${r.ignoradas[0].motivo}${r.ignoradas.length > 1 ? '…' : ''})` : texto);
 router.get('/liberacoes/opcoes', rota((req) => opcoesDaLiberacao(req.user), 'Opções da liberação'));
 router.get('/liberacoes', rota((req) => listarLiberacoes(req.user, req.query || {}), 'Liberação de pagamento'));
+// saldo bancário do card da tela (só o financeiro; o acesso é conferido como nas opções)
+router.get(
+  '/liberacoes/saldos',
+  rota(async (req) => {
+    await opcoesDaLiberacao(req.user);
+    return montarSaldos();
+  }, 'Saldo bancário'),
+);
 router.post('/liberacoes', rota((req) => liberarTitulos(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.liberadas, 'duplicata liberada', 'duplicatas liberadas')} para pagamento`, r)));
 router.post('/liberacoes/status', rota((req) => mudarStatus(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.alteradas, 'liberação movida', 'liberações movidas')}`, r)));
 router.post('/liberacoes/pagar', rota((req) => pagarLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.pagas, 'duplicata paga', 'duplicatas pagas')} · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r)));

@@ -9,7 +9,10 @@
 //
 // Ficou só o que outros módulos usam:
 //   • grupoChatid / MENCIONAR — o grupo e quem marcar (services/stoneInclusoes.js);
-//   • montarDados — saldos e títulos em previsão que o agente VEVETO lê para
+//   • montarSaldos — os saldos (total, por banco, contas Stone, Pagar.me e a
+//     hora da última consulta): card da Liberação de Pagamento do HeadCoach e
+//     o saldo de hora em hora no grupo (services/saldosGrupoWhatsapp.js);
+//   • montarDados — saldos + títulos em previsão que o agente VEVETO lê para
 //     responder quando é chamado no grupo (services/vevetoBot.js).
 //
 // Env: RELATORIO_SALDOS_GRUPO_CHATID, RELATORIO_SALDOS_GRUPO_NOME (default
@@ -54,11 +57,17 @@ export async function grupoChatid() {
 }
 
 // ─── dados ────────────────────────────────────────────────────
-export async function montarDados() {
+/**
+ * Só os saldos: total, por banco (com a hora em que cada um foi atualizado),
+ * contas Stone (com o antecipável) e Pagar.me. `atualizadoEm` = a última
+ * consulta do bot (o que a tela e o grupo mostram como "atualizado em").
+ */
+export async function montarSaldos() {
   const BANCOS = ['STONE', 'PAGARME', 'ITAU RECIFE', 'MENTORE']; // PAGARME A RECEBER fora da contagem (pedido do Yago, 27/10)
   const { data: sb } = await supabase.from('saldo_bancario').select('*').in('banco', BANCOS);
-  const saldoDe = (b) => Number((sb || []).find((x) => x.banco === b)?.valor || 0);
-  const bancos = BANCOS.map((b) => ({ banco: b, valor: round2(saldoDe(b)) }));
+  const linhaDe = (b) => (sb || []).find((x) => x.banco === b) || null;
+  const saldoDe = (b) => Number(linhaDe(b)?.valor || 0);
+  const bancos = BANCOS.map((b) => ({ banco: b, valor: round2(saldoDe(b)), atualizadoEm: linhaDe(b)?.updated_at || null, automatico: b === 'STONE' || b === 'PAGARME' }));
 
   const { data: ult } = await supabase.from('stone_bot_saldos').select('data,capturado_em').order('capturado_em', { ascending: false }).limit(1);
   const dia = ult?.[0]?.data || null;
@@ -73,6 +82,17 @@ export async function montarDados() {
   // total inclui o antecipável da STONE (pedido do Yago, 28/10); a Pagar.me NÃO soma o "a receber"
   const total = round2(bancos.reduce((a, b) => a + b.valor, 0) + antecipavel);
   const capturadoEm = ult?.[0]?.capturado_em || null;
+  // no chip da STONE o antecipável entra junto, como no total
+  const bancosTela = bancos.map((b) => (b.banco === 'STONE' ? { ...b, valor: round2(b.valor + antecipavel), disponivel: b.valor, antecipavel } : b));
+  return { geradoEm: agoraBr(), capturadoEm, atualizadoEm: capturadoEm, dia, bancos: bancosTela, total, stone, pagarme, antecipavel };
+}
+
+/** Saldos + os títulos em previsão na Liberação antiga (o que o VEVETO lê para responder no grupo). */
+export async function montarDados() {
+  const saldos = await montarSaldos();
+  // o VEVETO sempre recebeu o disponível da STONE separado do antecipável
+  const bancos = saldos.bancos.map((b) => (b.banco === 'STONE' ? { ...b, valor: b.disponivel } : b));
+  const { capturadoEm, dia, total, stone, pagarme, antecipavel } = saldos;
 
   const semana = semanaDe();
   const { data: prov } = await supabase
@@ -124,4 +144,4 @@ export function agruparProgramacao(programacao) {
   return [...itens, ...grupos.values()].sort((a, b) => (a.vencimento < b.vencimento ? -1 : a.vencimento > b.vencimento ? 1 : b.valor - a.valor));
 }
 
-export default { montarDados, agruparProgramacao, grupoChatid, semanaDe };
+export default { montarSaldos, montarDados, agruparProgramacao, grupoChatid, semanaDe };

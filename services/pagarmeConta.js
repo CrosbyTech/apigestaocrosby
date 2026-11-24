@@ -229,9 +229,9 @@ export async function extratoPagarme(contaId, { de, ate }) {
 
 /**
  * Executa a rotina completa (saldos + extratos + gravação).
- * @param {{execucaoId?:number, de?:string, ate?:string, diasRetroativos?:number}} p
+ * @param {{execucaoId?:number, de?:string, ate?:string, diasRetroativos?:number, soSaldo?:boolean}} p
  */
-export async function executarPagarme({ execucaoId = null, de, ate, diasRetroativos = 3 } = {}) {
+export async function executarPagarme({ execucaoId = null, de, ate, diasRetroativos = 3, soSaldo = false } = {}) {
   const log = async (msg, nivel = 'info') => {
     console.log(`[pagarme] ${nivel}: ${msg}`);
     if (execucaoId) await registrarLog(execucaoId, { nivel, msg }).catch(() => {});
@@ -275,6 +275,8 @@ export async function executarPagarme({ execucaoId = null, de, ate, diasRetroati
     });
     await log(`Pagar.me ${s.nome}: disponível R$ ${s.disponivel.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} · a receber R$ ${s.aReceber.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`);
 
+    // consulta de hora em hora: só o saldo (o extrato vem nas execuções completas)
+    if (soSaldo) continue;
     // extrato
     try {
       const { recebedor, operacoes, fontes } = await extratoPagarme(s.contaId, periodo);

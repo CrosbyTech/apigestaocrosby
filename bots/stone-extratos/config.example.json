@@ -1,6 +1,12 @@
 {
   "headcoachUrl": "https://apigestaocrosby-bw2v.onrender.com",
   "token": "COLE_AQUI_O_STONE_BOT_TOKEN_DO_RENDER",
+  "saldo": {
+    "ativo": true,
+    "horarios": ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"],
+    "diasSemana": [1, 2, 3, 4, 5],
+    "_comentario": "consulta só o saldo das contas nesses horários (hora local do PC; 1 = segunda … 5 = sexta) e o HeadCoach manda no grupo do WhatsApp. Sem este bloco vale exatamente esta agenda."
+  },
   "horarios": [
     "09:30",
     "14:00",
