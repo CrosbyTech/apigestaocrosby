@@ -24,7 +24,7 @@ import { Stone, helpers, manterSessao } from './stone.mjs';
 import { incluirPix } from './inclusoes.mjs';
 import { incluirTransferencia } from './transferencias.mjs';
 
-const VERSAO = '1.2.1'; // 1.1.0: saldo de hora em hora · 1.2.0: transferência entre contas · 1.2.1: um agente só por PC
+const VERSAO = '1.3.0'; // 1.1.0: saldo de hora em hora · 1.2.0: entre contas · 1.2.1: um agente só por PC · 1.3.0: Pix copia e cola
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { brDe, dormir, soDigitos } = helpers;
 

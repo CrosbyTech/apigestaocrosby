@@ -2260,6 +2260,12 @@
             "type": "string",
             "nullable": true
           },
+          "stoneInclusion": {
+            "description": "Inclusão automática na Stone (chaves em português, como gravado): status (fila, processando, incluido, erro, bloqueado, verificar, cancelada ou manual), conta, forma, recebedor, erro/motivo e em (quando).",
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true
+          },
           "lastChangeDate": {
             "description": "Última alteração.",
             "type": "string",

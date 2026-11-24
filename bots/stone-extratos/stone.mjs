@@ -330,9 +330,20 @@ export class Stone {
     return { status: resp.status, texto, json };
   }
 
-  /** Cria o Pix pendente pela chave; a resposta traz o recebedor para conferir. */
-  criarPix({ accountId, chave, valorCentavos, descricao, idempotencia }) {
-    return this.apiPost('/api/v1/pix/outbound_pix_payments', { account_id: accountId, key: chave, amount: valorCentavos, description: descricao }, { idempotencia });
+  /** Cria o Pix pendente pela chave; a resposta traz o recebedor para conferir. transactionId = a cobrança do Pix copia e cola (QR dinâmico). */
+  criarPix({ accountId, chave, valorCentavos, descricao, idempotencia, transactionId = null }) {
+    const corpo = { account_id: accountId, key: chave, amount: valorCentavos, description: descricao };
+    if (transactionId) corpo.transaction_id = transactionId;
+    return this.apiPost('/api/v1/pix/outbound_pix_payments', corpo, { idempotencia });
+  }
+
+  /**
+   * Pix copia e cola: pergunta à Stone o que o código diz (chave do recebedor, valor
+   * e o identificador da cobrança). Só lê — não cria pagamento. É a mesma chamada da
+   * tela "Pagar com QR Code" do portal.
+   */
+  decodificarBrcode({ brcode, ownerId, data, idempotencia }) {
+    return this.apiPost('/api/v1/pix/outbound_pix_payments/brcodes', { brcode, payment_date: data, owner_account: ownerId }, { idempotencia });
   }
 
   /** Confirma: para quem não é aprovador, o Pix vai para a aprovação no app. */

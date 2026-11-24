@@ -876,6 +876,7 @@ Esquemas:
 - `returnedBy` (string) — Quem devolveu ao contas a pagar.
 - `returnDate` (date-time) — Quando foi devolvida.
 - `returnReason` (string) — Motivo da devolução.
+- `stoneInclusion` (object) — Inclusão automática na Stone (chaves em português, como gravado): status (fila, processando, incluido, erro, bloqueado, verificar, cancelada ou manual), conta, forma, recebedor, erro/motivo e em (quando).
 - `lastChangeDate` (date-time) — Última alteração.
 
 **PayableExpense** — Plano de despesas usado nas duplicatas.

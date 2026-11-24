@@ -65,6 +65,60 @@ export function valorDoTitulo(titulo) {
 }
 export const emCentavos = (valor) => Math.round((Number(valor) + Number.EPSILON) * 100);
 
+/** CRC16-CCITT (o dígito de conferência do Pix copia e cola: os 4 últimos caracteres). */
+export function crc16(texto) {
+  let crc = 0xffff;
+  for (const ch of Buffer.from(String(texto), 'utf8')) {
+    crc ^= ch << 8;
+    for (let i = 0; i < 8; i += 1) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+/**
+ * Pix COPIA E COLA (o texto do QR Code, "000201…6304XXXX"). Devolve o código limpo
+ * ou null se não tiver esse formato ou se o dígito de conferência não bater
+ * (código cortado ao colar não vira pagamento).
+ */
+export function pixCopiaECola(valor) {
+  const codigo = String(valor ?? '').trim();
+  if (!/^0002\d{2}/.test(codigo) || codigo.length < 60 || codigo.length > 600) return null;
+  const m = /6304([0-9A-Fa-f]{4})$/.exec(codigo);
+  if (!m) return null;
+  return crc16(codigo.slice(0, -4)) === m[1].toUpperCase() ? codigo : null;
+}
+
+/** O dado de Pix da duplicata: chave (cpf, cnpj, e-mail, telefone, aleatória) ou copia e cola. null = não dá para pagar por Pix. */
+export function dadoPix(valor) {
+  const codigo = pixCopiaECola(valor);
+  if (codigo) return { chave: codigo, tipo: 'brcode' };
+  return normalizarChavePix(valor);
+}
+
+/**
+ * Liberação de Pagamento do HeadCoach: como o bot paga esta liberação.
+ *   • banco tem que ser uma conta Stone ("STONE 0549");
+ *   • com chave Pix válida OU Pix copia e cola (QR Code) vai por PIX — mesmo que a
+ *     duplicata também tenha boleto (preferência do Yago, 24/11/2026);
+ *   • só boleto, sem chave, ou chave que não dá para ter certeza do tipo: fica para
+ *     incluir à mão (o bot não inclui boleto).
+ * l: { banco, valor, titulo: { chave_pix, codigo_barras } }
+ * @returns {{ via: 'pix', chave, tipo, contaFinal, valorCentavos } | { via: 'manual', motivo, forma? }}
+ */
+export function planoDeInclusao(l) {
+  const contaFinal = finalContaStone(l?.banco);
+  if (!contaFinal) return { via: 'manual', motivo: l?.banco ? `o banco ${l.banco} não é uma conta Stone` : 'a liberação está sem banco' };
+  const valorCentavos = emCentavos(l?.valor);
+  if (!Number.isInteger(valorCentavos) || valorCentavos <= 0) return { via: 'manual', motivo: 'valor inválido' };
+  const chave = dadoPix(l?.titulo?.chave_pix);
+  if (chave) return { via: 'pix', chave: chave.chave, tipo: chave.tipo, contaFinal, valorCentavos };
+  const temBoleto = soDigitos(l?.titulo?.codigo_barras).length >= 44;
+  if (temBoleto) return { via: 'manual', forma: 'boleto', motivo: 'boleto: o bot não inclui, pague pelo app da Stone' };
+  const bruto = String(l?.titulo?.chave_pix || '').trim();
+  if (/^0002\d{2}/.test(bruto)) return { via: 'manual', motivo: 'o Pix copia e cola da duplicata está incompleto (o código de conferência não bate)' };
+  return { via: 'manual', motivo: bruto ? 'a chave Pix da duplicata não é válida' : 'a duplicata está sem chave Pix' };
+}
+
 /** Lista por conta + resumo de fornecedor e valor, para o grupo CONTAS A PAGAR. */
 export function textoAvisoFabio(itens, { mencionar, assinatura = '— Veveto' } = {}) {
   const contas = [...new Set(itens.map((i) => i.conta_final))].sort();

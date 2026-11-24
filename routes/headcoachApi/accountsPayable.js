@@ -183,6 +183,7 @@ modulo.recurso({
     f('returnedBy', 'cancelado_por', 'string', 'Quem devolveu ao contas a pagar.'),
     f('returnDate', 'cancelado_em', 'date-time', 'Quando foi devolvida.'),
     f('returnReason', 'cancelado_motivo', 'string', 'Motivo da devolução.'),
+    f('stoneInclusion', 'inclusao', 'object', 'Inclusão automática na Stone (chaves em português, como gravado): status (fila, processando, incluido, erro, bloqueado, verificar, cancelada ou manual), conta, forma, recebedor, erro/motivo e em (quando).'),
     f('lastChangeDate', 'atualizado_em', 'date-time', 'Última alteração.'),
   ],
   filters: [

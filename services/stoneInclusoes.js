@@ -13,6 +13,7 @@ import { MigrationPendingError } from './fluxoCaixaExt.js';
 import * as wa from './whatsappContasPagar.js';
 import { grupoChatid, MENCIONAR } from './relatorioSaldosWhatsapp.js';
 import { emCentavos, finalContaStone, normalizarChavePix, textoAvisoFabio, valorDoTitulo } from '../utils/stoneInclusao.js';
+import { motivoParaCancelarHc, marcarLiberacaoHc } from './hcCpInclusaoStone.js';
 
 const T = { inc: 'stone_inclusoes', lib: 'pagamentos_liberacao', saldos: 'stone_bot_saldos' };
 const CAMPOS_TITULO = 'id,status,banco_pagamento,forma_pagamento,chave_pix,vl_duplicata,vl_real,nm_fornecedor,nr_duplicata,nr_parcela,dados_completos';
@@ -28,6 +29,12 @@ function lancar(error) {
   if (/relation .*stone_inclusoes.* does not exist|Could not find the table 'public\.stone_inclusoes|schema cache/i.test(error.message || ''))
     throw new MigrationPendingError('Tabela stone_inclusoes não existe — rode migrations/stone_inclusoes.sql.');
   throw new Error(error.message || String(error));
+}
+
+/** A linha da fila pode ser de um título da Liberação antiga ou de uma liberação do HeadCoach (hc_liberacao_id). */
+async function marcarOrigem(linha, info, { incluida = false } = {}) {
+  if (linha.hc_liberacao_id) return marcarLiberacaoHc(linha.hc_liberacao_id, { ...info, forma: 'pix' }, { incluida });
+  return marcarTitulo(linha.liberacao_id, info);
 }
 
 /** Situação da inclusão fica no título: é de lá que a tela lê. */
@@ -142,10 +149,10 @@ async function marcarTravadas() {
     .update({ status: 'verificar', erro: 'Agente parou no meio: confira na Stone antes de repetir.', concluido_em: agora() })
     .eq('status', 'processando')
     .lt('iniciado_em', limite)
-    .select('liberacao_id,conta_final,erro,lote');
+    .select('liberacao_id,hc_liberacao_id,conta_final,erro,lote');
   lancar(error);
   for (const r of data || []) {
-    await marcarTitulo(r.liberacao_id, { status: 'verificar', conta: r.conta_final, erro: r.erro });
+    await marcarOrigem(r, { status: 'verificar', conta: r.conta_final, erro: r.erro });
     await avisarSeFechou(r.lote);
   }
 }
@@ -170,11 +177,11 @@ export async function proximaInclusao({ host } = {}) {
     lancar(error);
     const item = pend?.[0];
     if (!item) return null;
-    const motivo = await motivoParaCancelar(item);
+    const motivo = item.hc_liberacao_id ? await motivoParaCancelarHc(item) : await motivoParaCancelar(item);
     if (motivo) {
       const { error: e2 } = await supabase.from(T.inc).update({ status: 'cancelada', erro: motivo, concluido_em: agora() }).eq('id', item.id).eq('status', 'fila');
       lancar(e2);
-      await marcarTitulo(item.liberacao_id, { status: 'cancelada', conta: item.conta_final, erro: motivo });
+      await marcarOrigem(item, { status: 'cancelada', conta: item.conta_final, erro: motivo });
       await avisarSeFechou(item.lote);
       continue;
     }
@@ -186,7 +193,8 @@ export async function proximaInclusao({ host } = {}) {
       .select()
       .maybeSingle();
     lancar(e3);
-    if (data) return data;
+    // o agente usa liberacao_id na chave de idempotência: a liberação do HeadCoach ganha um identificador próprio
+    if (data) return data.hc_liberacao_id ? { ...data, liberacao_id: `hc-${data.hc_liberacao_id}` } : data;
   }
 }
 
@@ -208,7 +216,7 @@ export async function registrarResultado(id, { status, stonePagamentoId, recebed
     .maybeSingle();
   lancar(error);
   if (!data) throw new Error(`Inclusão ${id} não está em processamento.`);
-  await marcarTitulo(data.liberacao_id, { status, conta: data.conta_final, erro: data.erro, recebedor: data.recebedor_nome });
+  await marcarOrigem(data, { status, conta: data.conta_final, erro: data.erro, recebedor: data.recebedor_nome }, { incluida: status === 'incluido' });
   const aviso = await avisarSeFechou(data.lote);
   return { ok: true, aviso };
 }

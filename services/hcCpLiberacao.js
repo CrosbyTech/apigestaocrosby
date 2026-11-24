@@ -18,6 +18,7 @@
 import supabase from '../config/supabase.js';
 import { CpError, FORMAS, empresasPermitidas, conferirSenha, aplicarBaixa, saldoDoTitulo, rotuloDuplicata } from './hcContasPagar.js';
 import { solicitacoesAposDevolucao } from './solicitacaoVinculoHc.js';
+import { enfileirarHc } from './hcCpInclusaoStone.js';
 
 export const STATUS = { pendente: 'Pendente', previsao: 'Previsão', aprovado: 'Aprovado', incluido: 'Incluído', pago: 'Pago', cancelado: 'Devolvida' };
 export const EM_ANDAMENTO = ['pendente', 'previsao', 'aprovado', 'incluido']; // na ordem do fluxo
@@ -204,6 +205,7 @@ export async function mudarStatus(user, b = {}) {
   const por = quem(user);
   let alteradas = 0;
   const ignoradas = [];
+  const aprovadasAgora = []; // vieram de Pendente/Previsão: são as que vão para o bot incluir na Stone
   for (const l of linhas) {
     if (l.status === para && !b.dataPrevista) continue;
     if (l.status !== para && !podeMudar(l.status, para)) {
@@ -213,10 +215,14 @@ export async function mudarStatus(user, b = {}) {
     const patch = l.status === para ? { atualizado_por: por, atualizado_em: new Date().toISOString() } : carimboDaMudanca(para, por);
     if (ehData(b.dataPrevista)) patch.data_prevista = b.dataPrevista;
     const ok = await q(supabase.from('hc_cp_liberacoes').update(patch).eq('id', l.id).eq('status', l.status).select('id').maybeSingle());
-    if (ok) alteradas += 1;
-    else ignoradas.push({ id: l.id, rotulo: `${l.titulo.fornecedor_nome} ${rotuloDuplicata(l.titulo)}`, motivo: 'acabou de ser alterada por outra pessoa' });
+    if (ok) {
+      alteradas += 1;
+      // voltar de Incluído para Aprovado NÃO reenvia: o pagamento pode já estar na Stone
+      if (para === 'aprovado' && ['pendente', 'previsao'].includes(l.status)) aprovadasAgora.push({ ...l, status: 'aprovado' });
+    } else ignoradas.push({ id: l.id, rotulo: `${l.titulo.fornecedor_nome} ${rotuloDuplicata(l.titulo)}`, motivo: 'acabou de ser alterada por outra pessoa' });
   }
-  return { alteradas, ignoradas, status: para };
+  const inclusao = aprovadasAgora.length ? await incluirNaStone(aprovadasAgora, por) : null;
+  return { alteradas, ignoradas, status: para, inclusao };
 }
 
 // ─── alterar (banco, forma, data prevista, valor, observação) ────────────────
@@ -246,6 +252,33 @@ export async function editarLiberacao(user, id, b = {}) {
   const nova = await q(supabase.from('hc_cp_liberacoes').update({ ...patch, atualizado_por: quem(user), atualizado_em: new Date().toISOString() }).eq('id', l.id).in('status', EM_ANDAMENTO).select(COM_TITULO).maybeSingle());
   if (!nova) throw new CpError('Esta liberação acabou de ser paga ou devolvida', 'FINAL', 409);
   return paraTela(nova);
+}
+
+// ─── inclusão automática na Stone (services/hcCpInclusaoStone.js) ────────────
+/** Manda as aprovadas para o bot e resume: quantas foram por Pix e quantas ficam para incluir à mão (e por quê). */
+async function incluirNaStone(liberacoes, por) {
+  try {
+    const { itens } = await enfileirarHc(liberacoes, { usuario: por });
+    const porId = new Map(liberacoes.map((l) => [l.id, l]));
+    return {
+      naFila: itens.filter((i) => i.via === 'pix' && i.status === 'fila').length,
+      comErro: itens.filter((i) => i.via === 'pix' && i.status === 'erro').map((i) => ({ id: i.id, rotulo: `${porId.get(i.id)?.titulo?.fornecedor_nome || ''} ${rotuloDuplicata(porId.get(i.id)?.titulo || {})}`, motivo: i.erro })),
+      manuais: itens.filter((i) => i.via === 'manual').map((i) => ({ id: i.id, rotulo: `${porId.get(i.id)?.titulo?.fornecedor_nome || ''} ${rotuloDuplicata(porId.get(i.id)?.titulo || {})}`, motivo: i.motivo })),
+    };
+  } catch (e) {
+    console.error('[liberação HC → Stone] fila:', e.message);
+    return { naFila: 0, comErro: [], manuais: [], falha: e.message };
+  }
+}
+
+/** REENVIAR AO BOT: liberações em Aprovados cuja inclusão não chegou à Stone (erro, bloqueada, cancelada) ou que ainda não foram enviadas. */
+export async function reenviarAoBot(user, b = {}) {
+  const ids = idsDe(b.ids);
+  const linhas = (await liberacoesDoUsuario(user, ids)).filter((l) => l.status === 'aprovado');
+  if (!linhas.length) throw new CpError('Só dá para enviar ao bot o que está em Aprovados');
+  const inclusao = await incluirNaStone(linhas, quem(user));
+  if (inclusao.falha) throw new CpError(`Não consegui pôr na fila do bot: ${inclusao.falha}`, 'FILA', 500);
+  return { inclusao };
 }
 
 // ─── devolver ao contas a pagar ──────────────────────────────────────────────

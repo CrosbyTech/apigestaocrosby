@@ -2,7 +2,9 @@
 // Inclusão de Pix na Stone (botão APROVAR da Liberação de Pagamento).
 //
 // Mesma sequência da tela de transferência do portal: cria o Pix pendente, confere
-// o que a Stone devolveu (valor e documento do recebedor) e confirma. Quem não é
+// o que a Stone devolveu (valor e documento do recebedor) e confirma. Pix copia e
+// cola (chave_tipo "brcode"): antes de criar, a Stone lê o código (chave, valor e
+// cobrança) e o valor tem que bater com o da liberação. Quem não é
 // aprovador cai em "foi pra aprovação"; o dinheiro só sai quando o Fábio aprova.
 //
 // Se a Stone pedir a senha de 6 dígitos (PIN) no confirmar, o bot tenta UMA vez
@@ -57,9 +59,26 @@ export async function incluirPix(stone, item, contas) {
   if (!conta) return { status: 'bloqueado', erro: `Conta ${item.conta_final} não aparece para este usuário no portal.` };
   if (!String(conta.owner_document || '').replace(/\D/g, '').endsWith(item.conta_final)) return { status: 'erro', erro: `Conta do portal não termina em ${item.conta_final}.` };
 
+  // Pix copia e cola (QR Code): primeiro a Stone lê o código e diz a chave, o valor e a cobrança
+  let chave = item.chave_pix;
+  let transactionId = null;
+  if (item.chave_tipo === 'brcode') {
+    const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+    const lido = await stone.decodificarBrcode({ brcode: item.chave_pix, ownerId: conta.owner_id ?? conta.ownerId ?? null, data: hoje, idempotencia: chaveIdem(item, 'ler') });
+    const qr = lido.json?.data && !lido.json?.key ? lido.json.data : lido.json;
+    if (lido.status === 403) return { status: 'bloqueado', erro: `Stone recusou ler o Pix copia e cola (403): ${curto(lido)}` };
+    if (lido.status >= 300 || !qr?.key) return { status: 'erro', erro: `A Stone não leu o Pix copia e cola (${lido.status}): ${curto(lido)}` };
+    // QR com valor (cobrança): tem que ser exatamente o valor da liberação — conta com juros ou vencida muda de valor
+    if (qr.amount != null && Number(qr.amount) > 0 && Number(qr.amount) !== item.valor_centavos)
+      return { status: 'erro', erro: `O Pix copia e cola é de R$ ${(Number(qr.amount) / 100).toFixed(2)} e a liberação é de R$ ${(item.valor_centavos / 100).toFixed(2)}. Não incluí.` };
+    chave = qr.key;
+    transactionId = qr.type === 'static' ? null : qr.transaction_id ?? qr.transactionId ?? null;
+  }
+
   const criado = await stone.criarPix({
     accountId: item.stone_account_id,
-    chave: item.chave_pix,
+    chave,
+    transactionId,
     valorCentavos: item.valor_centavos,
     descricao: item.descricao,
     idempotencia: chaveIdem(item, 'criar'),

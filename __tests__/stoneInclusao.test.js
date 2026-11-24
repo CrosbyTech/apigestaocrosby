@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { cpfValido, cnpjValido, normalizarChavePix, finalContaStone, valorDoTitulo, emCentavos, textoAvisoFabio } from '../utils/stoneInclusao.js';
+import { cpfValido, cnpjValido, normalizarChavePix, finalContaStone, valorDoTitulo, emCentavos, textoAvisoFabio, planoDeInclusao, crc16, pixCopiaECola, dadoPix } from '../utils/stoneInclusao.js';
 import { incluirPix, documentoConfere } from '../bots/stone-extratos/inclusoes.mjs';
 
 describe('chave Pix', () => {
@@ -125,5 +125,130 @@ describe('incluirPix', () => {
     expect(documentoConfere('06704197451', '***.041.974-**')).toBe(true);
     expect(documentoConfere('06704197451', '***.041.975-**')).toBe(false);
     expect(documentoConfere('06704197451', null)).toBe(true);
+  });
+});
+
+describe('Liberação do HeadCoach: como o bot paga (planoDeInclusao)', () => {
+  const lib = (over = {}, titulo = {}) => ({ banco: 'STONE 0549', valor: 1234.56, titulo: { chave_pix: null, codigo_barras: null, ...titulo }, ...over });
+  const BOLETO = '34191.79001 01043.510047 91020.150008 5 12340000123456';
+
+  it('com chave Pix válida vai por Pix, na conta Stone da liberação, pelo valor em centavos', () => {
+    expect(planoDeInclusao(lib({}, { chave_pix: '27.728.810/0005-49' }))).toEqual({ via: 'pix', chave: '27728810000549', tipo: 'cnpj', contaFinal: '0549', valorCentavos: 123456 });
+    expect(planoDeInclusao(lib({ banco: 'STONE 1007', valor: 280 }, { chave_pix: 'financeiro@fornecedor.com.br' }))).toMatchObject({ via: 'pix', tipo: 'email', contaFinal: '1007', valorCentavos: 28000 });
+  });
+
+  it('tem Pix e boleto: prefere o Pix', () => {
+    expect(planoDeInclusao(lib({}, { chave_pix: '06704197451', codigo_barras: BOLETO }))).toMatchObject({ via: 'pix', tipo: 'cpf' });
+  });
+
+  it('só boleto: fica para incluir à mão, dizendo que é boleto', () => {
+    const p = planoDeInclusao(lib({}, { codigo_barras: BOLETO }));
+    expect(p).toMatchObject({ via: 'manual', forma: 'boleto' });
+    expect(p.motivo).toMatch(/boleto/);
+  });
+
+  it('chave Pix que não dá para ter certeza do tipo não vira pagamento', () => {
+    expect(planoDeInclusao(lib({}, { chave_pix: '067.051.974-51' }))).toMatchObject({ via: 'manual', motivo: expect.stringMatching(/não é válida/) }); // CPF com dígito errado
+    expect(planoDeInclusao(lib({}, { chave_pix: '   ' }))).toMatchObject({ via: 'manual', motivo: expect.stringMatching(/sem chave/) });
+    expect(planoDeInclusao(lib())).toMatchObject({ via: 'manual', motivo: expect.stringMatching(/sem chave/) });
+  });
+
+  it('banco que não é conta Stone (ou sem banco) não vai para o bot', () => {
+    expect(planoDeInclusao(lib({ banco: 'PAGARME' }, { chave_pix: '06704197451' }))).toMatchObject({ via: 'manual', motivo: expect.stringMatching(/não é uma conta Stone/) });
+    expect(planoDeInclusao(lib({ banco: 'STONE CROSBY' }, { chave_pix: '06704197451' })).via).toBe('manual');
+    expect(planoDeInclusao(lib({ banco: null }, { chave_pix: '06704197451' }))).toMatchObject({ via: 'manual', motivo: expect.stringMatching(/sem banco/) });
+  });
+
+  it('valor zerado ou inválido não vai', () => {
+    expect(planoDeInclusao(lib({ valor: 0 }, { chave_pix: '06704197451' })).via).toBe('manual');
+    expect(planoDeInclusao(lib({ valor: 'abc' }, { chave_pix: '06704197451' })).via).toBe('manual');
+  });
+});
+
+describe('Pix copia e cola (QR Code)', () => {
+  const BASE = '00020126580014br.gov.bcb.pix0136123e4567-e12b-12d1-a456-4266554400005204000053039865802BR5913Fulano de Tal6008BRASILIA62070503***6304';
+  const QR = BASE + crc16(BASE);
+
+  it('o dígito de conferência é o CRC16 conhecido do padrão ("123456789" → 29B1)', () => {
+    expect(crc16('123456789')).toBe('29B1');
+    expect(QR.slice(-4)).toMatch(/^[0-9A-F]{4}$/);
+  });
+
+  it('aceita o código inteiro e recusa o cortado ou alterado', () => {
+    expect(pixCopiaECola(` ${QR} `)).toBe(QR);
+    expect(pixCopiaECola(QR.slice(0, -1))).toBeNull(); // faltou um caractere ao colar
+    expect(pixCopiaECola(QR.replace('Fulano', 'Sicran'))).toBeNull(); // conteúdo não bate com o CRC
+    expect(pixCopiaECola('06704197451')).toBeNull();
+    expect(pixCopiaECola(null)).toBeNull();
+  });
+
+  it('dadoPix distingue copia e cola de chave', () => {
+    expect(dadoPix(QR)).toEqual({ chave: QR, tipo: 'brcode' });
+    expect(dadoPix('06704197451')).toEqual({ chave: '06704197451', tipo: 'cpf' });
+    expect(dadoPix('qualquer coisa')).toBeNull();
+  });
+
+  it('a liberação com copia e cola vai por Pix pelo bot — inclusive quando também tem boleto', () => {
+    const l = { banco: 'STONE 0549', valor: 913.33, titulo: { chave_pix: QR, codigo_barras: '34191.79001 01043.510047 91020.150008 5 12340000091333' } };
+    expect(planoDeInclusao(l)).toEqual({ via: 'pix', chave: QR, tipo: 'brcode', contaFinal: '0549', valorCentavos: 91333 });
+  });
+
+  it('copia e cola cortado não vira pagamento e o motivo diz isso', () => {
+    const p = planoDeInclusao({ banco: 'STONE 0549', valor: 10, titulo: { chave_pix: QR.slice(0, 80) } });
+    expect(p.via).toBe('manual');
+    expect(p.motivo).toMatch(/incompleto/);
+  });
+
+  describe('no bot (Stone simulada)', () => {
+    const contas = [{ id: 'acc-0549', owner_document: '27728810000549', owner_id: 'dono-1' }];
+    const item = { liberacao_id: 'hc-77', stone_account_id: 'acc-0549', conta_final: '0549', chave_pix: QR, chave_tipo: 'brcode', valor_centavos: 91333, descricao: 'Dup 1/11' };
+    const stoneFalsa = ({ lido = { key: 'chave-do-recebedor', amount: 91333, transaction_id: 'tx-1', type: 'dynamic' }, statusLido = 200 } = {}) => {
+      const chamadas = [];
+      return {
+        chamadas,
+        decodificarBrcode: async (p) => (chamadas.push(['ler', p]), { status: statusLido, json: lido, texto: JSON.stringify(lido) }),
+        criarPix: async (p) => (chamadas.push(['criar', p]), { status: 201, json: { id: 'pix-9', amount: p.valorCentavos, target: { entity: { name: 'EQUATORIAL', document: '06272793000184' } } } }),
+        confirmarPix: async (p) => (chamadas.push(['confirmar', p]), { status: 204, json: null, texto: '' }),
+      };
+    };
+
+    it('lê o código, cria o Pix com a chave e a cobrança que a Stone devolveu e confirma', async () => {
+      const s = stoneFalsa();
+      const r = await incluirPix(s, item, contas);
+      expect(r).toMatchObject({ status: 'incluido', stonePagamentoId: 'pix-9' });
+      expect(s.chamadas.map((c) => c[0])).toEqual(['ler', 'criar', 'confirmar']);
+      expect(s.chamadas[0][1]).toMatchObject({ brcode: QR, ownerId: 'dono-1' });
+      expect(s.chamadas[1][1]).toMatchObject({ accountId: 'acc-0549', chave: 'chave-do-recebedor', transactionId: 'tx-1', valorCentavos: 91333 });
+    });
+
+    it('valor do QR diferente do da liberação (conta com juros): não cria nada', async () => {
+      const s = stoneFalsa({ lido: { key: 'k', amount: 92000, transaction_id: 'tx', type: 'dynamic' } });
+      const r = await incluirPix(s, item, contas);
+      expect(r.status).toBe('erro');
+      expect(r.erro).toMatch(/920\.00.*913\.33/);
+      expect(s.chamadas.map((c) => c[0])).toEqual(['ler']);
+    });
+
+    it('QR estático (sem valor): usa o valor da liberação e não manda cobrança', async () => {
+      const s = stoneFalsa({ lido: { key: 'k-estatica', amount: null, type: 'static' } });
+      const r = await incluirPix(s, item, contas);
+      expect(r.status).toBe('incluido');
+      expect(s.chamadas[1][1]).toMatchObject({ chave: 'k-estatica', transactionId: null, valorCentavos: 91333 });
+    });
+
+    it('a Stone não leu o código (vencido, inválido): erro, sem criar Pix', async () => {
+      const s = stoneFalsa({ lido: { type: 'srn:error:invalid_brcode' }, statusLido: 422 });
+      const r = await incluirPix(s, item, contas);
+      expect(r.status).toBe('erro');
+      expect(r.erro).toMatch(/não leu o Pix copia e cola \(422\)/);
+      expect(s.chamadas.map((c) => c[0])).toEqual(['ler']);
+    });
+
+    it('Pix por chave continua igual: não chama a leitura de código', async () => {
+      const s = stoneFalsa();
+      const r = await incluirPix(s, { ...item, chave_pix: '06272793000184', chave_tipo: 'cnpj' }, contas);
+      expect(r.status).toBe('incluido');
+      expect(s.chamadas.map((c) => c[0])).toEqual(['criar', 'confirmar']);
+    });
   });
 });
