@@ -68,7 +68,7 @@ async function headcoachDoCliente(cliente, de) {
   const { data, error } = await supabase
     .from('pdv_vendas')
     .select(
-      'id, empresa, tipo_venda, canal, status, criado_em, totvs_transacao_code, pdv_venda_itens(product_code, nome, quantidade, valor_unit, desconto_unit), pdv_notas_fiscais(numero, serie, modelo, chave, status, dh_emissao)',
+      'id, empresa, tipo_venda, canal, status, criado_em, total, totvs_transacao_code, pdv_venda_itens(product_code, nome, quantidade, valor_unit, desconto_unit), pdv_notas_fiscais(numero, serie, modelo, chave, status, dh_emissao)',
     )
     .eq('cliente_code', cliente)
     .gte('criado_em', `${de}T00:00:00Z`)
@@ -83,7 +83,7 @@ async function headcoachDoCliente(cliente, de) {
  * itens: [{ productCode, quantidade }]. Devolve
  *   { ok, periodo, avisos[], chaves[], itens: [{ productCode, quantidade, ok, motivo,
  *     mensagem, comprado, devolvido, disponivel, valorUnit, notas: [{ origem, empresa,
- *     numero, serie, modelo, chave, data, quantidade, valorUnit }] }] }
+ *     numero, serie, modelo, chave, data, quantidade, valorUnit, totalNota }] }] }
  */
 export async function conferirTroca({ empresa, clienteCode, itens }) {
   const cliente = parseInt(clienteCode, 10);
@@ -149,6 +149,7 @@ export async function conferirTroca({ empresa, clienteCode, itens }) {
         data: diaBrasil(nota.dh_emissao || v.criado_em),
         quantidade: Number(i.quantidade) || 0,
         valorUnit: r2(Number(i.valor_unit) - Number(i.desconto_unit || 0)),
+        totalNota: r2(v.total), // a nota da troca referencia UMA só: a que cobre o valor (pdvFiscal.notaReferenciadaDaTroca)
       });
     }
   }
@@ -167,6 +168,7 @@ export async function conferirTroca({ empresa, clienteCode, itens }) {
         data: n.invoiceDate,
         quantidade: Number(i.quantity) || 0,
         valorUnit: r2(i.unitNet || Number(i.unitGross) - Number(i.unitDiscount || 0)),
+        totalNota: r2(n.totalValue),
       });
     }
   }

@@ -372,6 +372,47 @@ export function chavesReferenciadas(texto) {
   return [...new Set(String(texto || '').split(/[^0-9]+/).filter((c) => c.length === 44))];
 }
 
+// TROCA com peças de mais de uma compra: a SEFAZ só aceita UMA nota referenciada
+// (255 "NF-e possui mais de uma NF referenciada" — troca 569 da Parnamirim,
+// 24/11/2026; a mesma rejeição das devoluções, ver devolucaoRfidHc.js). Vai uma só
+// e todas seguem citadas no infCpl. A escolhida precisa ter total >= o da troca
+// (545 "valor total superior a NF-e devolvida"): entre as que cobrem, a que tem
+// mais valor devolvido; se nenhuma cobre, a de maior total. O total de cada nota
+// vem da conferência (pedido_info.troca.itens[].notas[].totalNota); nas trocas
+// gravadas antes disso ele não existe e a escolha é pelo valor devolvido.
+// Devolve { principal, chaves }.
+export function notaReferenciadaDaTroca(venda) {
+  const chaves = chavesReferenciadas(venda?.nf_referenciada);
+  if (chaves.length <= 1) return { principal: chaves[0] || null, chaves };
+  const devolvido = new Map();
+  const totalNota = new Map();
+  for (const it of venda.pedido_info?.troca?.itens || []) {
+    for (const n of it.notas || []) {
+      const c = String(n.chave || '');
+      if (!chaves.includes(c)) continue;
+      devolvido.set(c, (devolvido.get(c) || 0) + Number(n.quantidade || 0) * Number(n.valorUnit || 0));
+      if (Number(n.totalNota) > 0) totalNota.set(c, Number(n.totalNota));
+    }
+  }
+  const total = Number(venda.total) || 0;
+  const maior = (lista, valor) => lista.reduce((m, c) => (valor(c) > valor(m) ? c : m));
+  const cobrem = chaves.filter((c) => (totalNota.get(c) || 0) + 0.005 >= total);
+  let principal;
+  if (cobrem.length) principal = maior(cobrem, (c) => devolvido.get(c) || 0);
+  else {
+    // nenhuma cobre pelo que se sabe: primeiro as de total desconhecido (podem cobrir)
+    const semTotal = chaves.filter((c) => !totalNota.has(c));
+    principal = semTotal.length ? maior(semTotal, (c) => devolvido.get(c) || 0) : maior(chaves, (c) => totalNota.get(c) || 0);
+  }
+  return { principal, chaves };
+}
+
+// "NFC-E 54/4" a partir da chave de acesso (modelo, série e número estão nela)
+function rotuloDaChave(chave) {
+  const c = String(chave);
+  return `${c.slice(20, 22) === '65' ? 'NFC-E' : 'NF-E'} ${Number(c.slice(25, 34))}/${Number(c.slice(22, 25))}`;
+}
+
 // ─── Montagem do XML ─────────────────────────────────────────────────────────
 // venda: linha de pdv_vendas + itens[] + pagamentos[]
 // Retorna { xml (não assinado), numero, serie, modelo, chaveParcial }
@@ -436,12 +477,9 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
   });
   // TROCA: referencia a NF-e/NFC-e de origem quando informada
   // (nf_referenciada pode trazer várias chaves separadas por vírgula: peças de
-  // compras diferentes na mesma troca)
-  if (venda.tipo_venda === 'troca') {
-    const chaves = chavesReferenciadas(venda.nf_referenciada);
-    if (chaves.length === 1) nfe.tagRefNFe(chaves[0]);
-    else if (chaves.length > 1) nfe.tagRefNFe(chaves);
-  }
+  // compras diferentes na mesma troca — no XML vai UMA só, ver notaReferenciadaDaTroca)
+  const refTroca = venda.tipo_venda === 'troca' ? notaReferenciadaDaTroca(venda) : { principal: null, chaves: [] };
+  if (refTroca.principal) nfe.tagRefNFe(refTroca.principal);
 
   // A lib grava as chaves na ordem de inserção: ao receber xFant, tagEmit cria
   // enderEmit logo após — então IE e CRT passados aqui ficam DEPOIS do endereço,
@@ -550,8 +588,11 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
 
   // Informações complementares
   const partes = [];
-  if (venda.tipo_venda === 'troca') partes.push(`DEVOLUCAO DE MERCADORIA - TROCA - VENDA HEADCOACH ${venda.id}`);
-  else partes.push(`VENDA HEADCOACH ${venda.id}`);
+  if (venda.tipo_venda === 'troca') {
+    partes.push(`DEVOLUCAO DE MERCADORIA - TROCA - VENDA HEADCOACH ${venda.id}`);
+    // mais de uma compra de origem: só uma vai referenciada no XML; todas ficam citadas aqui
+    if (refTroca.chaves.length > 1) partes.push(`DEVOLUCAO REFERENTE A ${refTroca.chaves.map(rotuloDaChave).join(', ')}`);
+  } else partes.push(`VENDA HEADCOACH ${venda.id}`);
   if (venda.vendedor_nome) partes.push(`VENDEDOR ${semAcento(venda.vendedor_nome)}`);
   partes.push(`ICMS ${f2(aliqIcms).replace('.', ',')}% BASE ${f2(tot.vBC).replace('.', ',')} = ${f2(tot.vICMS).replace('.', ',')}`);
   if (cfg.info_complementar) partes.push(semAcento(cfg.info_complementar));
