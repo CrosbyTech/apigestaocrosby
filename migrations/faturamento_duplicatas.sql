@@ -26,3 +26,7 @@ CREATE TABLE IF NOT EXISTS faturamento_duplicatas (
   atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_fat_dup_status ON faturamento_duplicatas (status, enviada_em DESC);
+
+-- 24/11/2026 — Transações: histórico de envios (envio, reenvio, troca de telefone pelo owner).
+-- Lista de { em, por, tipo, telefone, de?, chip?, link? }.
+ALTER TABLE faturamento_duplicatas ADD COLUMN IF NOT EXISTS historico JSONB NOT NULL DEFAULT '[]'::jsonb;

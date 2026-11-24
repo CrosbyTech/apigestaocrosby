@@ -1283,6 +1283,7 @@ Esquemas:
 - `signedDocumentUrl` (string) — Documento assinado.
 - `senderName` (string) — Número de WhatsApp que enviou.
 - `createdBy` (string) — Quem disparou.
+- `sendHistory` (array) — Histórico de envios, do mais antigo ao mais novo: envio, reenvio (mesmo link), novo_documento, outro_telefone (número trocado pelo owner na tela Transações) e falha.
 - `createdDate` (date-time) — Criação do registro.
 - `lastChangeDate` (date-time) — Última alteração.
 

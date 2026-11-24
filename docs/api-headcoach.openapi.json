@@ -3200,6 +3200,16 @@
             "type": "string",
             "nullable": true
           },
+          "sendHistory": {
+            "description": "Histórico de envios, do mais antigo ao mais novo: envio, reenvio (mesmo link), novo_documento, outro_telefone (número trocado pelo owner na tela Transações) e falha.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "Evento do histórico (chaves em português, como gravado: em, por, tipo, telefone, de, chip, link, erro)."
+            },
+            "nullable": true
+          },
           "createdDate": {
             "description": "Criação do registro.",
             "type": "string",

@@ -378,9 +378,18 @@ async function autentiqueAssinatura(docId) {
 
 // ─── estado ─────────────────────────────────────────────────────────────────
 async function gravar(vendaId, patch) {
-  const { error } = await supabase.from('faturamento_duplicatas').upsert({ venda_id: vendaId, ...patch, atualizado_em: new Date().toISOString() }, { onConflict: 'venda_id' });
+  const salvar = (p) => supabase.from('faturamento_duplicatas').upsert({ venda_id: vendaId, ...p, atualizado_em: new Date().toISOString() }, { onConflict: 'venda_id' });
+  let { error } = await salvar(patch);
+  // banco ainda sem a coluna do histórico (migrations/faturamento_duplicatas.sql): o estado não pode se perder por isso
+  if (error && 'historico' in patch && /historico/i.test(error.message || '')) {
+    const { historico: _fora, ...resto } = patch;
+    ({ error } = await salvar(resto));
+  }
   if (error) console.warn(`⚠️ [duplicata] não gravei o estado da venda ${vendaId}: ${error.message}`);
 }
+
+// histórico de envios da duplicata (tela Transações): envio, reenvio e troca de telefone
+const comHistorico = (dup, evento) => [...(Array.isArray(dup?.historico) ? dup.historico : []), { em: new Date().toISOString(), ...evento }].slice(-40);
 
 // A nota emitida pelo HeadCoach vai para o card do Dryland (é dela que os robôs de
 // minuta precisam). Quando a venda tem boleto, a nota só é gravada JUNTO com o
@@ -416,9 +425,13 @@ export async function gravarNotaNoCard({ venda, nota, fat }, extra = {}, por = '
 /**
  * Gera e envia a duplicata da venda (NF-e autorizada, pagamento em boleto).
  * Não reenvia sozinho: com a duplicata já enviada, só `forcar` gera outra.
+ * `telefone`: manda para este número em vez do telefone do pedido/cadastro
+ * (troca de telefone pelo owner na tela Transações — ver reenviarDuplicata).
  */
-export async function enviarDuplicata(vendaId, { por = null, forcar = false } = {}) {
+export async function enviarDuplicata(vendaId, { por = null, forcar = false, telefone = null } = {}) {
   const base = await carregar(vendaId);
+  // já havia uma duplicata enviada e válida: se o envio novo falhar, ela continua valendo
+  const anterior = forcar && base.dup?.status === 'enviada' && base.dup.link ? base.dup : null;
   if (!base.nota) throw new DuplicataError('A NF-e ainda não foi autorizada', 'SEM_NOTA');
   if (!temBoleto(base.venda, base.pagamentos)) return { naoSeAplica: true, motivo: 'venda sem boleto' };
   if (base.dup && ['enviada', 'assinada'].includes(base.dup.status) && !forcar) return { jaEnviada: true, duplicata: base.dup };
@@ -441,6 +454,11 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false } = 
   const quem = `HeadCoach${por ? ` (${por})` : ''}`;
   const falhar = async (err) => {
     const msg = String(err.message || err).slice(0, 300);
+    if (anterior) {
+      // o cliente continua com o link anterior na mão: a duplicata segue "enviada" (e o job segue conferindo a assinatura)
+      await gravar(vendaId, { status: 'enviada', erro: null, criado_por: anterior.criado_por || null, historico: comHistorico(base.dup, { por, tipo: 'falha', telefone: telefone ? so(telefone) : null, erro: msg }) });
+      throw err instanceof DuplicataError ? err : new DuplicataError(msg, 'DUPLICATA_FALHOU', 502);
+    }
     await gravar(vendaId, { faturamento_id: base.fat?.id || null, chave: base.fat?.chave || null, nf_numero: base.nota.numero, status: 'erro', erro: msg, criado_por: por });
     // marca no card que quem cuida é o HeadCoach: o robô do Dryland não tenta por conta própria
     // (o texto não pode conter os trechos que ele trata como erro passageiro)
@@ -454,6 +472,7 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false } = 
 
   try {
     const dados = await dadosDaDuplicata(vendaId);
+    if (telefone) dados.telefone = telefone;
     if (!dados.telefone) throw new DuplicataError('Cliente sem WhatsApp no pedido nem no cadastro — não há para onde mandar a duplicata', 'SEM_TELEFONE');
     const chips = await chipsDaDuplicata();
     if (!chips.length) {
@@ -486,7 +505,8 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false } = 
     }
     if (!usado) {
       // documento criado e mensagem não saiu: guarda o link para o reenvio não criar outro à toa
-      await gravar(vendaId, { doc_id: doc.id, link: doc.link });
+      // (menos quando já havia uma duplicata enviada: o link que vale é o que o cliente recebeu)
+      if (!anterior) await gravar(vendaId, { doc_id: doc.id, link: doc.link });
       throw new DuplicataError(`Documento criado, mas a mensagem não saiu pelo WhatsApp: ${erroEnvio || 'sem chip'}`, 'WHATSAPP_NAO_ENVIOU', 502);
     }
 
@@ -506,6 +526,14 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false } = 
       mensagem_id: mensagemId,
       mensagem: texto,
       criado_por: por,
+      historico: comHistorico(base.dup, {
+        por,
+        tipo: telefone && base.dup?.telefone && !mesmoTelefone(destino, base.dup.telefone) ? 'outro_telefone' : base.dup?.enviada_em ? 'novo_documento' : 'envio',
+        telefone: destino,
+        ...(base.dup?.telefone && !mesmoTelefone(destino, base.dup.telefone) ? { de: base.dup.telefone } : {}),
+        chip: usado.nome,
+        link: doc.link,
+      }),
     });
     try {
       await gravarNotaNoCard(
@@ -557,4 +585,174 @@ export async function duplicatasDasVendas(vendaIds) {
   if (!vendaIds?.length) return new Map();
   const { data } = await supabase.from('faturamento_duplicatas').select('*').in('venda_id', vendaIds);
   return new Map((data || []).map((d) => [d.venda_id, d]));
+}
+
+// ─── tela Transações: ver, baixar, reenviar e trocar o telefone ──────────────
+// (Yago, 24/11/2026) Qualquer usuário que enxerga a transação vê a situação,
+// baixa o documento e reenvia para o MESMO número; mandar para OUTRO número é
+// só do owner (a rota confere) — e o número novo passa a ser o da duplicata.
+const ROTULO_STATUS = { enviando: 'Enviando', enviada: 'Aguardando assinatura', assinada: 'Assinada', erro: 'Não enviada', cancelada: 'Cancelada' };
+
+function resumoDaDuplicata(base) {
+  const dup = base.dup || null;
+  const aplicavel = !!base.nota && temBoleto(base.venda, base.pagamentos);
+  if (!aplicavel && !dup) return null;
+  return {
+    aplicavel,
+    status: dup?.status || 'pendente',
+    statusNome: dup ? ROTULO_STATUS[dup.status] || dup.status : 'Ainda não enviada',
+    assinada: dup?.status === 'assinada',
+    nf: dup?.nf_numero ?? base.nota?.numero ?? null,
+    telefone: dup?.telefone || null,
+    link: dup?.link || null,
+    enviadaEm: dup?.enviada_em || null,
+    enviadaPor: dup?.criado_por || null,
+    chip: dup?.chip || null,
+    assinadaEm: dup?.assinada_em || null,
+    temAssinado: !!dup?.assinada_url,
+    erro: dup?.erro || null,
+    atualizadoEm: dup?.atualizado_em || null,
+    historico: (Array.isArray(dup?.historico) ? dup.historico : []).slice().reverse(),
+  };
+}
+
+/** Situação da duplicata da venda para a tela (null = venda sem boleto). `conferir` consulta a assinatura agora. */
+export async function situacaoDaDuplicata(vendaId, { conferir = false } = {}) {
+  let base = await carregar(vendaId);
+  if (conferir && base.dup?.status === 'enviada' && base.dup.doc_id) {
+    await conferirAssinaturas({ vendaId });
+    base = await carregar(vendaId);
+  }
+  return resumoDaDuplicata(base);
+}
+
+// mesmo telefone do cliente, com ou sem o 55 e com ou sem o 9 do celular (DDD + 8 últimos dígitos)
+function mesmoTelefone(a, b) {
+  const n = (x) => {
+    let d = so(x);
+    if (d.length >= 12 && d.startsWith('55')) d = d.slice(2);
+    return d.length >= 10 ? `${d.slice(0, 2)}${d.slice(-8)}` : d;
+  };
+  return !!so(a) && n(a) === n(b);
+}
+
+// telefone digitado na tela → só dígitos, com o 55
+function telefoneInformado(t) {
+  let n = so(t);
+  if (n.length === 10 || n.length === 11) n = `55${n}`;
+  if (n.length < 12 || n.length > 13 || !n.startsWith('55')) throw new DuplicataError('Informe o WhatsApp com DDD (ex.: 84 99999-9999)', 'TELEFONE_INVALIDO');
+  return n;
+}
+
+/**
+ * Reenvia a duplicata. Sem `telefone`: a mesma mensagem (mesmo link de assinatura)
+ * para o número em que ela já está. Com `telefone` diferente: documento NOVO para
+ * o número informado, que passa a ser o da duplicata (só owner — a rota confere).
+ * Nada muda no que já foi enviado se o número não tiver WhatsApp ou o envio falhar.
+ */
+export async function reenviarDuplicata(vendaId, { por = null, telefone = null } = {}) {
+  const novoNumero = telefone ? telefoneInformado(telefone) : null;
+  let base = await carregar(vendaId);
+  if (!base.nota) throw new DuplicataError('A NF-e ainda não foi autorizada', 'SEM_NOTA');
+  if (!temBoleto(base.venda, base.pagamentos)) throw new DuplicataError('Esta venda não tem boleto — não há duplicata', 'SEM_BOLETO');
+  if (base.dup?.status === 'assinada') throw new DuplicataError('A duplicata desta venda já foi assinada', 'JA_ASSINADA', 409);
+  // ainda não saiu (ou saiu com erro): é o envio normal, para o número informado ou o do pedido
+  if (!base.dup || base.dup.status !== 'enviada' || !base.dup.link) {
+    const r = await enviarDuplicata(vendaId, { por, telefone: novoNumero });
+    if (r.emAndamento) throw new DuplicataError('A duplicata já está sendo enviada — aguarde um instante', 'EM_ANDAMENTO', 409);
+    return { ...r, duplicata: await situacaoDaDuplicata(vendaId) };
+  }
+  // o cliente pode ter assinado depois da última conferência
+  await conferirAssinaturas({ vendaId });
+  base = await carregar(vendaId);
+  if (base.dup?.status === 'assinada') throw new DuplicataError('O cliente já assinou a duplicata — não há o que reenviar', 'JA_ASSINADA', 409);
+
+  const chips = await chipsDaDuplicata();
+  if (!chips.length) throw new DuplicataError('WhatsApp da duplicata desconectado: nenhum dos números de envio está conectado agora', 'WHATSAPP_NAO_CONFIGURADO', 503);
+  const alvo = novoNumero || base.dup.telefone;
+  const destino = await jidValido(alvo, chips);
+  if (destino === undefined) throw new DuplicataError('Nenhum chip respondeu à conferência do número', 'WHATSAPP_FORA', 503);
+  if (!destino) throw new DuplicataError(`O número ${alvo} não tem WhatsApp — confira o telefone`, 'NUMERO_SEM_WHATSAPP');
+
+  // outro número: documento novo, com o telefone certo no registro da assinatura
+  if (!mesmoTelefone(destino, base.dup.telefone)) {
+    const r = await enviarDuplicata(vendaId, { por, forcar: true, telefone: destino });
+    return { ...r, outroTelefone: true, duplicata: await situacaoDaDuplicata(vendaId) };
+  }
+
+  // mesmo número: a mesma mensagem, com o mesmo link
+  const dados = await dadosDaDuplicata(vendaId);
+  const texto = textoDaDuplicata(dados, base.dup.link);
+  let usado = null;
+  let mensagemId = null;
+  let erroEnvio = null;
+  for (const chip of chips) {
+    try {
+      const r = await uaz(chip, '/send/text', { number: destino, text: texto });
+      mensagemId = r?.messageid || r?.id || null;
+      usado = chip;
+      break;
+    } catch (e) {
+      erroEnvio = String(e.response?.data?.error || e.response?.data?.message || e.message).slice(0, 110);
+    }
+  }
+  if (!usado) throw new DuplicataError(`A mensagem não saiu pelo WhatsApp: ${erroEnvio || 'sem chip'}`, 'WHATSAPP_NAO_ENVIOU', 502);
+  await gravar(vendaId, { chip: usado.nome, mensagem_id: mensagemId, mensagem: texto, historico: comHistorico(base.dup, { por, tipo: 'reenvio', telefone: destino, chip: usado.nome, link: base.dup.link }) });
+  console.log(`🔁 [duplicata] venda ${vendaId} NF ${base.nota.numero}: reenviada para ${destino} pelo ${usado.nome}${por ? ` (${por})` : ''}`);
+  return { reenviada: true, link: base.dup.link, telefone: destino, chip: usado.nome, duplicata: await situacaoDaDuplicata(vendaId) };
+}
+
+// arquivos do documento no Autentique: { original, signed } (URLs) ou null
+async function autentiqueArquivos(docId) {
+  const { url, chave } = autentiqueCredenciais();
+  if (!chave || !docId) return null;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${chave}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: 'query($id: UUID!){ document(id: $id){ files { original signed } } }', variables: { id: docId } }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!r.ok) return null;
+  const j = await r.json().catch(() => ({}));
+  return j.data?.document?.files || null;
+}
+
+async function baixarPdf(link) {
+  const { chave } = autentiqueCredenciais();
+  for (const headers of [{}, chave ? { Authorization: `Bearer ${chave}` } : null]) {
+    if (!headers) continue;
+    try {
+      const r = await fetch(link, { headers, signal: AbortSignal.timeout(90000) });
+      if (!r.ok) continue;
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.subarray(0, 5).toString('latin1') === '%PDF-') return buf;
+    } catch {
+      /* tenta a próxima forma */
+    }
+  }
+  return null;
+}
+
+/**
+ * PDF da duplicata para ver/baixar: o ASSINADO quando o cliente já assinou; senão o
+ * documento que foi enviado (o do Autentique); na falta dele, o documento montado agora.
+ * Devolve { pdf, nome, assinado, origem }.
+ */
+export async function arquivoDaDuplicata(vendaId) {
+  const base = await carregar(vendaId);
+  const nf = base.dup?.nf_numero ?? base.nota?.numero ?? vendaId;
+  if (base.dup?.doc_id) {
+    const arq = await autentiqueArquivos(base.dup.doc_id).catch(() => null);
+    const assinado = base.dup.status === 'assinada' ? arq?.signed || base.dup.assinada_url : null;
+    if (assinado) {
+      const pdf = await baixarPdf(assinado);
+      if (pdf) return { pdf, nome: `duplicata-nf-${nf}-assinada.pdf`, assinado: true, origem: 'autentique' };
+    }
+    if (arq?.original) {
+      const pdf = await baixarPdf(arq.original);
+      if (pdf) return { pdf, nome: `duplicata-nf-${nf}.pdf`, assinado: false, origem: 'autentique' };
+    }
+  }
+  const dados = await dadosDaDuplicata(vendaId);
+  return { pdf: await pdfDaDuplicata(dados), nome: `duplicata-nf-${dados.nf}.pdf`, assinado: false, origem: 'gerado' };
 }

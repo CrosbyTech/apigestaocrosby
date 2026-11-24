@@ -34,6 +34,9 @@ const DUPLICATE = {
     f('signedDocumentUrl', 'assinada_url', 'string', 'Documento assinado.'),
     f('senderName', 'chip', 'string', 'Número de WhatsApp que enviou.'),
     f('createdBy', 'criado_por', 'string', 'Quem disparou.'),
+    f('sendHistory', 'historico', 'array', 'Histórico de envios, do mais antigo ao mais novo: envio, reenvio (mesmo link), novo_documento, outro_telefone (número trocado pelo owner na tela Transações) e falha.', {
+      items: { type: 'object', additionalProperties: true, description: 'Evento do histórico (chaves em português, como gravado: em, por, tipo, telefone, de, chip, link, erro).' },
+    }),
     f('createdDate', 'criado_em', 'date-time', 'Criação do registro.'),
     f('lastChangeDate', 'atualizado_em', 'date-time', 'Última alteração.'),
   ],
