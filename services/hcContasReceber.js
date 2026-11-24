@@ -257,6 +257,11 @@ export function montarTitulos(venda, cfg, extra = {}) {
           parcela,
           vencimento: ehData(String(x.vencimento || '').slice(0, 10)) ? String(x.vencimento).slice(0, 10) : maisDias(emissao, 30),
           valor: v,
+          // boleto não tem taxa nem baixa na emissão — os campos vão explícitos porque, na venda
+          // com boleto + outra forma, o insert em lote gravaria NULL no que faltasse (RV1623)
+          taxa_pct: 0,
+          taxa_valor: 0,
+          valor_pago: 0,
           valor_liquido: v,
           situacao: 'aberto',
           precisa_conciliar: false,
@@ -333,7 +338,8 @@ export async function gerarTitulosDaVenda(vendaId, { cfg } = {}) {
   }
   const linhas = montarTitulos(venda, config, { dataCaixa });
   if (!linhas.length) return { acao: 'nada', motivo: 'sem pagamento que gere título' };
-  const { error } = await supabase.from('hc_cr_titulos').insert(linhas);
+  // defaultToNull: false → campo que uma linha não traz fica com o padrão da coluna, não NULL
+  const { error } = await supabase.from('hc_cr_titulos').insert(linhas, { defaultToNull: false });
   if (error) {
     if (/duplicate key|hc_cr_titulos_fatura_parcela/i.test(error.message)) return { acao: 'nada', motivo: 'já tem títulos' };
     throw falhaDb(error);
