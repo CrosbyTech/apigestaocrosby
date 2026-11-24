@@ -591,6 +591,52 @@ async function fonteLiberacao({ de, ate }) {
 // TOTVS…), sem janela de data: o Pix pode sair muito antes ou depois do
 // vencimento; a distância só pesa na pontuação. Fica de fora só o que já foi
 // pago (pago_em ou Liberação PAGO), rejeitado ou cancelado.
+// Contas a Pagar do HEADCOACH (hc_cp_titulos) — desde 23/11/2026 as solicitações
+// aprovadas vão para ele, não mais para o TOTVS (Titia, 24/11/2026). Em aberto e
+// pagos; o vencimento (ou a data do pagamento) pesa na pontuação.
+const SITUACOES_HC_CP = ['aberto', 'pago'];
+const candidatoHcCp = (t) => {
+  const pago = t.situacao === 'pago';
+  const abatido = round2(Number(t.valor_pago || 0) - Number(t.juros || 0) - Number(t.multa || 0) + Number(t.desconto || 0));
+  return {
+    origem: 'HC_CP',
+    id: String(t.id),
+    valor: round2(Number(t.valor)),
+    valorDuplicata: round2(Number(t.valor)),
+    valorPago: pago && t.valor_pago ? round2(Number(t.valor_pago)) : null,
+    data: t.data_pagamento || t.vencimento || null,
+    semDataPagamento: !t.data_pagamento,
+    vencimento: t.vencimento || null,
+    emissao: t.emissao || null,
+    nome: t.fornecedor_nome || null,
+    doc: soDigitos(t.fornecedor_cpf_cnpj) || null,
+    branch: Number(t.empresa),
+    empresa: `Empresa ${t.empresa}`,
+    duplicata: `${t.duplicata}|${t.parcela}`,
+    detalhe: [t.despesa_nome, `dup ${t.duplicata}/${t.parcela}`, t.documento_fiscal ? `doc ${t.documento_fiscal}` : null, pago ? `pago ${String(t.data_pagamento || '').slice(0, 10)}` : abatido > 0.005 ? `parcial (falta ${round2(Number(t.valor) - abatido).toFixed(2)})` : 'em aberto', 'Contas a Pagar HeadCoach'].filter(Boolean).join(' · '),
+    pago,
+  };
+};
+async function fonteHcCp({ de, ate }) {
+  const ini = addDias(de, -60);
+  const fim = addDias(ate, 60);
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase
+      .from('hc_cp_titulos')
+      .select('id,empresa,fornecedor_nome,fornecedor_cpf_cnpj,documento_fiscal,duplicata,parcela,despesa_nome,emissao,vencimento,valor,situacao,data_pagamento,valor_pago,juros,multa,desconto')
+      .in('situacao', SITUACOES_HC_CP)
+      .gte('vencimento', ini)
+      .lte('vencimento', fim)
+      .order('id')
+      .range(from, from + 999);
+    if (error) throw new Error(`hc_cp_titulos: ${error.message}`);
+    out.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return out.map(candidatoHcCp);
+}
+
 async function fonteSolicitacoes() {
   const { data, error } = await supabase
     .from(T.sol)
@@ -794,7 +840,7 @@ const porDataDesc = (campo) => (a, b) => String(b[campo] || '').localeCompare(St
 export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax, fontes, lancamentoId } = {}) {
   const avisos = [];
   // onde procurar: contas a pagar do TOTVS, Liberação de Pagamento e/ou Solicitações Crosby (padrão: as três)
-  const fontesSel = new Set(String(fontes || 'totvs,liberacao,solicitacoes').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean));
+  const fontesSel = new Set(String(fontes || 'totvs,headcoach,liberacao,solicitacoes').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean));
   if (!fontesSel.size) throw new Error('Escolha pelo menos uma fonte (Contas a Pagar, Liberação ou Solicitações).');
   const f = filtrosBuscaManual({ numero: duplicata, pessoa: fornecedor, codigo, cnpj, nome, tipoData, de, ate, emissaoDe, emissaoAte, status, valorMin, valorMax });
   if (!f.temAlgo) throw new Error('Informe pelo menos um filtro (duplicata, fornecedor, período ou valor).');
@@ -1000,6 +1046,35 @@ export async function buscarContasPagar({ duplicata, fornecedor, codigo, cnpj, n
     } catch (e) {
       avisos.push(`Contas a Pagar TOTVS: ${e.message}`);
     }
+  }
+
+  // ── Contas a Pagar do HeadCoach (Titia, 24/11/2026)
+  if (fontesSel.has('headcoach')) try {
+    let qh = supabase
+      .from('hc_cp_titulos')
+      .select('id,empresa,fornecedor_code,fornecedor_nome,fornecedor_cpf_cnpj,documento_fiscal,duplicata,parcela,despesa_nome,emissao,vencimento,valor,situacao,data_pagamento,valor_pago,juros,multa,desconto')
+      .neq('situacao', 'cancelado')
+      .limit(300);
+    if (f.duplicata) {
+      const num = parseInt(String(f.duplicata), 10);
+      qh = Number.isFinite(num) ? qh.or(`duplicata.eq.${num},documento_fiscal.ilike.%${String(f.duplicata).replace(/[%,()]/g, '')}%`) : qh.ilike('documento_fiscal', `%${String(f.duplicata).replace(/[%,()]/g, '')}%`);
+    }
+    if (nomeRe) qh = qh.ilike('fornecedor_nome', `%${nomeRe}%`);
+    if (docFornecedor) qh = qh.eq('fornecedor_cpf_cnpj', docFornecedor);
+    if (codigoFornecedor != null) qh = qh.eq('fornecedor_code', codigoFornecedor);
+    if (f.de) qh = qh.gte('vencimento', f.de);
+    if (f.ate) qh = qh.lte('vencimento', f.ate);
+    if (f.emissaoDe) qh = qh.gte('emissao', f.emissaoDe);
+    if (f.emissaoAte) qh = qh.lte('emissao', f.emissaoAte);
+    if (f.pagamentoDe) qh = qh.gte('data_pagamento', f.pagamentoDe);
+    if (f.pagamentoAte) qh = qh.lte('data_pagamento', f.pagamentoAte);
+    if (f.valorMin != null) qh = qh.gte('valor', f.valorMin);
+    if (f.valorMax != null) qh = qh.lte('valor', f.valorMax);
+    const { data, error } = await qh;
+    if (error) throw new Error(error.message);
+    for (const t of data || []) out.push({ ...candidatoHcCp(t), data: t.data_pagamento || null });
+  } catch (e) {
+    avisos.push(`Contas a Pagar HeadCoach: ${e.message}`);
   }
 
   // ── Liberação de Pagamento (qualquer status) e Solicitações, com os mesmos filtros
@@ -1707,7 +1782,7 @@ function pontuar(l, c, usado = 0) {
  */
 export function candidatosPara(l, fontes, usados = new Map()) {
   const lista = [];
-  for (const f of [fontes.liberacao, fontes.totvs, fontes.solicitacoes]) {
+  for (const f of [fontes.liberacao, fontes.totvs, fontes.hcCp, fontes.solicitacoes]) {
     for (const c of f || []) {
       const usado = usados.get(`${c.origem}:${c.id}`) || 0;
       const p = pontuar(l, c, usado);
@@ -1738,10 +1813,11 @@ const janelaMensal = ({ de, ate }) => {
 export async function carregarFontes({ de, ate }) {
   const janela = janelaMensal({ de, ate });
   const avisos = [];
-  const [liberacao, todasSol, totvs] = await Promise.all([
+  const [liberacao, todasSol, totvs, hcCp] = await Promise.all([
     fonteLiberacao(janela).catch((e) => (avisos.push(`Liberação de Pagamento: ${e.message}`), [])),
     fonteSolicitacoes().catch((e) => (avisos.push(`Solicitações Crosby: ${e.message}`), [])),
     fonteTotvs(janela).catch((e) => (avisos.push(`Contas a Pagar TOTVS: ${e.message}`), [])),
+    fonteHcCp(janela).catch((e) => (avisos.push(`Contas a Pagar HeadCoach: ${e.message}`), [])),
   ]);
   // solicitação já paga pela Liberação (em qualquer data) não concorre com ela
   const pagasPorSol = new Set(liberacao.map((l) => l.solicitacaoId).filter(Boolean));
@@ -1751,7 +1827,7 @@ export async function carregarFontes({ de, ate }) {
     for (const r of data || []) if (r.dados_completos?.solicitacao_id) pagasPorSol.add(r.dados_completos.solicitacao_id);
   }
   const solicitacoes = todasSol.filter((x) => !pagasPorSol.has(x.id));
-  return { liberacao, solicitacoes, totvs, avisos, janela };
+  return { liberacao, solicitacoes, totvs, hcCp, avisos, janela };
 }
 
 // quanto de cada pagamento já foi usado por outras conciliações: uma duplicata
@@ -1801,7 +1877,7 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
       throw new Error(`${r?.nm_fornecedor ? `${r.nm_fornecedor}: ` : ''}${faltam.values().next().value}.`);
     }
   }
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'HC_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
     const pessoa = PESSOAS_PRO_LABORE.find((p) => p.id === referencia?.pessoaId) || PESSOAS_PRO_LABORE.find((p) => p.cpf === soDigitos(referencia?.cpf));
@@ -2023,6 +2099,14 @@ export async function empresaDespesaDeItens(itens) {
   for (let k = 0; k < sols.length; k += 200) {
     const { data } = await supabase.from(T.sol).select('id,cd_empresa,nm_empresa,despesa_code').in('id', sols.slice(k, k + 200));
     for (const x of data || []) out.set(`SOLICITACAO:${x.id}`, { ...emp(x.cd_empresa, x.nm_empresa || null), despesa: x.despesa_code ? String(x.despesa_code) : null, despesaCodigo: x.despesa_code || null });
+  }
+  const hcIds = [...new Set(itens.filter((i) => i.origem === 'HC_CP').map((i) => Number(i.id)).filter(Boolean))];
+  for (let k = 0; k < hcIds.length; k += 200) {
+    const { data } = await supabase.from('hc_cp_titulos').select('id,empresa,despesa_code,despesa_nome,rateio').in('id', hcIds.slice(k, k + 200));
+    for (const t of data || []) {
+      const linhas = Array.isArray(t.rateio) && t.rateio.length ? t.rateio : [{ despesa_code: t.despesa_code, despesa_nome: t.despesa_nome }];
+      out.set(`HC_CP:${t.id}`, { ...emp(t.empresa, null), despesa: [...new Set(linhas.map((r) => `${r.despesa_code} ${r.despesa_nome || ''}`.trim()))].join(' / '), despesaCodigo: t.despesa_code || null });
+    }
   }
   for (const i of itens.filter((x) => x.origem === 'TOTVS_CR')) {
     const b = String(i.id).split('|')[0];
