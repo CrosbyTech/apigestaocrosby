@@ -35,7 +35,6 @@ import stoneBotRoutes from './routes/stoneBot.routes.js';
 import solicitacoesPatrimonioRoutes from './routes/solicitacoesPatrimonio.routes.js';
 import { iniciarJobPagarmeSaldo } from './jobs/pagarme-saldo.job.js';
 import { iniciarVevetoBot } from './services/vevetoBot.js';
-import { iniciarRelatorioSaldos } from './services/relatorioSaldosWhatsapp.js';
 import { iniciarJobConciliacaoAprovados } from './jobs/conciliacao-aprovados.job.js';
 import fluxoCaixaExtRoutes, { routerDrYgor as drYgorExtratosRoutes } from './routes/fluxoCaixaExt.routes.js';
 import novoExtratoRoutes from './routes/novoExtrato.routes.js';
@@ -344,7 +343,6 @@ app.listen(PORT, async () => {
   iniciarJobConversaoTemplate();
   iniciarJobProvisaoLiberacao();
   iniciarJobPagarmeSaldo();
-  iniciarRelatorioSaldos(); // saldos + programação no grupo CONTAS A PAGAR CROSBY OFC (fallback 09:50/14:20/18:20)
   iniciarJobConciliacaoAprovados(); // 09:50 — marca PAGO os APROVADOS que saíram ontem (Stone/Sicredi)
   iniciarVevetoBot().catch((e) => console.warn(`[veveto] falha ao iniciar: ${e.message}`)); // VEVETO — saldos/programação p/ o CEO Fábio
   iniciarJobBoletoCobranca();

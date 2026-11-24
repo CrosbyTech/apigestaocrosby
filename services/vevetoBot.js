@@ -3,8 +3,8 @@
 // "CONTAS A PAGAR CROSBY OFC". Atende o CEO Fábio Ferreira (+55 84 8782-0986).
 //
 // O que ele faz (núcleo em services/agenteWhatsapp.js):
-//  - 3x ao dia o HeadCoach manda no grupo o print dos saldos + a programação
-//    da semana (services/relatorioSaldosWhatsapp.js), marcando o Fábio;
+//  - (o relatório automático 3x ao dia — saldos + previsão — foi removido em
+//    24/11/2026 a pedido do Yago; virá um novo com a Liberação do HeadCoach);
 //  - responde quando chamado ("veveto") ou em resposta a ele, com os saldos e a
 //    programação atuais (contextoExtra);
 //  - o Fábio (e o Yago) podem pedir para INCLUIR itens na programação
@@ -20,7 +20,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import supabase from '../config/supabase.js';
 import { criarAgente } from './agenteWhatsapp.js';
-import { montarDados, textoProgramacao, enviarRelatorio } from './relatorioSaldosWhatsapp.js';
+import { montarDados } from './relatorioSaldosWhatsapp.js';
 import { getAIConfig, chatCompletion } from '../utils/aiProvider.js';
 
 const FABIO = '558487820986';
@@ -189,4 +189,3 @@ export const processarMensagem = veveto.processarMensagem;
 export const gerarResposta = veveto.gerarResposta;
 export const statusVeveto = veveto.status;
 export const provedorAtual = veveto.provedorAtual;
-export { enviarRelatorio, textoProgramacao };

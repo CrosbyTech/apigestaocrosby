@@ -32,7 +32,6 @@ import { requireAuth } from '../middlewares/auth.js';
 import bot from '../services/stoneBot.js';
 import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { salvarComprovante } from '../services/comprovantesStone.js';
-import { enviarRelatorio, statusRelatorio, testarImagem } from '../services/relatorioSaldosWhatsapp.js';
 import { conciliarAprovados } from '../services/conciliacaoAprovados.js';
 import { enfileirar, proximaInclusao, registrarResultado } from '../services/stoneInclusoes.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
@@ -139,21 +138,7 @@ tela.get(
   }),
 );
 
-// Relatório de saldos no WhatsApp (grupo CONTAS A PAGAR CROSBY OFC) — manda agora
-tela.get(
-  '/relatorio-whatsapp',
-  asyncHandler(async (req, res) => successResponse(res, statusRelatorio())),
-);
-tela.post(
-  '/relatorio-whatsapp',
-  asyncHandler(async (req, res) => {
-    try {
-      return successResponse(res, await enviarRelatorio({ motivo: `manual por ${req.user?.email || 'tela'}`, soTexto: !!req.body?.soTexto }), 'Relatório enviado no grupo');
-    } catch (e) {
-      return tratar(res, e);
-    }
-  }),
-);
+// (o relatório de saldos no WhatsApp foi removido em 24/11/2026)
 
 // Conciliação dos APROVADOS × extrato → marca PAGO (banco + data)
 tela.get(
@@ -394,23 +379,6 @@ agente.post(
   }),
 );
 
-// diagnóstico: gera a imagem do relatório no servidor sem enviar
-agente.get(
-  '/relatorio-whatsapp/imagem',
-  asyncHandler(async (req, res) => successResponse(res, await testarImagem())),
-);
-
-// o bot (ou um teste) pede o envio do relatório de saldos no WhatsApp
-agente.post(
-  '/relatorio-whatsapp',
-  asyncHandler(async (req, res) => {
-    try {
-      return successResponse(res, await enviarRelatorio({ motivo: req.body?.motivo || 'agente', soTexto: !!req.body?.soTexto, soImagem: !!req.body?.soImagem }));
-    } catch (e) {
-      return tratar(res, e);
-    }
-  }),
-);
 
 agente.post(
   '/execucoes/:id/finalizar',

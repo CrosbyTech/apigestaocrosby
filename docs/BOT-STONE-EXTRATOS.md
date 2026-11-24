@@ -133,15 +133,15 @@ manda o ping com `sessao_ok`. Depois de uma execução o contador reinicia.
 - Bot Stone no PC: `config.json → horarios: ["09:30","14:00","18:00"]`
   (substitui `horarioDiario`; o agente precisa ser reiniciado para ler).
 - Pagar.me no servidor 10 min antes: `PAGARME_SALDO_CRON="20 9 * * *;50 13 * * *;50 17 * * *"`.
-- `services/relatorioSaldosWhatsapp.js`: ao fim de cada execução AGENDADA do
-  bot (`finalizarExecucao`) manda no grupo **CONTAS A PAGAR CROSBY OFC** (pela
-  instância CONTAS A PAGAR, chatid achado pelo nome via `GET /group/list`) uma
-  imagem do card "Saldo Bancário" (HTML → puppeteer → PNG: total, chips por
-  banco, Stone por final de CNPJ com antecipável, Pagar.me disponível/a receber,
-  total da programação) com legenda marcando o Fábio (`mentions=558487820986`),
-  e um texto com a programação da semana (seg–dom) = títulos em PROVISÃO na
-  Liberação (fornecedor · valor · vencimento). Fallback por cron 09:50/14:20/18:20
-  se o PC não rodou. Manual: `POST /api/stone-bot/relatorio-whatsapp`.
+- **Relatório automático no WhatsApp: REMOVIDO em 24/11/2026** (pedido do Yago).
+  Até então, ao fim de cada execução agendada do bot (e por cron às
+  09:50/14:20/18:20) o servidor mandava no grupo **CONTAS A PAGAR CROSBY OFC** a
+  imagem do saldo bancário + a previsão de pagamentos (títulos em PROVISÃO na
+  Liberação antiga), marcando o Fábio. Saíram o agendamento, o disparo em
+  `finalizarExecucao` e as rotas `/api/stone-bot/relatorio-whatsapp`. Um novo
+  relatório será feito em cima da Liberação de Pagamento do HeadCoach.
+  `services/relatorioSaldosWhatsapp.js` ficou só com o grupo/menção (usados na
+  inclusão de pagamentos na Stone) e com `montarDados` (lido pelo VEVETO).
 - `services/vevetoBot.js`: agente **VEVETO** no mesmo grupo (chamado por "veveto"
   ou em resposta a ele). Autorizadores: Fábio (558487820986) e Yago. Recebe os
   dados vivos (saldos, antecipação, Pagar.me, programação) em cada resposta.
