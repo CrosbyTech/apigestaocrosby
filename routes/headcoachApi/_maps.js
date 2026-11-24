@@ -33,7 +33,7 @@ export const TRANSACTION_INTERNAL_STATUS = { registrada: 'Registered', emitindo:
 // troca de vendedor: onde está a transação (pdv_vendas ou devolucoes_transacoes)
 export const SELLER_CHANGE_SOURCE = { venda: 'Sale', devolucao: 'Return' };
 export const SALE_TYPE = { nfce: 'NFCe', nfe: 'NFe', troca: 'Exchange' };
-export const CHANNEL = { revenda: 'Reseller', franquias: 'Franchise', varejo: 'Retail', mtm: 'Multibrand', transferencia: 'Transfer', devolucao: 'Return', geral: 'General' };
+export const CHANNEL = { revenda: 'Reseller', franquias: 'Franchise', varejo: 'Retail', mtm: 'Multibrand', transferencia: 'Transfer', devolucao: 'Return', geral: 'General', bonificacao: 'Bonification' };
 
 export const INVOICE_STATUS = { autorizada: 'Authorized', cancelada: 'Canceled', rejeitada: 'Rejected', erro: 'Error', pendente: 'Pending', emitindo: 'Issuing', denegada: 'Denied' };
 export const ENVIRONMENT = { 1: 'Production', 2: 'Homologation' };

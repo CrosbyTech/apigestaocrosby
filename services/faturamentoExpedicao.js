@@ -40,6 +40,7 @@ import {
   tiposFiscais,
   cenarioExpedicao,
   cfopExpedicao,
+  cfopBonificacao,
   ICMS_DIFAL_UF_CONFERIDA,
   desoneracaoSuframa,
 } from './pdvFiscal.js';
@@ -69,6 +70,15 @@ export const DESCONTO_OPERADOR_MAXIMO = 15;
 
 // Documento interno no TOTVS (saída, financeira, modelo 35) por canal
 export const OPERACAO_DOC_INTERNO = { varejo: 511, franquias: 7807, mtm: 7808, revenda: 7809 };
+// BONIFICAÇÃO (Yago, 23/11/2026): peças que o marketing dá a clientes TOP, sem custo para
+// eles. É a operação 5910 ("5910 - REMESSA DE BONIFICACAO" do TOTVS), escolhida no campo
+// Operação do faturamento AVULSO. A nota sai pelo HeadCoach com cada peça no custo
+// MÉDIO S/ IMPOSTO do TOTVS (custo 3 — é o valor das operações de bonificação a custo:
+// 7263, 9026, 9033), sem pagamento e sem contas a receber, e a JUSTIFICATIVA é obrigatória.
+export const OPERACAO_BONIFICACAO = 5910;
+export const CANAL_BONIFICACAO = 'bonificacao';
+export const CUSTO_BONIFICACAO = { code: 3, nome: 'MÉDIO S/ IMPOSTO' };
+export const JUSTIFICATIVA_BONIFICACAO_MINIMO = 15;
 // Operação "oficial" de referência (só informativa na venda do HeadCoach)
 const OPERACAO_VENDA = { varejo: 545, franquias: 7234, mtm: 7235, revenda: 7236 };
 
@@ -415,7 +425,38 @@ export async function prepararFaturamento(chave) {
 }
 
 // CFOP de cada item para a tela (antes de emitir)
-export async function previaFiscal({ clienteCode, consumidorFinal = false, itens }) {
+/**
+ * Custo MÉDIO S/ IMPOSTO (custo 3 do TOTVS) de cada produto na empresa do faturamento —
+ * é o valor com que a peça sai na nota de BONIFICAÇÃO. → Map(código → custo); produto sem
+ * custo cadastrado (ou com custo zero) não entra no mapa.
+ */
+export async function custosBonificacao(codigos, empresa = EMPRESA_FATURAMENTO) {
+  const lista = [...new Set((codigos || []).map((c) => Number(c)).filter((c) => c > 0))];
+  const out = new Map();
+  for (let i = 0; i < lista.length; i += 100) {
+    let pagina = 1;
+    for (;;) {
+      let r;
+      try {
+        r = await callTotvs('post', `${TOTVS_BASE_URL}/product/v2/costs/search`, {
+          data: { filter: { productCodeList: lista.slice(i, i + 100) }, option: { costs: [{ branchCode: Number(empresa), costCodeList: [CUSTO_BONIFICACAO.code] }] }, page: pagina, pageSize: 200 },
+        });
+      } catch (e) {
+        const d = e.response?.data;
+        throw new FaturamentoError(`Não consegui ler o custo das peças: ${Array.isArray(d) ? d.map((x) => x.message).join('; ') : d?.message || e.message}`, 'CUSTO_INDISPONIVEL', 502);
+      }
+      for (const it of r.data?.items || []) {
+        const c = (it.costs || []).find((x) => Number(x.costCode) === CUSTO_BONIFICACAO.code && Number(x.branchCode) === Number(empresa));
+        if (c && Number(c.cost) > 0) out.set(Number(it.productCode), Number(c.cost));
+      }
+      if (!r.data?.hasNext) break;
+      pagina += 1;
+    }
+  }
+  return out;
+}
+
+export async function previaFiscal({ clienteCode, consumidorFinal = false, itens, bonificacao = false }) {
   const emit = await buscarEmitente(EMPRESA_FATURAMENTO);
   const cliente = clienteCode ? await buscarClienteFiscal(clienteCode) : null;
   if (!cliente) throw new FaturamentoError('Cliente não encontrado no TOTVS', 'CLIENTE');
@@ -428,7 +469,7 @@ export async function previaFiscal({ clienteCode, consumidorFinal = false, itens
     aliqDifal: cen.difal ? ICMS_DIFAL_UF_CONFERIDA[cen.destUf] ?? null : null,
     itens: (itens || []).map((i) => {
       const tipo = tipos.get(Number(i.productCode)) || 'producao';
-      return { productCode: i.productCode, tipo, cfop: cfopExpedicao(cen.chave, tipo) };
+      return { productCode: i.productCode, tipo, cfop: bonificacao ? cfopBonificacao(cen.chave) : cfopExpedicao(cen.chave, tipo) };
     }),
   };
 }
@@ -482,25 +523,48 @@ export async function faturar(body) {
   } else if (b.trocaCliente?.liberadoPor && b.clientePedido && Number(b.clienteCode) !== Number(b.clientePedido)) {
     clienteTrocado = { de: Number(b.clientePedido), para: Number(b.clienteCode), liberadoPor: String(b.trocaCliente.liberadoPor).slice(0, 120) };
   }
+  // BONIFICAÇÃO: operação 5910, só no faturamento avulso e com a justificativa de quem fez
+  const bonificacao = Number(b.operacaoDocInterno) === OPERACAO_BONIFICACAO;
+  let justificativaBonificacao = null;
+  if (bonificacao) {
+    if (!avulso) throw new FaturamentoError('A bonificação é feita pelo faturamento avulso (sem pedido), não em cima de um pedido', 'BONIFICACAO_SO_AVULSO');
+    justificativaBonificacao = String(b.bonificacao?.justificativa || '').replace(/\s+/g, ' ').trim();
+    if (justificativaBonificacao.length < JUSTIFICATIVA_BONIFICACAO_MINIMO) {
+      throw new FaturamentoError(`Escreva a justificativa da bonificação (pelo menos ${JUSTIFICATIVA_BONIFICACAO_MINIMO} letras): por que estas peças estão sendo dadas ao cliente`, 'JUSTIFICATIVA_OBRIGATORIA');
+    }
+  }
   // operação do documento interno: a escolhida na tela ou a do canal
-  const operacaoDocInterno = Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno)) ? Number(b.operacaoDocInterno) : OPERACAO_DOC_INTERNO[b.canal] || 511;
+  const operacaoDocInterno = bonificacao
+    ? OPERACAO_BONIFICACAO
+    : Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno))
+      ? Number(b.operacaoDocInterno)
+      : OPERACAO_DOC_INTERNO[b.canal] || 511;
   // canal da venda: o do pedido; no avulso, o da operação escolhida na tela
-  const canalVenda = b.canal || Object.keys(OPERACAO_DOC_INTERNO).find((k) => OPERACAO_DOC_INTERNO[k] === operacaoDocInterno) || null;
-  if (avulso && !Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno))) throw new FaturamentoError('Escolha a operação do documento interno');
+  const canalVenda = bonificacao ? CANAL_BONIFICACAO : b.canal || Object.keys(OPERACAO_DOC_INTERNO).find((k) => OPERACAO_DOC_INTERNO[k] === operacaoDocInterno) || null;
+  if (avulso && !bonificacao && !Object.values(OPERACAO_DOC_INTERNO).includes(Number(b.operacaoDocInterno))) throw new FaturamentoError('Escolha a operação do documento interno');
 
   // Itens + dados fiscais + produção/adquirido
   const emit = await buscarEmitente(empresa);
   const cliente = await buscarClienteFiscal(b.clienteCode);
   if (!cliente) throw new FaturamentoError(`Cliente ${b.clienteCode} não encontrado no TOTVS`, 'CLIENTE');
   const cen = cenarioExpedicao({ emitUf: emit.uf, cliente, consumidorFinal: !!b.consumidorFinal });
+  // bonificação: o valor de cada peça é o custo MÉDIO S/ IMPOSTO lido AGORA (o que a tela
+  // mandou não vale) e não há desconto
+  const custos = bonificacao ? await custosBonificacao(b.itens.map((it) => it.productCode), empresa) : null;
+  if (bonificacao) {
+    const semCusto = [...new Set(b.itens.map((it) => Number(it.productCode)).filter((c) => !(round2(custos.get(c)) > 0)))];
+    if (semCusto.length) {
+      throw new FaturamentoError(`Bonificação: ${semCusto.length === 1 ? 'a peça' : 'as peças'} ${semCusto.join(', ')} não ${semCusto.length === 1 ? 'tem' : 'têm'} custo ${CUSTO_BONIFICACAO.nome} cadastrado — sem o custo a nota não sai`, 'BONIFICACAO_SEM_CUSTO');
+    }
+  }
   const itens = [];
   let seq = 1;
   for (const it of b.itens) {
     const q = Number(it.quantidade);
-    const vUn = round2(it.valorUnit);
+    const vUn = bonificacao ? round2(custos.get(Number(it.productCode))) : round2(it.valorUnit);
     // desconto por unidade (rateio do desconto do pedido / Pix); a tela agrupa
     // as unidades por (preço, desconto), então q × desconto é exato
-    const dUn = round2(it.descontoUnit || 0);
+    const dUn = bonificacao ? 0 : round2(it.descontoUnit || 0);
     if (!(q > 0) || !(vUn > 0)) throw new FaturamentoError(`Item ${it.productCode}: quantidade/valor inválidos`);
     if (dUn < 0 || dUn >= vUn) throw new FaturamentoError(`Item ${it.productCode}: desconto inválido`);
     const pf = await buscarProdutoFiscal(it.productCode, empresa);
@@ -524,13 +588,13 @@ export async function faturar(body) {
   const tipos = await tiposFiscais(empresa, itens);
   for (const it of itens) {
     it.tipo_fiscal = tipos.get(it.product_code) || 'producao';
-    it.cfop = cfopExpedicao(cen.chave, it.tipo_fiscal);
+    it.cfop = bonificacao ? cfopBonificacao(cen.chave) : cfopExpedicao(cen.chave, it.tipo_fiscal);
   }
   const subtotal = round2(itens.reduce((s, i) => s + i.quantidade * i.valor_unit, 0));
   const descontoTotal = round2(itens.reduce((s, i) => s + i.quantidade * i.desconto_unit, 0));
   const liquido = round2(subtotal - descontoTotal);
   // SUFRAMA: o ICMS desonerado (12%) sai do total da nota — mesma conta da NF-e
-  const suframa = cen.suframa ? desoneracaoSuframa(itens, round2(b.transporte?.frete || 0)) : null;
+  const suframa = cen.suframa && !bonificacao ? desoneracaoSuframa(itens, round2(b.transporte?.frete || 0)) : null;
   if (suframa) {
     const importados = itens.filter((i) => ['1', '2', '3', '8'].includes(String(i.origem || '0')));
     if (importados.length) throw new FaturamentoError(`Cliente SUFRAMA: peça importada (${importados.map((i) => i.product_code).join(', ')}) não tem o benefício — fature esta pelo TOTVS`, 'SUFRAMA_IMPORTADO');
@@ -540,6 +604,7 @@ export async function faturar(body) {
   // Transporte
   const t = b.transporte || {};
   const frete = round2(t.frete || 0);
+  if (bonificacao && frete > 0) throw new FaturamentoError('Bonificação sai sem custo para o cliente: deixe o frete em zero', 'BONIFICACAO_COM_FRETE');
   let transporte = null;
   if (t.code) {
     const tr = await buscarTransportadora(t.code);
@@ -565,7 +630,8 @@ export async function faturar(body) {
 
   // Pagamentos (fecham com produtos + frete)
   const pagamentos = [];
-  for (const p of b.pagamentos || []) {
+  // bonificação não tem pagamento: o que vier da tela é ignorado
+  for (const p of bonificacao ? [] : b.pagamentos || []) {
     const forma = String(p.forma || '').toLowerCase();
     const valor = round2(p.valor);
     if (!['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'boleto', 'saldo_bonus'].includes(forma)) throw new FaturamentoError(`Forma de pagamento inválida: ${p.forma}`);
@@ -591,9 +657,9 @@ export async function faturar(body) {
       troco: 0,
     });
   }
-  if (!pagamentos.length) throw new FaturamentoError('Informe o pagamento');
+  if (!bonificacao && !pagamentos.length) throw new FaturamentoError('Informe o pagamento');
   const somaPag = round2(pagamentos.reduce((s, p) => s + p.valor, 0));
-  if (Math.abs(somaPag - total) > 0.01) {
+  if (!bonificacao && Math.abs(somaPag - total) > 0.01) {
     throw new FaturamentoError(
       `Pagamentos (R$ ${somaPag.toFixed(2)}) não fecham com o total (R$ ${total.toFixed(2)} = produtos ${subtotal.toFixed(2)} − desconto ${descontoTotal.toFixed(2)} + frete ${frete.toFixed(2)}${suframa ? ` − ICMS SUFRAMA ${suframa.total.toFixed(2)}` : ''})`,
       'PAYMENT_MISMATCH',
@@ -636,7 +702,7 @@ export async function faturar(body) {
   // e da transação do TOTVS (services/faturamentoCredito.js)
   let creditoFalta = null;
   try {
-    creditoFalta = normalizarCreditoFalta(b.creditoFalta, { pagamentos, por: b.por || null });
+    creditoFalta = bonificacao ? null : normalizarCreditoFalta(b.creditoFalta, { pagamentos, por: b.por || null });
   } catch (e) {
     if (e instanceof CreditoError) throw new FaturamentoError(e.message, e.code);
     throw e;
@@ -661,7 +727,7 @@ export async function faturar(body) {
     empresa_nome: emit.xNome,
     tipo_venda: 'nfe',
     // SUFRAMA: a operação de referência é a do TOTVS (7007 no Brejinho, 7259 nos demais)
-    operacao: suframa ? (String(b.chave).startsWith('BRJ:') ? 7007 : 7259) : OPERACAO_VENDA[canalVenda] || null,
+    operacao: bonificacao ? OPERACAO_BONIFICACAO : suframa ? (String(b.chave).startsWith('BRJ:') ? 7007 : 7259) : OPERACAO_VENDA[canalVenda] || null,
     cliente_code: cliente.code,
     cliente_nome: cliente.nome,
     cliente_cpf_cnpj: cliente.cnpj || cliente.cpf,
@@ -689,6 +755,10 @@ export async function faturar(body) {
       ...(b.pedidoInfo || {}),
       consumidorFinal: !!b.consumidorFinal,
       ...(avulso ? { avulso: true } : {}),
+      // bonificação: por que foi feita, por quem e com que custo saiu na nota
+      ...(bonificacao
+        ? { bonificacao: { justificativa: justificativaBonificacao.slice(0, 1000), por: b.por || null, em: new Date().toISOString(), custo: CUSTO_BONIFICACAO, valor: total } }
+        : {}),
       ...(clienteTrocado ? { clienteTrocado } : {}),
       // ICMS desonerado por item (seq → valor): o documento interno da 990 leva como desconto
       ...(suframa ? { suframa: { isuf: cen.isuf, pct: suframa.pct, icmsDesonerado: suframa.total, porItem: Object.fromEntries(itens.map((i, k) => [i.seq, suframa.porItem[k]])) } } : {}),
@@ -698,7 +768,7 @@ export async function faturar(body) {
       ...(trocas.length ? { trocas } : {}),
       // desconto dado na tela de faturamento (já está no valor de cada peça):
       // Brejinho: até 25% livre; acima, liberado por owner/admin/financeiro. Pedidos do site: até 15%
-      ...(Number(b.descontoFaturamento?.pct) > 0
+      ...(!bonificacao && Number(b.descontoFaturamento?.pct) > 0
         ? { descontoFaturamento: { pct: round2(b.descontoFaturamento.pct), liberadoPor: b.descontoFaturamento.liberadoPor || null } }
         : {}),
       dataVenda,
@@ -757,7 +827,7 @@ export async function faturar(body) {
       cfop: itens[0]?.cfop || null,
       total,
       frete,
-      forma_pagamento: pagamentos.map((p) => p.forma).join(' + '),
+      forma_pagamento: bonificacao ? 'bonificação (sem pagamento)' : pagamentos.map((p) => p.forma).join(' + '),
       cliente_code: cliente.code,
       cliente_nome: cliente.nome,
       vendedor_code: Number(b.vendedorCode),
@@ -824,6 +894,11 @@ export async function processarFaturamento(vendaId, faturamentoId = null, opcoes
   // 2) Transação + contas a receber SÓ no HeadCoach (Yago, 13/11/2026): nada
   //    vai para o TOTVS. Os títulos saem em HeadCoach › Contas a Receber.
   let contasReceber;
+  // bonificação: o cliente não paga — não há título no contas a receber
+  if (venda.pedido_info?.bonificacao) {
+    contasReceber = { ok: true, bonificacao: true, titulos: [], total: 0, mensagem: 'Bonificação: sem contas a receber' };
+    await atualizar({ totvs_erro: null, atendida_em: new Date().toISOString() });
+  } else
   try {
     if (!venda.pedido_info?.somenteHeadcoach) {
       const info = { ...(venda.pedido_info || {}), somenteHeadcoach: true };

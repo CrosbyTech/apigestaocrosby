@@ -749,7 +749,7 @@
             "nullable": true
           },
           "channel": {
-            "description": "Canal de venda do pedido (só faturamento).",
+            "description": "Canal de venda do pedido (só faturamento). `Bonification` = bonificação: peças dadas ao cliente, sem pagamento (ver `bonification`).",
             "type": "string",
             "enum": [
               "Reseller",
@@ -758,8 +758,37 @@
               "Multibrand",
               "Transfer",
               "Return",
-              "General"
+              "General",
+              "Bonification"
             ],
+            "nullable": true
+          },
+          "bonification": {
+            "description": "Bonificação (operação 5910 do faturamento avulso): peças dadas ao cliente, sem custo para ele. A nota sai com cada peça no custo `costName`, sem pagamento e sem contas a receber; `totalValue` é o valor da nota, não uma venda. `reason` é a justificativa obrigatória de quem fez. Nulo nas demais transações.",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "nullable": true
+              },
+              "by": {
+                "type": "string",
+                "nullable": true
+              },
+              "date": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "costName": {
+                "type": "string",
+                "nullable": true
+              },
+              "value": {
+                "type": "number",
+                "nullable": true
+              }
+            },
             "nullable": true
           },
           "transactionDate": {
@@ -1340,7 +1369,8 @@
               "Multibrand",
               "Transfer",
               "Return",
-              "General"
+              "General",
+              "Bonification"
             ],
             "nullable": true
           },
@@ -5651,7 +5681,7 @@
             "name": "channel",
             "in": "query",
             "required": false,
-            "description": "Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General.",
+            "description": "Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.",
             "schema": {
               "type": "string",
               "enum": [
@@ -5661,7 +5691,8 @@
                 "Multibrand",
                 "Transfer",
                 "Return",
-                "General"
+                "General",
+                "Bonification"
               ]
             }
           },

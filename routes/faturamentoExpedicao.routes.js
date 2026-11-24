@@ -25,6 +25,8 @@ import {
   listarTransacoes,
   detalheTransacao,
   listarCartoes,
+  custosBonificacao,
+  CUSTO_BONIFICACAO,
   FaturamentoError,
 } from '../services/faturamentoExpedicao.js';
 import { FiscalError } from '../services/pdvFiscal.js';
@@ -139,6 +141,22 @@ router.post(
   }),
 );
 
+// BONIFICAÇÃO: custo MÉDIO S/ IMPOSTO das peças (é o valor com que saem na nota)
+//   body { produtos: [código, …] } → { custo: { code, nome }, custos: { código: valor }, semCusto: [código, …] }
+router.post(
+  '/bonificacao/custos',
+  asyncHandler(async (req, res) => {
+    try {
+      const codigos = [...new Set((Array.isArray(req.body?.produtos) ? req.body.produtos : []).map((c) => Number(c)).filter((c) => c > 0))];
+      const mapa = await custosBonificacao(codigos);
+      const custos = Object.fromEntries([...mapa.entries()].map(([c, v]) => [c, Math.round((v + Number.EPSILON) * 100) / 100]));
+      return successResponse(res, { custo: CUSTO_BONIFICACAO, custos, semCusto: codigos.filter((c) => !(custos[c] > 0)) }, `${Object.keys(custos).length} custo(s)`);
+    } catch (err) {
+      return falha(res, err);
+    }
+  }),
+);
+
 router.post(
   '/faturar',
   asyncHandler(async (req, res) => {
@@ -146,7 +164,9 @@ router.post(
       const r = await faturar(req.body || {});
       const ok = r.fiscal.ok && r.totvs.ok;
       const msg = ok
-        ? `NF-e ${r.nota?.numero}/${r.nota?.serie} autorizada · transação nº ${r.vendaId} e contas a receber (fatura ${r.contasReceber?.fatura}) no HeadCoach`
+        ? r.contasReceber?.bonificacao
+          ? `NF-e ${r.nota?.numero}/${r.nota?.serie} de BONIFICAÇÃO autorizada · transação nº ${r.vendaId} no HeadCoach (sem contas a receber)`
+          : `NF-e ${r.nota?.numero}/${r.nota?.serie} autorizada · transação nº ${r.vendaId} e contas a receber (fatura ${r.contasReceber?.fatura}) no HeadCoach`
         : !r.fiscal.ok
           ? `NF-e não autorizada: ${r.fiscal.mensagem}`
           : `NF-e autorizada, mas o contas a receber não foi gerado: ${r.contasReceber?.mensagem || r.totvs.mensagem}`;

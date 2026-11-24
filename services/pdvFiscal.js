@@ -653,6 +653,19 @@ export function cfopTransferencia(chaveCenario, tipo, natureza) {
   }
   return CFOP_EXPEDICAO[chave][t];
 }
+// BONIFICAÇÃO (Yago, 23/11/2026) — peças que o marketing dá a clientes, sem custo para eles
+// (venda.pedido_info.bonificacao). Gabarito das 744 NF-e de bonificação que a 99 emitiu
+// pelo TOTVS (ops 7263, 9026, 9028 e 9086; tmp/hcapi/bonif_gabarito.mjs):
+//   natOp "REMESSA EM BONIFICACAO, DOACAO OU BRINDE", CFOP 5910 (6910 fora do estado)
+//   valor da peça = custo MÉDIO S/ IMPOSTO (quem define é o faturamento)
+//   ICMS 00 cheio (20% no RN, 12% interestadual, DIFAL para consumidor final de fora),
+//   PIS/COFINS CST 08 sem valor, IPI IPINT 53, IBS/CBS igual à venda
+//   SEM pagamento (tPag 90, vPag 0,00), sem cobrança; sem transportadora modFrete 9
+const NATOP_BONIFICACAO = 'REMESSA EM BONIFICACAO, DOACAO OU BRINDE';
+/** CFOP da bonificação pelo cenário (dentro do estado 5910, fora 6910). */
+export function cfopBonificacao(chaveCenario) {
+  return chaveCenario === 'interna' ? 5910 : 6910;
+}
 // saldo_bonus = crédito do cliente guardado no HeadCoach (peça em falta de outro pedido)
 const TPAG_EXPEDICAO = { ...TPAG, boleto: '15', saldo_bonus: TPAG.credito_loja };
 const f3 = (v) => (Number(v) || 0).toFixed(3);
@@ -736,6 +749,11 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   if (transf && !cen.contribuinte) {
     throw new FiscalError(`Transferência: a filial de destino (${cliente.nome}) precisa de CNPJ e inscrição estadual no cadastro do TOTVS`, 'TRANSF_DEST_NAO_CONTRIBUINTE');
   }
+  // bonificação (peças dadas ao cliente): ver NATOP_BONIFICACAO
+  const bonif = venda.pedido_info?.bonificacao || null;
+  if (bonif && transf) throw new FiscalError('A mesma nota não pode ser transferência e bonificação', 'BONIF_TRANSF');
+  const semPagamento = !!transf || !!bonif; // tPag 90, sem cobrança
+  const pisCofins08 = ehTransf || !!bonif; // CST 08, sem valor
   const aliqInterna = cfg.aliq_icms != null ? Number(cfg.aliq_icms) : ICMS_ALIQ_UF[emit.uf];
   const pDifal = cen.difal ? ICMS_DIFAL_UF_CONFERIDA[cen.destUf] : null;
   if (cen.difal && pDifal == null) {
@@ -751,7 +769,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   const liq = itens.map((it) => round2(Number(it.quantidade) * round2(it.valor_unit) - Number(it.quantidade) * Number(it.desconto_unit || 0)));
   const fretes = rateioFrete(liq, frete);
   // SUFRAMA: ICMS desonerado e abatido do total (não vale para transferência)
-  const sufr = cen.suframa && !transf;
+  const sufr = cen.suframa && !transf && !bonif;
   if (sufr) {
     const importados = itens.filter((it) => ORIGENS_IMPORTADAS.includes(String(it.origem || '0')));
     if (importados.length) {
@@ -768,6 +786,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   if (cen.chave === 'interNaoContrib') natOp = `${natOp}${SUFIXO_NAO_CONTRIB}`;
   if (sufr) natOp = tipos[0] === 'adquirido' ? NATOP_SUFRAMA_ADQUIRIDA : NATOP_SUFRAMA_PRODUCAO;
   if (ehTransf) natOp = tipos[0] === 'adquirido' ? NATOP_TRANSF_ADQUIRIDA : NATOP_TRANSF_PRODUCAO;
+  if (bonif) natOp = NATOP_BONIFICACAO;
   natOp = natOp.slice(0, 60);
 
   const dhEmi = agoraBrasil();
@@ -818,7 +837,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
     const vDesc = round2(q * Number(it.desconto_unit || 0));
     const vFrete = fretes[i];
     if (!it.ncm || String(it.ncm).length !== 8) throw new FiscalError(`Produto ${it.product_code} (${it.nome}) sem NCM válido no TOTVS`, 'NCM_MISSING');
-    const cfop = transf ? cfopTransferencia(cen.chave, tipos[i], transf.natureza) : cfopExpedicao(cen.chave, tipos[i]);
+    const cfop = transf ? cfopTransferencia(cen.chave, tipos[i], transf.natureza) : bonif ? cfopBonificacao(cen.chave) : cfopExpedicao(cen.chave, tipos[i]);
     cfops.push(cfop);
     const ean = digits(it.sku);
     const cEAN = [8, 12, 13, 14].includes(ean.length) ? ean : 'SEM GTIN';
@@ -864,16 +883,16 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
     const base = round2(vProd - vDesc + vFrete);
     const vICMS = round2((base * aliq) / 100);
     const basePC = round2(base - vICMS);
-    // transferência entre estabelecimentos da mesma empresa: PIS/COFINS CST 08, sem valor
-    const vPIS = ehTransf ? 0 : round2((basePC * 0.65) / 100);
-    const vCOFINS = ehTransf ? 0 : round2((basePC * 3) / 100);
+    // transferência entre estabelecimentos da mesma empresa e bonificação: PIS/COFINS CST 08, sem valor
+    const vPIS = pisCofins08 ? 0 : round2((basePC * 0.65) / 100);
+    const vCOFINS = pisCofins08 ? 0 : round2((basePC * 3) / 100);
     const vIBSUF = round2((base * IBSCBS.pIBSUF) / 100);
     const vCBS = round2((base * IBSCBS.pCBS) / 100);
     const imposto = {
       ICMS: { ICMS00: { orig, CST: '00', modBC: '3', vBC: f2(base), pICMS: f2(aliq), vICMS: f2(vICMS) } },
       IPI: { cEnq: '999', IPINT: { CST: '53' } },
-      PIS: ehTransf ? { PISNT: { CST: '08' } } : { PISAliq: { CST: '01', vBC: f2(basePC), pPIS: f4(0.65), vPIS: f2(vPIS) } },
-      COFINS: ehTransf ? { COFINSNT: { CST: '08' } } : { COFINSAliq: { CST: '01', vBC: f2(basePC), pCOFINS: f4(3), vCOFINS: f2(vCOFINS) } },
+      PIS: pisCofins08 ? { PISNT: { CST: '08' } } : { PISAliq: { CST: '01', vBC: f2(basePC), pPIS: f4(0.65), vPIS: f2(vPIS) } },
+      COFINS: pisCofins08 ? { COFINSNT: { CST: '08' } } : { COFINSAliq: { CST: '01', vBC: f2(basePC), pCOFINS: f4(3), vCOFINS: f2(vCOFINS) } },
     };
     let vDifal = 0;
     if (cen.difal) {
@@ -974,9 +993,9 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
 
   // Pagamento
   const detPag = [];
-  // transferência não tem pagamento: tPag 90 "sem pagamento", valor zero
-  if (transf) detPag.push({ tPag: '90', vPag: '0.00' });
-  for (const p of transf ? [] : pagamentos) {
+  // transferência e bonificação não têm pagamento: tPag 90 "sem pagamento", valor zero
+  if (semPagamento) detPag.push({ tPag: '90', vPag: '0.00' });
+  for (const p of semPagamento ? [] : pagamentos) {
     const valor = round2(p.valor);
     if (!(valor > 0)) continue;
     const cartao = p.forma === 'credito' || p.forma === 'debito';
@@ -986,7 +1005,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   }
   if (!detPag.length) throw new FiscalError('Venda sem pagamento informado', 'PAYMENT_MISSING');
   const somaPag = round2(detPag.reduce((s, d) => s + Number(d.vPag), 0));
-  if (!transf && Math.abs(somaPag - round2(tot.vNF)) > 0.01) {
+  if (!semPagamento && Math.abs(somaPag - round2(tot.vNF)) > 0.01) {
     throw new FiscalError(`Pagamentos (R$ ${brl(somaPag)}) não fecham com o total da nota (R$ ${brl(tot.vNF)}, produtos + frete)`, 'PAYMENT_MISMATCH');
   }
   nfe.tagDetPag(detPag);
@@ -999,11 +1018,13 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   if (transf) {
     partes.push(`TRANSFERENCIA${transf.ref ? ` ${semAcento(transf.ref)}` : ''} -> ${semAcento(transf.destinoNome || cliente.nome).toUpperCase()} NAO E VENDA`);
     partes.push(`TRANSFERENCIA HEADCOACH ${venda.id}`);
+  } else if (bonif) {
+    partes.push(`BONIFICACAO HEADCOACH ${venda.id}`);
   } else {
     if (venda.numero_site) partes.push(`PEDIDO ${semAcento(venda.numero_site)}`);
     partes.push(`VENDA HEADCOACH ${venda.id}`);
   }
-  if (venda.vendedor_nome && !transf) partes.push(`VENDEDOR ${semAcento(venda.vendedor_nome)}`);
+  if (venda.vendedor_nome && !transf && !bonif) partes.push(`VENDEDOR ${semAcento(venda.vendedor_nome)}`);
   const pi = venda.pedido_info || {};
   if (pi.forma) partes.push(`PAGO ${semAcento(pi.forma).toUpperCase()}${pi.nsu ? ` NSU ${pi.nsu}` : ''}${pi.autorizacao ? ` AUT ${pi.autorizacao}` : ''}`);
   if (cfg.info_complementar) partes.push(semAcento(cfg.info_complementar));
@@ -1011,7 +1032,7 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
 
   let xml = nfe.xml();
   // <cobr> (fatura + duplicatas) entre <transp> e <pag> — a lib não implementa tagFat/tagDup
-  if (!transf && pagamentos.some((p) => p.forma === 'boleto')) {
+  if (!semPagamento && pagamentos.some((p) => p.forma === 'boleto')) {
     const parcelas = venda.cobranca?.parcelas || [];
     if (!parcelas.length) throw new FiscalError('Boleto sem parcelas/vencimentos', 'BOLETO_SEM_PARCELAS');
     const somaDup = round2(parcelas.reduce((s, d) => s + Number(d.valor), 0));

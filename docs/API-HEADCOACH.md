@@ -131,7 +131,7 @@ Parâmetros:
 - `status` (string) — Situação (aceita lista). Valores: InProgress, Attended, Canceled.
 - `origin` (string) — De onde veio. Valores: Pos, Exchange, Billing, BrejinhoBilling, DirectBilling, Transfer, Return.
 - `saleType` (string) — Tipo de documento. Valores: NFCe, NFe, Exchange.
-- `channel` (string) — Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General.
+- `channel` (string) — Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.
 - `customerCode` (integer) — Código do cliente.
 - `customerCpfCnpj` (string) — CPF ou CNPJ do cliente.
 - `sellerCode` (integer) — Código do vendedor.
@@ -329,7 +329,8 @@ Esquemas:
 - `saleType` (string) — Tipo de documento: NFC-e, NF-e ou troca (NF-e de devolução). Valores: NFCe, NFe, Exchange.
 - `operationType` (string) — Entrada (troca, devolução) ou saída. Valores: Input, Output.
 - `operationCode` (integer) — Operação (general/operations).
-- `channel` (string) — Canal de venda do pedido (só faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General.
+- `channel` (string) — Canal de venda do pedido (só faturamento). `Bonification` = bonificação: peças dadas ao cliente, sem pagamento (ver `bonification`). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.
+- `bonification` (object) — Bonificação (operação 5910 do faturamento avulso): peças dadas ao cliente, sem custo para ele. A nota sai com cada peça no custo `costName`, sem pagamento e sem contas a receber; `totalValue` é o valor da nota, não uma venda. `reason` é a justificativa obrigatória de quem fez. Nulo nas demais transações.
 - `transactionDate` (date-time) — Data e hora do registro.
 - `cashierCode` (integer) — Caixa em que a transação entrou (cashier/cashiers).
 - `cashierDate` (date) — Data do caixa, quando gravada na transação.
@@ -594,7 +595,7 @@ Esquemas:
 - `installmentCode` (integer) — Parcela.
 - `transactionCode` (integer) — Transação de origem (transaction/transactions).
 - `origin` (string) — Sistema de origem: PDV ou faturamento da expedição. Valores: Pos, Billing.
-- `channel` (string) — Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General.
+- `channel` (string) — Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.
 - `operationCode` (integer) — Operação da transação.
 - `customerCode` (integer) — Código do cliente.
 - `customerName` (string) — Nome do cliente.

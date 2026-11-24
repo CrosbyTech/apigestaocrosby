@@ -162,7 +162,17 @@ modulo.recurso({
     f('saleType', 'tipo_venda', 'string', 'Tipo de documento: NFC-e, NF-e ou troca (NF-e de devolução).', { map: SALE_TYPE }),
     f('operationType', (v) => (v.tipo_venda === 'troca' || v.canal === 'devolucao' ? 'Input' : 'Output'), 'string', 'Entrada (troca, devolução) ou saída.', { cols: ['tipo_venda', 'canal'], enum: ['Input', 'Output'] }),
     f('operationCode', 'operacao', 'integer', 'Operação (general/operations).'),
-    f('channel', 'canal', 'string', 'Canal de venda do pedido (só faturamento).', { map: CHANNEL }),
+    f('channel', 'canal', 'string', 'Canal de venda do pedido (só faturamento). `Bonification` = bonificação: peças dadas ao cliente, sem pagamento (ver `bonification`).', { map: CHANNEL }),
+    f(
+      'bonification',
+      (v) => {
+        const b = v.pedido_info?.bonificacao;
+        return b ? { reason: b.justificativa || null, by: b.por || null, date: b.em || null, costName: b.custo?.nome || null, value: b.valor ?? null } : null;
+      },
+      'object',
+      'Bonificação (operação 5910 do faturamento avulso): peças dadas ao cliente, sem custo para ele. A nota sai com cada peça no custo `costName`, sem pagamento e sem contas a receber; `totalValue` é o valor da nota, não uma venda. `reason` é a justificativa obrigatória de quem fez. Nulo nas demais transações.',
+      { properties: { reason: { type: 'string', nullable: true }, by: { type: 'string', nullable: true }, date: { type: 'string', format: 'date-time', nullable: true }, costName: { type: 'string', nullable: true }, value: { type: 'number', nullable: true } } },
+    ),
     f('transactionDate', 'criado_em', 'date-time', 'Data e hora do registro.'),
     f('cashierCode', 'caixa_id', 'integer', 'Caixa em que a transação entrou (cashier/cashiers).'),
     f('cashierDate', 'data_caixa', 'date', 'Data do caixa, quando gravada na transação.'),
