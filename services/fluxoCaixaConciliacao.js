@@ -1699,6 +1699,13 @@ function pontuar(l, c, usado = 0) {
     if (usado > VALOR_TOL) return null;
     viaPago = true;
     motivos.push(`valor pago igual (título ${c.valor.toFixed(2)})`);
+  } else if (c.origem === 'HC_CP' && !c.pago && usado <= VALOR_TOL && valorExtrato > c.valor + VALOR_TOL && valorExtrato <= round2(c.valor * 1.1)) {
+    // guia/boleto pago com juros ou multa: o título do HeadCoach fica com o valor original e a
+    // diferença entra como juros na baixa (Titia, 24/11/2026) — até 10% acima do título
+    viaPago = true;
+    c = { ...c, valorPago: valorExtrato };
+    score -= 5;
+    motivos.push(`valor com juros/multa de R$ ${round2(valorExtrato - c.valor).toFixed(2)} (título ${c.valor.toFixed(2)})`);
   } else if (!l.semParcial && c.valor > valorL + VALOR_TOL && restante >= valorL - VALOR_TOL) {
     // duplicata maior que a saída: pagamento parcial (o restante fica para outra saída)
     parcial = true;
