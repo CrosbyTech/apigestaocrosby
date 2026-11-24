@@ -140,9 +140,56 @@ async function aprovadosDe(resolvidos) {
  * Depois de gravar uma conciliação: marca a(s) duplicata(s) como pagas para a
  * Consulta e leva os APROVADOS da Liberação para PAGO. Idempotente.
  */
+// ─── Contas a Pagar do HeadCoach: baixa automática ao conciliar ───────────────
+// Decisão do Yago (24/11/2026): "se a baixa for automática não precisa de senha".
+// Saída conciliada com título do Contas a Pagar HeadCoach (origem HC_CP) → baixa
+// na data da saída pelo valor usado; o que passar do saldo entra como juros.
+// Uma baixa por conciliação (marca [conc N] na observação); desfazer a
+// conciliação NÃO estorna a baixa (o Contas a Pagar HeadCoach não tem estorno).
+const MARCA_CONC = (id) => `[conc ${id}]`;
+export async function baixarHcCpDaConciliacao(conc, conta = null) {
+  const ref = conc?.referencia || {};
+  const itens = Array.isArray(ref.itens) && ref.itens.length
+    ? ref.itens.filter((it) => it?.origem === 'HC_CP' && it.id != null).map((it) => ({ id: Number(it.id), valor: round2(Math.abs(Number(it.valorUsado ?? it.valor ?? 0))) }))
+    : conc?.origem === 'HC_CP' && ref.id != null ? [{ id: Number(ref.id), valor: round2(Math.abs(Number(conc.valor))) }] : [];
+  const out = { baixadas: 0, avisos: [] };
+  if (!itens.length || Number(conc.valor) >= 0) return out;
+  const { aplicarBaixa, saldoDoTitulo } = await import('./hcContasPagar.js');
+  const banco = conta ? labelBanco(conta) || conta.apelido || conta.banco : null;
+  for (const it of itens) {
+    try {
+      const { data: t } = await supabase.from('hc_cp_titulos').select('*').eq('id', it.id).maybeSingle();
+      if (!t || t.situacao !== 'aberto') continue;
+      const { data: ja } = await supabase.from('hc_cp_baixas').select('id').eq('titulo_id', t.id).ilike('observacao', `%${MARCA_CONC(conc.id)}%`).limit(1);
+      if (ja?.length) continue;
+      const saldo = saldoDoTitulo(t);
+      if (!(saldo > 0.005) || !(it.valor > 0.005)) continue;
+      const juros = it.valor > saldo + 0.005 ? round2(it.valor - saldo) : 0;
+      await aplicarBaixa(
+        t,
+        { dataPagamento: String(conc.data).slice(0, 10), valorPago: it.valor, juros, conta: banco, observacao: `Baixa automática pela conciliação do extrato${conta?.apelido ? ` (${conta.apelido})` : ''} ${MARCA_CONC(conc.id)}` },
+        { por: conc.usuario ? `${conc.usuario} (conciliação)` : 'Conciliação do extrato' },
+      );
+      out.baixadas += 1;
+    } catch (e) {
+      out.avisos.push(`título ${it.id}: ${e.message}`);
+      console.warn(`[conciliacao→CP HeadCoach] conc ${conc.id} título ${it.id}: ${e.message}`);
+    }
+  }
+  return out;
+}
+
 export async function propagarConciliacao(conc) {
+  // Contas a Pagar do HeadCoach primeiro (independe das origens do TOTVS)
+  let hc = { baixadas: 0 };
+  try {
+    const { data: contaHc } = await supabase.from('fluxo_caixa_contas').select('banco,apelido,titular_cnpj').eq('id', conc.conta_id).maybeSingle();
+    hc = await baixarHcCpDaConciliacao(conc, contaHc);
+  } catch (e) {
+    console.warn(`[conciliacao→CP HeadCoach] ${e.message}`);
+  }
   const itens = itensDaConciliacao(conc);
-  const res = { conciliacaoId: conc.id, duplicatas: 0, liberacaoPagos: 0 };
+  const res = { conciliacaoId: conc.id, duplicatas: 0, liberacaoPagos: 0, hcBaixadas: hc.baixadas };
   await removerPagosDaConciliacao(conc.id);
   if (!itens.length || Number(conc.valor) >= 0) return res;
   const resolvidos = await completarPelaCopiaTotvs(await resolverItens(itens));
