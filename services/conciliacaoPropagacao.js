@@ -147,6 +147,20 @@ async function aprovadosDe(resolvidos) {
 // Uma baixa por conciliação (marca [conc N] na observação); desfazer a
 // conciliação NÃO estorna a baixa (o Contas a Pagar HeadCoach não tem estorno).
 const MARCA_CONC = (id) => `[conc ${id}]`;
+
+/**
+ * A duplicata já tem uma baixa DESTE pagamento lançada por outro caminho (PAGAR da
+ * Liberação de Pagamento, inclusão do bot) e ainda sem conciliação? Mesmo valor, até
+ * 5 dias de diferença da saída e sem a marca [conc N]. Devolve a baixa, ou null.
+ * Sem isso, o pagamento PARCIAL baixado na Liberação contava em dobro quando a saída
+ * aparecia no extrato (a duplicata continua "em aberto", então a conciliação baixava de novo).
+ */
+export function baixaParaAdotar(baixas, valor, dataSaida) {
+  const dia = String(dataSaida || '').slice(0, 10);
+  if (!dia) return null;
+  const longe = (d) => Math.abs((new Date(`${String(d).slice(0, 10)}T12:00:00Z`) - new Date(`${dia}T12:00:00Z`)) / 86400000);
+  return (baixas || []).filter((b) => Math.abs(Number(b.valor_pago) - Number(valor)) < 0.005 && !/\[conc \d+\]/.test(String(b.observacao || '')) && longe(b.data_pagamento) <= 5).sort((a, b) => longe(a.data_pagamento) - longe(b.data_pagamento) || a.id - b.id)[0] || null;
+}
 export async function baixarHcCpDaConciliacao(conc, conta = null) {
   const ref = conc?.referencia || {};
   const itens = Array.isArray(ref.itens) && ref.itens.length
@@ -162,6 +176,13 @@ export async function baixarHcCpDaConciliacao(conc, conta = null) {
       if (!t || t.situacao !== 'aberto') continue;
       const { data: ja } = await supabase.from('hc_cp_baixas').select('id').eq('titulo_id', t.id).ilike('observacao', `%${MARCA_CONC(conc.id)}%`).limit(1);
       if (ja?.length) continue;
+      // pagamento já baixado pela Liberação de Pagamento: a conciliação só assina essa baixa, sem lançar outra
+      const { data: doTitulo } = await supabase.from('hc_cp_baixas').select('id, valor_pago, data_pagamento, observacao').eq('titulo_id', t.id);
+      const adotada = baixaParaAdotar(doTitulo, it.valor, conc.data);
+      if (adotada) {
+        await supabase.from('hc_cp_baixas').update({ observacao: `${adotada.observacao || ''} · conferida no extrato ${MARCA_CONC(conc.id)}`.trim().slice(0, 1000) }).eq('id', adotada.id);
+        continue;
+      }
       const saldo = saldoDoTitulo(t);
       if (!(saldo > 0.005) || !(it.valor > 0.005)) continue;
       const juros = it.valor > saldo + 0.005 ? round2(it.valor - saldo) : 0;
