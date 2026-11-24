@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { podeMudar, carimboDaMudanca, motivoDeNaoLiberar, resumoDasLiberacoes, EM_ANDAMENTO, STATUS, BANCOS } from '../services/hcCpLiberacao.js';
+import { podeMudar, carimboDaMudanca, motivoDeNaoLiberar, resumoDasLiberacoes, bancoValido, EM_ANDAMENTO, STATUS, BANCOS } from '../services/hcCpLiberacao.js';
 import { CpError } from '../services/hcContasPagar.js';
 
 const AGORA = '2026-11-23T15:00:00.000Z';
@@ -60,6 +60,17 @@ describe('o que pode ser liberado', () => {
     expect(motivoDeNaoLiberar(tit(), { jaLiberada: true })).toMatch(/Liberação/);
     expect(motivoDeNaoLiberar(tit({ valor_pago: 900, desconto: 100 }))).toMatch(/valor em aberto/);
     expect(motivoDeNaoLiberar(null)).toMatch(/não encontrada/);
+  });
+});
+
+describe('banco em lote', () => {
+  it('aceita só banco da lista; vazio limpa', () => {
+    expect(bancoValido('STONE 0549')).toBe('STONE 0549');
+    expect(bancoValido('  PAGARME ')).toBe('PAGARME');
+    expect(bancoValido('')).toBeNull();
+    expect(bancoValido(null)).toBeNull();
+    expect(() => bancoValido('STONE 9999')).toThrow(CpError);
+    expect(() => bancoValido('qualquer')).toThrow(/Banco inválido/);
   });
 });
 

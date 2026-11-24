@@ -254,6 +254,27 @@ export async function editarLiberacao(user, id, b = {}) {
   return paraTela(nova);
 }
 
+// ─── banco em lote ───────────────────────────────────────────────────────────
+/** O banco tem que ser um dos da lista da tela (ou vazio, para limpar). */
+export function bancoValido(banco) {
+  const b = String(banco ?? '').trim();
+  if (!b) return null;
+  if (!BANCOS.includes(b)) throw new CpError(`Banco inválido: ${b}`);
+  return b;
+}
+
+/** Põe o mesmo banco em várias liberações de uma vez (as que ainda estão em andamento). b: { ids, banco } */
+export async function definirBanco(user, b = {}) {
+  const ids = idsDe(b.ids);
+  const banco = bancoValido(b.banco);
+  const linhas = await liberacoesDoUsuario(user, ids);
+  const alvo = linhas.filter((l) => EM_ANDAMENTO.includes(l.status));
+  const ignoradas = linhas.filter((l) => !EM_ANDAMENTO.includes(l.status)).map((l) => ({ id: l.id, rotulo: `${l.titulo.fornecedor_nome} ${rotuloDuplicata(l.titulo)}`, motivo: `está ${STATUS[l.status].toLowerCase()}` }));
+  if (!alvo.length) return { alteradas: 0, ignoradas, banco };
+  const feitas = await q(supabase.from('hc_cp_liberacoes').update({ banco, atualizado_por: quem(user), atualizado_em: new Date().toISOString() }).in('id', alvo.map((l) => l.id)).in('status', EM_ANDAMENTO).select('id'));
+  return { alteradas: (feitas || []).length, ignoradas, banco };
+}
+
 // ─── inclusão automática na Stone (services/hcCpInclusaoStone.js) ────────────
 /** Manda as aprovadas para o bot e resume: quantas foram por Pix e quantas ficam para incluir à mão (e por quê). */
 async function incluirNaStone(liberacoes, por) {

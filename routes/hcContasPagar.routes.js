@@ -20,6 +20,7 @@
 //   POST /liberacoes/status             { ids, status: pendente|previsao|aprovado|incluido, dataPrevista? }
 //                                       ao APROVAR, a que tem banco "STONE 0000" e chave Pix vai para o bot incluir na Stone
 //   POST /liberacoes/incluir-stone      { ids }  reenvia ao bot as aprovadas cuja inclusão não chegou à Stone
+//   POST /liberacoes/banco              { ids, banco }  o mesmo banco para várias liberações de uma vez (vazio = limpar)
 //   POST /liberacoes/pagar              { ids, dataPagamento, banco, senha }  grava a baixa (sem estorno)
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
 //   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 7 dias para trás);
@@ -31,7 +32,7 @@ import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../services/solicitacaoContasPagar.js';
-import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes, reenviarAoBot } from '../services/hcCpLiberacao.js';
+import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes, reenviarAoBot, definirBanco } from '../services/hcCpLiberacao.js';
 import { baixaAutomatica } from '../services/hcCpBaixaAutomatica.js';
 import { montarSaldos } from '../services/relatorioSaldosWhatsapp.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
@@ -81,6 +82,7 @@ router.get(
 router.post('/liberacoes', rota((req) => liberarTitulos(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.liberadas, 'duplicata liberada', 'duplicatas liberadas')} para pagamento`, r)));
 const resumoDoBot = (i) => (!i ? '' : [i.naFila ? ` · ${tantas(i.naFila, 'foi para o bot incluir na Stone (Pix)', 'foram para o bot incluir na Stone (Pix)')}` : '', i.manuais?.length ? ` · ${tantas(i.manuais.length, 'fica para incluir à mão', 'ficam para incluir à mão')} (${i.manuais[0].motivo})` : '', i.comErro?.length ? ` · ${i.comErro.length} com erro (${i.comErro[0].motivo})` : '', i.falha ? ` · a fila do bot falhou: ${i.falha}` : ''].join(''));
 router.post('/liberacoes/status', rota((req) => mudarStatus(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.alteradas, 'liberação movida', 'liberações movidas')}`, r) + resumoDoBot(r.inclusao)));
+router.post('/liberacoes/banco', rota((req) => definirBanco(req.user, req.body || {}), (r) => comIgnoradas(`${r.banco ? `Banco ${r.banco}` : 'Banco limpo'} em ${tantas(r.alteradas, 'liberação', 'liberações')}`, r)));
 router.post('/liberacoes/incluir-stone', rota((req) => reenviarAoBot(req.user, req.body || {}), (r) => `Envio ao bot${resumoDoBot(r.inclusao) || ' · nada novo para enviar'}`));
 router.post('/liberacoes/pagar', rota((req) => pagarLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.pagas, 'duplicata paga', 'duplicatas pagas')} · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r)));
 router.post('/liberacoes/devolver', rota((req) => devolverLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.devolvidas, 'devolvida', 'devolvidas')} ao contas a pagar`, r)));
