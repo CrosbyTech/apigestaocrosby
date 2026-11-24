@@ -734,24 +734,34 @@ async function fonteTotvs({ de, ate }) {
   }
 }
 
-// nomes de fornecedores TOTVS (pessoa jurídica) por código, em lotes
+// nomes de fornecedores por código, em lotes: cópia local (erp_pessoas, PF e PJ)
+// e, para o que faltar, o cadastro de PJ e de PF — antes só olhava PJ e o
+// fornecedor pessoa física aparecia "(sem nome)" (Titia, 24/11/2026)
 const cacheNomes = new Map();
 async function nomesFornecedores(codes, token) {
-  const faltam = [...new Set(codes.filter((c) => c != null && !cacheNomes.has(c)))];
-  for (let i = 0; i < faltam.length; i += 50) {
-    const lote = faltam.slice(i, i + 50);
-    try {
-      const r = await axios.post(
-        `${TOTVS_BASE_URL}/person/v2/legal-entities/search`,
-        { filter: { personCodeList: lote }, page: 1, pageSize: 100 },
-        { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 },
-      );
-      for (const p of r.data?.items || []) cacheNomes.set(p.code, p.name || p.fantasyName || null);
-    } catch {
-      /* nome fica vazio */
-    }
-    for (const c of lote) if (!cacheNomes.has(c)) cacheNomes.set(c, null);
+  let faltam = [...new Set(codes.filter((c) => c != null && !cacheNomes.has(c)))];
+  for (let i = 0; i < faltam.length; i += 200) {
+    const { data } = await supabase.from('erp_pessoas').select('code,nome,fantasia').in('code', faltam.slice(i, i + 200).map(Number));
+    for (const p of data || []) if (p.nome || p.fantasia) cacheNomes.set(Number(p.code), p.nome || p.fantasia);
   }
+  for (const rota of ['legal-entities', 'individuals']) {
+    faltam = faltam.filter((c) => !cacheNomes.has(c));
+    if (!token) break;
+    for (let i = 0; i < faltam.length; i += 50) {
+      const lote = faltam.slice(i, i + 50);
+      try {
+        const r = await axios.post(
+          `${TOTVS_BASE_URL}/person/v2/${rota}/search`,
+          { filter: { personCodeList: lote }, page: 1, pageSize: 100 },
+          { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 },
+        );
+        for (const p of r.data?.items || []) if (p.name || p.fantasyName) cacheNomes.set(p.code, p.name || p.fantasyName);
+      } catch {
+        /* segue para a próxima fonte */
+      }
+    }
+  }
+  for (const c of faltam) if (!cacheNomes.has(c)) cacheNomes.set(c, null);
   return cacheNomes;
 }
 
