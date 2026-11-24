@@ -61,6 +61,8 @@ const APELIDOS = [
   { re: /\bVIVO\b|TELEFONICA/, tok: 'VIVO' },
   { re: /\bTIM\b/, tok: 'TIM' },
   { re: /BRISANET/, tok: 'BRISANET' },
+  // a fatura vem da razão social "CABO SERVICOES DE TELECOMUNICACOES LTDA"; no extrato sai "ALARES INTERNET S/A"
+  { re: /ALARES|CABO SERVICOES.*TELECOM/, tok: 'ALARES' },
 ];
 function tokensNome(s) {
   const norm = normNome(s);

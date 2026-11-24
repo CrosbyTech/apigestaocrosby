@@ -19,6 +19,8 @@
 //   POST /liberacoes/status             { ids, status: pendente|previsao|aprovado|incluido, dataPrevista? }
 //   POST /liberacoes/pagar              { ids, dataPagamento, banco, senha }  grava a baixa (sem estorno)
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
+//   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 7 dias para trás);
+//                                       sem confirmar = só mostra o que achou; com confirmar + senha = grava a baixa das ids
 //   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
 //   POST /solicitacoes/:id/liberar      Solicitação Crosby (enviada ou Nota Fiscal) → Liberação de Pagamento do HeadCoach (cria a duplicata se ainda não existir)
 // ============================================================================
@@ -27,6 +29,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { requireAuth } from '../middlewares/auth.js';
 import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../services/solicitacaoContasPagar.js';
 import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes } from '../services/hcCpLiberacao.js';
+import { baixaAutomatica } from '../services/hcCpBaixaAutomatica.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
 
 const router = express.Router();
@@ -67,6 +70,16 @@ router.post('/liberacoes', rota((req) => liberarTitulos(req.user, req.body || {}
 router.post('/liberacoes/status', rota((req) => mudarStatus(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.alteradas, 'liberação movida', 'liberações movidas')}`, r)));
 router.post('/liberacoes/pagar', rota((req) => pagarLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.pagas, 'duplicata paga', 'duplicatas pagas')} · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r)));
 router.post('/liberacoes/devolver', rota((req) => devolverLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.devolvidas, 'devolvida', 'devolvidas')} ao contas a pagar`, r)));
+router.post(
+  '/liberacoes/baixa-automatica',
+  rota(
+    (req) => baixaAutomatica(req.user, req.body || {}),
+    (r) =>
+      r.simulacao
+        ? `${tantas(r.casadas.length, 'pagamento achado', 'pagamentos achados')} nos extratos de ${r.incluidas} incluída(s)`
+        : comIgnoradas(`${tantas(r.pagas, 'duplicata baixada', 'duplicatas baixadas')} pelo extrato · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r),
+  ),
+);
 router.put('/liberacoes/:id', rota((req) => editarLiberacao(req.user, req.params.id, req.body || {}), 'Liberação alterada'));
 
 export default router;
