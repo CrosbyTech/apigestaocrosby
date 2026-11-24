@@ -591,6 +591,9 @@ export async function enriquecerContrapartes({ de, ate, escopo } = {}) {
  * física (sócio = pró-labore, não entre contas).
  */
 export const MARCA_UM_LADO = 'Entre contas (outra ponta não importada)';
+// marcada à mão na Conciliação (botão "Transferência entre contas" — Titia, 24/11/2026):
+// nenhuma rotina automática desfaz
+export const MARCA_MANUAL_TRANSF = 'Transferência marcada à mão';
 export async function marcarEntreContasSemPar({ de, ate, escopo }) {
   const { esc, existe } = await prepararEscopo(escopo);
   const contas = await buscarTodos(() => eqEscopo(supabase.from(T.contas).select('*'), esc, existe));
@@ -661,6 +664,8 @@ export async function casarTransferencias({ de, ate, escopo }) {
     const ids = antigos.map((t) => t.id);
     for (let i = 0; i < ids.length; i += 200) {
       const fatia = ids.slice(i, i + 200);
+      // a marcada à mão continua transferência (só perde o par automático)
+      lancar((await supabase.from(T.lanc).update({ transferencia_id: null }).in('transferencia_id', fatia).eq('observacao', MARCA_MANUAL_TRANSF)).error);
       lancar((await supabase.from(T.lanc).update({ tipo: 'SAIDA', transferencia_id: null }).in('transferencia_id', fatia).lt('valor', 0)).error);
       lancar((await supabase.from(T.lanc).update({ tipo: 'ENTRADA', transferencia_id: null }).in('transferencia_id', fatia).gt('valor', 0)).error);
       lancar((await supabase.from(T.transf).delete().in('id', fatia)).error);
