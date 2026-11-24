@@ -376,6 +376,21 @@ async function autentiqueAssinatura(docId) {
   return { assinou: true, url: doc.files?.signed || null, quando };
 }
 
+// Remove o documento do Autentique (o link de assinatura dele deixa de valer). Só é chamado para
+// documento AINDA NÃO assinado que acabou de ser substituído por outro. Devolve true se removeu.
+async function autentiqueExcluir(docId) {
+  const { url, chave } = autentiqueCredenciais();
+  if (!chave || !docId) return false;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${chave}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: 'mutation($id: UUID!){ deleteDocument(id: $id) }', variables: { id: docId } }),
+    signal: AbortSignal.timeout(60000),
+  });
+  const j = await r.json().catch(() => ({}));
+  return r.ok && !j.errors && j.data?.deleteDocument === true;
+}
+
 // ─── estado ─────────────────────────────────────────────────────────────────
 async function gravar(vendaId, patch) {
   const salvar = (p) => supabase.from('faturamento_duplicatas').upsert({ venda_id: vendaId, ...p, atualizado_em: new Date().toISOString() }, { onConflict: 'venda_id' });
@@ -436,6 +451,15 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false, tel
   if (!temBoleto(base.venda, base.pagamentos)) return { naoSeAplica: true, motivo: 'venda sem boleto' };
   if (base.dup && ['enviada', 'assinada'].includes(base.dup.status) && !forcar) return { jaEnviada: true, duplicata: base.dup };
   if (base.dup?.status === 'assinada') throw new DuplicataError('A duplicata desta venda já foi assinada', 'JA_ASSINADA');
+  // documento novo no lugar de um já enviado: antes, confere se o cliente não assinou o anterior
+  // (o anterior é removido depois que o novo sai — não pode ser um documento assinado)
+  if (anterior?.doc_id) {
+    const a = await autentiqueAssinatura(anterior.doc_id).catch(() => ({ assinou: false }));
+    if (a.assinou) {
+      await conferirAssinaturas({ vendaId });
+      throw new DuplicataError('O cliente já assinou a duplicata — não gero outra', 'JA_ASSINADA', 409);
+    }
+  }
   // outra chamada já está enviando (faturar + "Tentar de novo" em seguida)
   if (base.dup?.status === 'enviando' && Date.now() - new Date(base.dup.atualizado_em).getTime() < 10 * 60 * 1000) return { emAndamento: true };
   await gravar(vendaId, { faturamento_id: base.fat?.id || null, chave: base.fat?.chave || null, nf_numero: base.nota.numero, status: 'enviando', criado_por: por });
@@ -472,7 +496,10 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false, tel
 
   try {
     const dados = await dadosDaDuplicata(vendaId);
-    if (telefone) dados.telefone = telefone;
+    // número informado agora ou, no documento novo, o que o owner já tinha trocado nesta duplicata
+    const ultimoEnvio = (Array.isArray(base.dup?.historico) ? base.dup.historico : []).filter((h) => ['envio', 'novo_documento', 'outro_telefone'].includes(h.tipo)).pop();
+    const telefoneManual = telefone || (ultimoEnvio?.manual && base.dup?.telefone ? base.dup.telefone : null);
+    if (telefoneManual) dados.telefone = telefoneManual;
     if (!dados.telefone) throw new DuplicataError('Cliente sem WhatsApp no pedido nem no cadastro — não há para onde mandar a duplicata', 'SEM_TELEFONE');
     const chips = await chipsDaDuplicata();
     if (!chips.length) {
@@ -510,6 +537,13 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false, tel
       throw new DuplicataError(`Documento criado, mas a mensagem não saiu pelo WhatsApp: ${erroEnvio || 'sem chip'}`, 'WHATSAPP_NAO_ENVIOU', 502);
     }
 
+    // o documento novo já está com o cliente: o anterior sai do Autentique (o link antigo deixa de valer)
+    let anteriorRemovido = null;
+    if (anterior?.doc_id && anterior.doc_id !== doc.id) {
+      anteriorRemovido = await autentiqueExcluir(anterior.doc_id).catch(() => false);
+      if (!anteriorRemovido) console.warn(`⚠️ [duplicata] venda ${vendaId}: não consegui remover o documento anterior (${anterior.doc_id}) do Autentique`);
+    }
+
     const agora = new Date().toISOString();
     await gravar(vendaId, {
       faturamento_id: base.fat?.id || null,
@@ -533,6 +567,8 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false, tel
         ...(base.dup?.telefone && !mesmoTelefone(destino, base.dup.telefone) ? { de: base.dup.telefone } : {}),
         chip: usado.nome,
         link: doc.link,
+        ...(telefoneManual ? { manual: true } : {}),
+        ...(anteriorRemovido === null ? {} : { linkAnterior: anterior.link, linkAnteriorRemovido: anteriorRemovido }),
       }),
     });
     try {
@@ -545,7 +581,7 @@ export async function enviarDuplicata(vendaId, { por = null, forcar = false, tel
       console.warn(`⚠️ [duplicata] venda ${vendaId}: enviada, mas não gravei no card do Dryland: ${e.message}`);
     }
     console.log(`✅ [duplicata] venda ${vendaId} NF ${dados.nf}: enviada para ${destino} pelo ${usado.nome} — ${doc.link}`);
-    return { enviada: true, link: doc.link, docId: doc.id, telefone: destino, chip: usado.nome };
+    return { enviada: true, link: doc.link, docId: doc.id, telefone: destino, chip: usado.nome, ...(anteriorRemovido === null ? {} : { linkAnteriorRemovido: anteriorRemovido }) };
   } catch (err) {
     return falhar(err);
   }

@@ -3206,7 +3206,7 @@
             "items": {
               "type": "object",
               "additionalProperties": true,
-              "description": "Evento do histórico (chaves em português, como gravado: em, por, tipo, telefone, de, chip, link, erro)."
+              "description": "Evento do histórico (chaves em português, como gravado: em, por, tipo, telefone, de, chip, link, erro, manual, linkAnterior, linkAnteriorRemovido)."
             },
             "nullable": true
           },
