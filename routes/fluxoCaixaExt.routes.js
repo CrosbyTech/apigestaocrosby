@@ -533,7 +533,7 @@ router.post(
     const { lancamentoId, origem, referencia, justificativa, pontuacao } = req.body || {};
     if (!lancamentoId || !origem) return errorResponse(res, 'Informe lancamentoId e origem.', 400);
     try {
-      const r = await conciliacao.salvarConciliacao({ lancamentoId: Number(lancamentoId), origem: String(origem).toUpperCase(), referencia, justificativa, usuario: usuarioDe(req), automatico: false, pontuacao: pontuacao ?? null });
+      const r = await conciliacao.salvarConciliacao({ lancamentoId: Number(lancamentoId), origem: String(origem).toUpperCase(), referencia, justificativa, usuario: usuarioDe(req), automatico: false, pontuacao: pontuacao ?? null, soHeadcoach: true });
       return successResponse(res, r, 'Pendência conciliada');
     } catch (e) {
       return tratar(res, e);

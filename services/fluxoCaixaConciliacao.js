@@ -547,13 +547,12 @@ export async function liberacoesSemLancamento(rows) {
   }
   return faltam;
 }
+// Titia, 24/11/2026: "deixe só consulta: liberação, solicitação e TOTVS. Pra conciliar
+// mesmo somente o que tiver no Contas a Pagar do HeadCoach."
+export const ORIGENS_SO_CONSULTA = ['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP'];
+export const BLOQUEIO_SO_HC = 'Só consulta: concilie com o Contas a Pagar HeadCoach (se o título só existe aqui, replique-o no Contas a Pagar HeadCoach)';
 async function marcarBloqueios(cands) {
-  const libs = cands.filter((c) => c.origem === 'LIBERACAO');
-  const faltam = libs.length ? await liberacoesSemLancamento(libs.map((c) => ({ id: c.id, cd_empresa: c.cdEmpresa ?? null, nr_duplicata: c.nrDuplicata ?? null }))) : new Map();
-  for (const c of cands) {
-    if (c.origem === 'SOLICITACAO') c.bloqueio = BLOQUEIO_SOLICITACAO;
-    else if (c.origem === 'LIBERACAO' && faltam.has(String(c.id))) c.bloqueio = faltam.get(String(c.id));
-  }
+  for (const c of cands) if (ORIGENS_SO_CONSULTA.includes(c.origem) && !c.bloqueio) c.bloqueio = c.origem === 'SOLICITACAO' ? BLOQUEIO_SOLICITACAO : BLOQUEIO_SO_HC;
   return cands;
 }
 
@@ -1844,6 +1843,7 @@ export async function carregarFontes({ de, ate }) {
     for (const r of data || []) if (r.dados_completos?.solicitacao_id) pagasPorSol.add(r.dados_completos.solicitacao_id);
   }
   const solicitacoes = todasSol.filter((x) => !pagasPorSol.has(x.id));
+  await marcarBloqueios(totvs); // TOTVS também só consulta (Titia, 24/11/2026)
   return { liberacao, solicitacoes, totvs, hcCp, avisos, janela };
 }
 
@@ -1878,7 +1878,12 @@ export async function lancamentoComChave(lancamentoId) {
   return { ...l, chave: eu?.chave };
 }
 
-export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null, permitirSolicitacao = false }) {
+export async function salvarConciliacao({ lancamentoId, origem, referencia, justificativa, usuario, automatico = false, pontuacao = null, permitirSolicitacao = false, soHeadcoach = false }) {
+  // pela tela (soHeadcoach): saída só concilia com o Contas a Pagar HeadCoach (Titia, 24/11/2026)
+  if (soHeadcoach) {
+    const origens = [origem, ...(Array.isArray(referencia?.itens) ? referencia.itens.map((it) => it?.origem) : [])];
+    if (origens.some((o) => ORIGENS_SO_CONSULTA.includes(o))) throw new Error('Liberação, Solicitação e Contas a Pagar do TOTVS são só consulta — concilie com o Contas a Pagar HeadCoach (replique o título lá se precisar).');
+  }
   // Titia, 11/11/2026: não se concilia com Solicitação — ela só aparece para
   // consulta; o pagamento é aprovado no Financeiro (Liberação) e aí concilia.
   // Exceção: duplicata que a própria Conciliação cria (tarifas/saídas pendentes).
