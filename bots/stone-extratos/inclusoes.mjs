@@ -35,6 +35,22 @@ export function documentoConfere(esperado, recebido) {
 }
 
 /**
+ * O que a Stone devolve ao ler um Pix copia e cola. Os dados vêm dentro de uma chave
+ * com o nome do tipo: {"static":{amount,key,transaction_id,…},"type":"static"} (e
+ * "dynamic" para cobrança). Devolve { tipo, chave, valorCentavos, transactionId } ou
+ * null quando não há chave.
+ */
+export function dadosDoBrcode(json) {
+  if (!json || typeof json !== 'object') return null;
+  const tipo = typeof json.type === 'string' ? json.type : null;
+  const d = (tipo && json[tipo] && typeof json[tipo] === 'object' ? json[tipo] : null) || (json.data && typeof json.data === 'object' ? json.data : null) || json;
+  if (!d?.key) return null;
+  const bruto = d.amount && typeof d.amount === 'object' ? d.amount.final ?? d.amount.total ?? d.amount.original : d.amount;
+  const valor = Number(bruto);
+  return { tipo: tipo || 'static', chave: String(d.key), valorCentavos: Number.isFinite(valor) && valor > 0 ? Math.round(valor) : null, transactionId: d.transaction_id ?? d.transactionId ?? null };
+}
+
+/**
  * Transferência entre contas do grupo: o recebedor devolvido pela Stone tem que ser
  * o CNPJ esperado. Vale documento inteiro ou mascarado, desde que todos os trechos
  * visíveis estejam no CNPJ esperado e apareçam pelo menos 6 dígitos — sem dígito
@@ -65,14 +81,20 @@ export async function incluirPix(stone, item, contas) {
   if (item.chave_tipo === 'brcode') {
     const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
     const lido = await stone.decodificarBrcode({ brcode: item.chave_pix, ownerId: conta.owner_id ?? conta.ownerId ?? null, data: hoje, idempotencia: chaveIdem(item, 'ler') });
-    const qr = lido.json?.data && !lido.json?.key ? lido.json.data : lido.json;
+    const qr = dadosDoBrcode(lido.json);
     if (lido.status === 403) return { status: 'bloqueado', erro: `Stone recusou ler o Pix copia e cola (403): ${curto(lido)}` };
-    if (lido.status >= 300 || !qr?.key) return { status: 'erro', erro: `A Stone não leu o Pix copia e cola (${lido.status}): ${curto(lido)}` };
-    // QR com valor (cobrança): tem que ser exatamente o valor da liberação — conta com juros ou vencida muda de valor
-    if (qr.amount != null && Number(qr.amount) > 0 && Number(qr.amount) !== item.valor_centavos)
-      return { status: 'erro', erro: `O Pix copia e cola é de R$ ${(Number(qr.amount) / 100).toFixed(2)} e a liberação é de R$ ${(item.valor_centavos / 100).toFixed(2)}. Não incluí.` };
-    chave = qr.key;
-    transactionId = qr.type === 'static' ? null : qr.transaction_id ?? qr.transactionId ?? null;
+    if (lido.status >= 300 || !qr) {
+      // resposta num formato que ainda não conheço: o erro leva os NOMES dos campos (sem os valores) para dar para ajustar
+      const interno = lido.json && typeof lido.json.type === 'string' ? lido.json[lido.json.type] : null;
+      const campos = interno && typeof interno === 'object' ? ` · campos de "${lido.json.type}": ${Object.keys(interno).join(', ')}` : '';
+      return { status: 'erro', erro: `A Stone não leu o Pix copia e cola (${lido.status})${campos}: ${curto(lido)}`.slice(0, 480) };
+    }
+    // QR com valor: tem que ser exatamente o valor da liberação — conta com juros ou vencida muda de valor
+    if (qr.valorCentavos != null && qr.valorCentavos !== item.valor_centavos)
+      return { status: 'erro', erro: `O Pix copia e cola é de R$ ${(qr.valorCentavos / 100).toFixed(2)} e a liberação é de R$ ${(item.valor_centavos / 100).toFixed(2)}. Não incluí.` };
+    chave = qr.chave;
+    // como o portal faz: a cobrança (transaction_id) só vai no QR dinâmico
+    transactionId = qr.tipo === 'static' ? null : qr.transactionId;
   }
 
   const criado = await stone.criarPix({

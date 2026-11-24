@@ -1,6 +1,6 @@
 import { describe, it, expect } from '@jest/globals';
 import { cpfValido, cnpjValido, normalizarChavePix, finalContaStone, valorDoTitulo, emCentavos, textoAvisoFabio, planoDeInclusao, crc16, pixCopiaECola, dadoPix } from '../utils/stoneInclusao.js';
-import { incluirPix, documentoConfere } from '../bots/stone-extratos/inclusoes.mjs';
+import { incluirPix, documentoConfere, dadosDoBrcode } from '../bots/stone-extratos/inclusoes.mjs';
 
 describe('chave Pix', () => {
   it('valida CPF e CNPJ pelo dígito', () => {
@@ -202,7 +202,7 @@ describe('Pix copia e cola (QR Code)', () => {
   describe('no bot (Stone simulada)', () => {
     const contas = [{ id: 'acc-0549', owner_document: '27728810000549', owner_id: 'dono-1' }];
     const item = { liberacao_id: 'hc-77', stone_account_id: 'acc-0549', conta_final: '0549', chave_pix: QR, chave_tipo: 'brcode', valor_centavos: 91333, descricao: 'Dup 1/11' };
-    const stoneFalsa = ({ lido = { key: 'chave-do-recebedor', amount: 91333, transaction_id: 'tx-1', type: 'dynamic' }, statusLido = 200 } = {}) => {
+    const stoneFalsa = ({ lido = { dynamic: { key: 'chave-do-recebedor', amount: 91333, transaction_id: 'tx-1' }, type: 'dynamic' }, statusLido = 200 } = {}) => {
       const chamadas = [];
       return {
         chamadas,
@@ -222,7 +222,7 @@ describe('Pix copia e cola (QR Code)', () => {
     });
 
     it('valor do QR diferente do da liberação (conta com juros): não cria nada', async () => {
-      const s = stoneFalsa({ lido: { key: 'k', amount: 92000, transaction_id: 'tx', type: 'dynamic' } });
+      const s = stoneFalsa({ lido: { dynamic: { key: 'k', amount: 92000, transaction_id: 'tx' }, type: 'dynamic' } });
       const r = await incluirPix(s, item, contas);
       expect(r.status).toBe('erro');
       expect(r.erro).toMatch(/920\.00.*913\.33/);
@@ -230,10 +230,32 @@ describe('Pix copia e cola (QR Code)', () => {
     });
 
     it('QR estático (sem valor): usa o valor da liberação e não manda cobrança', async () => {
-      const s = stoneFalsa({ lido: { key: 'k-estatica', amount: null, type: 'static' } });
+      const s = stoneFalsa({ lido: { static: { key: 'k-estatica', amount: null, transaction_id: 'COD1' }, type: 'static' } });
       const r = await incluirPix(s, item, contas);
       expect(r.status).toBe('incluido');
       expect(s.chamadas[1][1]).toMatchObject({ chave: 'k-estatica', transactionId: null, valorCentavos: 91333 });
+    });
+
+    it('formato real da Stone (24/11/2026): estático COM valor e com transaction_id', async () => {
+      const real = { static: { additional_information: 'CONTA 11/2026', amount: 12072, key: '1245d328-7ad1-42cf-b726-4d7d458edd3c', key_type: 'random_key', transaction_id: '1150020450880111202600003' }, type: 'static' };
+      expect(dadosDoBrcode(real)).toEqual({ tipo: 'static', chave: '1245d328-7ad1-42cf-b726-4d7d458edd3c', valorCentavos: 12072, transactionId: '1150020450880111202600003' });
+      const s = stoneFalsa({ lido: real });
+      const r = await incluirPix(s, { ...item, valor_centavos: 12072 }, contas);
+      expect(r.status).toBe('incluido');
+      // estático: vai só a chave, sem a cobrança (como o portal faz)
+      expect(s.chamadas[1][1]).toMatchObject({ chave: '1245d328-7ad1-42cf-b726-4d7d458edd3c', transactionId: null, valorCentavos: 12072 });
+      // e se a liberação for de outro valor, não inclui
+      const s2 = stoneFalsa({ lido: real });
+      expect((await incluirPix(s2, { ...item, valor_centavos: 12070 }, contas)).status).toBe('erro');
+      expect(s2.chamadas.map((c) => c[0])).toEqual(['ler']);
+    });
+
+    it('leitura da resposta: dados soltos, dentro de data, sem chave', () => {
+      expect(dadosDoBrcode({ key: 'k', amount: 100, type: 'static' })).toMatchObject({ chave: 'k', valorCentavos: 100 });
+      expect(dadosDoBrcode({ data: { key: 'k2', amount: 0 } })).toMatchObject({ chave: 'k2', valorCentavos: null });
+      expect(dadosDoBrcode({ dynamic: { key: 'k3', amount: { original: 500, final: 512 }, transaction_id: 't' }, type: 'dynamic' })).toEqual({ tipo: 'dynamic', chave: 'k3', valorCentavos: 512, transactionId: 't' });
+      expect(dadosDoBrcode({ type: 'static', static: {} })).toBeNull();
+      expect(dadosDoBrcode(null)).toBeNull();
     });
 
     it('a Stone não leu o código (vencido, inválido): erro, sem criar Pix', async () => {
