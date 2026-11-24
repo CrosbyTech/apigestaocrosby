@@ -8,3 +8,5 @@ capturas/
 mapa/
 node_modules/
 *.log
+# trava de agente único (pid do agente ligado)
+agente.lock

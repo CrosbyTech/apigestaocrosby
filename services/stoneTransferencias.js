@@ -12,6 +12,8 @@
 //     (ninguém digita chave na hora de transferir);
 //   • quem pede confirma com a própria senha do HeadCoach (owner, admin, financeiro);
 //   • uma só em andamento por par origem → destino (índice único);
+//   • conta com transferência já incluída e ainda não aprovada não manda o mesmo
+//     saldo de novo (o dinheiro continua aparecendo no saldo até o Fábio aprovar);
 //   • o agente só confirma o Pix se a Stone devolver, como recebedor, o CNPJ da
 //     conta de destino (bots/stone-extratos/transferencias.mjs);
 //   • transferência parada no meio vira "verificar" e nunca é repetida sozinha.
@@ -25,7 +27,7 @@ import * as wa from './whatsappContasPagar.js';
 import { grupoChatid, MENCIONAR } from './relatorioSaldosWhatsapp.js';
 import { CpError, PERFIS_FINANCEIRO, conferirSenha } from './hcContasPagar.js';
 import { nomeScore } from './conciliacaoAprovados.js';
-import { chaveAleatoria, chaveMascarada, finalDoCnpj, emCentavos, motivoDeNaoTransferir, descricaoDaTransferencia, textoAvisoTransferencias, SITUACOES } from '../utils/stoneTransferencia.js';
+import { chaveAleatoria, chaveMascarada, finalDoCnpj, emCentavos, motivoDeNaoTransferir, motivoPorPendente, descricaoDaTransferencia, textoAvisoTransferencias, SITUACOES } from '../utils/stoneTransferencia.js';
 
 const T = { contas: 'stone_contas', transf: 'stone_transferencias', saldos: 'stone_bot_saldos' };
 const PROCESSANDO_MAX_MIN = 30;
@@ -112,12 +114,17 @@ export async function solicitar(user, b = {}) {
   const contas = await contasComSaldo();
   const porId = new Map(contas.map((c) => [c.stone_account_id, c]));
   const destino = porId.get(String(b.destino));
+  // o que cada conta de origem já tem incluído na Stone e ainda não saiu (aguardando o Fábio), nas últimas 24 h
+  const { data: aguardando, error: eP } = await supabase.from(T.transf).select('origem_account_id, valor_incluido_centavos, valor_centavos').eq('status', 'incluido').gte('concluido_em', new Date(Date.now() - 864e5).toISOString()).in('origem_account_id', idsOrigem);
+  lancar(eP);
+  const pendente = new Map();
+  for (const t of aguardando || []) pendente.set(t.origem_account_id, (pendente.get(t.origem_account_id) || 0) + Number(t.valor_incluido_centavos ?? t.valor_centavos ?? 0));
   const pedidos = [];
   const ignoradas = [];
   for (const id of idsOrigem) {
     if (id === String(b.destino)) continue; // "todas para uma": o destino sai da lista de origens sem reclamar
     const origem = porId.get(id);
-    const motivo = motivoDeNaoTransferir({ origem, destino, tudo, valorCentavos });
+    const motivo = motivoDeNaoTransferir({ origem, destino, tudo, valorCentavos }) || motivoPorPendente({ tudo, valorCentavos, saldoCentavos: origem?.saldoCentavos ?? null, pendenteCentavos: pendente.get(id) || 0 });
     if (motivo) ignoradas.push({ id, final: origem?.conta_final || '?', motivo });
     else pedidos.push(origem);
   }

@@ -24,7 +24,7 @@ import { Stone, helpers, manterSessao } from './stone.mjs';
 import { incluirPix } from './inclusoes.mjs';
 import { incluirTransferencia } from './transferencias.mjs';
 
-const VERSAO = '1.2.0'; // 1.1.0: saldo de hora em hora · 1.2.0: transferência entre contas
+const VERSAO = '1.2.1'; // 1.1.0: saldo de hora em hora · 1.2.0: transferência entre contas · 1.2.1: um agente só por PC
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { brDe, dormir, soDigitos } = helpers;
 
@@ -332,7 +332,7 @@ async function rodarInclusoes(primeiro) {
       falhaGeral = 'Sessão da Stone expirada: rode login.bat e clique em tentar de novo.';
     }
   } catch (e) {
-    falhaGeral = e.message;
+    falhaGeral = /already running/i.test(e.message) ? 'O navegador do bot estava em uso por outro agente (dois agentes ligados ao mesmo tempo?). Nada foi enviado à Stone: peça de novo.' : e.message;
   }
   try {
     while (item) {
@@ -369,7 +369,7 @@ async function rodarTransferencias(primeira) {
       falhaGeral = 'Sessão da Stone expirada: rode login.bat e peça a transferência de novo.';
     }
   } catch (e) {
-    falhaGeral = e.message;
+    falhaGeral = /already running/i.test(e.message) ? 'O navegador do bot estava em uso por outro agente (dois agentes ligados ao mesmo tempo?). Nada foi enviado à Stone: peça de novo.' : e.message;
   }
   try {
     while (item) {
@@ -461,7 +461,39 @@ async function modoAgora() {
   console.log(`\nResultado: ${r.status} — ${JSON.stringify(r.resumo)}`);
 }
 
+// Só UM agente por computador: dois ao mesmo tempo disputam o perfil do Chrome e a fila
+// (em 24/11/2026 um segundo agente derrubou 8 transferências com "browser is already running").
+const TRAVA = path.join(__dirname, 'agente.lock');
+function outroAgenteLigado() {
+  try {
+    const pid = Number(String(fs.readFileSync(TRAVA, 'utf8')).trim());
+    if (!pid || pid === process.pid) return null;
+    process.kill(pid, 0); // não mata: só confere se o processo existe
+    return pid;
+  } catch {
+    return null; // sem trava, ou o processo da trava já não existe
+  }
+}
+function assumirTrava() {
+  fs.writeFileSync(TRAVA, String(process.pid));
+  const soltar = () => {
+    try {
+      if (Number(String(fs.readFileSync(TRAVA, 'utf8')).trim()) === process.pid) fs.unlinkSync(TRAVA);
+    } catch {
+      /* já saiu */
+    }
+  };
+  process.on('exit', soltar);
+  for (const sinal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) process.on(sinal, () => process.exit(0));
+}
+
 async function modoAgente() {
+  const outro = outroAgenteLigado();
+  if (outro) {
+    console.log(`\n⚠️  Já existe um agente do Bot Stone ligado neste computador (processo ${outro}). Não vou abrir outro: dois agentes ao mesmo tempo brigam pelo navegador e derrubam as inclusões.\n   Se quiser reiniciar, rode parar.bat e depois iniciar de novo. (Se tiver certeza de que não há outro, apague o arquivo agente.lock.)`);
+    return;
+  }
+  assumirTrava();
   console.log(`Bot Stone Extratos v${VERSAO} — agente em ${host} → ${cfg.headcoachUrl}`);
   const listaHorarios = (Array.isArray(cfg.horarios) && cfg.horarios.length ? cfg.horarios : [cfg.horarioDiario]).filter(Boolean).join(', ');
   console.log(`Saldo de hora em hora: ${cfg.saldo?.ativo === false ? '(desligado)' : 'seg–sex, das 9h às 20h (ou "saldo" no config.json)'}`);

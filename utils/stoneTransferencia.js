@@ -49,6 +49,20 @@ export function motivoDeNaoTransferir({ origem, destino, tudo = false, valorCent
   return null;
 }
 
+/**
+ * Transferência já incluída e ainda não aprovada pelo Fábio: o dinheiro continua
+ * aparecendo no saldo da conta. Pedir "todo o saldo" de novo (ou um valor que não
+ * cabe no que sobra) criaria um segundo Pix do mesmo dinheiro — não deixa.
+ * @returns motivo (string) ou null quando pode
+ */
+export function motivoPorPendente({ tudo = false, valorCentavos = null, saldoCentavos = null, pendenteCentavos = 0 } = {}) {
+  if (!(pendenteCentavos > 0)) return null;
+  const aguardando = `já tem ${fmt(pendenteCentavos / 100)} aguardando a aprovação do Fábio (esse dinheiro ainda aparece no saldo)`;
+  if (tudo) return aguardando;
+  if (saldoCentavos != null && Number(valorCentavos) > saldoCentavos - pendenteCentavos) return `${aguardando}; sobram ${fmt(Math.max(0, saldoCentavos - pendenteCentavos) / 100)} livres`;
+  return null;
+}
+
 /** Descrição que vai no Pix (a Stone limita o tamanho). */
 export const descricaoDaTransferencia = (origemFinal, destinoFinal) => `Entre contas ${origemFinal} > ${destinoFinal}`.slice(0, 60);
 

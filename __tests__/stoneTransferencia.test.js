@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { chaveAleatoria, chaveMascarada, finalDoCnpj, emCentavos, motivoDeNaoTransferir, descricaoDaTransferencia, textoAvisoTransferencias, SITUACOES } from '../utils/stoneTransferencia.js';
+import { chaveAleatoria, chaveMascarada, finalDoCnpj, emCentavos, motivoDeNaoTransferir, motivoPorPendente, descricaoDaTransferencia, textoAvisoTransferencias, SITUACOES } from '../utils/stoneTransferencia.js';
 import { recebedorEhOEsperado } from '../bots/stone-extratos/inclusoes.mjs';
 import { incluirTransferencia } from '../bots/stone-extratos/transferencias.mjs';
 
@@ -62,6 +62,23 @@ describe('o que pode ser transferido', () => {
   it('"todo o saldo" de conta zerada não vai; sem saldo conhecido, quem decide é o bot na hora', () => {
     expect(motivoDeNaoTransferir({ origem: { ...origem, saldoCentavos: 0 }, destino, tudo: true })).toMatch(/sem saldo/);
     expect(motivoDeNaoTransferir({ origem: { ...origem, saldoCentavos: null }, destino, tudo: true })).toBeNull();
+  });
+});
+
+describe('conta com transferência aguardando o Fábio', () => {
+  it('sem nada pendente: pode', () => {
+    expect(motivoPorPendente({ tudo: true, saldoCentavos: 215511, pendenteCentavos: 0 })).toBeNull();
+    expect(motivoPorPendente({ valorCentavos: 1000, saldoCentavos: 215511 })).toBeNull();
+  });
+
+  it('"todo o saldo" de novo com o mesmo dinheiro ainda pendente: não', () => {
+    expect(motivoPorPendente({ tudo: true, saldoCentavos: 215511, pendenteCentavos: 215511 })).toMatch(/R\$\s2\.155,11 aguardando a aprovação do Fábio/);
+  });
+
+  it('um valor só passa se couber no que sobra livre', () => {
+    expect(motivoPorPendente({ valorCentavos: 50000, saldoCentavos: 300000, pendenteCentavos: 200000 })).toBeNull();
+    expect(motivoPorPendente({ valorCentavos: 150000, saldoCentavos: 300000, pendenteCentavos: 200000 })).toMatch(/sobram R\$\s1\.000,00 livres/);
+    expect(motivoPorPendente({ valorCentavos: 1, saldoCentavos: 215511, pendenteCentavos: 215511 })).toMatch(/sobram R\$\s0,00 livres/);
   });
 });
 
