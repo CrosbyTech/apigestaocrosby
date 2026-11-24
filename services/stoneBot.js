@@ -180,6 +180,15 @@ export async function finalizarExecucao(id, { status = 'concluido', resumo = nul
   }
   // extrato novo importado → títulos marcados PAGO na Liberação ganham a
   // conciliação da saída correspondente (Yago, 09/11/2026)
+  // extrato novo → transferência entre contas incluída vira FEITA quando a saída aparece
+  if (ok === 'concluido' && !data?.parametros?.soSaldo) {
+    import('./stoneTransferencias.js')
+      .then((m) => m.conferirNoExtrato())
+      .then((r) => {
+        if (r?.feitas) registrarLog(id, { nivel: 'ok', msg: `Entre contas: ${r.feitas} transferência(s) confirmada(s) no extrato.` }).catch(() => {});
+      })
+      .catch((e) => console.error('[stone-bot] entre contas → conferência:', e.message));
+  }
   if (ok === 'concluido' && !data?.parametros?.soSaldo) {
     import('./conciliacaoPropagacao.js')
       .then((m) => m.conciliarLiberacaoPagos({ dias: 15, usuario: 'Liberação PAGO → conciliação (bot Stone)' }))

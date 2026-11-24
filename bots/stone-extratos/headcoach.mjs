@@ -59,6 +59,15 @@ export class HeadCoach {
     return this.req('POST', `/inclusoes/${id}/resultado`, { json: resultado, timeoutMs: 60000 });
   }
 
+  // transferência entre contas (botão TRANSFERIR do HeadCoach)
+  proximaTransferencia() {
+    return this.req('GET', `/transferencias/proxima?host=${encodeURIComponent(this.host)}`, { timeoutMs: 30000 });
+  }
+
+  resultadoTransferencia(id, resultado) {
+    return this.req('POST', `/transferencias/${id}/resultado`, { json: resultado, timeoutMs: 60000 });
+  }
+
   // origem 'saldo' = consulta de hora em hora (só o saldo); avisarGrupo = o HeadCoach manda o saldo no grupo ao terminar
   criarExecucao({ origem = 'manual', de, ate, avisarGrupo = false } = {}) {
     return this.req('POST', '/execucoes', { json: { origem, host: this.host, de, ate, avisarGrupo }, timeoutMs: 30000 });

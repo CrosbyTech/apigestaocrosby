@@ -9,6 +9,10 @@
 //   DELETE /execucoes/:id          → cancela uma pendente
 //   GET    /saldos                 → saldos da última captura
 //   POST   /inclusoes {ids}        → fila de inclusão na Stone (botão APROVAR da Liberação)
+//   GET    /transferencias                      → contas Stone (saldo, se tem a chave) + transferências recentes
+//   POST   /transferencias {origens, destino, tudo|valor, senha} → TRANSFERIR entre contas (fila do agente)
+//   POST   /transferencias/:id/cancelar         → tira da fila (só antes de o agente pegar)
+//   PUT    /contas/:id/chave {chave}            → guarda a chave Pix aleatória da conta
 //
 // Agente local (bots/stone-extratos, header x-bot-token = STONE_BOT_TOKEN):
 //   POST   /agente/ping                         { host, versao, sessaoOk, proximaAgendada }
@@ -25,6 +29,8 @@
 //   POST   /agente/execucoes/:id/finalizar      { status, resumo, erro }
 //   GET    /agente/inclusoes/proxima?host       → próximo título a incluir (marca processando) ou null
 //   POST   /agente/inclusoes/:id/resultado      { status, stonePagamentoId, recebedorNome, recebedorDoc, erro }
+//   GET    /agente/transferencias/proxima?host  → próxima transferência entre contas (marca processando) ou null
+//   POST   /agente/transferencias/:id/resultado { status, valorCentavos, stonePagamentoId, recebedorNome, recebedorDoc, erro }
 // ============================================================
 import crypto from 'node:crypto';
 import express from 'express';
@@ -36,12 +42,15 @@ import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
 import { salvarComprovante } from '../services/comprovantesStone.js';
 import { conciliarAprovados } from '../services/conciliacaoAprovados.js';
 import { enfileirar, proximaInclusao, registrarResultado } from '../services/stoneInclusoes.js';
+import * as transferencias from '../services/stoneTransferencias.js';
+import { CpError } from '../services/hcContasPagar.js';
 import { MigrationPendingError } from '../services/fluxoCaixaExt.js';
 
 const router = express.Router();
 
 const tratar = (res, e) => {
   if (e instanceof MigrationPendingError || e?.code === 'MIGRATION_PENDING') return errorResponse(res, e.message, 503, 'MIGRATION_PENDING');
+  if (e instanceof CpError) return errorResponse(res, e.message, e.status || 400, e.code || 'STONE_TRANSFERENCIA'); // regra de negócio: a mensagem vai para a tela
   console.error('[stone-bot]', e);
   return errorResponse(res, e.message || 'Erro interno', 500, 'STONE_BOT');
 };
@@ -197,6 +206,50 @@ tela.post(
   }),
 );
 
+// ─── Transferência entre contas da Stone (botão TRANSFERIR) ───
+tela.get(
+  '/transferencias',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await transferencias.painel(req.user));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+tela.post(
+  '/transferencias',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await transferencias.solicitar(req.user, req.body || {});
+      const fora = r.ignoradas.length ? ` · ${r.ignoradas.length} ficou(aram) de fora (${r.ignoradas[0].final}: ${r.ignoradas[0].motivo})` : '';
+      return successResponse(res, r, `${r.criadas.length} transferência(s) na fila para a conta ${r.destino}${fora}`);
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+tela.post(
+  '/transferencias/:id/cancelar',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await transferencias.cancelar(req.user, req.params.id), 'Transferência cancelada');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+tela.put(
+  '/contas/:id/chave',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await transferencias.salvarChave(req.user, req.params.id, req.body?.chave), 'Chave guardada');
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
 // Pagar.me (roda no servidor, não depende do PC do bot)
 tela.get(
   '/pagarme/saldos',
@@ -254,6 +307,27 @@ agente.get(
   asyncHandler(async (req, res) => {
     try {
       return successResponse(res, await proximaInclusao({ host: req.query.host }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+
+agente.get(
+  '/transferencias/proxima',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await transferencias.proximaTransferencia({ host: req.query.host }));
+    } catch (e) {
+      return tratar(res, e);
+    }
+  }),
+);
+agente.post(
+  '/transferencias/:id/resultado',
+  asyncHandler(async (req, res) => {
+    try {
+      return successResponse(res, await transferencias.registrarResultado(Number(req.params.id), req.body || {}));
     } catch (e) {
       return tratar(res, e);
     }

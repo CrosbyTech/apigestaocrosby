@@ -33,6 +33,20 @@ export function documentoConfere(esperado, recebido) {
 }
 
 /**
+ * Transferência entre contas do grupo: o recebedor devolvido pela Stone tem que ser
+ * o CNPJ esperado. Vale documento inteiro ou mascarado, desde que todos os trechos
+ * visíveis estejam no CNPJ esperado e apareçam pelo menos 6 dígitos — sem dígito
+ * visível não dá para afirmar, então não confere.
+ */
+export function recebedorEhOEsperado(esperado, recebido) {
+  const alvo = String(esperado ?? '').replace(/\D/g, '');
+  const visiveis = String(recebido ?? '').replace(/[.\-/\s]/g, '').split(/\D+/).filter((p) => p.length >= 3);
+  if (alvo.length < 11 || !visiveis.length) return false;
+  if (visiveis.reduce((n, p) => n + p.length, 0) < 6) return false;
+  return visiveis.every((p) => alvo.includes(p));
+}
+
+/**
  * @param stone instância logada (criarPix / confirmarPix / resolverDesafio)
  * @param item linha de stone_inclusoes
  * @param contas lista do portal (id, owner_document)
@@ -59,6 +73,10 @@ export async function incluirPix(stone, item, contas) {
   // conferência antes de confirmar: daqui para a frente o pagamento vai para o Fábio
   if (pix.amount != null && Number(pix.amount) !== item.valor_centavos) return { ...resultado, status: 'erro', erro: `Valor devolvido pela Stone (${pix.amount}) difere do título (${item.valor_centavos}).` };
   if (['cpf', 'cnpj'].includes(item.chave_tipo) && !documentoConfere(item.chave_pix, entidade.document)) return { ...resultado, status: 'erro', erro: `Documento do recebedor (${entidade.document}) não bate com a chave.` };
+
+  // transferência entre contas: só segue se o recebedor for a conta de destino do grupo
+  if (item.recebedor_cnpj_esperado && !recebedorEhOEsperado(item.recebedor_cnpj_esperado, entidade.document))
+    return { ...resultado, status: 'erro', erro: `O recebedor que a Stone devolveu (${entidade.name || '?'} ${entidade.document || 'sem documento'}) não é a conta de destino. Não confirmei.` };
 
   let confirmado;
   try {

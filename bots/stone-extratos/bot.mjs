@@ -22,8 +22,9 @@ import { fileURLToPath } from 'node:url';
 import { HeadCoach } from './headcoach.mjs';
 import { Stone, helpers, manterSessao } from './stone.mjs';
 import { incluirPix } from './inclusoes.mjs';
+import { incluirTransferencia } from './transferencias.mjs';
 
-const VERSAO = '1.1.0'; // 1.1.0: consulta só do saldo de hora em hora (seg–sex, 9h–20h)
+const VERSAO = '1.2.0'; // 1.1.0: saldo de hora em hora · 1.2.0: transferência entre contas
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { brDe, dormir, soDigitos } = helpers;
 
@@ -352,6 +353,44 @@ async function rodarInclusoes(primeiro) {
   }
 }
 
+// ─── transferência entre contas (botão TRANSFERIR do HeadCoach) ─────────────
+async function rodarTransferencias(primeira) {
+  const stone = new Stone(cfg, dirs, (m) => console.log(`${hora()}    ${m}`));
+  let item = primeira;
+  let contas = null;
+  let falhaGeral = null;
+  try {
+    await stone.abrir({ visivel: false });
+    await stone.irParaInicio();
+    if (await stone.sessaoOk()) {
+      await stone.garantirApi();
+      contas = await stone.listarContas();
+    } else {
+      falhaGeral = 'Sessão da Stone expirada: rode login.bat e peça a transferência de novo.';
+    }
+  } catch (e) {
+    falhaGeral = e.message;
+  }
+  try {
+    while (item) {
+      let r;
+      try {
+        r = falhaGeral ? { status: 'erro', erro: falhaGeral } : await incluirTransferencia(stone, item, contas);
+      } catch (e) {
+        // falhou antes do confirmar: nada foi para o Fábio e a chave de idempotência protege a repetição
+        r = { status: 'erro', erro: e.message };
+      }
+      const valor = r.valorCentavos ?? item.valor_centavos;
+      console.log(`${hora()} ${r.status === 'incluido' ? '✅' : '⚠️ '} entre contas #${item.id} ${item.origem_final} → ${item.destino_final}${valor ? ` R$ ${(valor / 100).toFixed(2)}` : ''}: ${r.status}${r.erro ? ` — ${r.erro}` : ''}`);
+      const volta = await hc.resultadoTransferencia(item.id, r);
+      if (volta?.aviso) console.log(`${hora()}    aviso no grupo: ${volta.aviso.enviado ? `enviado (${volta.aviso.contas.join(', ')})` : `FALHOU — ${volta.aviso.erro}`}`);
+      item = await hc.proximaTransferencia();
+    }
+  } finally {
+    await stone.fechar();
+  }
+}
+
 // ─── modos ───────────────────────────────────────────────────────────────────
 async function modoLogin() {
   const stone = new Stone(cfg, dirs, (m) => console.log(`${hora()}    ${m}`));
@@ -504,6 +543,18 @@ async function modoAgente() {
           ocupado = true;
           try {
             await rodarInclusoes(inclusao);
+          } finally {
+            ocupado = false;
+            ultimoKeepAlive = Date.now();
+          }
+        }
+      }
+      if (!ocupado) {
+        const transferencia = await hc.proximaTransferencia();
+        if (transferencia) {
+          ocupado = true;
+          try {
+            await rodarTransferencias(transferencia);
           } finally {
             ocupado = false;
             ultimoKeepAlive = Date.now();
