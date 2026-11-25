@@ -484,7 +484,9 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
       const dados = validarInclusao({
         empresa: filial.code,
         fornecedorCode: fornHc.code,
-        documentoFiscal: `Extrato ${fmtData(l.data)}`.slice(0, 40),
+        // uma por linha do extrato: várias tarifas do mesmo banco no mesmo dia batiam na
+        // chave única (empresa, fornecedor, documento fiscal, parcela) e eram recusadas
+        documentoFiscal: `Extrato ${fmtData(l.data)} #${l.id}`.slice(0, 40),
         tipoDocumento: 'outro',
         formaPagamento: 'debito_automatico',
         despesaCode: despesaCodigo,

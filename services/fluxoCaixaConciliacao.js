@@ -2374,6 +2374,46 @@ export async function detalheConciliacao(id) {
       origem.stone.erroParcelas = e.message;
     }
   }
+  // Contas a Pagar HeadCoach: detalhe completo do título, com a observação da duplicata
+  if (c.origem === 'HC_CP' && ref.id) {
+    const { data: t } = await supabase.from('hc_cp_titulos').select('*').eq('id', Number(ref.id)).maybeSingle();
+    if (t) {
+      const linhas = Array.isArray(t.rateio) && t.rateio.length ? t.rateio : [{ despesa_code: t.despesa_code, despesa_nome: t.despesa_nome, centro_custo_code: t.centro_custo_code, valor: t.valor }];
+      origem = {
+        ...(origem || {}),
+        tipo: 'Contas a Pagar HeadCoach',
+        empresa: ref.empresa || `Empresa ${t.empresa}`,
+        fornecedor: t.fornecedor_nome || ref.nome,
+        fornecedorCodigo: t.fornecedor_code,
+        doc: soDigitos(t.fornecedor_cpf_cnpj) || ref.doc || null,
+        duplicata: t.duplicata,
+        parcela: t.parcela,
+        emissao: t.emissao,
+        vencimento: t.vencimento,
+        dataPagamento: t.data_pagamento,
+        valor: Number(t.valor),
+        valorPago: t.valor_pago != null ? Number(t.valor_pago) : Number(t.valor),
+        juros: Number(t.juros) || null,
+        desconto: Number(t.desconto) || null,
+        forma: t.forma_pagamento,
+        chavePix: t.chave_pix,
+        codigoBarras: t.codigo_barras,
+        banco: t.portador_nome || null,
+        despesas: linhas.map((r) => ({ codigo: r.despesa_code, nome: r.despesa_nome, centroCusto: r.centro_custo_code ?? t.centro_custo_code, percentual: r.percentual, valor: r.valor != null ? round2(r.valor) : null })),
+        despesa: linhas.map((r) => `${r.despesa_code} ${r.despesa_nome || ''}`.trim()).join(' / '),
+        centroCusto: [t.centro_custo_code, t.centro_custo_nome].filter(Boolean).join(' ') || null,
+        incluidoPor: t.criado_por,
+        pagoPor: t.baixado_por,
+        status: t.situacao,
+        observacao: t.observacao,
+      };
+    }
+  }
+  // despesa só com o número: completa com a descrição
+  if (origem?.despesa != null && /^\d+$/.test(String(origem.despesa).trim()) && !origem.despesas?.length) {
+    const { data: d } = await supabase.from('hc_cp_despesas').select('code,nome').eq('code', Number(origem.despesa)).maybeSingle();
+    if (d?.nome) origem.despesa = `${d.code} ${d.nome}`;
+  }
   // outras saídas conciliadas com a mesma origem (pagamento parcial)
   let usos = [];
   if (ref.id != null && c.origem !== 'MANUAL') {
