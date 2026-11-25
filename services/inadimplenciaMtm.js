@@ -272,8 +272,10 @@ export async function painel() {
     semanaAnterior: anterior || null,
     apuradoEm: apuradoEm || null,
     vendedores,
+    // principais (ativos) e outros separados (João, 25/11): cada grupo com o seu total ponderado
     totais: {
       ativos: { ...totalCom(VENDEDORES_MTM.filter((v) => v.ativo)), rotulo: VENDEDORES_MTM.filter((v) => v.ativo).map((v) => v.chave).join(' + ') },
+      outros: { ...totalCom(VENDEDORES_MTM.filter((v) => !v.ativo)), rotulo: VENDEDORES_MTM.filter((v) => !v.ativo).map((v) => v.chave).join(' + ') },
       geral: totalCom(VENDEDORES_MTM),
     },
   };
