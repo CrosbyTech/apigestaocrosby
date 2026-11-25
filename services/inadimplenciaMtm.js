@@ -33,6 +33,7 @@
 import axios from 'axios';
 import supabase from '../config/supabase.js';
 import { faturamentoPorVendedorJanelas } from './faturamentoVendedorMensal.js';
+import { vendasHeadcoachParaForecast } from './hcVendasForecast.js';
 
 const TZ = 'America/Sao_Paulo';
 const INTERNAL_API_BASE = process.env.INTERNAL_API_BASE_URL || `http://localhost:${process.env.PORT || 4100}`;
@@ -146,6 +147,21 @@ async function inadimplenciaPorVendedor(hoje) {
   return { porVendedor, totalFaturas: faturas.length };
 }
 
+// ─── Parte do HeadCoach no faturado (João, 25/11/2026) ───────────────────────
+// Mesmas vendas que o faturamento por vendedor soma do HeadCoach (atacado e
+// Brejinho, sem CREDEV), na janela de cada vendedor. A parte do TOTVS é o resto.
+async function headcoachPorVendedor(hoje) {
+  const dmin = VENDEDORES_MTM.reduce((m, v) => (v.desde < m ? v.desde : m), VENDEDORES_MTM[0].desde);
+  const hc = await vendasHeadcoachParaForecast({ dmin, dmax: hoje });
+  const vendas = [...(hc.atacado || []), ...(hc.brejinho || [])];
+  const m = new Map();
+  for (const v of VENDEDORES_MTM) {
+    const soma = vendas.filter((x) => Number(x.vendedor_code) === v.code && String(x.data) >= v.desde && String(x.data) <= hoje).reduce((s, x) => s + (Number(x.valor) || 0), 0);
+    m.set(v.code, r2(soma));
+  }
+  return m;
+}
+
 // ─── Ajustes ─────────────────────────────────────────────────────────────────
 /** Σ dos ajustes válidos até a semana (inclusive), por vendedor e tipo. */
 async function somaAjustes(semana) {
@@ -185,10 +201,11 @@ export function totalPonderado(linhas) {
 export async function apurar({ gravar = true, origem = 'job', hoje = hojeISO() } = {}) {
   const semana = semanaDe(hoje);
   const t0 = Date.now();
-  const [fat, inad, ajustes] = await Promise.all([
+  const [fat, inad, ajustes, hcPorCod] = await Promise.all([
     faturamentoPorVendedorJanelas(VENDEDORES_MTM.map((v) => ({ seller_code: v.code, datemin: v.desde })), hoje),
     inadimplenciaPorVendedor(hoje),
     somaAjustes(semana),
+    headcoachPorVendedor(hoje),
   ]);
   const fatPorCod = new Map((fat.vendedores || []).map((v) => [Number(v.seller_code), v]));
 
@@ -208,6 +225,8 @@ export async function apurar({ gravar = true, origem = 'job', hoje = hojeISO() }
       data_apuracao: agora,
       desde: v.desde,
       faturado: r2(fatPorCod.get(v.code).valor),
+      faturado_headcoach: hcPorCod.get(v.code) || 0,
+      faturado_totvs: r2(fatPorCod.get(v.code).valor - (hcPorCod.get(v.code) || 0)),
       inadimplencia_60d: r2(i.inad),
       ajuste_faturado: r2(aj.FATURADO),
       ajuste_inadimplencia: r2(aj.INADIMPLENCIA),
@@ -258,8 +277,14 @@ export async function painel() {
     const p = anterior ? grupo(lista, anterior) : null;
     const carteira = r2(lista.reduce((s, v) => s + (Number(de(atual, v.code)?.carteira_vencida) || 0), 0));
     const clientes = lista.reduce((s, v) => s + (Number(de(atual, v.code)?.clientes) || 0), 0);
+    const somaCampo = (campo) => {
+      const vals = lista.map((v) => de(atual, v.code)?.[campo]);
+      return vals.some((x) => x == null) ? null : r2(vals.reduce((s, x) => s + Number(x), 0));
+    };
     return {
       ...a,
+      faturado_totvs: somaCampo('faturado_totvs'),
+      faturado_headcoach: somaCampo('faturado_headcoach'),
       carteira_vencida: carteira,
       clientes,
       anterior: p,

@@ -46,3 +46,7 @@ CREATE INDEX IF NOT EXISTS inad_snapshot_semana_idx ON inad_snapshot (semana_ref
 
 ALTER TABLE inad_ajustes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inad_snapshot ENABLE ROW LEVEL SECURITY;
+
+-- Divisão do faturado por sistema (João, 25/11/2026): quanto veio do TOTVS e quanto do HeadCoach
+ALTER TABLE inad_snapshot ADD COLUMN IF NOT EXISTS faturado_totvs numeric(14,2);
+ALTER TABLE inad_snapshot ADD COLUMN IF NOT EXISTS faturado_headcoach numeric(14,2);
