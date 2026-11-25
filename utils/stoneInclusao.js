@@ -95,6 +95,29 @@ export function dadoPix(valor) {
   return normalizarChavePix(valor);
 }
 
+const TIPO_DE_CHAVE = { cpf: 'CPF', cnpj: 'CNPJ', email: 'e-mail', telefone: 'telefone', evp: 'chave aleatória', brcode: 'copia e cola' };
+
+/**
+ * O que a tela diz depois de gravar a chave Pix / boleto da duplicata pela Liberação
+ * de Pagamento: se o Pix foi reconhecido (e de que tipo) e se o boleto tem o tamanho certo.
+ * @returns {string|null} null = nada informado
+ */
+export function leituraDoPagamento({ chavePix, codigoBarras } = {}) {
+  const partes = [];
+  const pix = String(chavePix ?? '').trim();
+  if (pix) {
+    const d = dadoPix(pix);
+    if (d) partes.push(`Pix reconhecido (${TIPO_DE_CHAVE[d.tipo] || d.tipo})`);
+    else if (/^0002\d{2}/.test(pix)) partes.push('o Pix copia e cola está incompleto (o código de conferência não bate): confira se colou inteiro');
+    else partes.push('a chave Pix não foi reconhecida (CPF, CNPJ, e-mail, telefone ou aleatória): o bot não inclui sozinho');
+  }
+  if (String(codigoBarras ?? '').trim()) {
+    const n = soDigitos(codigoBarras).length;
+    partes.push([44, 47, 48].includes(n) ? `boleto com ${n} dígitos` : `o boleto ficou com ${n} dígitos (o normal é 47 ou 48): confira`);
+  }
+  return partes.join(' · ') || null;
+}
+
 /**
  * Liberação de Pagamento do HeadCoach: como o bot paga esta liberação.
  *   • banco tem que ser uma conta Stone ("STONE 0549");

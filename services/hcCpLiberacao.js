@@ -19,6 +19,7 @@ import supabase from '../config/supabase.js';
 import { CpError, FORMAS, empresasPermitidas, conferirSenha, aplicarBaixa, saldoDoTitulo, rotuloDuplicata } from './hcContasPagar.js';
 import { solicitacoesAposDevolucao } from './solicitacaoVinculoHc.js';
 import { enfileirarHc } from './hcCpInclusaoStone.js';
+import { leituraDoPagamento } from '../utils/stoneInclusao.js';
 
 export const STATUS = { pendente: 'Pendente', previsao: 'Previsão', aprovado: 'Aprovado', incluido: 'Incluído', pago: 'Pago', cancelado: 'Devolvida' };
 export const EM_ANDAMENTO = ['pendente', 'previsao', 'aprovado', 'incluido']; // na ordem do fluxo
@@ -105,7 +106,7 @@ export function resumoDasLiberacoes(linhas) {
 }
 
 // ─── leitura ─────────────────────────────────────────────────────────────────
-const CAMPOS_TITULO = 'id, empresa, fornecedor_code, fornecedor_nome, fornecedor_cpf_cnpj, duplicata, parcela, documento_fiscal, despesa_code, despesa_nome, centro_custo_code, centro_custo_nome, rateio, emissao, vencimento, valor, valor_pago, juros, multa, desconto, situacao, forma_pagamento, chave_pix, codigo_barras, observacao, origem, origem_ref, anexo_path';
+const CAMPOS_TITULO = 'id, empresa, fornecedor_code, fornecedor_nome, fornecedor_cpf_cnpj, duplicata, parcela, documento_fiscal, despesa_code, despesa_nome, centro_custo_code, centro_custo_nome, rateio, emissao, vencimento, valor, valor_pago, juros, multa, desconto, situacao, forma_pagamento, chave_pix, codigo_barras, observacao, origem, origem_ref, anexo_path, escrituracao';
 const COM_TITULO = `*, titulo:hc_cp_titulos!inner(${CAMPOS_TITULO})`;
 
 const paraTela = (l) => ({ ...l, valor: Number(l.valor), titulo: l.titulo ? { ...l.titulo, rotulo: rotuloDuplicata(l.titulo), falta: saldoDoTitulo(l.titulo) } : null });
@@ -248,10 +249,27 @@ export async function editarLiberacao(user, id, b = {}) {
     if (valor > falta + 0.005) throw new CpError(`O valor é maior que o que falta pagar da duplicata (R$ ${falta.toFixed(2).replace('.', ',')})`);
     patch.valor = valor;
   }
-  if (!Object.keys(patch).length) return paraTela(l);
-  const nova = await q(supabase.from('hc_cp_liberacoes').update({ ...patch, atualizado_por: quem(user), atualizado_em: new Date().toISOString() }).eq('id', l.id).in('status', EM_ANDAMENTO).select(COM_TITULO).maybeSingle());
+  // chave Pix / boleto (Yago, 25/11/2026): ficam na DUPLICATA — é de lá que o contas a pagar e o bot leem
+  const pagamento = {};
+  if (b.chavePix !== undefined) pagamento.chave_pix = texto(b.chavePix, 600);
+  if (b.codigoBarras !== undefined) pagamento.codigo_barras = texto(b.codigoBarras, 120);
+  const mudouPagamento = Object.keys(pagamento).some((k) => (l.titulo[k] || null) !== pagamento[k]);
+  if (mudouPagamento && l.status === 'incluido') throw new CpError('Esta liberação já foi incluída no banco: para trocar a chave Pix ou o boleto, volte-a para Aprovados', 'INCLUIDA', 409);
+  if (mudouPagamento && patch.forma_pagamento === undefined && !l.forma_pagamento) {
+    // forma de pagamento em branco acompanha o que foi informado (Pix tem a preferência)
+    const pix = pagamento.chave_pix !== undefined ? pagamento.chave_pix : l.titulo.chave_pix;
+    const boleto = pagamento.codigo_barras !== undefined ? pagamento.codigo_barras : l.titulo.codigo_barras;
+    if (pix || boleto) patch.forma_pagamento = pix ? 'pix' : 'boleto';
+  }
+  if (!Object.keys(patch).length && !mudouPagamento) return paraTela(l);
+  const carimbo = { atualizado_por: quem(user), atualizado_em: new Date().toISOString() };
+  if (mudouPagamento) {
+    const feita = await q(supabase.from('hc_cp_titulos').update({ ...pagamento, ...carimbo }).eq('id', l.titulo.id).eq('situacao', 'aberto').select('id').maybeSingle());
+    if (!feita) throw new CpError('A duplicata desta liberação não está mais em aberto', 'NAO_ABERTA', 409);
+  }
+  const nova = await q(supabase.from('hc_cp_liberacoes').update({ ...patch, ...carimbo }).eq('id', l.id).in('status', EM_ANDAMENTO).select(COM_TITULO).maybeSingle());
   if (!nova) throw new CpError('Esta liberação acabou de ser paga ou devolvida', 'FINAL', 409);
-  return paraTela(nova);
+  return { ...paraTela(nova), aviso: mudouPagamento ? leituraDoPagamento({ chavePix: nova.titulo?.chave_pix, codigoBarras: nova.titulo?.codigo_barras }) || 'chave Pix e boleto removidos' : null };
 }
 
 // ─── banco em lote ───────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ import supabase from '../config/supabase.js';
 import { CpError, PERFIS_FINANCEIRO, validarInclusao, inserirTitulos, rotuloDuplicata } from './hcContasPagar.js';
 import { liberarTitulos, EM_ANDAMENTO } from './hcCpLiberacao.js';
 import { inclusaoDaSolicitacao, escolherFornecedor, motivoDeNaoLiberarSolicitacao, ORIGEM_SOLICITACAO, DESTINO_HC, STATUS_QUE_ENVIAM } from '../utils/solicitacaoCp.js';
+import { escrituracaoDaSolicitacao } from '../utils/hcCpEscrituracao.js';
 
 const dig = (v) => String(v ?? '').replace(/\D+/g, '');
 const hojeBrasil = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife' }).format(new Date());
@@ -150,14 +151,15 @@ export async function enviarSolicitacaoAoCp(user, id) {
     return { solicitacao: { ...sol, ...patch }, titulos: jaTem, rotulo: jaTem.map(rotuloDuplicata).join(', '), jaEnviada: true };
   }
   if (sol.status === 'enviado_totvs') throw new CpError('Esta solicitação já foi enviada antes (ao TOTVS) e não pode ser lançada de novo', 'JA_ENVIADA', 409);
-  if (sol.tem_nota_fiscal === true && sol.status !== 'conciliado') throw new CpError('Solicitação com nota fiscal não vira duplicata: ela segue pelo chamado de escrituração', 'NOTA_FISCAL', 409);
+  // com nota fiscal: vai mesmo sem escrituração — a duplicata nasce marcada (NÃO ESCRITURADA até o chamado ser concluído ou o financeiro trocar na tela)
+  const escrituracao = escrituracaoDaSolicitacao(sol);
   // Compras & Manutenção não passam pela aprovação do gestor: seguem as etapas da tela delas
   const porEtapas = ['compra', 'manutencao'].includes(sol.tipo_solicitacao) && sol.status !== 'rejeitado';
   if (!porEtapas && !STATUS_QUE_ENVIAM.includes(sol.status)) throw new CpError(`A solicitação está "${sol.status}" e ainda não pode ir para o contas a pagar`, 'STATUS', 409);
 
   let criados;
   try {
-    criados = await inserirTitulos(await prepararDuplicata(sol), { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id) });
+    criados = await inserirTitulos(await prepararDuplicata(sol), { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id), escrituracao });
   } catch (e) {
     // o erro fica na solicitação (como ficava o erro do envio antigo) para o financeiro corrigir e reenviar
     if (e instanceof CpError && e.status !== 500) await supabase.from('solicitacoes_crosby').update({ status: 'erro_envio', totvs_erro: e.message, totvs_response: { destino: DESTINO_HC, erro: e.code || null } }).eq('id', sol.id);
@@ -166,8 +168,8 @@ export async function enviarSolicitacaoAoCp(user, id) {
   if (sol.status === 'conciliado') await baixarPelaConciliacao(sol, criados);
   const patch = await marcarEnviada(sol, criados);
   const rotulo = criados.map(rotuloDuplicata).join(', ');
-  console.log(`🧾 [solicitação → contas a pagar] ${sol.id} · ${criados[0]?.fornecedor_nome} · empresa ${criados[0]?.empresa} · duplicata ${rotulo}${sol.status === 'conciliado' ? ' (já paga)' : ''} · ${quem(user)}`);
-  return { solicitacao: { ...sol, ...patch }, titulos: criados, rotulo, jaEnviada: false };
+  console.log(`🧾 [solicitação → contas a pagar] ${sol.id} · ${criados[0]?.fornecedor_nome} · empresa ${criados[0]?.empresa} · duplicata ${rotulo}${sol.status === 'conciliado' ? ' (já paga)' : ''}${escrituracao === 'pendente' ? ' (nota não escriturada)' : ''} · ${quem(user)}`);
+  return { solicitacao: { ...sol, ...patch }, titulos: criados, rotulo, jaEnviada: false, escrituracao };
 }
 
 /**
@@ -186,7 +188,7 @@ export async function liberarSolicitacaoParaPagamento(user, id) {
   // sem duplicata no contas a pagar (Nota Fiscal, ou enviada no modelo antigo): cria agora
   let titulos = await titulosDaSolicitacao(sol.id);
   const criouDuplicata = !titulos?.length;
-  if (criouDuplicata) titulos = await inserirTitulos(await prepararDuplicata(sol), { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id) });
+  if (criouDuplicata) titulos = await inserirTitulos(await prepararDuplicata(sol), { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id), escrituracao: escrituracaoDaSolicitacao(sol) });
 
   const ids = titulos.map((t) => t.id);
   const r = await liberarTitulos(user, { ids }, { semConferirEmpresa: true });

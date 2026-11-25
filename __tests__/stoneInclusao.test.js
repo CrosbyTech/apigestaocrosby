@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { cpfValido, cnpjValido, normalizarChavePix, finalContaStone, valorDoTitulo, emCentavos, textoAvisoFabio, planoDeInclusao, crc16, pixCopiaECola, dadoPix } from '../utils/stoneInclusao.js';
+import { cpfValido, cnpjValido, normalizarChavePix, finalContaStone, valorDoTitulo, emCentavos, textoAvisoFabio, planoDeInclusao, crc16, pixCopiaECola, dadoPix, leituraDoPagamento } from '../utils/stoneInclusao.js';
 import { incluirPix, documentoConfere, dadosDoBrcode } from '../bots/stone-extratos/inclusoes.mjs';
 
 describe('chave Pix', () => {
@@ -272,5 +272,27 @@ describe('Pix copia e cola (QR Code)', () => {
       expect(r.status).toBe('incluido');
       expect(s.chamadas.map((c) => c[0])).toEqual(['criar', 'confirmar']);
     });
+  });
+});
+
+describe('leitura da chave Pix / boleto gravados pela Liberação de Pagamento', () => {
+  it('reconhece a chave e diz o tipo', () => {
+    expect(leituraDoPagamento({ chavePix: 'financeiro@fornecedor.com.br' })).toBe('Pix reconhecido (e-mail)');
+    expect(leituraDoPagamento({ chavePix: '123e4567-e89b-42d3-a456-426614174000' })).toBe('Pix reconhecido (chave aleatória)');
+  });
+  it('chave que não dá para reconhecer: avisa que o bot não inclui', () => {
+    expect(leituraDoPagamento({ chavePix: 'chave do joao' })).toMatch(/não foi reconhecida/);
+  });
+  it('copia e cola cortado: avisa para conferir', () => {
+    expect(leituraDoPagamento({ chavePix: '00020126580014br.gov.bcb.pix0136123e4567-e89b-42d3-a456-4266141740005204000053039865802BR6304ABCD' })).toMatch(/incompleto/);
+  });
+  it('boleto: confere a quantidade de dígitos', () => {
+    expect(leituraDoPagamento({ codigoBarras: '34191.79001 01043.510047 91020.150008 5 91230000026000' })).toBe('boleto com 47 dígitos');
+    expect(leituraDoPagamento({ codigoBarras: '3419179001' })).toMatch(/10 dígitos.*confira/);
+  });
+  it('os dois juntos e nenhum', () => {
+    expect(leituraDoPagamento({ chavePix: 'financeiro@fornecedor.com.br', codigoBarras: '34191.79001 01043.510047 91020.150008 5 91230000026000' })).toBe('Pix reconhecido (e-mail) · boleto com 47 dígitos');
+    expect(leituraDoPagamento({})).toBeNull();
+    expect(leituraDoPagamento({ chavePix: '  ', codigoBarras: '' })).toBeNull();
   });
 });

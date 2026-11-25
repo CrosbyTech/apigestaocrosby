@@ -7,6 +7,8 @@ const PAYABLE_STATUS = { aberto: 'Open', pago: 'Paid', cancelado: 'Canceled' };
 const PAYABLE_DOCUMENT_TYPE = { duplicata: 'Duplicate', nota_fiscal: 'Invoice', boleto: 'BankSlip', recibo: 'Receipt', outro: 'Other' };
 const PAYABLE_PAYMENT_METHOD = { pix: 'Pix', boleto: 'BankSlip', transferencia: 'Transfer', debito_automatico: 'DirectDebit', cartao: 'Card', dinheiro: 'Cash', outro: 'Other' };
 const FORECAST_TYPE = { real: 'Real', previsao: 'Forecast' };
+// escrituração da nota fiscal da duplicata (vazio = não se aplica)
+const BOOKKEEPING_STATUS = { pendente: 'Pending', escriturada: 'Booked' };
 const COST_CENTER_TYPE = { empresa: 'Branch', setor: 'Department', outro: 'Other' };
 // etapas da Liberação de Pagamento (HEADCOACH › FINANCEIRO)
 const PAYMENT_RELEASE_STATUS = { pendente: 'Pending', previsao: 'Scheduled', aprovado: 'Approved', incluido: 'Included', pago: 'Paid', cancelado: 'Returned' };
@@ -106,6 +108,9 @@ modulo.recurso({
     f('remainingValue', (l) => (l.situacao !== 'aberto' ? 0 : Math.max(0, Math.round((Number(l.valor || 0) - Math.max(0, Number(l.valor_pago || 0) - Number(l.juros || 0) - Number(l.multa || 0) + Number(l.desconto || 0)) + Number.EPSILON) * 100) / 100)), 'number', 'Quanto falta pagar: valor − (pago − juros − multa + desconto). Zero na paga e na cancelada.', { cols: ['situacao', 'valor', 'valor_pago', 'juros', 'multa', 'desconto'], example: 5500 }),
     f('isPartiallyPaid', (l) => l.situacao === 'aberto' && Number(l.valor_pago || 0) > 0, 'boolean', 'Paga em parte: continua Open, com `paidValue` já pago e `remainingValue` em aberto.', { cols: ['situacao', 'valor_pago'] }),
     f('paymentAccount', 'conta_pagamento', 'string', 'Banco / conta de onde saiu o pagamento.'),
+    f('bookkeepingStatus', 'escrituracao', 'string', 'Escrituração da nota fiscal: Pending = a duplicata veio de uma solicitação com nota fiscal que ainda não foi escriturada (ela entra no contas a pagar e pode ser paga mesmo assim); Booked = nota escriturada. Vazio = não se aplica (duplicata sem nota fiscal a escriturar).', { map: BOOKKEEPING_STATUS, example: 'Pending' }),
+    f('bookkeepingDate', 'escrituracao_em', 'date-time', 'Quando o status de escrituração foi definido pela última vez.'),
+    f('bookkeepingBy', 'escrituracao_por', 'string', 'Quem trocou o status de escrituração (vazio = veio da solicitação e ninguém mexeu).'),
     f('observation', 'observacao', 'string', 'Observação.'),
     f('origin', 'origem', 'string', 'De onde veio: manual (tela), o robô que capturou a conta (ex.: bot-cosern-whatsapp), solicitacao-crosby (Solicitação Crosby aprovada pelo financeiro; originReference = id da solicitação) ou totvs (duplicata já paga importada do contas a pagar do TOTVS — a marca TOTVS da tela).', { example: 'totvs' }),
     f('originReference', 'origem_ref', 'string', 'Identificador na origem. Nas importadas do TOTVS: empresa|fornecedor|duplicata|parcela de lá.'),
@@ -130,6 +135,7 @@ modulo.recurso({
       example: 'true',
       apply: (query, v, ruim) => (String(v) === 'true' ? query.eq('situacao', 'aberto').gt('valor_pago', 0) : String(v) === 'false' ? query.or('situacao.neq.aberto,valor_pago.eq.0') : ruim('Esperado true ou false.')),
     }),
+    q('bookkeepingStatus', 'enum', 'escrituracao', 'Escrituração da nota fiscal (aceita lista): Pending = não escriturada, Booked = escriturada.', { map: inverso(BOOKKEEPING_STATUS) }),
     q('origin', 'string', 'origem', 'Origem exata (ex.: totvs = só as importadas do TOTVS; manual = só as incluídas na tela).', { example: 'totvs' }),
     q('expenseCode', 'custom', 'rateio', 'Despesa, em qualquer linha do rateio.', {
       apply: (query, v, ruim) => (Number.isInteger(Number(v)) ? query.contains('rateio', JSON.stringify([{ despesa_code: Number(v) }])) : ruim('Esperado um número inteiro.')),

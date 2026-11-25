@@ -3,7 +3,7 @@
 // Exige login; o módulo é só para owner, admin e financeiro.
 //   GET  /opcoes                        empresas, formas, tipos de documento, despesas, portadores, centros de custo
 //   GET  /fornecedores?q=               busca no cadastro local (código, CPF/CNPJ ou nome)
-//   GET  /titulos?empresa&campoData&de&ate&situacao&fornecedor&duplicata&documentoFiscal&despesa&centroCusto&portador&forma&previsao&origem
+//   GET  /titulos?empresa&campoData&de&ate&situacao&fornecedor&duplicata&documentoFiscal&despesa&centroCusto&portador&forma&previsao&origem&escrituracao
 //                                       situacao: aberto | vencido | a_vencer | parcial | pago (inclui o já pago das parciais) | cancelado
 //   POST /titulos                       inclui a duplicata (uma ou várias parcelas)
 //   GET  /titulos/:id                   detalhe (parcelas do mesmo lote, baixas, link do anexo)
@@ -11,12 +11,14 @@
 //   POST /titulos/:id/baixar            { dataPagamento, valorPago?, juros, multa, desconto, formaPagamento, conta, observacao, senha }  (sem estorno)
 //                                       valorPago em branco = tudo o que falta; menor = BAIXA PARCIAL (continua em aberto pelo restante)
 //   POST /titulos/:id/cancelar          { motivo, senha }  (só em aberto)
+//   POST /titulos/escrituracao          { ids, escrituracao: pendente | escriturada | null }  troca o status de escrituração da nota fiscal (null = tira a marca)
 //   — Liberação de Pagamento (HEADCOACH › FINANCEIRO): pendente → previsão → aprovado → incluído → pago —
 //   GET  /liberacoes/opcoes             empresas, etapas, bancos e formas
 //   GET  /liberacoes/saldos             saldo bancário (total, por banco, contas Stone, Pagar.me) e a hora da última atualização
 //   GET  /liberacoes?empresa&de&ate     tudo o que está em andamento + pagos do período (de/ate = data do pagamento)
 //   POST /liberacoes                    { ids (duplicatas), dataPrevista? }  LIBERAR PARA PAGAMENTO (entra como pendente)
-//   PUT  /liberacoes/:id                { dataPrevista, banco, formaPagamento, valor, observacao }
+//   PUT  /liberacoes/:id                { dataPrevista, banco, formaPagamento, valor, observacao, chavePix, codigoBarras }
+//                                       chavePix / codigoBarras são gravados na duplicata (não mudam depois de incluída no banco)
 //   POST /liberacoes/status             { ids, status: pendente|previsao|aprovado|incluido, dataPrevista? }
 //                                       ao APROVAR, a que tem banco "STONE 0000" e chave Pix vai para o bot incluir na Stone
 //   POST /liberacoes/incluir-stone      { ids }  reenvia ao bot as aprovadas cuja inclusão não chegou à Stone
@@ -26,7 +28,7 @@
 //   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 30 dias para trás);
 //                                       sem confirmar = só mostra o que achou; com confirmar + senha = grava a baixa das ids
 //   POST /totvs/liberar                 { itens } títulos da Consulta antiga (TOTVS) → cria a duplicata aqui (em aberto) e manda para a Liberação de Pagamento do HeadCoach
-//   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
+//   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada (ou no status Nota Fiscal: a duplicata nasce NÃO ESCRITURADA) → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
 //   POST /solicitacoes/:id/liberar      Solicitação Crosby (enviada ou Nota Fiscal) → Liberação de Pagamento do HeadCoach (cria a duplicata se ainda não existir)
 // ============================================================================
 import express from 'express';
@@ -36,6 +38,7 @@ import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../servi
 import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes, reenviarAoBot, definirBanco } from '../services/hcCpLiberacao.js';
 import { baixaAutomatica } from '../services/hcCpBaixaAutomatica.js';
 import { enviarDoTotvsParaLiberacao } from '../services/hcCpDoTotvs.js';
+import { mudarEscrituracao, sincronizarEscrituracaoDasSolicitacoes } from '../services/hcCpEscrituracao.js';
 import { montarSaldos } from '../services/relatorioSaldosWhatsapp.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
 
@@ -57,7 +60,13 @@ const rota = (fn, msg) =>
 router.get('/opcoes', rota((req) => opcoes(req.user), 'Opções'));
 router.get('/fornecedores', rota(async (req) => ({ fornecedores: await buscarFornecedores(req.user, req.query?.q) }), 'Fornecedores'));
 router.get('/duplicatas', rota((req) => duplicatasDoFornecedor(req.user, req.query || {}), 'Duplicatas do fornecedor'));
-router.get('/titulos', rota((req) => listarTitulos(req.user, req.query || {}), 'Duplicatas'));
+router.get(
+  '/titulos',
+  rota(async (req) => {
+    await sincronizarEscrituracaoDasSolicitacoes(); // chamado de escrituração concluído → a duplicata já aparece ESCRITURADA
+    return listarTitulos(req.user, req.query || {});
+  }, 'Duplicatas'),
+);
 router.post('/titulos', rota((req) => criarTitulos(req.user, req.body || {}), (r) => `${r.titulos.length} duplicata(s) incluída(s)`));
 router.get('/titulos/:id', rota((req) => detalheTitulo(req.user, req.params.id), 'Duplicata'));
 router.put('/titulos/:id', rota((req) => editarTitulo(req.user, req.params.id, req.body || {}), 'Duplicata alterada'));
@@ -72,15 +81,23 @@ router.post(
   ),
 );
 // Solicitações Crosby: o "Enviar ao Contas a Pagar HC" (no lugar do antigo envio ao TOTVS)
-router.post('/solicitacoes/:id/enviar', rota((req) => enviarSolicitacaoAoCp(req.user, req.params.id), (r) => (r.jaEnviada ? `Esta solicitação já estava no contas a pagar (duplicata ${r.rotulo})` : `Solicitação enviada ao contas a pagar — duplicata ${r.rotulo}`)));
+router.post('/solicitacoes/:id/enviar', rota((req) => enviarSolicitacaoAoCp(req.user, req.params.id), (r) => (r.jaEnviada ? `Esta solicitação já estava no contas a pagar (duplicata ${r.rotulo})` : `Solicitação enviada ao contas a pagar — duplicata ${r.rotulo}${r.escrituracao === 'pendente' ? ' · marcada como NÃO ESCRITURADA' : ''}`)));
 // Solicitações Crosby: o "Liberar para Pagamento" cai na Liberação de Pagamento do HeadCoach
 router.post('/solicitacoes/:id/liberar', rota((req) => liberarSolicitacaoParaPagamento(req.user, req.params.id), (r) => (r.jaLiberada ? `Esta solicitação já estava na Liberação de Pagamento (duplicata ${r.rotulo})` : `Solicitação liberada para pagamento — duplicata ${r.rotulo} na Liberação de Pagamento HeadCoach`)));
 
 // ─── Liberação de Pagamento ──────────────────────────────────────────────────
 const tantas = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 const comIgnoradas = (texto, r) => (r.ignoradas?.length ? `${texto} · ${tantas(r.ignoradas.length, 'ficou de fora', 'ficaram de fora')} (${r.ignoradas[0].rotulo}: ${r.ignoradas[0].motivo}${r.ignoradas.length > 1 ? '…' : ''})` : texto);
+// Escrituração da nota fiscal: troca o status de uma ou várias duplicatas
+router.post('/titulos/escrituracao', rota((req) => mudarEscrituracao(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.alteradas, 'duplicata marcada', 'duplicatas marcadas')} como ${r.escrituracao === 'escriturada' ? 'ESCRITURADA' : r.escrituracao === 'pendente' ? 'NÃO ESCRITURADA' : 'sem marca de escrituração'}`, r)));
 router.get('/liberacoes/opcoes', rota((req) => opcoesDaLiberacao(req.user), 'Opções da liberação'));
-router.get('/liberacoes', rota((req) => listarLiberacoes(req.user, req.query || {}), 'Liberação de pagamento'));
+router.get(
+  '/liberacoes',
+  rota(async (req) => {
+    await sincronizarEscrituracaoDasSolicitacoes();
+    return listarLiberacoes(req.user, req.query || {});
+  }, 'Liberação de pagamento'),
+);
 // saldo bancário do card da tela (só o financeiro; o acesso é conferido como nas opções)
 router.get(
   '/liberacoes/saldos',
@@ -106,6 +123,6 @@ router.post(
         : comIgnoradas(`${tantas(r.pagas, 'duplicata baixada', 'duplicatas baixadas')} pelo extrato · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r),
   ),
 );
-router.put('/liberacoes/:id', rota((req) => editarLiberacao(req.user, req.params.id, req.body || {}), 'Liberação alterada'));
+router.put('/liberacoes/:id', rota((req) => editarLiberacao(req.user, req.params.id, req.body || {}), (r) => (r.aviso ? `Liberação alterada · ${r.aviso}` : 'Liberação alterada')));
 
 export default router;

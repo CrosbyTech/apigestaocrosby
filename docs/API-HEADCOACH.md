@@ -675,6 +675,7 @@ Parâmetros:
 - `fiscalDocument` (string) — Documento fiscal exato.
 - `batchId` (string) — Parcelas incluídas na mesma vez.
 - `isPartiallyPaid` (string) — true = só as pagas em parte (em aberto com pagamento lançado); false = todas as outras.
+- `bookkeepingStatus` (string) — Escrituração da nota fiscal (aceita lista): Pending = não escriturada, Booked = escriturada. Valores: Pending, Booked.
 - `origin` (string) — Origem exata (ex.: totvs = só as importadas do TOTVS; manual = só as incluídas na tela).
 - `expenseCode` (string) — Despesa, em qualquer linha do rateio.
 - `costCenterCode` (string) — Centro de custo, em qualquer linha do rateio.
@@ -843,6 +844,9 @@ Esquemas:
 - `remainingValue` (number) — Quanto falta pagar: valor − (pago − juros − multa + desconto). Zero na paga e na cancelada.
 - `isPartiallyPaid` (boolean) — Paga em parte: continua Open, com `paidValue` já pago e `remainingValue` em aberto.
 - `paymentAccount` (string) — Banco / conta de onde saiu o pagamento.
+- `bookkeepingStatus` (string) — Escrituração da nota fiscal: Pending = a duplicata veio de uma solicitação com nota fiscal que ainda não foi escriturada (ela entra no contas a pagar e pode ser paga mesmo assim); Booked = nota escriturada. Vazio = não se aplica (duplicata sem nota fiscal a escriturar). Valores: Pending, Booked.
+- `bookkeepingDate` (date-time) — Quando o status de escrituração foi definido pela última vez.
+- `bookkeepingBy` (string) — Quem trocou o status de escrituração (vazio = veio da solicitação e ninguém mexeu).
 - `observation` (string) — Observação.
 - `origin` (string) — De onde veio: manual (tela), o robô que capturou a conta (ex.: bot-cosern-whatsapp), solicitacao-crosby (Solicitação Crosby aprovada pelo financeiro; originReference = id da solicitação) ou totvs (duplicata já paga importada do contas a pagar do TOTVS — a marca TOTVS da tela).
 - `originReference` (string) — Identificador na origem. Nas importadas do TOTVS: empresa|fornecedor|duplicata|parcela de lá.

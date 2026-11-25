@@ -361,7 +361,7 @@ async function completarCadastros(comum) {
  * Grava as parcelas já validadas. Usado pela tela (criarTitulos) e pelas rotinas
  * (bots), que passam origem/origemRef/anexoPath e o nome de quem criou.
  */
-export async function inserirTitulos(dados, { por, origem = 'manual', origemRef = null, anexoPath = null } = {}) {
+export async function inserirTitulos(dados, { por, origem = 'manual', origemRef = null, anexoPath = null, escrituracao = null } = {}) {
   const [comum, rateio] = await Promise.all([completarCadastros(dados.comum), nomearRateio(dados.rateio)]);
   const pri = principal(rateio);
   const lote = crypto.randomUUID();
@@ -379,7 +379,7 @@ export async function inserirTitulos(dados, { por, origem = 'manual', origemRef 
       const ultima = await q(daEmpresa().order('duplicata', { ascending: false }).limit(1));
       numero = Number(ultima?.[0]?.duplicata || 0) + 1;
     }
-    const linhas = dados.parcelas.map((p) => ({ ...comum, despesa_nome: pri.despesa_nome, centro_custo_nome: pri.centro_custo_nome, ...p, duplicata: numero, lote, rateio: ratear(rateio, p.valor), origem, origem_ref: origemRef, anexo_path: anexoPath, criado_por: por || null, atualizado_por: por || null }));
+    const linhas = dados.parcelas.map((p) => ({ ...comum, despesa_nome: pri.despesa_nome, centro_custo_nome: pri.centro_custo_nome, ...p, duplicata: numero, lote, rateio: ratear(rateio, p.valor), origem, origem_ref: origemRef, anexo_path: anexoPath, ...(escrituracao ? { escrituracao } : {}), criado_por: por || null, atualizado_por: por || null })); // escrituracao: 'pendente' | 'escriturada' — só a duplicata de solicitação com nota fiscal nasce marcada
     try {
       return await q(supabase.from('hc_cp_titulos').insert(linhas).select());
     } catch (e) {
@@ -439,6 +439,7 @@ export async function listarTitulos(user, f = {}) {
     if (['real', 'previsao'].includes(f.previsao)) qy = qy.eq('previsao', f.previsao);
     if (f.origem === 'totvs') qy = qy.eq('origem', 'totvs'); // importadas do contas a pagar do TOTVS (marca TOTVS)
     else if (f.origem === 'headcoach') qy = qy.neq('origem', 'totvs');
+    if (['pendente', 'escriturada'].includes(f.escrituracao)) qy = qy.eq('escrituracao', f.escrituracao); // nota fiscal ainda não escriturada / já escriturada
     const doc = String(f.documentoFiscal || '').trim();
     if (doc) qy = qy.eq('documento_fiscal', doc);
     const [dup, parc] = String(f.duplicata || '').split('/').map((s) => s.replace(/\D/g, '')); // "1" = a duplicata inteira; "1/12" = só a parcela 12

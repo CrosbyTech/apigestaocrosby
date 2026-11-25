@@ -11,8 +11,13 @@ const dia = (v) => (v ? String(v).slice(0, 10) : null);
 export const ORIGEM_SOLICITACAO = 'solicitacao-crosby';
 export const DESTINO_HC = 'contas-pagar-headcoach';
 
-/** Situações da solicitação em que o financeiro pode mandar para o contas a pagar. */
-export const STATUS_QUE_ENVIAM = ['aprovado_gestor', 'aprovado_financeiro', 'erro_envio', 'conciliado'];
+/**
+ * Situações da solicitação em que o financeiro pode mandar para o contas a pagar.
+ * 'nota_fiscal' entrou em 25/11/2026 (Yago): a solicitação com nota fiscal não espera
+ * mais a escrituração — vai para o contas a pagar e a duplicata mostra que a nota
+ * ainda não foi escriturada (utils/hcCpEscrituracao.js).
+ */
+export const STATUS_QUE_ENVIAM = ['aprovado_gestor', 'aprovado_financeiro', 'erro_envio', 'conciliado', 'nota_fiscal'];
 
 /**
  * A duplicata da solicitação (mesma regra da tela): pagamento/reembolso montam

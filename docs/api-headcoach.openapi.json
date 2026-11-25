@@ -2083,6 +2083,28 @@
             "type": "string",
             "nullable": true
           },
+          "bookkeepingStatus": {
+            "description": "Escrituração da nota fiscal: Pending = a duplicata veio de uma solicitação com nota fiscal que ainda não foi escriturada (ela entra no contas a pagar e pode ser paga mesmo assim); Booked = nota escriturada. Vazio = não se aplica (duplicata sem nota fiscal a escriturar).",
+            "type": "string",
+            "enum": [
+              "Pending",
+              "Booked"
+            ],
+            "example": "Pending",
+            "nullable": true
+          },
+          "bookkeepingDate": {
+            "description": "Quando o status de escrituração foi definido pela última vez.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "bookkeepingBy": {
+            "description": "Quem trocou o status de escrituração (vazio = veio da solicitação e ninguém mexeu).",
+            "type": "string",
+            "nullable": true
+          },
           "observation": {
             "description": "Observação.",
             "type": "string",
@@ -8716,6 +8738,19 @@
             "schema": {
               "type": "string",
               "example": "true"
+            }
+          },
+          {
+            "name": "bookkeepingStatus",
+            "in": "query",
+            "required": false,
+            "description": "Escrituração da nota fiscal (aceita lista): Pending = não escriturada, Booked = escriturada. Valores: Pending, Booked.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Pending",
+                "Booked"
+              ]
             }
           },
           {
