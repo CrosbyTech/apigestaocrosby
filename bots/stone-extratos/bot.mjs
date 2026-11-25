@@ -24,7 +24,7 @@ import { Stone, helpers, manterSessao } from './stone.mjs';
 import { incluirPix } from './inclusoes.mjs';
 import { incluirTransferencia } from './transferencias.mjs';
 
-const VERSAO = '1.3.1'; // 1.1.0: saldo de hora em hora · 1.2.0: entre contas · 1.2.1: um agente só por PC · 1.3.0: Pix copia e cola
+const VERSAO = '1.3.2'; // 1.1.0: saldo de hora em hora · 1.2.0: entre contas · 1.2.1: um agente só por PC · 1.3.0: Pix copia e cola
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { brDe, dormir, soDigitos } = helpers;
 
@@ -463,22 +463,34 @@ async function modoAgora() {
 
 // Só UM agente por computador: dois ao mesmo tempo disputam o perfil do Chrome e a fila
 // (em 24/11/2026 um segundo agente derrubou 8 transferências com "browser is already running").
+// A trava é um arquivo que o agente ligado regrava a cada 20 s ("batimento"). Outro agente só
+// se recusa a abrir se o batimento for recente; trava velha (PC reiniciado, agente morto) não
+// impede nada. Não dá para confiar só no número do processo: o Windows reaproveita o número.
 const TRAVA = path.join(__dirname, 'agente.lock');
+const BATIMENTO_MS = 20000;
+const TRAVA_VALE_MS = 90000;
 function outroAgenteLigado() {
   try {
-    const pid = Number(String(fs.readFileSync(TRAVA, 'utf8')).trim());
-    if (!pid || pid === process.pid) return null;
-    process.kill(pid, 0); // não mata: só confere se o processo existe
-    return pid;
+    const t = JSON.parse(fs.readFileSync(TRAVA, 'utf8'));
+    if (!t || typeof t !== 'object' || !t.pid || t.pid === process.pid) return null;
+    return Date.now() - Number(t.em) < TRAVA_VALE_MS ? t.pid : null;
   } catch {
-    return null; // sem trava, ou o processo da trava já não existe
+    return null; // sem trava, ou trava no formato antigo
   }
 }
 function assumirTrava() {
-  fs.writeFileSync(TRAVA, String(process.pid));
+  const bater = () => {
+    try {
+      fs.writeFileSync(TRAVA, JSON.stringify({ pid: process.pid, em: Date.now() }));
+    } catch {
+      /* disco ocupado: o próximo batimento tenta de novo */
+    }
+  };
+  bater();
+  setInterval(bater, BATIMENTO_MS).unref();
   const soltar = () => {
     try {
-      if (Number(String(fs.readFileSync(TRAVA, 'utf8')).trim()) === process.pid) fs.unlinkSync(TRAVA);
+      if (JSON.parse(fs.readFileSync(TRAVA, 'utf8'))?.pid === process.pid) fs.unlinkSync(TRAVA);
     } catch {
       /* já saiu */
     }

@@ -23,7 +23,7 @@
 //   POST /liberacoes/banco              { ids, banco }  o mesmo banco para várias liberações de uma vez (vazio = limpar)
 //   POST /liberacoes/pagar              { ids, dataPagamento, banco, senha }  grava a baixa (sem estorno)
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
-//   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 7 dias para trás);
+//   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 30 dias para trás);
 //                                       sem confirmar = só mostra o que achou; com confirmar + senha = grava a baixa das ids
 //   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
 //   POST /solicitacoes/:id/liberar      Solicitação Crosby (enviada ou Nota Fiscal) → Liberação de Pagamento do HeadCoach (cria a duplicata se ainda não existir)

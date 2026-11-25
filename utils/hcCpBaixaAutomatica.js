@@ -1,6 +1,6 @@
 // Regras puras (sem banco) da BAIXA AUTOMÁTICA da Liberação de Pagamento do
 // HeadCoach: casar as liberações INCLUÍDAS NO BANCO com as saídas dos extratos
-// (hoje e até 7 dias para trás). Pedido do Yago em 24/11/2026.
+// (hoje e até 30 dias para trás — eram 7; o Yago pediu 30 em 25/11/2026). Pedido do Yago em 24/11/2026.
 //
 // Uma saída do extrato paga uma liberação quando:
 //   • o valor é o mesmo (centavo a centavo) e
@@ -10,7 +10,7 @@
 // que liberações (em contas ou dias diferentes) fica para conferir à mão.
 // Também casa UMA saída = SOMA exata de duas ou mais liberações do mesmo fornecedor.
 
-export const DIAS_ATRAS = 7;
+export const DIAS_ATRAS = 30;
 export const NOME_MIN = 0.6; // fração do nome do fornecedor que precisa aparecer na saída
 const MAX_SOMA = 16; // liberações do mesmo fornecedor testadas na soma
 

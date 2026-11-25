@@ -12,10 +12,10 @@ const saida = (id, valor, nome = 'ALARES TELECOM', over = {}) => ({ id, conta_id
 const casar = (libs, saidas, usadas) => casarIncluidos(libs, saidas, { pontuar, usadas });
 
 describe('janela dos extratos e banco da conta', () => {
-  it('confere de hoje até 7 dias para trás', () => {
-    expect(DIAS_ATRAS).toBe(7);
-    expect(janelaDosExtratos('2026-11-24')).toEqual({ de: '2026-11-17', ate: '2026-11-24' });
-    expect(janelaDosExtratos('2026-12-03')).toEqual({ de: '2026-11-26', ate: '2026-12-03' });
+  it('confere de hoje até 30 dias para trás', () => {
+    expect(DIAS_ATRAS).toBe(30);
+    expect(janelaDosExtratos('2026-11-24')).toEqual({ de: '2026-10-25', ate: '2026-11-24' });
+    expect(janelaDosExtratos('2026-12-03')).toEqual({ de: '2026-11-03', ate: '2026-12-03' });
     expect(addDias('2026-03-01', -1)).toBe('2026-02-28');
   });
 

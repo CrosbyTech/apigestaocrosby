@@ -1,7 +1,7 @@
 // =============================================================================
 // HEADCOACH › FINANCEIRO › LIBERAÇÃO DE PAGAMENTO — BAIXA AUTOMÁTICA.
 // Botão da aba INCLUÍDOS NO BANCO (pedido do Yago, 24/11/2026): confere nos
-// extratos de hoje e até 7 dias para trás se as duplicatas incluídas saíram de
+// extratos de hoje e até 30 dias para trás se as duplicatas incluídas saíram de
 // fato e, onde saiu, grava a baixa e leva a liberação para PAGOS.
 //
 //   • Extratos = fluxo_caixa_lancamentos (o mesmo extrato da Conciliação: Stone,
