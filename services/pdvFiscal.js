@@ -37,6 +37,22 @@ export const ICMS_ALIQ_UF = {
   MT: 17, MS: 17, TO: 20, PA: 19, AM: 20, RO: 19.5, AC: 19, RR: 20, AP: 18,
 };
 
+// SIMPLES NACIONAL — empresas dos Irmãos: Irmãos Varejo (raiz 53661116: loja 55 Parnamirim) e
+// Irmãos CR / AZ Vestuário (raiz 33592092: loja 5 Nova Cruz). Gabarito copiado das notas que as
+// próprias lojas emitiam no TOTVS (out–nov/2026): emitente CRT 1, sem ICMS destacado e sem IBS/CBS.
+//   venda no balcão (NFC-e/NF-e) → ICMSSN102 com o CSOSN `venda`; PIS/COFINS 01 como no regime normal
+//   troca/devolução (NF-e)       → ICMSSN102 com o CSOSN `devolucao`; PIS/COFINS `pisDevolucao`, zerados
+//   venda entre lojas (NF-e)     → ICMSSN101 CSOSN 101 com pCredSN 0 (montarXmlExpedicao)
+const SIMPLES_POR_RAIZ = {
+  53661116: { venda: '400', devolucao: '102', pisDevolucao: '99' },
+  33592092: { venda: '400', devolucao: '400', pisDevolucao: '50' },
+};
+export const RAIZES_SIMPLES = Object.keys(SIMPLES_POR_RAIZ);
+const raizDe = (cnpj) => String(cnpj || '').replace(/\D/g, '').slice(0, 8);
+/** A empresa (pelo CNPJ) é do Simples Nacional? Devolve a regra dela ou null. */
+export const simplesDe = (cnpj) => SIMPLES_POR_RAIZ[raizDe(cnpj)] || null;
+const FRASE_SIMPLES = 'DOCUMENTO EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL. NAO GERA DIREITO A CREDITO FISCAL DE IPI.';
+
 const REGRAS = {
   venda: {
     cfop: 5102,
@@ -219,7 +235,8 @@ export async function buscarEmitente(empresa) {
       uf: ender.UF,
       cMun: ender.cMun,
       endereco: { ...ender, fone: fone ? digits(fone.number) : undefined },
-      crt: 3,
+      // 1 = Simples Nacional (empresas dos Irmãos), 3 = regime normal
+      crt: simplesDe(item.cnpj || filial.cnpj) ? 1 : 3,
     };
   });
 }
@@ -353,12 +370,28 @@ function toolsPara({ modelo, uf, cfg, cert, cnpj }) {
 }
 
 // ─── Cálculo dos impostos de um item ─────────────────────────────────────────
-export function calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo }) {
+// `simples` = regra do Simples Nacional do emitente (simplesDe) ou null no regime normal.
+export function calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo, simples = null }) {
   const base = round2(vProd - vDesc); // valor líquido do item
   const vICMS = round2((base * aliqIcms) / 100);
   const basePisCofins = round2(base - vICMS);
   const vPIS = regra.pis.aliq > 0 ? round2((basePisCofins * regra.pis.aliq) / 100) : 0;
   const vCOFINS = regra.cofins.aliq > 0 ? round2((basePisCofins * regra.cofins.aliq) / 100) : 0;
+  if (simples) {
+    // sem ICMS destacado e sem IBS/CBS; a base do PIS/COFINS é a mesma do regime normal
+    // (valor − ICMS da alíquota interna), como nas notas do TOTVS: R$ 74,70 → base 59,76
+    const devolucao = Number(regra.tpNF) === 0;
+    const imp = { ICMS: { ICMSSN102: { orig: undefined, CSOSN: devolucao ? simples.devolucao : simples.venda } } };
+    if (Number(modelo) === 55) imp.IPI = { cEnq: '999', IPINT: { CST: regra.ipiCST } };
+    if (regra.pis.aliq > 0) {
+      imp.PIS = { PISAliq: { CST: regra.pis.CST, vBC: f2(basePisCofins), pPIS: f4(regra.pis.aliq), vPIS: f2(vPIS) } };
+      imp.COFINS = { COFINSAliq: { CST: regra.cofins.CST, vBC: f2(basePisCofins), pCOFINS: f4(regra.cofins.aliq), vCOFINS: f2(vCOFINS) } };
+    } else {
+      imp.PIS = { PISOutr: { CST: simples.pisDevolucao, vBC: '0.00', pPIS: '0.0000', vPIS: '0.00' } };
+      imp.COFINS = { COFINSOutr: { CST: simples.pisDevolucao, vBC: '0.00', pCOFINS: '0.0000', vCOFINS: '0.00' } };
+    }
+    return { imposto: imp, base, vBC: 0, vICMS: 0, vPIS, vCOFINS, vIBSUF: 0, vIBSMun: 0, vCBS: 0 };
+  }
   const vIBSUF = round2((base * IBSCBS.pIBSUF) / 100);
   const vIBSMun = round2((base * IBSCBS.pIBSMun) / 100);
   const vCBS = round2((base * IBSCBS.pCBS) / 100);
@@ -387,7 +420,7 @@ export function calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo }) 
       gCBS: { pCBS: f4(IBSCBS.pCBS), vCBS: f2(vCBS) },
     },
   };
-  return { imposto, base, vICMS, vPIS, vCOFINS, vIBSUF, vIBSMun, vCBS };
+  return { imposto, base, vBC: base, vICMS, vPIS, vCOFINS, vIBSUF, vIBSMun, vCBS };
 }
 
 // chaves (44 dígitos) guardadas em pdv_vendas.nf_referenciada, sem repetir
@@ -457,6 +490,9 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
   const serie = modelo === 65 ? cfg.serie_nfce : cfg.serie_nfe;
   const tpAmb = Number(cfg.ambiente);
   const aliqIcms = cfg.aliq_icms != null ? Number(cfg.aliq_icms) : ICMS_ALIQ_UF[emit.uf];
+  // Simples Nacional (Parnamirim, Nova Cruz): nota sem ICMS destacado — ver SIMPLES_POR_RAIZ
+  const simples = Number(emit.crt) === 1 ? simplesDe(emit.cnpj) : null;
+  if (Number(emit.crt) === 1 && !simples) throw new FiscalError(`Empresa ${emit.empresa} é do Simples Nacional e não tem a regra fiscal cadastrada`, 'SIMPLES_SEM_REGRA');
   if (!(aliqIcms >= 0)) throw new FiscalError(`Alíquota de ICMS não definida para a UF ${emit.uf}`, 'ICMS_ALIQ_MISSING');
 
   // NF-e (55) exige destinatário com endereço; NFC-e aceita sem destinatário
@@ -551,10 +587,10 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
       ...(vDesc > 0 ? { vDesc } : {}),
       indTot: '1',
     });
-    const calc = calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo });
-    calc.imposto.ICMS.ICMS00.orig = it.origem || '0';
+    const calc = calcularImpostosItem({ vProd, vDesc, aliqIcms, regra, modelo, simples });
+    Object.values(calc.imposto.ICMS)[0].orig = it.origem || '0';
     impostos.push(calc);
-    tot.vBC += calc.base; tot.vICMS += calc.vICMS; tot.vProd += vProd; tot.vDesc += vDesc;
+    tot.vBC += calc.vBC; tot.vICMS += calc.vICMS; tot.vProd += vProd; tot.vDesc += vDesc;
     tot.vPIS += calc.vPIS; tot.vCOFINS += calc.vCOFINS; tot.vIBSUF += calc.vIBSUF; tot.vIBSMun += calc.vIBSMun; tot.vCBS += calc.vCBS;
     tot.vNF += calc.base;
   }
@@ -562,7 +598,19 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
   impostos.forEach((calc, i) => nfe.taginfAdProd(i, { imposto: calc.imposto, vItem: f2(calc.base) }));
 
   // Totais (forçados: cálculo próprio, no formato aceito pela SEFAZ)
-  nfe.tagTotal(
+  // Simples Nacional: só o ICMSTot, com base e ICMS zerados e sem IBS/CBS (igual às notas do TOTVS)
+  if (simples) {
+    nfe.tagTotal(
+      {
+        ICMSTot: {
+          vBC: '0.00', vICMS: '0.00', vICMSDeson: '0.00', vFCP: '0.00', vBCST: '0.00', vST: '0.00', vFCPST: '0.00', vFCPSTRet: '0.00',
+          vProd: f2(tot.vProd), vFrete: '0.00', vSeg: '0.00', vDesc: f2(tot.vDesc), vII: '0.00', vIPI: '0.00',
+          vIPIDevol: '0.00', vPIS: f2(tot.vPIS), vCOFINS: f2(tot.vCOFINS), vOutro: '0.00', vNF: f2(tot.vNF),
+        },
+      },
+      true,
+    );
+  } else nfe.tagTotal(
     {
       ICMSTot: {
         vBC: f2(tot.vBC), vICMS: f2(tot.vICMS), vICMSDeson: '0.00', vFCPUFDest: '0.00', vICMSUFDest: '0.00',
@@ -617,7 +665,8 @@ export async function montarXml({ venda, itens, pagamentos, cfg, emit, cliente, 
     if (refTroca.chaves.length > 1) partes.push(`DEVOLUCAO REFERENTE A ${refTroca.chaves.map(rotuloDaChave).join(', ')}`);
   } else partes.push(`VENDA HEADCOACH ${venda.id}`);
   if (venda.vendedor_nome) partes.push(`VENDEDOR ${semAcento(venda.vendedor_nome)}`);
-  partes.push(`ICMS ${f2(aliqIcms).replace('.', ',')}% BASE ${f2(tot.vBC).replace('.', ',')} = ${f2(tot.vICMS).replace('.', ',')}`);
+  if (simples) partes.push(FRASE_SIMPLES);
+  else partes.push(`ICMS ${f2(aliqIcms).replace('.', ',')}% BASE ${f2(tot.vBC).replace('.', ',')} = ${f2(tot.vICMS).replace('.', ',')}`);
   if (cfg.info_complementar) partes.push(semAcento(cfg.info_complementar));
   nfe.tagInfAdic({ infCpl: partes.join(' | ').slice(0, 2000) });
 
@@ -818,6 +867,10 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   if (bonif && transf) throw new FiscalError('A mesma nota não pode ser transferência e bonificação', 'BONIF_TRANSF');
   const semPagamento = !!transf || !!bonif; // tPag 90, sem cobrança
   const pisCofins08 = ehTransf || !!bonif; // CST 08, sem valor
+  // Simples Nacional (lojas dos Irmãos): por aqui só sai a nota ENTRE LOJAS — ICMSSN101, sem ICMS
+  // destacado nem IBS/CBS (gabarito: NF 16/4 da 55 e NF 11/4 da 5, operação 7280 do TOTVS)
+  const simples = Number(emit.crt) === 1;
+  if (simples && !transf) throw new FiscalError(`A empresa ${emit.empresa} é do Simples Nacional: por aqui ela só emite a nota entre lojas`, 'SIMPLES_SO_TRANSFERENCIA');
   const aliqInterna = cfg.aliq_icms != null ? Number(cfg.aliq_icms) : ICMS_ALIQ_UF[emit.uf];
   const pDifal = cen.difal ? ICMS_DIFAL_UF_CONFERIDA[cen.destUf] : null;
   if (cen.difal && pDifal == null) {
@@ -943,6 +996,28 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
       tot.vNF += round2(baseS - deson);
       return;
     }
+    if (simples) {
+      const baseN = round2(vProd - vDesc + vFrete);
+      // PIS/COFINS sobre o valor menos o ICMS da alíquota interna (R$ 24,09 → base 19,27 no TOTVS)
+      const basePCn = round2(baseN - round2((baseN * aliqInterna) / 100));
+      const vPISn = pisCofins08 ? 0 : round2((basePCn * 0.65) / 100);
+      const vCOFINSn = pisCofins08 ? 0 : round2((basePCn * 3) / 100);
+      imps.push({
+        imposto: {
+          ICMS: { ICMSSN101: { orig, CSOSN: '101', pCredSN: '0.0000', vCredICMSSN: '0.00' } },
+          IPI: { cEnq: '999', IPINT: { CST: '53' } },
+          PIS: pisCofins08 ? { PISNT: { CST: '08' } } : { PISAliq: { CST: '01', vBC: f2(basePCn), pPIS: f4(0.65), vPIS: f2(vPISn) } },
+          COFINS: pisCofins08 ? { COFINSNT: { CST: '08' } } : { COFINSAliq: { CST: '01', vBC: f2(basePCn), pCOFINS: f4(3), vCOFINS: f2(vCOFINSn) } },
+        },
+      });
+      tot.vProd += vProd;
+      tot.vFrete += vFrete;
+      tot.vDesc += vDesc;
+      tot.vPIS += vPISn;
+      tot.vCOFINS += vCOFINSn;
+      tot.vNF += baseN;
+      return;
+    }
     const aliq = cen.interestadual ? (ORIGENS_IMPORTADAS.includes(orig) ? 4 : 12) : aliqInterna;
     const base = round2(vProd - vDesc + vFrete);
     const vICMS = round2((base * aliq) / 100);
@@ -1001,13 +1076,14 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   imps.forEach((x, i) => nfe.taginfAdProd(i, x));
 
   // SUFRAMA: só o ICMSTot, como o TOTVS (sem IBS/CBS), com o ICMS desonerado abatido do vNF
-  if (sufr) {
+  // Simples Nacional: também só o ICMSTot, com base e ICMS zerados
+  if (sufr || simples) {
     nfe.tagTotal(
       {
         ICMSTot: {
           vBC: '0.00', vICMS: '0.00', vICMSDeson: f2(tot.vICMSDeson), vFCP: '0.00', vBCST: '0.00', vST: '0.00', vFCPST: '0.00', vFCPSTRet: '0.00',
           vProd: f2(tot.vProd), vFrete: f2(tot.vFrete), vSeg: '0.00', vDesc: f2(tot.vDesc), vII: '0.00', vIPI: '0.00',
-          vIPIDevol: '0.00', vPIS: '0.00', vCOFINS: '0.00', vOutro: '0.00', vNF: f2(tot.vNF),
+          vIPIDevol: '0.00', vPIS: f2(tot.vPIS), vCOFINS: f2(tot.vCOFINS), vOutro: '0.00', vNF: f2(tot.vNF),
         },
       },
       true,
@@ -1078,9 +1154,13 @@ async function montarXmlExpedicao({ venda, itens, pagamentos, cfg, emit, cliente
   const aliqNota = cen.interestadual ? 12 : aliqInterna;
   const partes = sufr
     ? [`ICMS ${brl(SUFRAMA_PCT_ICMS)} = ${brl(tot.vICMSDeson)} TOTAL ${brl(tot.vICMSDeson)} SUSP.IPI-ART.84 RIPI/10-SUFRAMA: ${cen.isuf}`]
-    : [`CST 000 ICMS ${brl(aliqNota)} ${brl(tot.vBC)} = ${brl(tot.vICMS)}`];
+    : simples
+      ? [FRASE_SIMPLES]
+      : [`CST 000 ICMS ${brl(aliqNota)} ${brl(tot.vBC)} = ${brl(tot.vICMS)}`];
   if (transf) {
-    partes.push(`TRANSFERENCIA${transf.ref ? ` ${semAcento(transf.ref)}` : ''} -> ${semAcento(transf.destinoNome || cliente.nome).toUpperCase()} NAO E VENDA`);
+    // entre empresas diferentes a mercadoria vai por VENDA (natOp de venda): o texto não pode dizer "não é venda"
+    if (transf.natureza === 'venda') partes.push(`VENDA ENTRE LOJAS${transf.ref ? ` ${semAcento(transf.ref)}` : ''} -> ${semAcento(transf.destinoNome || cliente.nome).toUpperCase()}`);
+    else partes.push(`TRANSFERENCIA${transf.ref ? ` ${semAcento(transf.ref)}` : ''} -> ${semAcento(transf.destinoNome || cliente.nome).toUpperCase()} NAO E VENDA`);
     partes.push(`TRANSFERENCIA HEADCOACH ${venda.id}`);
   } else if (bonif) {
     partes.push(`BONIFICACAO HEADCOACH ${venda.id}`);

@@ -2,7 +2,7 @@
 // TRANSFERÊNCIA ENTRE LOJAS DO VAREJO (Yago, 19/11/2026)
 // Tela /varejo/transferencia-lojas — a própria loja manda mercadoria para outra:
 //   • ORIGEM = a loja de quem está logado (owner/admin escolhem qualquer ativa);
-//   • DESTINO = uma das lojas ATIVAS (LOJAS_ATIVAS), diferente da origem;
+//   • DESTINO = uma das lojas ATIVAS (LOJAS_ATIVAS) ou a 99 Brejinho (SO_DESTINO), diferente da origem;
 //   • as peças são bipadas com o LEITOR RFID de mesa (a loja não tem portal);
 //   • a operação é decidida pela RAIZ DO CNPJ das duas lojas (regra do Yago,
 //     19/11/2026 — todas são lojas próprias, então nenhum par fica de fora):
@@ -24,8 +24,9 @@
 //     'transferencia' → aparece em HeadCoach › Transações) e em
 //     transferencias_transacoes (→ aparece em Recebimento de Transferência da
 //     loja de destino assim que a nota é autorizada).
-// Só emite a loja que tem configuração fiscal no HeadCoach (pdv_fiscal_config)
-// e é do regime normal (CRT 3): 5 e 55 são do Simples e ainda não emitem aqui.
+// Só emite a loja que tem configuração fiscal no HeadCoach (pdv_fiscal_config).
+// As lojas do Simples Nacional (5 e 55, empresas dos Irmãos) emitem desde 25/11/2026:
+// a nota sai com CRT 1 e ICMSSN101, sem ICMS destacado (pdvFiscal.js › SIMPLES_POR_RAIZ).
 // ============================================================================
 import axios from 'axios';
 import supabase from '../config/supabase.js';
@@ -41,11 +42,13 @@ import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
  * pelo exemplo que ele deu ao corrigir a regra (Cidade Jardim → Ayrton Senna). A 88 (Shopping
  * Guararapes) entrou em 23/11/2026: a Cidade Jardim não a encontrava para transferir. */
 export const LOJAS_ATIVAS = [2, 5, 55, 65, 87, 88, 90, 93, 94, 95, 97, 98];
+/** Só DESTINO: a 99 (Brejinho) recebe mercadoria de todas as lojas (Yago, 25/11/2026: a Cidade Jardim
+ * não a encontrava). Ela não é origem por aqui — o que sai dela vai por Expedição › Transferências. */
+export const SO_DESTINO = [99];
 
 // raízes de CNPJ das empresas dos Irmãos (Irmãos CR e Irmãos Varejo): são do Simples Nacional
 // (conferido nos XML das notas do TOTVS em 19/11/2026) e, no POP, a venda com elas é a 7280
 const RAIZES_IRMAOS = ['33592092', '53661116'];
-const RAIZES_SIMPLES = RAIZES_IRMAOS;
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const hojeBrasil = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife' }).format(new Date());
@@ -55,9 +58,10 @@ const NATUREZA_NOME = { transferencia: 'Transferência entre lojas', venda: 'Ven
 // ─── lojas ───────────────────────────────────────────────────────────────────
 let cacheLojas = null;
 let cacheLojasEm = 0;
-export async function lojasAtivas() {
+// todas as lojas da tela (as ativas + as que são só destino), com `soDestino` marcado
+async function lojasDaTela() {
   if (cacheLojas && Date.now() - cacheLojasEm < 10 * 60 * 1000) return cacheLojas;
-  const { data, error } = await supabase.from('erp_empresas').select('code, descricao, fantasia, cnpj, person_code, uf, cidade, ie').in('code', LOJAS_ATIVAS).order('code');
+  const { data, error } = await supabase.from('erp_empresas').select('code, descricao, fantasia, cnpj, person_code, uf, cidade, ie').in('code', [...LOJAS_ATIVAS, ...SO_DESTINO]).order('code');
   if (error) throw new TransferenciaError(`Não consegui ler as lojas: ${error.message}`, 'DB_ERROR', 500);
   cacheLojas = (data || []).map((e) => ({
     code: Number(e.code),
@@ -68,9 +72,18 @@ export async function lojasAtivas() {
     uf: e.uf || null,
     cidade: e.cidade || null,
     personCode: Number(e.person_code) || null,
+    soDestino: SO_DESTINO.includes(Number(e.code)),
   }));
   cacheLojasEm = Date.now();
   return cacheLojas;
+}
+/** Lojas que ENVIAM por esta tela. */
+export async function lojasAtivas() {
+  return (await lojasDaTela()).filter((l) => !l.soDestino);
+}
+/** Lojas que podem RECEBER: as ativas + a 99 (Brejinho). */
+export async function lojasDeDestino() {
+  return lojasDaTela();
 }
 
 /**
@@ -113,9 +126,8 @@ export function regraEntreLojas(origem, destino) {
 
 // por que a loja (ainda) não emite a NF-e pelo HeadCoach; null = emite
 async function impedimentoFiscal(loja) {
-  // 5 (Irmãos CR) e 55 (Irmãos Varejo) são do Simples Nacional (CRT 1, CSOSN 101/102 nas
-  // notas do TOTVS): o motor de NF-e do HeadCoach só monta o regime normal (ICMS 00)
-  if (RAIZES_SIMPLES.includes(loja.raiz)) return `A loja ${loja.code} — ${loja.nome} é do Simples Nacional: a nota de transferência dela ainda não sai pelo HeadCoach.`;
+  // (até 25/11/2026 as lojas do Simples Nacional — 5 e 55 — eram recusadas aqui: o motor de
+  // NF-e só montava o regime normal. Agora a nota delas sai com CRT 1 e ICMSSN101.)
   try {
     await buscarConfig(loja.code);
   } catch (e) {
@@ -132,13 +144,13 @@ export async function contextoVarejo(user) {
   const restritas = await empresasRestritasDoUsuario(user);
   const minhas = restritas ? lojas.filter((l) => restritas.includes(l.code)) : lojas;
   const origens = await Promise.all(minhas.map(async (l) => ({ ...l, impedimento: await impedimentoFiscal(l) })));
-  return { origens, destinos: lojas, todasAsLojas: !restritas };
+  return { origens, destinos: await lojasDeDestino(), todasAsLojas: !restritas };
 }
 
 async function lojasDoPar(user, origemCode, destinoCode) {
   const lojas = await lojasAtivas();
   const origem = lojas.find((l) => l.code === Number(origemCode));
-  const destino = lojas.find((l) => l.code === Number(destinoCode));
+  const destino = (await lojasDeDestino()).find((l) => l.code === Number(destinoCode));
   if (!origem) throw new TransferenciaError('Loja de origem inválida: só as lojas ativas transferem por aqui', 'ORIGEM_INVALIDA');
   if (!destino) throw new TransferenciaError('Loja de destino inválida: escolha uma das lojas ativas', 'DESTINO_INVALIDO');
   const restritas = await empresasRestritasDoUsuario(user);
