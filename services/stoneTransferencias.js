@@ -282,7 +282,7 @@ export async function conferirNoExtrato() {
     const dia = diaRecife(t.concluido_em);
     const { data: saidas, error: e3 } = await supabase.from('fluxo_caixa_lancamentos').select('id, data, valor, contraparte_nome, memo, transferencia_id').eq('conta_id', contaOrigem).gte('data', dia).gte('valor', -(v + 0.001)).lte('valor', -(v - 0.001)).order('data').order('id');
     lancar(e3);
-    const saida = (saidas || []).find((l) => !usadas.has(l.id) && (l.transferencia_id || nomeScore(t.destino_nome || '', l.contraparte_nome || l.memo || '') >= 0.6));
+    const saida = (saidas || []).find((l) => !usadas.has(l.id) && (l.transferencia_id || Math.max(nomeScore(t.destino_nome || '', l.contraparte_nome || ''), nomeScore(t.destino_nome || '', l.memo || '')) >= 0.6));
     if (!saida) continue;
     usadas.add(saida.id);
     let entrada = null;

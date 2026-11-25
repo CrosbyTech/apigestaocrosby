@@ -42,14 +42,24 @@ export function bancoDaConta(conta) {
   );
 }
 
-/** Para quem foi a saída, como aparece no extrato. */
-export const contraparteDaSaida = (l) => String(l?.contraparte_nome || l?.memo || l?.descricao || '').trim();
+/** "Transferência | Pix", "Pagamento Pix"…: o tipo da operação no lugar do nome (o leitor do extrato às vezes troca os dois). */
+const NOME_GENERICO = /^(transfer[eê]ncia|pix|pagamento|ted|doc)\b/i;
+
+/** Para quem foi a saída, como aparece no extrato (o memo, quando o nome guardado é só o tipo da operação). */
+export function contraparteDaSaida(l) {
+  const nome = String(l?.contraparte_nome || '').trim();
+  const memo = String(l?.memo || '').trim();
+  if (nome && !NOME_GENERICO.test(nome)) return nome;
+  return memo || nome || String(l?.descricao || '').trim();
+}
 
 /** Quanto a saída "é" do fornecedor da duplicata: 2 = CPF/CNPJ igual; senão a pontuação do nome (0 a 1). */
 export function pontosDaSaida(titulo, l, pontuar) {
   const doc = dig(titulo?.fornecedor_cpf_cnpj);
   if (doc.length >= 11 && dig(l?.contraparte_doc) === doc) return 2;
-  return Number(pontuar(titulo?.fornecedor_nome || '', contraparteDaSaida(l))) || 0;
+  // o nome é procurado no nome guardado E no memo: vale o que bater melhor
+  const nome = titulo?.fornecedor_nome || '';
+  return Math.max(...[l?.contraparte_nome, l?.memo].filter((t) => String(t || '').trim()).map((t) => Number(pontuar(nome, t)) || 0), 0);
 }
 
 const porVencimento = (a, b) => String(a.titulo?.vencimento || '').localeCompare(String(b.titulo?.vencimento || '')) || a.id - b.id;

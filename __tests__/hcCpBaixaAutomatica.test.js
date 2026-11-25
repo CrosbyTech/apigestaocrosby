@@ -37,6 +37,30 @@ describe('janela dos extratos e banco da conta', () => {
   });
 });
 
+describe('nome de quem recebeu só no memo do extrato', () => {
+  // caso real de 25/11/2026: o leitor guardou "Transferência | Pix" como nome e o CPF do MEI como documento
+  const real = { id: 327094, conta_id: 10, data: '2026-11-17', valor: -450, contraparte_nome: 'Transferência | Pix', contraparte_doc: '05069473433', memo: 'SALATIEL GONCALVES DA SILVA JUNIOR 05069473433 - Transferência | Pix', seq: 1 };
+  const liberacao = { id: 69, valor: 450, titulo: { fornecedor_code: 501, fornecedor_nome: 'SALATIEL GONCALVES DA SILVA JUNIOR 05069473433', fornecedor_cpf_cnpj: '34859806000151', vencimento: '2026-11-12' } };
+
+  it('casa pelo memo', () => {
+    expect(pontosDaSaida(liberacao.titulo, real, pontuar)).toBe(1);
+    const r = casar([liberacao], [real]);
+    expect(r.casadas).toHaveLength(1);
+    expect(r.casadas[0].saida.id).toBe(327094);
+  });
+
+  it('na tela aparece o memo, não "Transferência | Pix"', () => {
+    expect(contraparteDaSaida(real)).toMatch(/^SALATIEL/);
+    expect(contraparteDaSaida({ contraparte_nome: 'ALARES INTERNET S/A', memo: 'ALARES INTERNET S/A - Transferência | Pix' })).toBe('ALARES INTERNET S/A');
+    expect(contraparteDaSaida({ contraparte_nome: 'Pagamento Pix', memo: '' })).toBe('Pagamento Pix');
+  });
+
+  it('memo de outra pessoa continua não casando', () => {
+    const r = casar([liberacao], [{ ...real, memo: 'PADARIA DO ZE - Transferência | Pix' }]);
+    expect(r.casadas).toEqual([]);
+  });
+});
+
 describe('uma saída = uma liberação', () => {
   it('casa valor igual + mesmo fornecedor', () => {
     const r = casar([lib(1, 170.32)], [saida(100, 170.32)]);
