@@ -25,6 +25,7 @@
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
 //   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 30 dias para trás);
 //                                       sem confirmar = só mostra o que achou; com confirmar + senha = grava a baixa das ids
+//   POST /totvs/liberar                 { itens } títulos da Consulta antiga (TOTVS) → cria a duplicata aqui (em aberto) e manda para a Liberação de Pagamento do HeadCoach
 //   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
 //   POST /solicitacoes/:id/liberar      Solicitação Crosby (enviada ou Nota Fiscal) → Liberação de Pagamento do HeadCoach (cria a duplicata se ainda não existir)
 // ============================================================================
@@ -34,6 +35,7 @@ import { requireAuth } from '../middlewares/auth.js';
 import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../services/solicitacaoContasPagar.js';
 import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, pagarLiberacoes, reenviarAoBot, definirBanco } from '../services/hcCpLiberacao.js';
 import { baixaAutomatica } from '../services/hcCpBaixaAutomatica.js';
+import { enviarDoTotvsParaLiberacao } from '../services/hcCpDoTotvs.js';
 import { montarSaldos } from '../services/relatorioSaldosWhatsapp.js';
 import { CpError, opcoes, buscarFornecedores, listarTitulos, criarTitulos, duplicatasDoFornecedor, detalheTitulo, editarTitulo, baixarTitulo, cancelarTitulo } from '../services/hcContasPagar.js';
 
@@ -61,6 +63,14 @@ router.get('/titulos/:id', rota((req) => detalheTitulo(req.user, req.params.id),
 router.put('/titulos/:id', rota((req) => editarTitulo(req.user, req.params.id, req.body || {}), 'Duplicata alterada'));
 router.post('/titulos/:id/baixar', rota((req) => baixarTitulo(req.user, req.params.id, req.body || {}), (r) => (r.baixaParcial ? `Baixa parcial lançada — falta pagar R$ ${Number(r.faltaPagar).toFixed(2).replace('.', ',')}` : 'Duplicata baixada')));
 router.post('/titulos/:id/cancelar', rota((req) => cancelarTitulo(req.user, req.params.id, req.body || {}), 'Duplicata cancelada'));
+// Consulta antiga do Contas a Pagar: o "Enviar para Pagamento" cria a duplicata aqui e libera na Liberação do HeadCoach
+router.post(
+  '/totvs/liberar',
+  rota(
+    (req) => enviarDoTotvsParaLiberacao(req.user, req.body || {}),
+    (r) => `${r.liberadas} título(s) na Liberação de Pagamento HeadCoach${r.criadas ? ` · ${r.criadas} duplicata(s) criada(s) no Contas a Pagar HeadCoach` : ''}${r.jaExistiam ? ` · ${r.jaExistiam} já existia(m) lá` : ''}${r.ignoradas.length ? ` · ${r.ignoradas.length} ficou(aram) de fora (${r.ignoradas[0].rotulo}: ${r.ignoradas[0].motivo})` : ''}`,
+  ),
+);
 // Solicitações Crosby: o "Enviar ao Contas a Pagar HC" (no lugar do antigo envio ao TOTVS)
 router.post('/solicitacoes/:id/enviar', rota((req) => enviarSolicitacaoAoCp(req.user, req.params.id), (r) => (r.jaEnviada ? `Esta solicitação já estava no contas a pagar (duplicata ${r.rotulo})` : `Solicitação enviada ao contas a pagar — duplicata ${r.rotulo}`)));
 // Solicitações Crosby: o "Liberar para Pagamento" cai na Liberação de Pagamento do HeadCoach

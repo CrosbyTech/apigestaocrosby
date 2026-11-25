@@ -1,4 +1,4 @@
-import { ocultoNaConsulta, pagamentoDoTitulo, pagoParaImportar, chaveTotvs, rateioDoTotvs, linhaDoTituloTotvs, numerarDuplicatas, conciliacoesDoTitulo, liberacaoDoTitulo, baixasDoTituloTotvs, faltaDoTotvs } from '../utils/hcCpTotvs.js';
+import { ocultoNaConsulta, pagamentoDoTitulo, pagoParaImportar, chaveTotvs, rateioDoTotvs, linhaDoTituloTotvs, numerarDuplicatas, conciliacoesDoTitulo, liberacaoDoTitulo, baixasDoTituloTotvs, faltaDoTotvs, linhaAbertaDoTituloTotvs } from '../utils/hcCpTotvs.js';
 
 const item = (x = {}) => ({
   cd_empresa: 1,
@@ -164,5 +164,33 @@ describe('número da duplicata no HeadCoach', () => {
     expect(linhas).toHaveLength(1);
     expect(linhas[0]).toMatchObject({ duplicata: 2, parcela: 12 });
     expect(conflitos).toHaveLength(1);
+  });
+});
+
+describe('título em aberto vindo da Consulta antiga (Enviar para Pagamento)', () => {
+  const item = { cd_empresa: 1, nm_empresa: 'CROSBY MATRIZ', cd_fornecedor: '89612', nm_fornecedor: 'INFLOW CONSULTORIA INTERNACIONAL DE GESTAO ADMINISTRATIVAS L', nr_duplicata: '89656', nr_parcela: '3', nr_portador: '0', cd_despesaitem: '6020', ds_despesaitem: 'CONSULTORIA OPERACIONAL', cd_ccusto: '10', ds_ccusto: 'MATRIZ', dt_emissao: '2026-11-01T00:00:00', dt_vencimento: '2026-11-24T00:00:00', vl_duplicata: '1500.00' };
+
+  it('entra em aberto, sem pagamento, com a chave do TOTVS e a despesa da linha', () => {
+    const l = linhaAbertaDoTituloTotvs(item, {}, { por: 'Yago Matias' });
+    expect(l).toMatchObject({ empresa: 1, fornecedor_code: 89612, documento_fiscal: '89656', parcela: 3, valor: 1500, vencimento: '2026-11-24', emissao: '2026-11-01', situacao: 'aberto', valor_pago: 0, data_pagamento: null, baixado_por: null, origem: 'totvs', origem_ref: '1|89612|89656|3', despesa_code: 6020, centro_custo_code: 10, criado_por: 'Yago Matias' });
+    expect(l.rateio).toEqual([{ despesa_code: 6020, despesa_nome: 'CONSULTORIA OPERACIONAL', centro_custo_code: 10, centro_custo_nome: 'MATRIZ', percentual: 100, valor: 1500 }]);
+    expect(l.observacao).toMatch(/Consulta do Contas a Pagar \(TOTVS\) · duplicata 89656 parcela 3/);
+  });
+
+  it('com a lista de despesas do título, usa o rateio dela', () => {
+    const l = linhaAbertaDoTituloTotvs({ ...item, despesas: [{ expenseCode: 6020, costCenterCode: 10, proratedPercentage: 60 }, { expenseCode: 6028, costCenterCode: 2, proratedPercentage: 40 }] });
+    expect(l.rateio.map((r) => [r.despesa_code, r.valor])).toEqual([[6020, 900], [6028, 600]]);
+  });
+
+  it('sem valor, sem vencimento ou sem fornecedor: não entra', () => {
+    expect(linhaAbertaDoTituloTotvs({ ...item, vl_duplicata: 0 })).toBeNull();
+    expect(linhaAbertaDoTituloTotvs({ ...item, dt_vencimento: null })).toBeNull();
+    expect(linhaAbertaDoTituloTotvs({ ...item, cd_fornecedor: null })).toBeNull();
+  });
+
+  it('sem despesa na linha: entra sem rateio', () => {
+    const l = linhaAbertaDoTituloTotvs({ ...item, cd_despesaitem: null });
+    expect(l.rateio).toBeNull();
+    expect(l.despesa_code).toBeNull();
   });
 });

@@ -202,6 +202,33 @@ export function linhaDoTituloTotvs(item, pg, nomes = {}, { parcial = false } = {
 }
 
 /**
+ * Linha de hc_cp_titulos para um título EM ABERTO que vem da Consulta antiga (botão
+ * "Enviar para Pagamento"). Mesma leitura do título pago, mas sem pagamento nenhum.
+ * A linha da Consulta nem sempre traz a lista de despesas: aí vale a despesa e o
+ * centro de custo da própria linha, em 100%.
+ * @returns {object|null} null quando falta valor, vencimento, empresa ou fornecedor
+ */
+export function linhaAbertaDoTituloTotvs(item, nomes = {}, { por = null } = {}) {
+  const despesas = Array.isArray(item?.despesas) && item.despesas.length ? item.despesas : Number(item?.cd_despesaitem) > 0 ? [{ expenseCode: Number(item.cd_despesaitem), expenseName: item.ds_despesaitem || null, costCenterCode: Number(item.cd_ccusto) > 0 ? Number(item.cd_ccusto) : null, costCenterName: item.ds_ccusto || null, proratedPercentage: 100 }] : [];
+  const base = linhaDoTituloTotvs({ ...item, despesas }, { forma: null, valorPago: 0, data: null, via: 'TOTVS', conta: null }, nomes);
+  if (!base) return null;
+  return {
+    ...base,
+    situacao: 'aberto',
+    data_pagamento: null,
+    valor_pago: 0,
+    juros: 0,
+    multa: 0,
+    desconto: 0,
+    conta_pagamento: null,
+    baixado_por: null,
+    observacao: `Veio da Consulta do Contas a Pagar (TOTVS) · duplicata ${item.nr_duplicata}${item.nr_parcela ? ` parcela ${item.nr_parcela}` : ''} · enviada para pagamento${por ? ` por ${por}` : ''}`,
+    criado_por: por || 'Consulta do Contas a Pagar',
+    atualizado_por: por || 'Consulta do Contas a Pagar',
+  };
+}
+
+/**
  * Dá o número da duplicata do HeadCoach a cada linha nova: uma por empresa +
  * fornecedor + duplicata do TOTVS (as parcelas ficam na mesma), continuando da
  * maior que a empresa já tem com o fornecedor. Duplicata do TOTVS que já foi
