@@ -165,6 +165,10 @@ async function calcularMes(mes) {
   const franquiasBase = somaSemanas(canais.FRANQUIAS);
   let multimarcasBase = 0;
   for (const k of CHAVES_MULTIMARCAS) multimarcasBase += somaSemanas(canais[k]);
+  // BlueCred: o VAREJO do semanal já vem líquido do BlueCred → linha própria (BLUECRED)
+  const bluecred = somaSemanas(canais.BLUECRED);
+  // Magazine Jesus (op 512, chave RICARDO_ELETRO) → linha IMOBILIZADO (Niziany, 25/11/2026)
+  const imobilizado = somaSemanas(canais.RICARDO_ELETRO);
 
   // Showroom/fábricas: separa por cliente a partir do drill da expedição.
   let showroomFranquia = 0;
@@ -201,6 +205,8 @@ async function calcularMes(mes) {
     franquia: r2(franquia),
     revenda: r2(revenda),
     bazar: r2(bazar),
+    bluecred: r2(bluecred),
+    imobilizado: r2(imobilizado),
     credev,
     credev_canais: credevCanais,
     detalhe: {
