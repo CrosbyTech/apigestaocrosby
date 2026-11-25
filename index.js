@@ -50,6 +50,8 @@ import hcContasReceberRoutes from './routes/hcContasReceber.routes.js';
 import hcContasPagarRoutes from './routes/hcContasPagar.routes.js';
 import contasFixasEmailRoutes from './routes/contasFixasEmail.routes.js';
 import hcSaldosClientesRoutes from './routes/hcSaldosClientes.routes.js';
+import inadimplenciaMtmRoutes from './routes/inadimplenciaMtm.routes.js';
+import { iniciarJobInadMtm } from './jobs/inad-mtm-snapshot.job.js';
 import drylandEstoqueRoutes from './routes/drylandEstoque.routes.js';
 import faturamentoExpedicaoRoutes from './routes/faturamentoExpedicao.routes.js';
 import balancoRfidRoutes from './routes/balancoRfid.routes.js';
@@ -262,6 +264,7 @@ app.use('/api/devolucoes', devolucoesRoutes); // Devoluções de mercadoria — 
 app.use('/api/transferencias', transferenciasRoutes); // Transferências de mercadoria entre empresas — regra do POP (7272/7273/7280), página /transferencias-mercadoria
 app.use('/api/pedidos-venda', pedidosVendaRoutes); // Pedidos de venda do Dryland (separação → pedido), página /expedicao/pedidos-venda
 app.use('/api/dryland-estoque', drylandEstoqueRoutes); // HEADCOACH › ESTOQUE › Estoque Dryland: saldo, movimentos, grupos e fila pela porta estq_gw do Estoquista (só consulta; token em DRYLAND_ESTQ_TOKEN) — exige login
+app.use('/api/inadimplencia-mtm', inadimplenciaMtmRoutes); // INADIMPLÊNCIA MTM › Venda x Inadimplência por Vendedor: foto semanal gravada + ajustes — exige login
 app.use('/api/hc/saldos-clientes', hcSaldosClientesRoutes); // HEADCOACH › SALDOS DE CLIENTES: CREDEV e adiantamento próprios (carga do TOTVS da 99, uso no faturamento, devoluções) — exige login
 app.use('/api/hc/contas-pagar', hcContasPagarRoutes); // HEADCOACH › CONTAS A PAGAR: duplicatas próprias (fornecedor, fatura, parcela, portador, despesa), baixa e cancelamento — exige login, só financeiro
 app.use('/api/contas-fixas', contasFixasEmailRoutes); // DESPESAS FIXAS: entrada dos e-mails encaminhados pela caixa de Patrimônio (Cloudflare Email Worker, com segredo) — só guarda a mensagem
@@ -351,6 +354,7 @@ app.listen(PORT, async () => {
   iniciarResellerCacheWarm();
   iniciarJobEsteiraProtesto();
   iniciarJobFaturamentoVendedorMensal();
+  iniciarJobInadMtm(); // foto semanal da Venda x Inadimplência por Vendedor (segunda 06:10)
   iniciarJobContratoAluguelVencimento();
   iniciarJobDrylandChamados();
   iniciarJojoBot().catch((e) => console.warn(`[jojo] falha ao iniciar: ${e.message}`)); // JOJO — assistente fiscal no grupo do Contas a Pagar
