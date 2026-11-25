@@ -1813,7 +1813,13 @@ export function candidatosPara(l, fontes, usados = new Map()) {
     semRepetidos[0].score += 10;
     semRepetidos[0].motivos.push('único candidato com este valor');
   }
-  semRepetidos.sort((a, b) => b.score - a.score || Number(!!a.parcial) - Number(!!b.parcial));
+  // valor exato vem antes de "pagamento parcial" de outra duplicata qualquer: senão
+  // parciais sem nada a ver (só data perto) ocupavam as 8 vagas e o título certo,
+  // de mesmo valor, nem aparecia (Claro R$ 15 paga via MULTIDISPLAY, 25/11/2026).
+  // Parcial só passa na frente quando o fornecedor/CNPJ bate.
+  const forte = (c) => c.motivos.some((m) => /mesmo fornecedor|mesmo CNPJ/.test(m));
+  const grupo = (c) => (!c.parcial || forte(c) ? 0 : 1);
+  semRepetidos.sort((a, b) => grupo(a) - grupo(b) || b.score - a.score || Number(!!a.parcial) - Number(!!b.parcial));
   return semRepetidos.slice(0, 8);
 }
 
