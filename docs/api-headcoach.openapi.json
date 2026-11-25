@@ -791,6 +791,31 @@
             },
             "nullable": true
           },
+          "transfer": {
+            "description": "Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. Nulo quando não é transferência.",
+            "type": "object",
+            "properties": {
+              "nature": {
+                "type": "string",
+                "enum": [
+                  "Transfer",
+                  "Sale"
+                ]
+              },
+              "destinationBranchCode": {
+                "type": "integer",
+                "nullable": true
+              },
+              "destinationName": {
+                "type": "string",
+                "nullable": true
+              },
+              "withoutInvoice": {
+                "type": "boolean"
+              }
+            },
+            "nullable": true
+          },
           "transactionDate": {
             "description": "Data e hora do registro.",
             "type": "string",

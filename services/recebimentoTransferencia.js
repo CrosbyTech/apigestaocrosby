@@ -95,7 +95,8 @@ async function temCancelamento() {
 // aguardado, então ele nunca pode sair de uma função async.
 const valendo = (qy, tem) => (tem ? qy.is('cancelado_em', null) : qy);
 
-const saiu = (t) => (t.venda_id ? t.nf_status === 'autorizada' : Number(t.transacao_status) === 4);
+// (movimentação entre estoques — Brejinho ↔ Matriz — não tem nota: nf_status 'sem_nota' e transação atendida)
+const saiu = (t) => (t.venda_id ? t.nf_status === 'autorizada' || (t.nf_status === 'sem_nota' && Number(t.transacao_status) === 4) : Number(t.transacao_status) === 4);
 const cancelada = (t) => t.nf_status === 'cancelada' || Number(t.transacao_status) === 6;
 const esperadoDe = (itens) => (itens || []).reduce((s, i) => s + (Number(i.quantidade) || 0), 0);
 

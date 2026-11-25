@@ -173,6 +173,16 @@ modulo.recurso({
       'Bonificação (operação 5910 do faturamento avulso): peças dadas ao cliente, sem custo para ele. A nota sai com cada peça no custo `costName`, sem pagamento e sem contas a receber; `totalValue` é o valor da nota, não uma venda. `reason` é a justificativa obrigatória de quem fez. Nulo nas demais transações.',
       { properties: { reason: { type: 'string', nullable: true }, by: { type: 'string', nullable: true }, date: { type: 'string', format: 'date-time', nullable: true }, costName: { type: 'string', nullable: true }, value: { type: 'number', nullable: true } } },
     ),
+    f(
+      'transfer',
+      (v) => {
+        const t = v.pedido_info?.transferencia;
+        return t ? { nature: t.natureza === 'venda' ? 'Sale' : 'Transfer', destinationBranchCode: t.destinoCode ?? null, destinationName: t.destinoNome || null, withoutInvoice: !!t.semNota } : null;
+      },
+      'object',
+      'Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. Nulo quando não é transferência.',
+      { cols: ['pedido_info'], properties: { nature: { type: 'string', enum: ['Transfer', 'Sale'] }, destinationBranchCode: { type: 'integer', nullable: true }, destinationName: { type: 'string', nullable: true }, withoutInvoice: { type: 'boolean' } } }
+    ),
     f('transactionDate', 'criado_em', 'date-time', 'Data e hora do registro.'),
     f('cashierCode', 'caixa_id', 'integer', 'Caixa em que a transação entrou (cashier/cashiers).'),
     f('cashierDate', 'data_caixa', 'date', 'Data do caixa, quando gravada na transação.'),

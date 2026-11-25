@@ -331,6 +331,7 @@ Esquemas:
 - `operationCode` (integer) — Operação (general/operations).
 - `channel` (string) — Canal de venda do pedido (só faturamento). `Bonification` = bonificação: peças dadas ao cliente, sem pagamento (ver `bonification`). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.
 - `bonification` (object) — Bonificação (operação 5910 do faturamento avulso): peças dadas ao cliente, sem custo para ele. A nota sai com cada peça no custo `costName`, sem pagamento e sem contas a receber; `totalValue` é o valor da nota, não uma venda. `reason` é a justificativa obrigatória de quem fez. Nulo nas demais transações.
+- `transfer` (object) — Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. Nulo quando não é transferência.
 - `transactionDate` (date-time) — Data e hora do registro.
 - `cashierCode` (integer) — Caixa em que a transação entrou (cashier/cashiers).
 - `cashierDate` (date) — Data do caixa, quando gravada na transação.

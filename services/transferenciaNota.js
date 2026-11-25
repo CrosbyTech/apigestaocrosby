@@ -17,6 +17,11 @@
 // cancelamento e espelho. O acompanhamento fica em transferencias_transacoes
 // (aba Transações da página) e na solicitação (transferencias_mercadoria).
 // Transferência de outra empresa continua no fluxo antigo (TRAFP005).
+//
+// MESMO ESTOQUE (Yago, 25/11/2026): Brejinho (99, CNPJ final 0010-07) e Matriz (1, CNPJ final
+// 0001-16) são o mesmo estoque em dois CNPJs. Entre os dois, em qualquer sentido, a transferência
+// NÃO movimenta o fiscal: grava a transação e a saída das peças, SEM NF-e
+// (pedido_info.transferencia.semNota; registro com nf_status 'sem_nota' e já atendido).
 // ============================================================================
 import supabase from '../config/supabase.js';
 import { listarFiliaisPop, raizCnpj, TransferenciaError } from './transferenciasMercadoria.js';
@@ -25,6 +30,16 @@ import { acertarNumeracao } from './faturamentoExpedicao.js';
 import { emitirVendaPdv, registrarEpcs, carregarVenda } from '../routes/pdvCrosby.routes.js';
 
 export const EMPRESA_ORIGEM_NOTA = 99;
+// Brejinho ↔ Matriz: mesmo estoque, transferência sem nota fiscal (ver o topo)
+export const PAR_MESMO_ESTOQUE = [99, 1];
+// origens aceitas por esta tela: a 99 (para qualquer destino) e a Matriz (só para o Brejinho, sem nota)
+export const ORIGENS_ACEITAS = [99, 1];
+export const mesmoEstoque = (a, b) => PAR_MESMO_ESTOQUE.includes(Number(a)) && PAR_MESMO_ESTOQUE.includes(Number(b)) && Number(a) !== Number(b);
+const origemValida = (code) => {
+  const n = Number(code) || EMPRESA_ORIGEM_NOTA;
+  if (!ORIGENS_ACEITAS.includes(n)) throw new TransferenciaError(`Por esta tela a transferência sai da empresa ${EMPRESA_ORIGEM_NOTA} (ou da Matriz para o Brejinho)`, 'ORIGEM_NAO_ATENDIDA');
+  return n;
+};
 // nota: operação que a 99 usava no TOTVS (só referência, define a natureza da NF-e) ·
 // docInterno: a que ia para a 990 quando havia transação no TOTVS (não é mais usada)
 export const OPERACOES_TRANSF_NOTA = {
@@ -56,15 +71,16 @@ async function exigirColunas() {
   colunasOk = true;
 }
 
-// Origem (99), destino (filial ou pessoa informada) e a natureza pela raiz do CNPJ
-async function contexto(destinoClienteCode) {
+// Origem (99, ou a Matriz), destino (filial ou pessoa informada) e a natureza pela raiz do CNPJ
+async function contexto(destinoClienteCode, origemCode = EMPRESA_ORIGEM_NOTA) {
+  const origem = origemValida(origemCode);
   const pessoa = Number(destinoClienteCode);
   if (!(pessoa > 0)) throw new TransferenciaError('Informe a loja de destino', 'SEM_DESTINO');
-  const [emit, filiais, cliente] = await Promise.all([buscarEmitente(EMPRESA_ORIGEM_NOTA), listarFiliaisPop().catch(() => []), buscarClienteFiscal(pessoa)]);
+  const [emit, filiais, cliente] = await Promise.all([buscarEmitente(origem), listarFiliaisPop().catch(() => []), buscarClienteFiscal(pessoa)]);
   if (!cliente) throw new TransferenciaError(`Cliente ${pessoa} (loja de destino) não encontrado no TOTVS`, 'DESTINO_NAO_ENCONTRADO', 404);
   if (!cliente.cnpj) throw new TransferenciaError(`O destino ${cliente.nome} não tem CNPJ no TOTVS: transferência é só entre empresas`, 'DESTINO_SEM_CNPJ');
   const filial = filiais.find((f) => Number(f.personCode) === pessoa) || null;
-  if (filial && Number(filial.code) === EMPRESA_ORIGEM_NOTA) throw new TransferenciaError('A loja de destino é a própria origem (99)', 'MESMA_EMPRESA');
+  if (filial && Number(filial.code) === origem) throw new TransferenciaError(`A loja de destino é a própria origem (${origem})`, 'MESMA_EMPRESA');
   // Loja própria fora dos grupos do POP (ex.: 98 Shopping Recife, que recebe VENDA):
   // não é "filial" para a regra da operação, mas a nota guarda o código dela para
   // a loja ver a mercadoria em Recebimento de Mercadoria.
@@ -73,9 +89,15 @@ async function contexto(destinoClienteCode) {
     const { data: emp } = await supabase.from('erp_empresas').select('code').eq('person_code', pessoa).eq('propria', true).order('code').limit(1);
     empresaDestino = emp?.[0]?.code ? Number(emp[0].code) : null;
   }
+  if (empresaDestino === origem) throw new TransferenciaError(`A loja de destino é a própria origem (${origem})`, 'MESMA_EMPRESA');
   const natureza = raizCnpj(cliente.cnpj) === raizCnpj(emit.cnpj) ? 'transferencia' : 'venda';
+  // Brejinho ↔ Matriz: mesmo estoque, sem nota fiscal
+  const semNota = mesmoEstoque(origem, empresaDestino);
+  if (origem !== EMPRESA_ORIGEM_NOTA && !semNota) {
+    throw new TransferenciaError(`Saindo da empresa ${origem} (Matriz), por esta tela, só a movimentação para o Brejinho (${EMPRESA_ORIGEM_NOTA})`, 'ORIGEM_NAO_ATENDIDA');
+  }
   const cen = cenarioExpedicao({ emitUf: emit.uf, cliente });
-  return { emit, cliente, filial, empresaDestino, natureza, cen, operacoes: OPERACOES_TRANSF_NOTA[natureza] };
+  return { origem, emit, cliente, filial, empresaDestino, natureza, cen, semNota, operacoes: OPERACOES_TRANSF_NOTA[natureza] };
 }
 
 async function solicitacaoDe(id) {
@@ -90,28 +112,32 @@ async function notaDaSolicitacao(sol) {
   if (!sol?.venda_id) return null;
   const venda = await carregarVenda(sol.venda_id);
   if (!venda || venda.status === 'cancelada') return null;
+  // movimentação entre estoques (sem nota): a transação registrada já conta
+  if (venda.pedido_info?.transferencia?.semNota && venda.status === 'autorizada') return { vendaId: venda.id, semNota: true, numero: null, serie: null, chave: null };
   const nota = venda.notas.find((n) => n.status === 'autorizada');
   return nota ? { vendaId: venda.id, numero: nota.numero, serie: nota.serie, chave: nota.chave, totvsStatus: venda.totvs_status, transacao: venda.totvs_transacao_code } : null;
 }
 
 /** O que a tela precisa antes de ler as peças. */
-export async function prepararTransferenciaNota({ solicitacaoId = null, destinoClienteCode = null } = {}) {
+export async function prepararTransferenciaNota({ solicitacaoId = null, destinoClienteCode = null, origem = null } = {}) {
   await exigirColunas();
   const sol = await solicitacaoDe(solicitacaoId);
-  if (sol && Number(sol.empresa_origem) !== EMPRESA_ORIGEM_NOTA) {
-    throw new TransferenciaError(`A nota pelo HeadCoach é só para transferência saindo da empresa ${EMPRESA_ORIGEM_NOTA}`, 'ORIGEM_NAO_ATENDIDA');
-  }
+  const origemCode = origemValida(sol ? sol.empresa_origem : origem);
   const pessoa = sol?.cliente_code || destinoClienteCode;
-  const ctx = await contexto(pessoa);
-  const cfg = await buscarConfig(EMPRESA_ORIGEM_NOTA);
+  const ctx = await contexto(pessoa, origemCode);
+  // sem nota (Brejinho ↔ Matriz): não precisa de numeração nem do cadastro fiscal completo do destino
+  const cfg = ctx.semNota ? null : await buscarConfig(origemCode);
   const pendencias = [];
-  if (!ctx.cliente.endereco?.cMun || !ctx.cliente.endereco?.UF) pendencias.push(`A loja de destino (${ctx.cliente.nome}) está sem endereço completo no TOTVS.`);
-  if (!ctx.cen.contribuinte) pendencias.push(`A loja de destino (${ctx.cliente.nome}) está sem inscrição estadual no TOTVS.`);
+  if (!ctx.semNota) {
+    if (!ctx.cliente.endereco?.cMun || !ctx.cliente.endereco?.UF) pendencias.push(`A loja de destino (${ctx.cliente.nome}) está sem endereço completo no TOTVS.`);
+    if (!ctx.cen.contribuinte) pendencias.push(`A loja de destino (${ctx.cliente.nome}) está sem inscrição estadual no TOTVS.`);
+  }
   return {
-    origem: { code: EMPRESA_ORIGEM_NOTA, nome: ctx.emit.xFant || ctx.emit.xNome, cnpj: ctx.emit.cnpj, uf: ctx.emit.uf },
+    semNota: ctx.semNota,
+    origem: { code: origemCode, nome: ctx.emit.xFant || ctx.emit.xNome, cnpj: ctx.emit.cnpj, uf: ctx.emit.uf },
     destino: {
       personCode: ctx.cliente.code,
-      code: ctx.filial?.code ?? null,
+      code: ctx.filial?.code ?? ctx.empresaDestino ?? null,
       nome: ctx.filial?.nome || ctx.cliente.nome,
       razao: ctx.cliente.nome,
       cnpj: ctx.cliente.cnpj,
@@ -121,11 +147,13 @@ export async function prepararTransferenciaNota({ solicitacaoId = null, destinoC
       foraDoPop: !ctx.filial,
     },
     natureza: ctx.natureza,
-    naturezaNome: ctx.operacoes.nome,
-    operacaoNota: ctx.operacoes.nota,
+    naturezaNome: ctx.semNota ? 'Movimentação entre estoques (sem nota fiscal)' : ctx.operacoes.nome,
+    operacaoNota: ctx.semNota ? null : ctx.operacoes.nota,
     semTotvs: true,
-    cenario: { chave: ctx.cen.chave, texto: CENARIO_TXT[ctx.cen.chave] || ctx.cen.chave, cfops: ctx.cen.contribuinte ? [cfopTransferencia(ctx.cen.chave, 'producao', ctx.natureza), cfopTransferencia(ctx.cen.chave, 'adquirido', ctx.natureza)] : [] },
-    numeracao: { serie: cfg.serie_nfe, ambiente: cfg.ambiente },
+    cenario: ctx.semNota
+      ? { chave: 'mesmoEstoque', texto: 'Brejinho e Matriz são o mesmo estoque: sem nota fiscal', cfops: [] }
+      : { chave: ctx.cen.chave, texto: CENARIO_TXT[ctx.cen.chave] || ctx.cen.chave, cfops: ctx.cen.contribuinte ? [cfopTransferencia(ctx.cen.chave, 'producao', ctx.natureza), cfopTransferencia(ctx.cen.chave, 'adquirido', ctx.natureza)] : [] },
+    numeracao: cfg ? { serie: cfg.serie_nfe, ambiente: cfg.ambiente } : null,
     pendencias,
     solicitacao: sol
       ? { id: sol.id, ref: sol.origem_ref || null, origem: sol.origem || null, status: sol.status, qtd_pecas: sol.qtd_pecas, valor: Number(sol.valor) || 0, observacao: sol.observacao || null, itens: Array.isArray(sol.itens) ? sol.itens : [] }
@@ -154,6 +182,40 @@ export async function processarTransferenciaNota(vendaId) {
   const atualizar = async (patch) => {
     if (reg) await supabase.from('transferencias_transacoes').update({ ...patch, atualizado_em: new Date().toISOString() }).eq('id', reg.id);
   };
+
+  // Brejinho ↔ Matriz: mesmo estoque, sem nota fiscal — a transação registrada já é a transferência
+  if (t.semNota) {
+    const agora0 = new Date().toISOString();
+    if (venda.status !== 'cancelada' && venda.status !== 'autorizada') {
+      await supabase.from('pdv_vendas').update({ status: 'autorizada' }).eq('id', vendaId);
+      venda = await carregarVenda(vendaId);
+    }
+    await atualizar({ nota_id: null, nf_numero: null, nf_serie: null, nf_chave: null, nf_status: 'sem_nota', transacao_status: 4, totvs_erro: null, atendida_em: reg?.atendida_em || agora0 });
+    if (t.solicitacaoId) {
+      await supabase
+        .from('transferencias_mercadoria')
+        .update({
+          status: 'concluida',
+          venda_id: vendaId,
+          nf_numero: null,
+          nf_chave: null,
+          transacao_status: 4,
+          transacao_total: venda.total,
+          transacao_qtd_epcs: (venda.itens || []).reduce((s, i) => s + (Array.isArray(i.epcs) ? i.epcs.length : 0), 0),
+          transacao_por: venda.criado_por || null,
+          transacao_atendida_em: agora0,
+          atualizado_em: agora0,
+        })
+        .eq('id', t.solicitacaoId);
+    }
+    return {
+      vendaId,
+      venda,
+      nota: null,
+      fiscal: { ok: true, semNota: true, mensagem: 'Movimentação entre estoques registrada — sem nota fiscal' },
+      totvs: { ok: true, semTotvs: true, mensagem: 'registrada só no HeadCoach' },
+    };
+  }
 
   // 1) NF-e
   let nota = venda.notas.find((n) => n.status === 'autorizada') || null;
@@ -208,16 +270,19 @@ export async function transferirComNota(b = {}) {
   if (!Number(b.vendedorCode)) throw new TransferenciaError('Escolha o vendedor', 'SEM_VENDEDOR');
   if (!Array.isArray(b.itens) || !b.itens.length) throw new TransferenciaError('Nenhuma peça conferida', 'SEM_ITENS');
   const sol = await solicitacaoDe(b.solicitacaoId);
+  const origemCode = origemValida(sol ? sol.empresa_origem : b.origem);
   if (sol) {
-    if (Number(sol.empresa_origem) !== EMPRESA_ORIGEM_NOTA) throw new TransferenciaError(`A nota pelo HeadCoach é só para transferência saindo da empresa ${EMPRESA_ORIGEM_NOTA}`, 'ORIGEM_NAO_ATENDIDA');
     if (sol.status === 'cancelada') throw new TransferenciaError('Solicitação cancelada', 'SOLICITACAO_CANCELADA');
     const ja = await notaDaSolicitacao(sol);
+    if (ja?.semNota) throw new TransferenciaError(`Esta solicitação já foi registrada (transação nº ${ja.vendaId}). Para refazer, cancele a transação.`, 'JA_EMITIDA', 409);
     if (ja) throw new TransferenciaError(`Esta solicitação já tem a NF-e ${ja.numero}/${ja.serie}. Para emitir de novo, cancele a nota.`, 'JA_EMITIDA', 409);
   }
-  const ctx = await contexto(sol?.cliente_code || b.destinoClienteCode);
-  const { emit, cliente, natureza, cen, operacoes } = ctx;
-  if (!cen.contribuinte) throw new TransferenciaError(`A loja de destino (${cliente.nome}) está sem inscrição estadual no TOTVS`, 'DESTINO_SEM_IE');
-  if (!cliente.endereco?.cMun || !cliente.endereco?.UF) throw new TransferenciaError(`A loja de destino (${cliente.nome}) está sem endereço completo no TOTVS`, 'DESTINO_SEM_ENDERECO');
+  const ctx = await contexto(sol?.cliente_code || b.destinoClienteCode, origemCode);
+  const { emit, cliente, natureza, cen, operacoes, semNota } = ctx;
+  if (!semNota) {
+    if (!cen.contribuinte) throw new TransferenciaError(`A loja de destino (${cliente.nome}) está sem inscrição estadual no TOTVS`, 'DESTINO_SEM_IE');
+    if (!cliente.endereco?.cMun || !cliente.endereco?.UF) throw new TransferenciaError(`A loja de destino (${cliente.nome}) está sem endereço completo no TOTVS`, 'DESTINO_SEM_ENDERECO');
+  }
 
   // itens + dados fiscais
   const itens = [];
@@ -226,7 +291,10 @@ export async function transferirComNota(b = {}) {
     const q = Number(it.quantidade);
     const vUn = round2(it.valorUnit);
     if (!(q > 0) || !(vUn > 0)) throw new TransferenciaError(`Peça ${it.productCode}: quantidade ou valor inválido`, 'ITEM_INVALIDO');
-    const pf = await buscarProdutoFiscal(it.productCode, EMPRESA_ORIGEM_NOTA);
+    // sem nota: os dados fiscais da peça não são exigidos (servem só para nome e SKU)
+    const pf = semNota
+      ? await buscarProdutoFiscal(it.productCode, origemCode).catch(() => ({ sku: it.sku || null, nome: it.nome || null, referencia: null, ncm: null, cest: null, origem: null, unidade: null }))
+      : await buscarProdutoFiscal(it.productCode, origemCode);
     itens.push({
       seq: seq++,
       product_code: Number(it.productCode),
@@ -244,10 +312,12 @@ export async function transferirComNota(b = {}) {
       epcs: Array.isArray(it.epcs) ? it.epcs : [],
     });
   }
-  const tipos = await tiposFiscais(EMPRESA_ORIGEM_NOTA, itens);
-  for (const it of itens) {
-    it.tipo_fiscal = tipos.get(it.product_code) || 'producao';
-    it.cfop = cfopTransferencia(cen.chave, it.tipo_fiscal, natureza);
+  if (!semNota) {
+    const tipos = await tiposFiscais(origemCode, itens);
+    for (const it of itens) {
+      it.tipo_fiscal = tipos.get(it.product_code) || 'producao';
+      it.cfop = cfopTransferencia(cen.chave, it.tipo_fiscal, natureza);
+    }
   }
   const total = round2(itens.reduce((s, i) => s + i.total, 0));
   const qtd = itens.reduce((s, i) => s + i.quantidade, 0);
@@ -255,7 +325,7 @@ export async function transferirComNota(b = {}) {
   const destinoNome = ctx.filial?.nome || cliente.nome;
 
   const cabecalho = {
-    empresa: EMPRESA_ORIGEM_NOTA,
+    empresa: origemCode,
     empresa_cnpj: emit.cnpj,
     empresa_nome: emit.xNome,
     tipo_venda: 'nfe',
@@ -284,7 +354,7 @@ export async function transferirComNota(b = {}) {
     cobranca: null,
     comprovantes: [],
     pedido_info: {
-      transferencia: { natureza, ref, solicitacaoId: sol?.id || null, destinoCode: ctx.filial?.code ?? ctx.empresaDestino ?? null, destinoNome, operacaoNota: operacoes.nota },
+      transferencia: { natureza, ref, solicitacaoId: sol?.id || null, destinoCode: ctx.filial?.code ?? ctx.empresaDestino ?? null, destinoNome, operacaoNota: semNota ? null : operacoes.nota, ...(semNota ? { semNota: true } : {}) },
     },
   };
   const { data: venda, error } = await supabase.from('pdv_vendas').insert(cabecalho).select().single();
@@ -299,15 +369,16 @@ export async function transferirComNota(b = {}) {
   // registro da aba Transações (acompanha a nota; não há transação no TOTVS)
   const { error: e2 } = await supabase.from('transferencias_transacoes').insert({
     transferencia_id: sol?.id || null,
-    empresa: EMPRESA_ORIGEM_NOTA,
+    empresa: origemCode,
     empresa_destino: ctx.filial?.code ?? ctx.empresaDestino ?? 0,
     empresa_totvs: null,
     venda_id: venda.id,
     natureza,
     transacao_code: null,
     transacao_status: 1,
-    operacao: operacoes.nota,
+    operacao: semNota ? null : operacoes.nota,
     cfop: itens[0]?.cfop || null,
+    ...(semNota ? { nf_status: 'sem_nota' } : {}),
     total,
     qtd_pecas: qtd,
     qtd_epcs: itens.reduce((s, i) => s + i.epcs.length, 0),
@@ -322,6 +393,6 @@ export async function transferirComNota(b = {}) {
   });
   if (e2) console.warn(`⚠️ [transferência] venda ${venda.id}: não gravei o registro da aba Transações: ${e2.message}`);
   if (sol) await supabase.from('transferencias_mercadoria').update({ status: 'em_transferencia', venda_id: venda.id, atualizado_em: new Date().toISOString() }).eq('id', sol.id);
-  console.log(`🔁 [transferência] ${ref || 'avulsa'}: 99 → ${ctx.filial?.code ?? cliente.code} ${destinoNome} · ${qtd} pç · R$ ${total.toFixed(2)} · ${natureza} · só HeadCoach · venda ${venda.id}`);
+  console.log(`🔁 [transferência] ${ref || 'avulsa'}: ${origemCode} → ${ctx.filial?.code ?? ctx.empresaDestino ?? cliente.code} ${destinoNome} · ${qtd} pç · R$ ${total.toFixed(2)} · ${semNota ? 'mesmo estoque, SEM NOTA' : natureza} · só HeadCoach · venda ${venda.id}`);
   return processarTransferenciaNota(venda.id);
 }

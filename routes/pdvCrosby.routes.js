@@ -1621,6 +1621,14 @@ router.post(
           return null;
         });
         const etiquetas = await registrarEpcs({ venda, itens: venda.itens, tipo: 'estorno' });
+        // transferência sem nota (Brejinho ↔ Matriz) ou cuja nota não saiu: o registro acompanha o cancelamento
+        if (venda.pedido_info?.transferencia) {
+          const agoraT = new Date().toISOString();
+          await supabase.from('transferencias_transacoes').update({ transacao_status: 6, atualizado_em: agoraT }).eq('venda_id', id);
+          if (venda.pedido_info.transferencia.solicitacaoId) {
+            await supabase.from('transferencias_mercadoria').update({ status: 'aguardando_transferencia', transacao_status: 6, atualizado_em: agoraT }).eq('id', venda.pedido_info.transferencia.solicitacaoId).eq('venda_id', id);
+          }
+        }
         feito = { saldosDevolvidos, cashbackEstorno, cashbackTotvs, etiquetas };
         passo('Nota fiscal', true, venda.notas.some((n) => n.status === 'cancelada') ? 'a nota já estava cancelada' : 'não havia nota autorizada');
       } else {

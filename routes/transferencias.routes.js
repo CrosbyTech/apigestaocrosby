@@ -237,15 +237,18 @@ router.get(
       const r = await prepararTransferenciaNota({
         solicitacaoId: parseInt(req.query.solicitacao, 10) || null,
         destinoClienteCode: parseInt(req.query.destino, 10) || null,
+        origem: parseInt(req.query.origem, 10) || null,
       });
-      return successResponse(res, r, `Transferência da ${EMPRESA_ORIGEM_NOTA} para ${r.destino.nome}`);
+      return successResponse(res, r, `${r.semNota ? 'Movimentação sem nota fiscal' : 'Transferência'} da ${r.origem.code} para ${r.destino.nome}`);
     } catch (err) {
       return responder(res, err);
     }
   }),
 );
 const mensagemNota = (r) =>
-  !r.fiscal?.ok
+  r.fiscal?.semNota
+    ? `Movimentação entre estoques registrada sem nota fiscal: transação nº ${r.vendaId}`
+    : !r.fiscal?.ok
     ? `NF-e não autorizada: ${r.fiscal?.mensagem || 'erro'}`
     : `Transferência concluída: NF-e ${r.nota?.numero}/${r.nota?.serie} autorizada e registrada no HeadCoach`;
 router.post(
