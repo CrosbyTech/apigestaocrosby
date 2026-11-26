@@ -92,6 +92,16 @@ const resumoFat = (lista) => {
 const resumoSep = (p, criadoPedido = null) =>
   p ? { status: p.status, qtd_pecas: p.qtd_pecas, qtd_separada: p.qtd_separada, separado_em: p.separado_em, incompleta: separacaoIncompleta(p, criadoPedido), viva: !p.sumiu_do_dryland_em } : null;
 
+// PRONTO PRA FATURAR (Yago, 26/11/2026): o pedido só entra no Faturamento quando o
+// vendedor confirma a separação no Dryland. aguardando = o Dryland ainda lista o
+// pedido em "aguardando confirmar a separação"; em/por = quem confirmou e quando.
+const resumoPronto = (sep, card = null) => ({
+  aguardando: !!sep?.aguardando_pronto,
+  desde: sep?.aguardando_pronto ? sep.aguardando_pronto_desde || null : null,
+  em: card?.pronto_faturar_em || (!sep?.aguardando_pronto && sep?.pronto_liberado_em) || null,
+  por: card?.pronto_faturar_por || null,
+});
+
 // Linha da tela a partir do card da fila (+ separação do pedido do site)
 function linhaDoCard(c, sep, anexo, fats) {
   return {
@@ -122,6 +132,7 @@ function linhaDoCard(c, sep, anexo, fats) {
     criado_em: c.criado_em,
     sumiu_do_dryland_em: c.sumiu_do_dryland_em,
     separacao: resumoSep(sep, c.criado_em),
+    pronto: resumoPronto(sep, c),
     pecas_card: c.total_pecas != null ? Number(c.total_pecas) : null,
     faturamento: resumoFat(fats),
   };
@@ -155,6 +166,7 @@ function linhaDaSeparacao(p, anexo, fats) {
     criado_em: p.criado_em,
     sumiu_do_dryland_em: p.sumiu_do_dryland_em,
     separacao: resumoSep(p),
+    pronto: resumoPronto(p),
     faturamento: resumoFat(fats),
   };
 }
@@ -172,7 +184,7 @@ router.get(
         lerTudo('pedidos_venda_fila', (q) => {
           let x = q
             .select(
-              'id, canal, titulo, status, numero_site, pedido_totvs, transacao, eh_venda, cliente, cliente_doc, cliente_telefone, vendedor, loja, forma_pagamento, parcelamento, valor_pedido, nf_numero, cartao_nsu, cartao_autorizacao, pix_e2e, comprovantes, criado_em, sumiu_do_dryland_em, total_pecas',
+              'id, canal, titulo, status, numero_site, pedido_totvs, transacao, eh_venda, cliente, cliente_doc, cliente_telefone, vendedor, loja, forma_pagamento, parcelamento, valor_pedido, nf_numero, cartao_nsu, cartao_autorizacao, pix_e2e, comprovantes, criado_em, sumiu_do_dryland_em, total_pecas, pronto_faturar_em, pronto_faturar_por',
             )
             .order('criado_em', { ascending: false });
           if (deIso) x = x.gte('criado_em', deIso);
@@ -206,6 +218,9 @@ router.get(
       if (!comTransf) linhas = linhas.filter((l) => l.eh_venda);
       if (canal) linhas = linhas.filter((l) => l.canal === canal);
       if (status) linhas = linhas.filter((l) => (l.status_fat || '').toLowerCase() === String(status).toLowerCase());
+      // lista "a faturar" (tela Faturamento): pedido que ainda espera o vendedor marcar
+      // "Pronto pra faturar" no Dryland não entra
+      if (/^a faturar$/i.test(String(status || ''))) linhas = linhas.filter((l) => !l.pronto?.aguardando);
       if (separacao === 'sem') linhas = linhas.filter((l) => !l.separacao);
       else if (separacao) linhas = linhas.filter((l) => l.separacao?.status === separacao);
       if (busca) {
@@ -229,6 +244,7 @@ router.get(
             emSeparacao: conta((l) => l.separacao?.status === 'em_separacao'),
             separados: conta((l) => l.separacao?.status === 'separado'),
             semSeparacao: conta((l) => !l.separacao),
+            aguardandoPronto: conta((l) => l.pronto?.aguardando),
             aFaturar: conta((l) => /^a faturar$/i.test(l.status_fat || '')),
             faturados: conta((l) => /faturad|enviado|conclu/i.test(l.status_fat || '')),
             comComprovante: conta((l) => l.comprovantes > 0),

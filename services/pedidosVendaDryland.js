@@ -19,6 +19,7 @@
 // pedidos_venda_anexos (chave = id do card ou ref da separação).
 // ============================================================================
 import supabase from '../config/supabase.js';
+import { prontoDoCard, cardVoltouAEsperar, mapaAguardando, acharAguardando, textoAguardando, mudancasAguardando, refDoPedido } from './pedidosVendaPronto.js';
 
 export const DRYLAND_URL = process.env.DRYLAND_SUPABASE_URL || 'https://umhczriycvtagjqjnrzm.supabase.co';
 export const DRYLAND_KEY =
@@ -85,7 +86,70 @@ export const linhaSeparadaVale = (x) => !x.sumiu_do_dryland_em || Number(x.separ
 export async function sincronizarPedidosDryland() {
   const separacao = await sincronizarSeparacao();
   const fila = await sincronizarFila();
-  return { ...separacao, fila };
+  // depois da separação: marca nos pedidos quem ainda espera o "Pronto pra faturar"
+  const pronto = await sincronizarAguardandoPronto().catch((e) => {
+    console.log(`⚠️ [pedidos-venda] não li os pedidos aguardando o "pronto pra faturar": ${e.message}`);
+    return { erro: e.message };
+  });
+  return { ...separacao, fila, pronto };
+}
+
+// ─── PRONTO PRA FATURAR (Yago, 26/11/2026) ───────────────────────────────────
+// O pedido do site só entra no Faturamento quando o vendedor confirma a
+// separação no Dryland (botão "Pronto pra faturar"). O Dryland lista em
+// lv_sep_aguardando os pedidos pagos que ainda esperam essa confirmação —
+// regras em services/pedidosVendaPronto.js.
+let aguardandoCache = { em: 0, mapa: null };
+const AGUARDANDO_CACHE_MS = 20000;
+
+/** Pedidos que o Dryland ainda lista como "aguardando confirmar a separação" (só leitura). */
+export async function lerAguardandoPronto({ forcar = false } = {}) {
+  if (!forcar && aguardandoCache.mapa && Date.now() - aguardandoCache.em < AGUARDANDO_CACHE_MS) return aguardandoCache.mapa;
+  const lista = await drylandRpc('lv_sep_aguardando', {});
+  if (!Array.isArray(lista)) throw new Error('resposta inesperada do Dryland (lv_sep_aguardando)');
+  aguardandoCache = { em: Date.now(), mapa: mapaAguardando(lista) };
+  return aguardandoCache.mapa;
+}
+
+/** Copia a lista de espera para pedidos_venda_dryland (aguardando_pronto). */
+export async function sincronizarAguardandoPronto() {
+  const mapa = await lerAguardandoPronto({ forcar: true });
+  const agora = new Date().toISOString();
+  const { data: marcados, error } = await supabase.from('pedidos_venda_dryland').select('ref').eq('aguardando_pronto', true).limit(5000);
+  if (error) throw error;
+  const { entraram, sairam } = mudancasAguardando((marcados || []).map((m) => m.ref), mapa.porRef.keys());
+  // quem está na lista: guarda a contagem de agora (a tela mostra "X de Y peças")
+  for (const [ref, a] of mapa.porRef) {
+    const patch = { aguardando_pronto: true, aguardando_pronto_info: { pecas: a.pecas, separadas: a.separadas, naoAchadas: a.naoAchadas, cardId: a.cardId, vistoEm: agora } };
+    if (entraram.includes(ref)) Object.assign(patch, { aguardando_pronto_desde: agora, pronto_liberado_em: null });
+    const { error: e } = await supabase.from('pedidos_venda_dryland').update(patch).eq('ref', ref);
+    if (e) throw e;
+  }
+  for (const lote of chunk(sairam, 200)) {
+    const { error: e } = await supabase.from('pedidos_venda_dryland').update({ aguardando_pronto: false, pronto_liberado_em: agora }).in('ref', lote);
+    if (e) throw e;
+  }
+  return { aguardando: mapa.porRef.size, entraram: entraram.length, liberados: sairam.length };
+}
+
+/**
+ * Trava do Faturamento: o pedido ainda espera o "Pronto pra faturar"?
+ * Pergunta ao Dryland na hora; se ele não responder, vale a última cópia guardada.
+ * Devolve { motivo: 'aguardando_pronto', texto, … } ou null.
+ */
+export async function bloqueioAguardandoPronto(chave, ref = null) {
+  const c = String(chave || '');
+  if (/^(BRJ|AVULSO):/i.test(c)) return null;
+  const r = refDoPedido(ref) || (c.startsWith('SEP:') ? refDoPedido(c.slice(4)) : null);
+  let a = null;
+  try {
+    a = acharAguardando(await lerAguardandoPronto(), { chave: c, ref: r });
+  } catch (e) {
+    if (!r) return null;
+    const { data } = await supabase.from('pedidos_venda_dryland').select('ref, aguardando_pronto, aguardando_pronto_info').eq('ref', r).maybeSingle();
+    if (data?.aguardando_pronto) a = { ref: r, pecas: Number(data.aguardando_pronto_info?.pecas) || 0, separadas: Number(data.aguardando_pronto_info?.separadas) || 0, naoAchadas: Number(data.aguardando_pronto_info?.naoAchadas) || 0 };
+  }
+  return a ? { motivo: 'aguardando_pronto', ref: a.ref, pecas: a.pecas, separadas: a.separadas, naoAchadas: a.naoAchadas, texto: textoAguardando(a) } : null;
 }
 
 async function sincronizarSeparacao() {
@@ -403,6 +467,7 @@ export async function sincronizarFila() {
     const { error } = await supabase.from('pedidos_venda_fila').upsert(lote, { onConflict: 'id' });
     if (error) throw error;
   }
+  await guardarProntoDosCards(cards).catch((e) => console.log(`⚠️ [pedidos-venda] não guardei quem marcou "pronto pra faturar": ${e.message}`));
   // o que saiu da fila do Dryland: marca, não apaga. A fila devolve no máximo
   // 500 cards por canal (os mais novos): card antigo que "sai" por causa desse
   // corte não é marcado — só os que sumiram de dentro da janela que veio.
@@ -426,6 +491,40 @@ export async function sincronizarFila() {
     sumiram += ids.length;
   }
   return { cards: linhas.length, sumiram };
+}
+
+// Quem marcou "Pronto pra faturar" e quando, lido do card (pronto_faturar_em / _por).
+// Vai à parte do upsert dos cards porque o Dryland só devolve os últimos eventos do
+// log: a confirmação guardada não pode ser apagada quando ela some de lá — só quando
+// o card diz que voltou a esperar.
+async function guardarProntoDosCards(cards) {
+  const achados = new Map();
+  const voltaram = [];
+  for (const c of cards) {
+    const p = prontoDoCard(c);
+    if (p) achados.set(c.id, p);
+    else if (cardVoltouAEsperar(c)) voltaram.push(c.id);
+  }
+  const guardados = new Map();
+  for (const lote of chunk([...achados.keys(), ...voltaram], 150)) {
+    const { data, error } = await supabase.from('pedidos_venda_fila').select('id, pronto_faturar_em, pronto_faturar_por').in('id', lote);
+    if (error) throw error;
+    for (const g of data || []) guardados.set(g.id, g);
+  }
+  let gravados = 0;
+  for (const [id, p] of achados) {
+    const g = guardados.get(id);
+    if (g && g.pronto_faturar_em && Date.parse(g.pronto_faturar_em) === Date.parse(p.em) && (g.pronto_faturar_por || null) === (p.por || null)) continue;
+    const { error } = await supabase.from('pedidos_venda_fila').update({ pronto_faturar_em: p.em, pronto_faturar_por: p.por }).eq('id', id);
+    if (error) throw error;
+    gravados += 1;
+  }
+  const limpar = voltaram.filter((id) => guardados.get(id)?.pronto_faturar_em);
+  for (const lote of chunk(limpar, 200)) {
+    const { error } = await supabase.from('pedidos_venda_fila').update({ pronto_faturar_em: null, pronto_faturar_por: null }).in('id', lote);
+    if (error) throw error;
+  }
+  return { gravados, limpos: limpar.length };
 }
 
 // Registro manual do pagamento (dinheiro, débito, ou o que não veio do site).

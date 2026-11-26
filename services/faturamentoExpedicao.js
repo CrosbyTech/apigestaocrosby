@@ -53,7 +53,7 @@ import { enviarDuplicata, gravarNotaNoCard, temBoleto } from './faturamentoDupli
 import { logisticaDosFaturamentos } from './faturamentoLogistica.js';
 import { normalizarCreditoFalta, gerarCreditoFalta, CreditoError } from './faturamentoCredito.js';
 import { saldoBonusDoCliente, usarBonus, estornarUsoDasVendas, BonusError } from './saldoBonus.js';
-import { COMPROVANTE_URL } from './pedidosVendaDryland.js';
+import { COMPROVANTE_URL, bloqueioAguardandoPronto } from './pedidosVendaDryland.js';
 
 import { cardBrejinho } from './brejinhoDryland.js';
 import { lerTrocaProdutos, motivoTrocaBloqueada } from './faturamentoConfig.js';
@@ -412,8 +412,9 @@ export async function prepararFaturamento(chave) {
       credev: texto(d.credev) && !/^n(ã|a)o$/i.test(d.credev) ? d.credev : null,
     },
     comprovantes: (card?.comprovantes || []).map((p) => ({ path: p, url: COMPROVANTE_URL(p) })),
-    // pedido já faturado pelo HeadCoach: a tela trava o FATURAR
-    bloqueio: await bloqueioDeFaturamento(chave, ref).catch(() => null),
+    // pedido já faturado pelo HeadCoach, ou que ainda espera o vendedor marcar
+    // "Pronto pra faturar" no Dryland: a tela trava o FATURAR
+    bloqueio: (await bloqueioDeFaturamento(chave, ref).catch(() => null)) || (await bloqueioAguardandoPronto(chave, ref).catch(() => null)),
     jaNoTotvs: [
       d.transacao && `transação ${d.transacao}`,
       d.pedido_totvs && `pedido ${d.pedido_totvs}`,
@@ -490,6 +491,10 @@ export async function faturar(body) {
   if (!Array.isArray(b.itens) || !b.itens.length) throw new FaturamentoError('Nenhuma peça conferida');
   const bloqueio = await bloqueioDeFaturamento(b.chave, b.numeroSite || null);
   if (bloqueio) throw new FaturamentoError(bloqueio.texto, 'PEDIDO_JA_FATURADO', 409);
+  // PRONTO PRA FATURAR (Yago, 26/11/2026): pedido do site só é faturado depois que o
+  // vendedor confirma a separação no Dryland
+  const esperaPronto = await bloqueioAguardandoPronto(b.chave, b.numeroSite || null);
+  if (esperaPronto) throw new FaturamentoError(esperaPronto.texto, 'AGUARDANDO_PRONTO_PARA_FATURAR', 409);
   // HEADCOACH › CAIXA: só fatura com o caixa da empresa aberto no HeadCoach (Yago, 13/11/2026)
   const caixaHc = await caixaAbertoPara(empresa);
   if (!caixaHc) {
