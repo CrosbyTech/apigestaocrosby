@@ -524,9 +524,13 @@ export async function detalheTitulo(user, id) {
 }
 
 // ─── alteração (só em aberto) ────────────────────────────────────────────────
-export async function editarTitulo(user, id, b = {}) {
+export async function editarTitulo(user, id, bruto = {}) {
   const t = await tituloDoUsuario(user, id);
-  if (t.situacao !== 'aberto') throw new CpError(`Esta duplicata está ${t.situacao} e não pode mais ser alterada`, 'NAO_ABERTA', 409);
+  // paga: só a classificação (despesa / centro de custo) e a observação podem ser
+  // corrigidas — valor, datas e forma ficam como foram pagos (Titia, 26/11/2026)
+  const soClassificacao = t.situacao === 'pago';
+  if (t.situacao !== 'aberto' && !soClassificacao) throw new CpError(`Esta duplicata está ${t.situacao} e não pode mais ser alterada`, 'NAO_ABERTA', 409);
+  const b = soClassificacao ? { rateio: bruto.rateio, despesaCode: bruto.despesaCode, centroCustoCode: bruto.centroCustoCode, observacao: bruto.observacao } : bruto;
   const patch = {};
   if (b.vencimento !== undefined) {
     if (!ehData(b.vencimento)) throw new CpError('Vencimento inválido');
@@ -582,7 +586,7 @@ export async function editarTitulo(user, id, b = {}) {
     .from('hc_cp_titulos')
     .update({ ...patch, atualizado_por: quem(user), atualizado_em: new Date().toISOString() })
     .eq('id', t.id)
-    .eq('situacao', 'aberto')
+    .eq('situacao', t.situacao)
     .select()
     .maybeSingle();
   if (error) throw falhaDb(error);
