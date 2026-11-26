@@ -366,6 +366,105 @@ export async function gerarCredito(user, b = {}) {
   return { empresa, clienteCode: cliente, tipo, valor, saldo: r.saldo };
 }
 
+// ─── transferência entre lojas e zerar saldo (Yago, 26/11/2026) ──────────────
+// Só owner ou admin, com a própria senha e motivo. Tudo fica no extrato do cliente (movimento
+// "ajuste", com a referência dizendo o que foi). Vale para CREDEV e adiantamento; o cashback antigo
+// é cópia diária do saldo bônus e não entra (voltaria no dia seguinte).
+export const REF_TRANSFERENCIA = 'transferência entre lojas';
+export const REF_ZERADO = 'saldo zerado';
+async function conferirGestor(user, senha, oQue) {
+  if (!['owner', 'admin'].includes(user?.role)) throw new SaldoClienteError(`Só owner ou admin ${oQue}`, 'SEM_PERMISSAO', 403);
+  try {
+    await verificarSenhaAutorizador(user?.email, senha, ['owner', 'admin']);
+  } catch (e) {
+    if (e instanceof AutorizacaoError) throw new SaldoClienteError(e.message, e.code, e.status);
+    throw e;
+  }
+  return user?.name || user?.email || null;
+}
+const lerValor = (v) => {
+  const bruto = String(v ?? '').trim();
+  return round2(Number(bruto.includes(',') ? bruto.replace(/\./g, '').replace(',', '.') : bruto));
+};
+async function linhasDoCliente(cliente, empresa) {
+  return (await q(supabase.from('hc_cliente_saldos').select('tipo, saldo, cliente_nome, cliente_cpf_cnpj').eq('cliente_code', Number(cliente)).eq('empresa', Number(empresa)))) || [];
+}
+
+/**
+ * Passa saldo (CREDEV ou adiantamento) do cliente de uma loja para outra: sai da origem e entra no
+ * destino no mesmo valor, com os dois movimentos amarrados pela mesma referência.
+ * b: { clienteCode, tipo, empresaOrigem, empresaDestino, valor, motivo, senha }
+ */
+export async function transferirSaldo(user, b = {}) {
+  const cliente = parseInt(b.clienteCode, 10);
+  const origem = parseInt(b.empresaOrigem, 10);
+  const destino = parseInt(b.empresaDestino, 10);
+  const tipo = String(b.tipo || '');
+  const valor = lerValor(b.valor);
+  const motivo = String(b.motivo || '').trim();
+  if (!['owner', 'admin'].includes(user?.role)) throw new SaldoClienteError('Só owner ou admin transfere saldo entre lojas', 'SEM_PERMISSAO', 403);
+  if (!(cliente > 0)) throw new SaldoClienteError('Escolha o cliente');
+  if (!TIPOS[tipo]) throw new SaldoClienteError('Escolha CREDEV ou adiantamento');
+  if (!(origem > 0)) throw new SaldoClienteError('Informe a loja de origem');
+  if (!(destino > 0)) throw new SaldoClienteError('Informe a loja de destino');
+  if (origem === destino) throw new SaldoClienteError('A loja de destino tem de ser diferente da de origem');
+  if (!(valor > 0)) throw new SaldoClienteError('Informe o valor');
+  if (motivo.length < 5) throw new SaldoClienteError('Informe o motivo');
+  const lojas = (await q(supabase.from('erp_empresas').select('code, fantasia, descricao').in('code', [origem, destino]))) || [];
+  const nomeDa = (c) => { const e = lojas.find((x) => Number(x.code) === c); return e ? e.fantasia || e.descricao || `empresa ${c}` : null; };
+  if (!nomeDa(destino)) throw new SaldoClienteError(`A empresa ${destino} não existe no cadastro`, 'EMPRESA_INVALIDA');
+  const linha = (await linhasDoCliente(cliente, origem)).find((r) => r.tipo === tipo);
+  const saldo = round2(linha?.saldo || 0);
+  if (valor > saldo) throw new SaldoClienteError(`O cliente tem ${brl(saldo)} de ${TIPOS[tipo]} na empresa ${origem}: não dá para transferir ${brl(valor)}`, 'SALDO_INSUFICIENTE', 409);
+  const quem = await conferirGestor(user, b.senha, 'transfere saldo entre lojas');
+
+  const referencia = `${REF_TRANSFERENCIA} ${origem}→${destino} #${Date.now().toString(36).toUpperCase()}`;
+  const saiu = await movimentar({ empresa: origem, cliente, tipo, valor: -valor, movimento: 'ajuste', referencia, observacao: `Transferido para a empresa ${destino} (${nomeDa(destino)}) por ${quem}: ${motivo}`, por: quem });
+  let entrou;
+  try {
+    entrou = await movimentar({ empresa: destino, cliente, tipo, valor, movimento: 'ajuste', referencia, observacao: `Recebido da empresa ${origem}${nomeDa(origem) ? ` (${nomeDa(origem)})` : ''} por ${quem}: ${motivo}`, por: quem, nome: linha?.cliente_nome || null, doc: linha?.cliente_cpf_cnpj || null });
+  } catch (e) {
+    // não entrou no destino: devolve à origem, para o saldo não sumir no caminho
+    try {
+      await movimentar({ empresa: origem, cliente, tipo, valor, movimento: 'ajuste', referencia, observacao: `Transferência para a empresa ${destino} não concluída: valor devolvido`, por: quem });
+    } catch (e2) {
+      console.error(`🚨 [saldos] transferência ${referencia} do cliente ${cliente}: saiu ${brl(valor)} da empresa ${origem}, não entrou na ${destino} e NÃO voltou (${e2.message})`);
+      throw new SaldoClienteError(`A transferência parou no meio: ${brl(valor)} saiu da empresa ${origem} e não entrou na ${destino}. Gere o crédito na empresa ${destino} pelo botão GERAR CRÉDITO (referência ${referencia}).`, 'TRANSFERENCIA_INCOMPLETA', 500);
+    }
+    throw new SaldoClienteError(`Não consegui lançar na empresa ${destino} (${e.message}). Nada mudou: o saldo continua na empresa ${origem}.`, 'TRANSFERENCIA_FALHOU', 500);
+  }
+  console.log(`🔁 [saldos] ${TIPOS[tipo]} de ${brl(valor)} do cliente ${cliente}: empresa ${origem} → ${destino} por ${quem}: ${motivo}`);
+  return { clienteCode: cliente, tipo, valor, referencia, origem: { empresa: origem, saldo: saiu.saldo }, destino: { empresa: destino, nome: nomeDa(destino), saldo: entrou.saldo } };
+}
+
+/**
+ * Zera o CREDEV e/ou o adiantamento do cliente numa loja (tira exatamente o que há de saldo).
+ * b: { clienteCode, empresa, tipos: ['credev', 'adiantamento'], motivo, senha }
+ */
+export async function zerarSaldo(user, b = {}) {
+  const cliente = parseInt(b.clienteCode, 10);
+  const empresa = parseInt(b.empresa, 10);
+  const tipos = [...new Set((Array.isArray(b.tipos) && b.tipos.length ? b.tipos : Object.keys(TIPOS)).map(String))];
+  const motivo = String(b.motivo || '').trim();
+  if (!['owner', 'admin'].includes(user?.role)) throw new SaldoClienteError('Só owner ou admin zera saldo de cliente', 'SEM_PERMISSAO', 403);
+  if (!(cliente > 0)) throw new SaldoClienteError('Escolha o cliente');
+  if (!(empresa > 0)) throw new SaldoClienteError('Informe a empresa');
+  if (tipos.some((t) => !TIPOS[t])) throw new SaldoClienteError('Só dá para zerar CREDEV e adiantamento');
+  if (motivo.length < 5) throw new SaldoClienteError('Informe o motivo');
+  const linhas = (await linhasDoCliente(cliente, empresa)).filter((r) => tipos.includes(r.tipo) && round2(r.saldo) > 0);
+  if (!linhas.length) throw new SaldoClienteError(`O cliente não tem ${tipos.map((t) => TIPOS[t]).join(' nem ')} com saldo na empresa ${empresa}`, 'SEM_SALDO', 409);
+  const quem = await conferirGestor(user, b.senha, 'zera saldo de cliente');
+  const zerados = [];
+  for (const l of linhas) {
+    const valor = round2(l.saldo);
+    await movimentar({ empresa, cliente, tipo: l.tipo, valor: -valor, movimento: 'ajuste', referencia: REF_ZERADO, observacao: `Saldo zerado por ${quem}: ${motivo}`, por: quem });
+    zerados.push({ tipo: l.tipo, valor });
+  }
+  const total = round2(zerados.reduce((s, z) => s + z.valor, 0));
+  console.log(`🧹 [saldos] cliente ${cliente} na empresa ${empresa}: ${zerados.map((z) => `${TIPOS[z.tipo]} ${brl(z.valor)}`).join(' + ')} zerado por ${quem}: ${motivo}`);
+  return { clienteCode: cliente, empresa, zerados, total };
+}
+
 // ─── devoluções ──────────────────────────────────────────────────────────────
 async function inicioDosSaldos() {
   const { data } = await supabase.from('hc_cliente_saldos_mov').select('em').eq('movimento', 'carga_inicial').order('em').limit(1);

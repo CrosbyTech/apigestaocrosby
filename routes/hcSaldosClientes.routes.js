@@ -6,6 +6,8 @@
 //   POST /sincronizar-devolucoes        credita as devoluções atendidas que faltam (owner/admin)
 //   POST /sincronizar-cashback          acerta o cashback pelo saldo bônus do TOTVS agora, em segundo plano (owner/admin)
 //   POST /gerar                         { empresa, clienteCode, clienteNome, tipo: credev|adiantamento, valor, motivo, senha } (owner/admin)
+//   POST /transferir                    { clienteCode, tipo, empresaOrigem, empresaDestino, valor, motivo, senha } passa o saldo de uma loja para outra (owner/admin)
+//   POST /zerar                         { clienteCode, empresa, tipos: [credev, adiantamento], motivo, senha } zera o saldo do cliente na loja (owner/admin)
 //   Cashback do HeadCoach (services/cashbackHc.js — gerado nas vendas do PDV Crosby, carência de 3 dias, vale até o dia 93):
 //   GET  /cashback?busca                totais (gerado, usado, disponível, em carência, vencido) + clientes
 //   GET  /cashback/cliente/:code        saldo, gerações (lotes) e extrato do cliente
@@ -15,7 +17,7 @@ import express from 'express';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
 import { requireAuth } from '../middlewares/auth.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
-import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes, gerarCredito } from '../services/hcSaldosClientes.js';
+import { SaldoClienteError, listarSaldos, saldoDoCliente, extratoDoCliente, sincronizarDevolucoes, gerarCredito, transferirSaldo, zerarSaldo } from '../services/hcSaldosClientes.js';
 import { rodarCashback } from '../jobs/hc-cashback.job.js';
 import { CashbackHcError, resumoCashbackHc, historicoCashbackHc, reativarCashbackHc } from '../services/cashbackHc.js';
 import { verificarSenhaAutorizador, AutorizacaoError } from '../services/autorizacaoSenha.js';
@@ -83,6 +85,18 @@ router.post(
 router.post(
   '/gerar',
   rota((req) => gerarCredito(req.user, req.body || {}), (r) => `${r.tipo === 'credev' ? 'CREDEV' : 'Adiantamento'} de R$ ${r.valor.toFixed(2).replace('.', ',')} gerado — saldo agora R$ ${Number(r.saldo).toFixed(2).replace('.', ',')}`),
+);
+
+// Passa o saldo (CREDEV ou adiantamento) do cliente de uma loja para outra — só owner/admin, com senha e motivo
+const dinheiro = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+router.post(
+  '/transferir',
+  rota((req) => transferirSaldo(req.user, req.body || {}), (r) => `${r.tipo === 'credev' ? 'CREDEV' : 'Adiantamento'} de ${dinheiro(r.valor)} transferido da empresa ${r.origem.empresa} para a ${r.destino.empresa} — ficou ${dinheiro(r.origem.saldo)} na ${r.origem.empresa} e ${dinheiro(r.destino.saldo)} na ${r.destino.empresa}`),
+);
+// Zera o CREDEV e/ou o adiantamento do cliente numa loja — só owner/admin, com senha e motivo
+router.post(
+  '/zerar',
+  rota((req) => zerarSaldo(req.user, req.body || {}), (r) => `Saldo zerado na empresa ${r.empresa}: ${r.zerados.map((z) => `${z.tipo === 'credev' ? 'CREDEV' : 'Adiantamento'} ${dinheiro(z.valor)}`).join(' + ')}`),
 );
 
 // ─── CASHBACK DO HEADCOACH ───────────────────────────────────────────────────
