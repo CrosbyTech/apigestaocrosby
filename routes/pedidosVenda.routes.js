@@ -38,7 +38,9 @@ import {
   COMPROVANTE_URL,
   linhaSeparadaVale,
   separacaoIncompleta,
+  atualizarAFaturarDoDryland,
 } from '../services/pedidosVendaDryland.js';
+import { varejoEmSeparacao } from '../services/pedidosVendaPronto.js';
 
 const router = express.Router();
 
@@ -95,12 +97,18 @@ const resumoSep = (p, criadoPedido = null) =>
 // PRONTO PRA FATURAR (Yago, 26/11/2026): o pedido só entra no Faturamento quando o
 // vendedor confirma a separação no Dryland. aguardando = o Dryland ainda lista o
 // pedido em "aguardando confirmar a separação"; em/por = quem confirmou e quando.
-const resumoPronto = (sep, card = null) => ({
-  aguardando: !!sep?.aguardando_pronto,
-  desde: sep?.aguardando_pronto ? sep.aguardando_pronto_desde || null : null,
-  em: card?.pronto_faturar_em || (!sep?.aguardando_pronto && sep?.pronto_liberado_em) || null,
-  por: card?.pronto_faturar_por || null,
-});
+// VAREJO ONLINE (VJ) não tem o botão no Dryland: espera enquanto a separação não termina
+// (etapa 'separacao'; a do botão é 'pronto').
+const resumoPronto = (sep, card = null) => {
+  const emSeparacao = !sep?.aguardando_pronto && varejoEmSeparacao(sep, card?.canal || null);
+  return {
+    aguardando: !!sep?.aguardando_pronto || emSeparacao,
+    etapa: sep?.aguardando_pronto ? 'pronto' : emSeparacao ? 'separacao' : null,
+    desde: sep?.aguardando_pronto ? sep.aguardando_pronto_desde || null : null,
+    em: card?.pronto_faturar_em || (!sep?.aguardando_pronto && sep?.pronto_liberado_em) || null,
+    por: card?.pronto_faturar_por || null,
+  };
+};
 
 // Linha da tela a partir do card da fila (+ separação do pedido do site)
 function linhaDoCard(c, sep, anexo, fats) {
@@ -179,6 +187,16 @@ router.get(
     const comTransf = req.query.transferencias === '1';
     const deIso = de ? `${String(de).slice(0, 10)}T00:00:00-03:00` : null;
     const ateIso = ate ? `${String(ate).slice(0, 10)}T23:59:59.999-03:00` : null;
+    // Lista "a faturar" (tela Faturamento): lê os cards "a faturar" e a espera do pronto
+    // direto do Dryland antes de montar, para não depender da cópia de 5 min. Se o
+    // Dryland não responder, a lista sai da cópia guardada, como antes.
+    const soAFaturar = /^a faturar$/i.test(String(status || ''));
+    const aoVivo = soAFaturar
+      ? await atualizarAFaturarDoDryland().catch((e) => {
+          console.log(`⚠️ [pedidos-venda] lista "a faturar" pela cópia (Dryland não respondeu na hora): ${e.message}`);
+          return null;
+        })
+      : null;
     try {
       const [cards, seps, anexos, fats] = await Promise.all([
         lerTudo('pedidos_venda_fila', (q) => {
@@ -220,7 +238,9 @@ router.get(
       if (status) linhas = linhas.filter((l) => (l.status_fat || '').toLowerCase() === String(status).toLowerCase());
       // lista "a faturar" (tela Faturamento): pedido que ainda espera o vendedor marcar
       // "Pronto pra faturar" no Dryland não entra
-      if (/^a faturar$/i.test(String(status || ''))) linhas = linhas.filter((l) => !l.pronto?.aguardando);
+      if (soAFaturar) linhas = linhas.filter((l) => !l.pronto?.aguardando);
+      // card que o Dryland já tirou de "a faturar" (a cópia ainda não viu) não aparece
+      if (soAFaturar && aoVivo?.ids) linhas = linhas.filter((l) => l.fonte !== 'fila' || aoVivo.ids.has(l.chave));
       if (separacao === 'sem') linhas = linhas.filter((l) => !l.separacao);
       else if (separacao) linhas = linhas.filter((l) => l.separacao?.status === separacao);
       if (busca) {
@@ -252,6 +272,8 @@ router.get(
           },
           statusFat: [...new Set(linhas.map((l) => l.status_fat).filter(Boolean))].sort(),
           sincronizacao: ultima,
+          // lista "a faturar": lida do Dryland na hora (em) ou da cópia (null)
+          aoVivo: soAFaturar ? (aoVivo ? { em: aoVivo.em } : null) : undefined,
         },
         `${linhas.length} pedido(s)`,
       );

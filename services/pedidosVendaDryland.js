@@ -19,7 +19,7 @@
 // pedidos_venda_anexos (chave = id do card ou ref da separação).
 // ============================================================================
 import supabase from '../config/supabase.js';
-import { prontoDoCard, cardVoltouAEsperar, mapaAguardando, acharAguardando, textoAguardando, mudancasAguardando, refDoPedido } from './pedidosVendaPronto.js';
+import { prontoDoCard, cardVoltouAEsperar, mapaAguardando, acharAguardando, textoAguardando, mudancasAguardando, refDoPedido, varejoEmSeparacao, textoEmSeparacao } from './pedidosVendaPronto.js';
 
 export const DRYLAND_URL = process.env.DRYLAND_SUPABASE_URL || 'https://umhczriycvtagjqjnrzm.supabase.co';
 export const DRYLAND_KEY =
@@ -103,23 +103,26 @@ let aguardandoCache = { em: 0, mapa: null };
 const AGUARDANDO_CACHE_MS = 20000;
 
 /** Pedidos que o Dryland ainda lista como "aguardando confirmar a separação" (só leitura). */
-export async function lerAguardandoPronto({ forcar = false } = {}) {
+export async function lerAguardandoPronto({ forcar = false, timeoutMs = 60000 } = {}) {
   if (!forcar && aguardandoCache.mapa && Date.now() - aguardandoCache.em < AGUARDANDO_CACHE_MS) return aguardandoCache.mapa;
-  const lista = await drylandRpc('lv_sep_aguardando', {});
+  const lista = await drylandRpc('lv_sep_aguardando', {}, { timeoutMs });
   if (!Array.isArray(lista)) throw new Error('resposta inesperada do Dryland (lv_sep_aguardando)');
   aguardandoCache = { em: Date.now(), mapa: mapaAguardando(lista) };
   return aguardandoCache.mapa;
 }
 
 /** Copia a lista de espera para pedidos_venda_dryland (aguardando_pronto). */
-export async function sincronizarAguardandoPronto() {
-  const mapa = await lerAguardandoPronto({ forcar: true });
+// soMudancas = só quem entrou e quem saiu da espera (leitura rápida da tela Faturamento);
+// sem ele (job de 5 min) atualiza também a contagem de peças de todos.
+export async function sincronizarAguardandoPronto({ soMudancas = false, timeoutMs = 60000 } = {}) {
+  const mapa = await lerAguardandoPronto({ forcar: true, timeoutMs });
   const agora = new Date().toISOString();
   const { data: marcados, error } = await supabase.from('pedidos_venda_dryland').select('ref').eq('aguardando_pronto', true).limit(5000);
   if (error) throw error;
   const { entraram, sairam } = mudancasAguardando((marcados || []).map((m) => m.ref), mapa.porRef.keys());
   // quem está na lista: guarda a contagem de agora (a tela mostra "X de Y peças")
   for (const [ref, a] of mapa.porRef) {
+    if (soMudancas && !entraram.includes(ref)) continue;
     const patch = { aguardando_pronto: true, aguardando_pronto_info: { pecas: a.pecas, separadas: a.separadas, naoAchadas: a.naoAchadas, cardId: a.cardId, vistoEm: agora } };
     if (entraram.includes(ref)) Object.assign(patch, { aguardando_pronto_desde: agora, pronto_liberado_em: null });
     const { error: e } = await supabase.from('pedidos_venda_dryland').update(patch).eq('ref', ref);
@@ -149,7 +152,13 @@ export async function bloqueioAguardandoPronto(chave, ref = null) {
     const { data } = await supabase.from('pedidos_venda_dryland').select('ref, aguardando_pronto, aguardando_pronto_info').eq('ref', r).maybeSingle();
     if (data?.aguardando_pronto) a = { ref: r, pecas: Number(data.aguardando_pronto_info?.pecas) || 0, separadas: Number(data.aguardando_pronto_info?.separadas) || 0, naoAchadas: Number(data.aguardando_pronto_info?.naoAchadas) || 0 };
   }
-  return a ? { motivo: 'aguardando_pronto', ref: a.ref, pecas: a.pecas, separadas: a.separadas, naoAchadas: a.naoAchadas, texto: textoAguardando(a) } : null;
+  if (a) return { motivo: 'aguardando_pronto', etapa: 'pronto', ref: a.ref, pecas: a.pecas, separadas: a.separadas, naoAchadas: a.naoAchadas, texto: textoAguardando(a) };
+  // VAREJO ONLINE: não tem o botão no Dryland — segura enquanto a separação não termina
+  // (cópia do job de 5 min; o motivo é o mesmo para a tela mostrar o mesmo aviso)
+  if (!r) return null;
+  const { data: sep } = await supabase.from('pedidos_venda_dryland').select('ref, canal, eh_venda, status, qtd_pecas, qtd_separada, sumiu_do_dryland_em').eq('ref', r).maybeSingle();
+  if (!varejoEmSeparacao(sep)) return null;
+  return { motivo: 'aguardando_pronto', etapa: 'separacao', ref: r, pecas: Number(sep.qtd_pecas) || 0, separadas: Number(sep.qtd_separada) || 0, naoAchadas: 0, texto: textoEmSeparacao(sep) };
 }
 
 async function sincronizarSeparacao() {
@@ -378,12 +387,12 @@ async function capturarPagamentos() {
 
 // ─── Fila de faturamento (Painel do /frete) ──────────────────────────────────
 // Chamada de leitura a uma RPC do Dryland (chave anon, a mesma do bundle do Dryland)
-export async function drylandRpc(fn, body = {}) {
+export async function drylandRpc(fn, body = {}, { timeoutMs = 60000 } = {}) {
   const r = await fetch(`${DRYLAND_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
     headers: { apikey: DRYLAND_KEY, Authorization: `Bearer ${DRYLAND_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!r.ok) throw new Error(`Dryland ${fn} HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return r.json();
@@ -414,55 +423,97 @@ async function lerFila(canal) {
   return (await r.json()) || [];
 }
 
+// ─── Lista "a faturar" NA HORA (Yago, 26/11/2026) ────────────────────────────
+// A cópia inteira roda a cada 5 min e leva quase 2 min; pedido que o vendedor
+// acabou de liberar (ou que a Expedição voltou para "a faturar") demorava a
+// aparecer na tela Faturamento. Ao abrir a lista (e no Atualizar), o HeadCoach
+// lê do Dryland só os cards "a faturar" (¼ de segundo) e a lista de espera do
+// "Pronto pra faturar", e grava por cima da cópia. Devolve os ids que estão "a
+// faturar" agora, para a lista não mostrar card que já mudou de situação.
+const AO_VIVO_MS = 15000;
+const AO_VIVO_LIMITE = 500; // teto do Dryland por chamada
+let aoVivo = { em: 0, ids: null, promessa: null };
+
+export async function atualizarAFaturarDoDryland({ forcar = false } = {}) {
+  if (aoVivo.promessa) return aoVivo.promessa;
+  if (!forcar && aoVivo.em && Date.now() - aoVivo.em < AO_VIVO_MS) return { ids: aoVivo.ids, em: new Date(aoVivo.em).toISOString(), cache: true };
+  aoVivo.promessa = (async () => {
+    const agora = new Date().toISOString();
+    const [cards] = await Promise.all([
+      drylandRpc('fila_fat_listar', { p_canal: null, p_status: 'a faturar', p_limit: AO_VIVO_LIMITE }, { timeoutMs: 8000 }),
+      // a trava da lista usa aguardando_pronto: acerta quem entrou e quem saiu da espera
+      sincronizarAguardandoPronto({ soMudancas: true, timeoutMs: 8000 }).catch((e) => console.log(`⚠️ [pedidos-venda] lista de espera do pronto não atualizada na hora: ${e.message}`)),
+    ]);
+    if (!Array.isArray(cards)) throw new Error('resposta inesperada do Dryland (fila_fat_listar)');
+    const daFila = cards.filter((c) => c?.id && CANAIS_FILA.includes(c.canal));
+    const linhas = daFila.map((c) => linhaDaFila(c, agora));
+    for (const lote of chunk(linhas, 300)) {
+      const { error } = await supabase.from('pedidos_venda_fila').upsert(lote, { onConflict: 'id' });
+      if (error) throw error;
+    }
+    await guardarProntoDosCards(daFila).catch((e) => console.log(`⚠️ [pedidos-venda] não guardei quem marcou "pronto pra faturar": ${e.message}`));
+    // veio no teto: pode ter card "a faturar" fora da resposta — não serve de lista fechada
+    const ids = cards.length >= AO_VIVO_LIMITE ? null : new Set(linhas.map((l) => l.id));
+    aoVivo = { ...aoVivo, em: Date.now(), ids };
+    return { ids, em: agora, cards: linhas.length };
+  })().finally(() => {
+    aoVivo.promessa = null;
+  });
+  return aoVivo.promessa;
+}
+
+// card da fila do Dryland → linha de pedidos_venda_fila
+function linhaDaFila(c, agora) {
+  const d = c.dados || {};
+  const forma = texto(d.forma_pagamento);
+  return {
+    id: c.id,
+    canal: c.canal || null,
+    titulo: c.titulo || null,
+    status: c.status || null,
+    numero_site: texto(d.numero_pedido_site),
+    pedido_totvs: texto(d.pedido_totvs),
+    transacao: texto(d.transacao),
+    eh_venda: !/TRANSFER/i.test(forma || '') && !/^TRANSFER/i.test(c.titulo || ''),
+    cliente: texto(d.nome_cliente),
+    cliente_codigo: texto(d.codigo_cliente),
+    cliente_doc: texto(d.cnpj_cliente) || texto(d.doc),
+    cliente_telefone: texto(d.telefone) || texto(d.whats_cliente),
+    tipo_cliente: texto(d.tipo_cliente),
+    vendedor: texto(d.vendedor),
+    vendedor_code: texto(d.cod_vendedor),
+    loja: texto(d.loja) || texto(d.loja_retirada),
+    forma_pagamento: forma,
+    parcelamento: texto(d.parcelamento),
+    valor_pedido: numero(d.valor_pedido),
+    valor_frete: numero(d.valor_frete),
+    desconto: numero(d.desconto),
+    total_pecas: numero(d.total_pecas),
+    cartao_nsu: codigo(d.cartao_nsu) || codigo(d.pago_info?.nsu),
+    cartao_autorizacao: codigo(d.cartao_autorizacao) || codigo(d.pago_info?.autorizacao),
+    cartao_bandeira: texto(d.cartao_bandeira) || texto(d.pago_info?.bandeira),
+    cartao_final: texto(d.cartao_final) || texto(d.pago_info?.cartao_final),
+    pix_e2e: texto(d.pix_e2e) || texto(d.pago_info?.end_to_end_id),
+    pagarme_charge: texto(d.pagarme_charge) || texto(d.pago_info?.charge_id),
+    nf_numero: texto(d.nf_numero),
+    nf_serie: texto(d.nf_serie),
+    nf_chave: texto(d.nf_chave),
+    comprovantes: Array.isArray(c.comprovantes) ? c.comprovantes.filter(Boolean) : [],
+    dados: d,
+    criado_em: c.criado_em || null,
+    atualizado_em: c.atualizado_em || null,
+    criado_por: c.criado_por || null,
+    atualizado_por: c.atualizado_por || null,
+    sumiu_do_dryland_em: null,
+    sincronizado_em: agora,
+  };
+}
+
 export async function sincronizarFila() {
   const agora = new Date().toISOString();
   const cards = [];
   for (const canal of CANAIS_FILA) cards.push(...(await lerFila(canal)));
-  const linhas = cards.map((c) => {
-    const d = c.dados || {};
-    const forma = texto(d.forma_pagamento);
-    return {
-      id: c.id,
-      canal: c.canal || null,
-      titulo: c.titulo || null,
-      status: c.status || null,
-      numero_site: texto(d.numero_pedido_site),
-      pedido_totvs: texto(d.pedido_totvs),
-      transacao: texto(d.transacao),
-      eh_venda: !/TRANSFER/i.test(forma || '') && !/^TRANSFER/i.test(c.titulo || ''),
-      cliente: texto(d.nome_cliente),
-      cliente_codigo: texto(d.codigo_cliente),
-      cliente_doc: texto(d.cnpj_cliente) || texto(d.doc),
-      cliente_telefone: texto(d.telefone) || texto(d.whats_cliente),
-      tipo_cliente: texto(d.tipo_cliente),
-      vendedor: texto(d.vendedor),
-      vendedor_code: texto(d.cod_vendedor),
-      loja: texto(d.loja) || texto(d.loja_retirada),
-      forma_pagamento: forma,
-      parcelamento: texto(d.parcelamento),
-      valor_pedido: numero(d.valor_pedido),
-      valor_frete: numero(d.valor_frete),
-      desconto: numero(d.desconto),
-      total_pecas: numero(d.total_pecas),
-      cartao_nsu: codigo(d.cartao_nsu) || codigo(d.pago_info?.nsu),
-      cartao_autorizacao: codigo(d.cartao_autorizacao) || codigo(d.pago_info?.autorizacao),
-      cartao_bandeira: texto(d.cartao_bandeira) || texto(d.pago_info?.bandeira),
-      cartao_final: texto(d.cartao_final) || texto(d.pago_info?.cartao_final),
-      pix_e2e: texto(d.pix_e2e) || texto(d.pago_info?.end_to_end_id),
-      pagarme_charge: texto(d.pagarme_charge) || texto(d.pago_info?.charge_id),
-      nf_numero: texto(d.nf_numero),
-      nf_serie: texto(d.nf_serie),
-      nf_chave: texto(d.nf_chave),
-      comprovantes: Array.isArray(c.comprovantes) ? c.comprovantes.filter(Boolean) : [],
-      dados: d,
-      criado_em: c.criado_em || null,
-      atualizado_em: c.atualizado_em || null,
-      criado_por: c.criado_por || null,
-      atualizado_por: c.atualizado_por || null,
-      sumiu_do_dryland_em: null,
-      sincronizado_em: agora,
-    };
-  });
+  const linhas = cards.map((c) => linhaDaFila(c, agora));
   for (const lote of chunk(linhas, 300)) {
     const { error } = await supabase.from('pedidos_venda_fila').upsert(lote, { onConflict: 'id' });
     if (error) throw error;

@@ -1,4 +1,4 @@
-import { prontoDoCard, cardVoltouAEsperar, mapaAguardando, acharAguardando, textoAguardando, mudancasAguardando, refDoPedido } from '../services/pedidosVendaPronto.js';
+import { prontoDoCard, cardVoltouAEsperar, varejoEmSeparacao, textoEmSeparacao, mapaAguardando, acharAguardando, textoAguardando, mudancasAguardando, refDoPedido } from '../services/pedidosVendaPronto.js';
 
 // linhas reais do lv_sep_aguardando do Dryland (26/11/2026), só com os campos usados
 const AGUARDANDO = [
@@ -96,5 +96,35 @@ describe('pronto pra faturar — quem confirmou, pelo card da fila', () => {
     expect(prontoDoCard({ log: [{ obs: 'separação confirmada', em: 'ontem' }] })).toBeNull();
     expect(prontoDoCard({ log: 'x' })).toBeNull();
     expect(prontoDoCard(null)).toBeNull();
+  });
+});
+
+describe('varejo online (VJ) — entra no Faturamento quando a separação termina', () => {
+  const vj = (extra = {}) => ({ ref: 'VJ1894', canal: 'varejo', eh_venda: true, status: 'aguardando', qtd_pecas: 1, qtd_separada: 0, sumiu_do_dryland_em: null, ...extra });
+
+  test('pago e ainda sem separar (caso de 26/11: nascia "a faturar" no pagamento) → segura', () => {
+    expect(varejoEmSeparacao(vj())).toBe(true);
+    expect(varejoEmSeparacao(vj({ status: 'em_separacao', qtd_pecas: 7, qtd_separada: 4 }))).toBe(true);
+  });
+
+  test('separação terminada → libera', () => {
+    expect(varejoEmSeparacao(vj({ status: 'separado', qtd_separada: 1 }))).toBe(false);
+  });
+
+  test('pedido sem separação, ou cuja separação já saiu da tela do Dryland, continua como antes', () => {
+    expect(varejoEmSeparacao(null)).toBe(false);
+    expect(varejoEmSeparacao(vj({ sumiu_do_dryland_em: '2026-11-20T10:00:00Z' }))).toBe(false);
+  });
+
+  test('só o varejo: o atacado segue a regra do botão, e transferência não é venda', () => {
+    expect(varejoEmSeparacao(vj({ ref: 'RV1842', canal: 'revenda' }))).toBe(false);
+    expect(varejoEmSeparacao(vj({ ref: 'MT1860', canal: 'multimarca' }))).toBe(false);
+    expect(varejoEmSeparacao(vj({ ref: 'TR485', canal: 'transferencia', eh_venda: false }))).toBe(false);
+    // card da fila no canal varejo, mas a separação é de transferência (TRU-…)
+    expect(varejoEmSeparacao(vj({ ref: 'TRU-TR484-MAX', canal: 'transferencia', eh_venda: false }), 'varejo')).toBe(false);
+  });
+
+  test('o texto diz quantas peças faltam', () => {
+    expect(textoEmSeparacao(vj({ status: 'em_separacao', qtd_pecas: 7, qtd_separada: 4 }))).toMatch(/VJ1894 ainda está em separação no Dryland \(4 de 7 peças separadas\)/);
   });
 });

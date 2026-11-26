@@ -97,6 +97,27 @@ export function textoAguardando(a) {
   return `O vendedor ainda não marcou PRONTO PRA FATURAR no Dryland para o pedido ${a?.ref || ''}${quanto}. O pedido entra no Faturamento quando ele confirmar a separação.`.replace(/\s+/g, ' ');
 }
 
+// ─── VAREJO ONLINE (Yago, 26/11/2026) ───────────────────────────────────────
+// O pedido do varejo do site (VJ) nasce "a faturar" na fila do Dryland minutos
+// depois do pagamento e não passa pela lista de espera do "Pronto pra faturar"
+// (o botão só existe para o atacado). Para ficar no mesmo padrão, aqui ele só
+// entra no Faturamento quando o vendedor TERMINA a separação na tela /separar:
+// enquanto houver peça por separar, não aparece na lista e não fatura. Se o
+// Dryland passar a listar o VJ no lv_sep_aguardando, vale também a regra de cima.
+// sep = linha de pedidos_venda_dryland; canalDoCard = canal do card da fila.
+export function varejoEmSeparacao(sep, canalDoCard = null) {
+  if (!sep || sep.sumiu_do_dryland_em || sep.eh_venda === false) return false;
+  const canal = String(canalDoCard || sep.canal || '').toLowerCase();
+  if (canal !== 'varejo') return false;
+  return sep.status !== 'separado';
+}
+
+export function textoEmSeparacao(sep) {
+  const pecas = Number(sep?.qtd_pecas) || 0;
+  const quanto = pecas ? ` (${Number(sep?.qtd_separada) || 0} de ${pecas} peças separadas)` : '';
+  return `O pedido ${sep?.ref || ''} ainda está em separação no Dryland${quanto}. O pedido do varejo online entra no Faturamento quando o vendedor termina a separação.`.replace(/\s+/g, ' ');
+}
+
 /**
  * O que mudou na lista de espera desde a última cópia.
  * antes = refs marcadas no HeadCoach; agora = refs que o Dryland devolveu.
