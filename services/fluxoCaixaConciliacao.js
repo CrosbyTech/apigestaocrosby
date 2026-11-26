@@ -39,7 +39,7 @@ import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
 import { mapearFiliaisTotvsPorCnpj, resolverFiliaisLoja, buscarTitulosCartaoStone } from './totvsCartoesStone.js';
 import { bater } from './stoneBatimento.js';
 import { ehLinhaFolha, candidatosFolha } from './folhaConciliacao.js';
-import { vincularComprovanteASolicitacao, solicitacoesDaConciliacao, comprovantePorChave, urlComprovante } from './comprovantesStone.js';
+import { vincularComprovanteASolicitacao, solicitacoesDaConciliacao, levarComprovanteDoHc, comprovantePorChave, urlComprovante } from './comprovantesStone.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
 
@@ -2014,6 +2014,15 @@ async function gravarConciliacaoRow(row) {
   } catch (e) {
     console.error('[conciliacao] comprovante → solicitação falhou:', e.message);
     data.avisoComprovante = e.message;
+  }
+  // Duplicata do Contas a Pagar HeadCoach que nasceu de solicitação (conciliada direto ou
+  // pela baixa automática da Liberação): o comprovante da saída vai para a solicitação —
+  // é o que o solicitante vê em "Minhas Solicitações" (Yago, 26/11/2026)
+  try {
+    const levados = await levarComprovanteDoHc(data);
+    if (levados.length && !data.solicitacaoVinculada) data.solicitacaoVinculada = { id: levados[0].solicitacaoId, comprovante: levados[0].url, jaEstavaPaga: levados[0].jaEstavaPaga };
+  } catch (e) {
+    console.error('[conciliacao] comprovante → solicitação (HeadCoach) falhou:', e.message);
   }
   // Saída conciliada = duplicata paga: "PAGO VIA CONCILIAÇÃO" na Consulta do
   // contas a pagar e APROVADO → PAGO na Liberação (Yago, 09/11/2026)

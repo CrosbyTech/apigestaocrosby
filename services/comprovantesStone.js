@@ -13,10 +13,19 @@
 // comprovante é copiado para o bucket público solicitacoes-crosby, gravado em
 // solicitacoes_crosby.comprovante_url, a solicitação é marcada como paga
 // (pago_em/pago_por_nome) e, se houver, o título da Liberação vira PAGO.
+//
+// HEADCOACH (26/11/2026): a saída conciliada com uma duplicata do Contas a Pagar
+// HeadCoach que nasceu de solicitação — direto (origem HC_CP) ou pela baixa
+// automática da Liberação de Pagamento — também leva o comprovante para a
+// solicitação. Aí é SÓ o comprovante: quem marca a solicitação como paga é a
+// baixa da duplicata (services/solicitacaoVinculoHc.js).
+// O recibo fica em solicitacoes_crosby.comprovante_pagamento_url (o
+// comprovante_url também guarda o anexo que a pessoa pôs no pedido).
 // ============================================================
 import crypto from 'node:crypto';
 import supabase from '../config/supabase.js';
 import { atribuirChaves, hashMemo } from './fluxoCaixaConciliacao.js';
+import { titulosHcDaConciliacao } from '../utils/hcCpComprovante.js';
 
 export const BUCKET_PRIVADO = 'extratos-bancarios';
 export const BUCKET_SOLICITACOES = 'solicitacoes-crosby';
@@ -156,7 +165,7 @@ async function publicarNaSolicitacao(comp, solicitacaoId) {
  * + marcada como paga (+ título da Liberação PAGO, se existir).
  * @returns {{url, solicitacaoId}|null} null quando a saída não tem comprovante do bot
  */
-export async function vincularComprovanteASolicitacao({ chave, solicitacaoId, dataPagamento, usuario }) {
+export async function vincularComprovanteASolicitacao({ chave, solicitacaoId, dataPagamento, usuario, soComprovante = false }) {
   if (!chave || !solicitacaoId) return null;
   const comp = await comprovantePorChave(chave);
   if (!comp) return null;
@@ -166,9 +175,10 @@ export async function vincularComprovanteASolicitacao({ chave, solicitacaoId, da
 
   const url = await publicarNaSolicitacao(comp, solicitacaoId);
   const quem = usuario || 'Conciliação bancária (bot Stone)';
-  const patch = {};
+  // soComprovante: só anexa o recibo (o "pago" e a Liberação ficam com quem chamou)
+  const patch = { comprovante_pagamento_url: url };
   if (!sol.comprovante_url) patch.comprovante_url = url;
-  if (!sol.pago_em) {
+  if (!soComprovante && !sol.pago_em) {
     patch.pago_em = agora();
     patch.pago_por_nome = quem;
   }
@@ -176,7 +186,7 @@ export async function vincularComprovanteASolicitacao({ chave, solicitacaoId, da
     const { error: e2 } = await supabase.from(T.sol).update(patch).eq('id', solicitacaoId);
     lancar(e2);
   }
-  if (sol.pagamento_liberacao_id) {
+  if (!soComprovante && sol.pagamento_liberacao_id) {
     const { data: lib } = await supabase.from(T.lib).select('id,status,dt_pagamento,banco_pagamento').eq('id', sol.pagamento_liberacao_id).maybeSingle();
     if (lib && !['PAGO', 'CANCELADO'].includes(lib.status)) {
       const { error: e3 } = await supabase
@@ -212,4 +222,47 @@ export async function solicitacoesDaConciliacao(conc) {
   return [...ids];
 }
 
-export default { salvarComprovante, anexarComprovantes, comprovantePorChave, urlComprovante, vincularComprovanteASolicitacao, solicitacoesDaConciliacao };
+/** Solicitações Crosby que viraram as duplicatas do Contas a Pagar HeadCoach citadas na conciliação. */
+export async function solicitacoesHcDaConciliacao(conc) {
+  const ids = titulosHcDaConciliacao(conc);
+  if (!ids.length) return [];
+  const { data, error } = await supabase.from('hc_cp_titulos').select('id,origem_ref').in('id', ids).eq('origem', 'solicitacao-crosby');
+  lancar(error);
+  return [...new Set((data || []).map((t) => String(t.origem_ref || '')).filter(Boolean))];
+}
+
+/**
+ * Comprovante da saída → solicitações das duplicatas do HeadCoach desta conciliação (só o comprovante).
+ * @returns {Array<{url, solicitacaoId}>}
+ */
+export async function levarComprovanteDoHc(conc) {
+  const out = [];
+  if (!conc?.chave) return out;
+  for (const solicitacaoId of await solicitacoesHcDaConciliacao(conc)) {
+    const r = await vincularComprovanteASolicitacao({ chave: conc.chave, solicitacaoId, dataPagamento: conc.data, usuario: conc.usuario, soComprovante: true });
+    if (r) out.push(r);
+  }
+  return out;
+}
+
+/**
+ * Comprovante que chegou DEPOIS de a saída já estar conciliada: vai para as
+ * solicitações da conciliação que já existe. Só anexa o recibo — não mexe em
+ * pago nem na Liberação (isso foi decidido na hora da conciliação).
+ */
+export async function vincularComprovanteTardio(chave) {
+  if (!chave) return [];
+  const { data: conc, error } = await supabase.from(T.conc).select('*').eq('chave', chave).maybeSingle();
+  if (error || !conc) return [];
+  const comp = await comprovantePorChave(chave);
+  if (!comp || comp.solicitacao_id) return []; // sem recibo, ou já levado
+  const out = [];
+  const ids = new Set([...(await solicitacoesDaConciliacao(conc)), ...(await solicitacoesHcDaConciliacao(conc))]);
+  for (const solicitacaoId of ids) {
+    const r = await vincularComprovanteASolicitacao({ chave, solicitacaoId, dataPagamento: conc.data, usuario: conc.usuario, soComprovante: true });
+    if (r) out.push(r);
+  }
+  return out;
+}
+
+export default { salvarComprovante, anexarComprovantes, comprovantePorChave, urlComprovante, vincularComprovanteASolicitacao, solicitacoesDaConciliacao, solicitacoesHcDaConciliacao, levarComprovanteDoHc, vincularComprovanteTardio };

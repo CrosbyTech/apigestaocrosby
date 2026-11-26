@@ -39,7 +39,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { requireAuth } from '../middlewares/auth.js';
 import bot from '../services/stoneBot.js';
 import { executarPagarme, saldosPagarme } from '../services/pagarmeConta.js';
-import { salvarComprovante } from '../services/comprovantesStone.js';
+import { salvarComprovante, vincularComprovanteTardio } from '../services/comprovantesStone.js';
 import { conciliarAprovados } from '../services/conciliacaoAprovados.js';
 import { enfileirar, proximaInclusao, registrarResultado } from '../services/stoneInclusoes.js';
 import * as transferencias from '../services/stoneTransferencias.js';
@@ -413,6 +413,13 @@ agente.post(
         meta = {};
       }
       const r = await salvarComprovante({ ...meta, buffer: req.file.buffer, nome: req.file.originalname, execucaoId: Number(req.params.id) });
+      // a saída já estava conciliada com uma solicitação quando o recibo chegou: leva agora (não derruba o envio)
+      try {
+        const levados = await vincularComprovanteTardio(r.chave);
+        if (levados.length) r.solicitacoes = levados.map((x) => x.solicitacaoId);
+      } catch (e) {
+        console.warn(`[stone-bot] comprovante ${r.chave} não foi para a solicitação: ${e.message}`);
+      }
       return successResponse(res, r);
     } catch (e) {
       return tratar(res, e);
