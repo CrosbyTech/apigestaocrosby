@@ -10214,6 +10214,51 @@ const BRANCHES_TOTALS_CACHE = new Map();
 const BRANCHES_TOTALS_TTL = 60 * 60 * 1000; // 1h realtime
 const BRANCHES_TOTALS_TTL_PAST = 24 * 60 * 60 * 1000; // 24h passado
 
+// Metas mensais por loja vindas da tabela metas_mensais_calculadas (alimentada
+// pelo Dryland via meta_get). A tabela é chaveada por NOME; aqui mapeamos
+// nome→código de filial pra o /branches-totals usar a mesma meta da aba "Metas".
+// Fallback: se não houver meta no mês na tabela, cai no config estático
+// (getMetaMensal de config/varejoMetas.js).
+const META_LOJA_NOME_TO_CODE = {
+  'CROSBY JOAO PESSOA': 2,
+  'CROSBY NOVA CRUZ': 5,
+  'CROSBY PARNAMIRIM': 55,
+  'CROSBY CANGUARETAMA': 65,
+  'CROSBY SHOPPING CIDADE JARDIM': 87,
+  'CROSBY SHOPPING GUARARAPES': 88,
+  'CROSBY AYRTON SENNA': 90,
+  'CROSBY IMPERATRIZ': 93,
+  'CROSBY SHOPPING PATOS': 94,
+  'CROSBY SHOPPING MIDWAY': 95,
+  'CROSBY SHOPPING TERESINA': 97,
+  'CROSBY SHOPPING RECIFE': 98,
+};
+async function getMetaMensalLojasDB(yyyymm) {
+  try {
+    const { data, error } = await supabase
+      .from('metas_mensais_calculadas')
+      .select('nome,bronze,prata,ouro,diamante')
+      .eq('tipo', 'lojas')
+      .eq('mes', yyyymm);
+    if (error || !data || data.length === 0) return null;
+    const map = {};
+    for (const r of data) {
+      const code = META_LOJA_NOME_TO_CODE[String(r.nome || '').trim().toUpperCase()];
+      if (!code) continue;
+      map[code] = {
+        bronze: Number(r.bronze || 0),
+        prata: Number(r.prata || 0),
+        ouro: Number(r.ouro || 0),
+        diamante: Number(r.diamante || 0),
+      };
+    }
+    return Object.keys(map).length ? map : null;
+  } catch (e) {
+    console.warn('[branches-totals] getMetaMensalLojasDB falhou:', e.message);
+    return null;
+  }
+}
+
 router.post(
   '/branches-totals',
   asyncHandler(async (req, res) => {
@@ -10268,7 +10313,8 @@ router.post(
     let metaInfo = null;
     if (metaType === 'mensal') {
       const yyyymm = datemin.slice(0, 7);
-      metasMap = getMetaMensal(yyyymm);
+      // Prioriza a tabela (metas do Dryland); fallback no config estático.
+      metasMap = (await getMetaMensalLojasDB(yyyymm)) || getMetaMensal(yyyymm);
       metaInfo = { type: 'mensal', label: yyyymm };
     } else if (metaType === 'semanal') {
       const sem = getMetaSemanal(datemin, datemax);
