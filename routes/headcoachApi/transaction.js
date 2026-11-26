@@ -1,7 +1,7 @@
 // API HEADCOACH › transaction — toda transação que o HeadCoach registra.
 import { criarModulo, f, q } from './_engine.js';
 import { INVOICE } from './fiscal.js';
-import { TRANSACTION_STATUS, TRANSACTION_INTERNAL_STATUS, SALE_TYPE, CHANNEL, PAYMENT_METHOD, RFID_MOVEMENT, SELLER_CHANGE_SOURCE, inverso } from './_maps.js';
+import { TRANSACTION_STATUS, TRANSACTION_INTERNAL_STATUS, SALE_TYPE, CHANNEL, PAYMENT_METHOD, RFID_MOVEMENT, SELLER_CHANGE_SOURCE, ITEM_FISCAL_TYPE, INVOICE_TYPE, inverso } from './_maps.js';
 
 const modulo = criarModulo({
   nome: 'transaction',
@@ -69,6 +69,96 @@ const cashbackBaixado = (v) => {
   };
 };
 
+// ─── detalhes guardados dentro da transação (pedido_info) ───────────────────
+const dia10 = (v) => (v ? String(v).slice(0, 10) : null);
+const notaDeOrigem = (n) => ({
+  accessKey: n.chave || null,
+  invoiceCode: n.numero ?? null,
+  serialCode: n.serie != null ? String(n.serie) : null,
+  invoiceType: INVOICE_TYPE[n.modelo] || null,
+  branchCode: n.empresa ?? null,
+  issueDate: dia10(n.data),
+  source: n.origem === 'headcoach' ? 'HeadCoach' : n.origem === 'totvs' ? 'Totvs' : null,
+  quantity: n.quantidade ?? null,
+  unitValue: n.valorUnit ?? null,
+});
+const NOTA_DE_ORIGEM = {
+  type: 'object',
+  properties: {
+    accessKey: { type: 'string', nullable: true, description: 'Chave da nota em que a peça foi comprada.' },
+    invoiceCode: { type: 'integer', nullable: true },
+    serialCode: { type: 'string', nullable: true },
+    invoiceType: { type: 'string', nullable: true, enum: ['NFe', 'NFCe'] },
+    branchCode: { type: 'integer', nullable: true, description: 'Empresa que emitiu a nota.' },
+    issueDate: { type: 'string', format: 'date', nullable: true },
+    source: { type: 'string', nullable: true, enum: ['HeadCoach', 'Totvs'], description: 'Onde a nota foi emitida.' },
+    quantity: { type: 'number', nullable: true, description: 'Peças desta nota usadas na troca / devolução.' },
+    unitValue: { type: 'number', nullable: true, description: 'Valor pago por peça nessa nota.' },
+  },
+};
+// compra do crediário BlueCard amarrada à venda (PDV Crosby pede a compra, o cliente aprova no app)
+const bluecardDe = (v) => {
+  const b = v.pedido_info?.bluecard;
+  if (!b?.compraId) return null;
+  return {
+    purchaseId: b.compraId,
+    document: b.documento || null,
+    value: b.valorCents != null ? Number(b.valorCents) / 100 : null,
+    installmentQuantity: b.parcelas ?? null,
+    schedule: (b.vencimentos || []).map((x) => ({ installmentCode: x.numero ?? null, dueDate: dia10(x.vencimento), value: x.valor_cents != null ? Number(x.valor_cents) / 100 : null })),
+    approvalDate: b.aprovadaEm || null,
+    linkedDate: b.conferidaEm || b.vinculadaEm || null,
+    linkedBy: b.por || null,
+    invoiceSentDate: b.fiscalEnviadoEm || null,
+    canceledInAppDate: b.canceladaNoApp?.em || null,
+    canceledInAppReason: b.canceladaNoApp?.motivo || null,
+  };
+};
+// troca no PDV: cada peça devolvida e a(s) nota(s) em que ela foi comprada
+const trocaDe = (v) => {
+  const tr = v.pedido_info?.troca;
+  if (!tr && !v.pedido_info?.cupomTroca && !v.pedido_info?.comprador) return null;
+  return {
+    checkedDate: tr?.conferidoEm || null,
+    couponCode: v.pedido_info?.cupomTroca || null,
+    buyerCode: v.pedido_info?.comprador?.code ?? null,
+    buyerName: v.pedido_info?.comprador?.nome || null,
+    items: (tr?.itens || []).map((i) => ({ productCode: i.productCode != null ? Number(i.productCode) : null, quantity: i.quantidade ?? null, unitValue: i.valorUnit ?? null, originInvoices: (i.notas || []).map(notaDeOrigem) })),
+  };
+};
+// devolução de mercadoria (expedição): nota anulada ou devolução por RFID com as notas de origem
+const devolucaoDe = (v) => {
+  const d = v.pedido_info?.devolucao;
+  const r = v.pedido_info?.devolucaoRfid;
+  if (!d && !r) return null;
+  return {
+    reason: d?.motivo || null,
+    operationCode: d?.operacao ?? r?.operacao ?? null,
+    operationName: r?.operacaoNome || null,
+    requestId: r?.solicitacaoId ?? null,
+    originalTransactionCode: d?.vendaOriginal ?? null,
+    originalInvoiceCode: d?.notaOriginal ?? null,
+    originalInvoiceAccessKey: d?.chaveOriginal || null,
+    originInvoices: (r?.notas || []).map(notaDeOrigem),
+  };
+};
+// saldo bônus gerado por peça em falta no faturamento (customer-balance/billing-bonus)
+const creditoFaltaDe = (v) => {
+  const c = v.pedido_info?.creditoFalta;
+  if (!c) return null;
+  return {
+    status: c.status || null,
+    value: c.valor ?? null,
+    items: (c.pecas || []).map((x) => ({ productCode: x.productCode != null ? Number(x.productCode) : null, productName: x.nome || null, quantity: x.quantidade ?? null, value: x.valor ?? null })),
+    bonusId: c.bonus?.id ?? null,
+    ticketNumber: c.chamado?.numero ?? null,
+    requestedDate: c.pedidoEm || null,
+    generatedDate: c.geradoEm || null,
+    createdBy: c.por || null,
+    error: c.erro || null,
+  };
+};
+
 const ITEM = {
   name: 'TransactionItem',
   path: '/items',
@@ -85,6 +175,8 @@ const ITEM = {
     f('productName', 'nome', 'string', 'Nome do produto.'),
     f('referenceName', 'referencia', 'string', 'Referência (modelo).'),
     f('ncm', 'ncm', 'string', 'NCM.'),
+    f('cest', 'cest', 'string', 'CEST, quando o produto tem.'),
+    f('fiscalType', 'tipo_fiscal', 'string', 'Tipo fiscal da peça na nota: `OwnProduction` (produção própria) ou `Purchased` (adquirida de terceiros). É o que decide o CFOP. Nulo nas transações antigas.', { map: ITEM_FISCAL_TYPE }),
     f('cfop', 'cfop', 'integer', 'CFOP do item na nota.'),
     f('measureUnit', 'unidade', 'string', 'Unidade.'),
     f('quantity', 'quantidade', 'number', 'Quantidade.'),
@@ -177,11 +269,118 @@ modulo.recurso({
       'transfer',
       (v) => {
         const t = v.pedido_info?.transferencia;
-        return t ? { nature: t.natureza === 'venda' ? 'Sale' : 'Transfer', destinationBranchCode: t.destinoCode ?? null, destinationName: t.destinoNome || null, withoutInvoice: !!t.semNota } : null;
+        return t ? { nature: t.natureza === 'venda' ? 'Sale' : 'Transfer', originBranchCode: t.origemCode ?? null, destinationBranchCode: t.destinoCode ?? null, destinationName: t.destinoNome || null, withoutInvoice: !!t.semNota, isRetail: !!t.varejo, requestId: t.solicitacaoId ?? null, reference: t.ref || null, invoiceOperationCode: t.operacaoNota ?? null } : null;
       },
       'object',
-      'Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. Nulo quando não é transferência.',
-      { cols: ['pedido_info'], properties: { nature: { type: 'string', enum: ['Transfer', 'Sale'] }, destinationBranchCode: { type: 'integer', nullable: true }, destinationName: { type: 'string', nullable: true }, withoutInvoice: { type: 'boolean' } } }
+      'Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. `isRetail` = true na Transferência entre Lojas do varejo (loja → loja, ou loja → Brejinho); `originBranchCode` é a loja de origem quando gravada (nulo nas antigas: é a própria empresa da transação); `requestId` liga à solicitação em transfer/requests e `invoiceOperationCode` é a operação da nota (7272 transferência, 7273 / 7280 venda entre empresas). Nulo quando não é transferência.',
+      { cols: ['pedido_info'], properties: { nature: { type: 'string', enum: ['Transfer', 'Sale'] }, destinationBranchCode: { type: 'integer', nullable: true }, destinationName: { type: 'string', nullable: true }, withoutInvoice: { type: 'boolean' }, originBranchCode: { type: 'integer', nullable: true }, isRetail: { type: 'boolean' }, requestId: { type: 'integer', nullable: true }, reference: { type: 'string', nullable: true }, invoiceOperationCode: { type: 'integer', nullable: true } } }
+    ),
+    f('headcoachOnly', (v) => !v.totvs_transacao_code, 'boolean', 'A transação existe SÓ no HeadCoach: não tem espelho no TOTVS (`totvsTransactionCode` nulo). É o caso do faturamento da empresa 99 desde 13/11/2026, do PDV Crosby das lojas que saíram do TOTVS (ver `headcoachOnly` em general/branches) e da movimentação Brejinho ↔ Matriz.', { cols: ['totvs_transacao_code'] }),
+    f('isFinalConsumer', (v) => (typeof v.pedido_info?.consumidorFinal === 'boolean' ? v.pedido_info.consumidorFinal : null), 'boolean', 'Faturamento marcado como venda a consumidor final (muda o imposto da nota). Nulo no PDV.'),
+    f('saleDate', (v) => dia10(v.pedido_info?.dataVenda), 'date', 'Data da venda informada no faturamento, quando é diferente da data do caixa em que a transação entrou. Nulo = a própria data do registro.'),
+    f(
+      'bluecard',
+      bluecardDe,
+      'object',
+      'Compra do crediário BlueCard amarrada a esta venda. O PDV Crosby pede a compra ao BlueCard, o cliente aprova no aplicativo e só então a venda fecha; `schedule` são as parcelas que o cliente aceitou (as mesmas dos títulos em accounts-receivable/documents, portador BLUECARD). `invoiceSentDate` = quando a nota foi enviada ao BlueCard. `canceledInAppDate` preenchido = a compra foi cancelada no aplicativo DEPOIS de a venda existir (precisa de acerto). Nulo nas vendas sem BlueCard e nas feitas antes desta amarração.',
+      {
+        properties: {
+          purchaseId: { type: 'string', description: 'Identificador da compra no BlueCard.' },
+          document: { type: 'string', nullable: true, description: 'Referência da tentativa enviada ao BlueCard (HC<loja>-…).' },
+          value: { type: 'number', nullable: true, description: 'Valor aprovado em BlueCard (pode ser só parte da venda).' },
+          installmentQuantity: { type: 'integer', nullable: true },
+          schedule: { type: 'array', items: { type: 'object', properties: { installmentCode: { type: 'integer', nullable: true }, dueDate: { type: 'string', format: 'date', nullable: true }, value: { type: 'number', nullable: true } } } },
+          approvalDate: { type: 'string', format: 'date-time', nullable: true },
+          linkedDate: { type: 'string', format: 'date-time', nullable: true, description: 'Quando a compra foi conferida e amarrada à transação.' },
+          linkedBy: { type: 'string', nullable: true },
+          invoiceSentDate: { type: 'string', format: 'date-time', nullable: true },
+          canceledInAppDate: { type: 'string', format: 'date-time', nullable: true },
+          canceledInAppReason: { type: 'string', nullable: true },
+        },
+      },
+    ),
+    f(
+      'exchange',
+      trocaDe,
+      'object',
+      'Troca no PDV Crosby (origin `Exchange`): cada peça devolvida com a(s) nota(s) em que foi comprada e o valor pago nela (`originInvoices`) — é esse valor que vira Credev. `couponCode` = troca de presente feita pelo cupom (sale-panel/exchange-coupons), com quem comprou em `buyerCode` / `buyerName`. Nulo nas demais transações.',
+      {
+        properties: {
+          checkedDate: { type: 'string', format: 'date-time', nullable: true, description: 'Quando as compras do cliente foram conferidas.' },
+          couponCode: { type: 'string', nullable: true },
+          buyerCode: { type: 'integer', nullable: true },
+          buyerName: { type: 'string', nullable: true },
+          items: { type: 'array', items: { type: 'object', properties: { productCode: { type: 'integer', nullable: true }, quantity: { type: 'number', nullable: true }, unitValue: { type: 'number', nullable: true }, originInvoices: { type: 'array', items: NOTA_DE_ORIGEM } } } },
+        },
+      },
+    ),
+    f(
+      'returnDetails',
+      devolucaoDe,
+      'object',
+      'Devolução de mercadoria da expedição (origin `Return`): motivo e operação, a solicitação de origem (`requestId`, em return/requests), a transação / nota original quando é anulação de nota (`originalTransactionCode`, `originalInvoiceCode`, `originalInvoiceAccessKey`) e, na Devolução RFID, as notas de compra referenciadas (`originInvoices`). Nulo nas demais transações.',
+      {
+        properties: {
+          reason: { type: 'string', nullable: true },
+          operationCode: { type: 'integer', nullable: true },
+          operationName: { type: 'string', nullable: true },
+          requestId: { type: 'integer', nullable: true },
+          originalTransactionCode: { type: 'integer', nullable: true },
+          originalInvoiceCode: { type: 'integer', nullable: true },
+          originalInvoiceAccessKey: { type: 'string', nullable: true },
+          originInvoices: { type: 'array', items: NOTA_DE_ORIGEM },
+        },
+      },
+    ),
+    f(
+      'productSwaps',
+      (v) => (Array.isArray(v.pedido_info?.trocas) ? v.pedido_info.trocas.map((x) => ({ fromProductCode: x.de != null ? Number(x.de) : null, fromProductName: x.deNome || null, toProductCode: x.para != null ? Number(x.para) : null, toProductName: x.paraNome || null, quantity: x.quantidade ?? null })) : []),
+      'array',
+      'Peças trocadas no faturamento: o pedido pedia `fromProduct…` e saiu `toProduct…` (mesmo modelo em outro tamanho / cor). Lista vazia quando não houve.',
+      { items: { type: 'object', properties: { fromProductCode: { type: 'integer', nullable: true }, fromProductName: { type: 'string', nullable: true }, toProductCode: { type: 'integer', nullable: true }, toProductName: { type: 'string', nullable: true }, quantity: { type: 'number', nullable: true } } } },
+    ),
+    f(
+      'billingDiscount',
+      (v) => (v.pedido_info?.descontoFaturamento ? { percentage: v.pedido_info.descontoFaturamento.pct ?? null, releasedBy: v.pedido_info.descontoFaturamento.liberadoPor || null } : null),
+      'object',
+      'Desconto dado no faturamento (percentual) e quem liberou, quando passou do limite. Nulo quando não houve.',
+      { properties: { percentage: { type: 'number', nullable: true }, releasedBy: { type: 'string', nullable: true } } },
+    ),
+    f(
+      'suframa',
+      (v) => (v.pedido_info?.suframa ? { registration: v.pedido_info.suframa.isuf || null, percentage: v.pedido_info.suframa.pct ?? null, exemptIcmsValue: v.pedido_info.suframa.icmsDesonerado ?? null } : null),
+      'object',
+      'Venda para a Zona Franca / área de livre comércio: inscrição SUFRAMA do cliente, a alíquota e o ICMS desonerado na nota. Nulo nas demais.',
+      { properties: { registration: { type: 'string', nullable: true }, percentage: { type: 'number', nullable: true }, exemptIcmsValue: { type: 'number', nullable: true } } },
+    ),
+    f(
+      'missingItemsCredit',
+      creditoFaltaDe,
+      'object',
+      'Peças do pedido que faltaram no faturamento e viraram saldo bônus do cliente (`bonusId` em customer-balance/billing-bonus), com o chamado aberto para o financeiro (`ticketNumber`). `status`: gerado, pendente ou erro. Nulo quando não faltou peça paga.',
+      {
+        properties: {
+          status: { type: 'string', nullable: true },
+          value: { type: 'number', nullable: true },
+          items: { type: 'array', items: { type: 'object', properties: { productCode: { type: 'integer', nullable: true }, productName: { type: 'string', nullable: true }, quantity: { type: 'number', nullable: true }, value: { type: 'number', nullable: true } } } },
+          bonusId: { type: 'integer', nullable: true },
+          ticketNumber: { type: 'integer', nullable: true },
+          requestedDate: { type: 'string', format: 'date-time', nullable: true },
+          generatedDate: { type: 'string', format: 'date-time', nullable: true },
+          createdBy: { type: 'string', nullable: true },
+          error: { type: 'string', nullable: true },
+        },
+      },
+    ),
+    f(
+      'paymentAdjustment',
+      (v) => {
+        const a = v.pedido_info?.ajustePagamento;
+        return a ? { from: a.de || null, to: a.para || null, reason: a.motivo || null, adjustedBy: a.por || null, date: a.em || null } : null;
+      },
+      'object',
+      'Correção da forma de pagamento feita depois do faturamento (texto de como estava e como ficou, o motivo e quem fez). Nulo quando não houve.',
+      { properties: { from: { type: 'string', nullable: true }, to: { type: 'string', nullable: true }, reason: { type: 'string', nullable: true }, adjustedBy: { type: 'string', nullable: true }, date: { type: 'string', format: 'date-time', nullable: true } } },
     ),
     f('transactionDate', 'criado_em', 'date-time', 'Data e hora do registro.'),
     f('cashierCode', 'caixa_id', 'integer', 'Caixa em que a transação entrou (cashier/cashiers).'),
@@ -216,7 +415,7 @@ modulo.recurso({
       cols: ['cobranca'],
       items: { type: 'object', properties: { dueDate: { type: 'string', format: 'date', nullable: true }, value: { type: 'number', nullable: true } } },
     }),
-    f('shipping', 'transporte', 'object', 'Dados de transporte da nota (faturamento), com as chaves em português como gravado na tela (transportadora, volumes, peso…).'),
+    f('shipping', 'transporte', 'object', 'Dados de transporte da nota (faturamento), com as chaves como gravadas na tela: `code` e `nome` da transportadora, `cnpj` / `cpf`, `ie`, `uf`, `xMun` (cidade), `xEnder` (endereço), `servico`, `volumes`, `pesoB` (peso bruto), `pesoL` (peso líquido) e `modFrete` (0 = por conta do remetente, 1 = do destinatário, 9 = sem frete).'),
     f('paymentReceipts', 'comprovantes', 'array', 'Comprovantes de pagamento anexados (endereços dos arquivos).', { items: { type: 'object', additionalProperties: true } }),
     f('observation', 'observacao', 'string', 'Observação.'),
     f('createdBy', 'criado_por', 'string', 'Usuário que registrou.'),
@@ -239,6 +438,7 @@ modulo.recurso({
     q('orderKey', 'string', 'pedido_chave', 'Chave do pedido no Dryland (exata).'),
     q('cashierCode', 'int', 'caixa_id', 'Transações de um caixa.'),
     q('transactionCodeList', 'intList', 'id', 'Números das transações, separados por vírgula.'),
+    q('bluecardPurchaseId', 'custom', null, 'Transação amarrada a esta compra do BlueCard (identificador da compra no BlueCard).', { apply: (qy, valor) => qy.eq('pedido_info->bluecard->>compraId', valor) }),
     q('startChangeDate', 'startDate', 'atualizado_em', 'Alteradas a partir de (AAAA-MM-DD) — para sincronização.'),
   ],
   expand: {

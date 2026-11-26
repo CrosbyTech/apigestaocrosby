@@ -55,6 +55,7 @@ modulo.recurso({
     f('receivableCode', 'fatura', 'integer', 'Número da fatura.', { example: 9000000244 }),
     f('installmentCode', 'parcela', 'integer', 'Parcela.'),
     f('transactionCode', 'venda_id', 'integer', 'Transação de origem (transaction/transactions).'),
+    f('paymentId', 'pagamento_id', 'integer', 'Pagamento da transação que gerou o título (paymentId em transaction/transactions/{transactionCode}/payments).'),
     f('origin', 'origem', 'string', 'Sistema de origem: PDV ou faturamento da expedição.', { map: ORIGIN_SYSTEM }),
     f('channel', 'canal', 'string', 'Canal de venda (faturamento).', { map: CHANNEL }),
     f('operationCode', 'operacao', 'integer', 'Operação da transação.'),
@@ -92,6 +93,8 @@ modulo.recurso({
     f('needsReconciliation', 'precisa_conciliar', 'boolean', 'Título de cartão ou Pix que entra na conciliação D+1.'),
     f('reconciliationDate', 'conciliado_em', 'date-time', 'Quando foi conciliado.'),
     f('reconciliationId', 'conciliacao_id', 'integer', 'Conciliação que fechou o título (/reconciliations).'),
+    f('reconciledBy', 'conciliado_por', 'string', 'Quem conciliou.'),
+    f('bluecardExternalId', (x) => (x.portador === 'BLUECARD' ? `HC-${x.fatura}-${x.parcela}` : null), 'string', 'Identificador da parcela no crediário BlueCard (HC-<fatura>-<parcela>): é com ele que o HeadCoach envia a parcela ao BlueCard e que o pagamento feito no aplicativo volta e baixa o título. Só nos títulos de portador BLUECARD; a compra está em `bluecard` da transação.', { cols: ['portador', 'fatura', 'parcela'] }),
     f('settledBy', 'baixado_por', 'string', 'Quem baixou ("automático (na emissão)" para os que nascem pagos).'),
     f('settledDate', 'baixado_em', 'date-time', 'Quando foi baixado.'),
     f('cancelDate', 'cancelado_em', 'date-time', 'Quando foi cancelado.'),
@@ -151,6 +154,29 @@ modulo.recurso({
     q('endSettlementDate', 'endDay', 'data_liquidacao', 'Liquidação até (AAAA-MM-DD).'),
     q('paymentMethod', 'enum', 'forma', 'Forma.', { map: inverso(PAYMENT_METHOD) }),
   ],
+});
+
+modulo.recurso({
+  name: 'ReceivableSettings',
+  path: '/settings',
+  table: 'hc_cr_config',
+  summary: 'Parâmetros do contas a receber',
+  description: 'Uma linha só, com o que a tela usa para calcular: juros e multa do título em atraso, taxa de cada forma de pagamento (vira `feePercentage` / `feeValue` do título) e em quantos dias cada forma liquida (`settlementDate`).',
+  order: [['id', true]],
+  fields: [
+    f('monthlyInterestPercentage', 'juros_mes_pct', 'number', 'Juros ao mês do título em atraso (%).'),
+    f('finePercentage', 'multa_pct', 'number', 'Multa do título em atraso (%).'),
+    f('creditCardFeePercentage', 'taxa_credito_pct', 'number', 'Taxa do cartão de crédito à vista (%).'),
+    f('installmentCreditCardFeePercentage', 'taxa_credito_parc_pct', 'number', 'Taxa do cartão de crédito parcelado (%).'),
+    f('debitCardFeePercentage', 'taxa_debito_pct', 'number', 'Taxa do cartão de débito (%).'),
+    f('pixFeePercentage', 'taxa_pix_pct', 'number', 'Taxa do Pix (%).'),
+    f('creditCardSettlementDays', 'dias_liq_credito', 'integer', 'Dias para o cartão de crédito liquidar.'),
+    f('debitCardSettlementDays', 'dias_liq_debito', 'integer', 'Dias para o cartão de débito liquidar.'),
+    f('pixSettlementDays', 'dias_liq_pix', 'integer', 'Dias para o Pix liquidar.'),
+    f('changedBy', 'atualizado_por', 'string', 'Quem alterou por último.'),
+    f('lastChangeDate', 'atualizado_em', 'date-time', 'Última alteração.'),
+  ],
+  filters: [],
 });
 
 export default modulo;

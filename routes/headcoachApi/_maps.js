@@ -70,6 +70,8 @@ export const TRANSFER_NATURE = { venda: 'Sale', transferencia: 'Transfer' };
 
 export const STOCK_MOVEMENT = { recebimento_transferencia: 'TransferReceipt', estorno_recebimento: 'ReceiptReversal' };
 export const RFID_MOVEMENT = { venda: 'Sale', devolucao: 'Return', estorno: 'Reversal' };
+// tipo fiscal da peça na nota: produção própria (CFOP 5101/6101…) ou adquirida de terceiros (5102/6102…)
+export const ITEM_FISCAL_TYPE = { producao: 'OwnProduction', adquirido: 'Purchased' };
 
 /** ValorDaApi → [valores do banco] (para filtros do tipo enum). */
 export const inverso = (mapa) => {

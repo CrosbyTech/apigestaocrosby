@@ -104,7 +104,7 @@
       },
       "Branch": {
         "type": "object",
-        "description": "Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.",
+        "description": "Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.",
         "properties": {
           "branchCode": {
             "description": "Código da empresa (o mesmo do TOTVS).",
@@ -155,6 +155,31 @@
           "city": {
             "description": "Cidade.",
             "type": "string",
+            "nullable": true
+          },
+          "cityIbgeCode": {
+            "description": "Código IBGE da cidade.",
+            "type": "integer",
+            "nullable": true
+          },
+          "address": {
+            "description": "Endereço do cadastro, com as chaves do TOTVS: cep, publicPlace (tipo do logradouro), address, addressNumber, complement, neighborhood, cityName, stateAbbreviation, ibgeCityCode.",
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true
+          },
+          "taxRegime": {
+            "description": "Regime tributário com que o HeadCoach emite as notas da empresa: `SimplesNacional` (CRT 1, sem ICMS destacado — lojas dos grupos IRMAOS) ou `Normal` (CRT 3). Nulo nas franquias (o HeadCoach não emite por elas).",
+            "type": "string",
+            "enum": [
+              "SimplesNacional",
+              "Normal"
+            ],
+            "nullable": true
+          },
+          "headcoachOnly": {
+            "description": "A loja vende só pelo PDV Crosby do HeadCoach e não lança mais venda no TOTVS (venda, nota, contas a receber, caixa e crediário BlueCard ficam no HeadCoach).",
+            "type": "boolean",
             "nullable": true
           },
           "isActive": {
@@ -312,6 +337,20 @@
           "ncm": {
             "description": "NCM.",
             "type": "string",
+            "nullable": true
+          },
+          "cest": {
+            "description": "CEST, quando o produto tem.",
+            "type": "string",
+            "nullable": true
+          },
+          "fiscalType": {
+            "description": "Tipo fiscal da peça na nota: `OwnProduction` (produção própria) ou `Purchased` (adquirida de terceiros). É o que decide o CFOP. Nulo nas transações antigas.",
+            "type": "string",
+            "enum": [
+              "OwnProduction",
+              "Purchased"
+            ],
             "nullable": true
           },
           "cfop": {
@@ -547,6 +586,11 @@
           },
           "consultUrl": {
             "description": "Endereço de consulta da NFC-e pela chave.",
+            "type": "string",
+            "nullable": true
+          },
+          "qrCodeUrl": {
+            "description": "Conteúdo do QR Code da NFC-e (o endereço de consulta que vai impresso no cupom). Nulo na NF-e.",
             "type": "string",
             "nullable": true
           },
@@ -792,7 +836,7 @@
             "nullable": true
           },
           "transfer": {
-            "description": "Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. Nulo quando não é transferência.",
+            "description": "Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. `isRetail` = true na Transferência entre Lojas do varejo (loja → loja, ou loja → Brejinho); `originBranchCode` é a loja de origem quando gravada (nulo nas antigas: é a própria empresa da transação); `requestId` liga à solicitação em transfer/requests e `invoiceOperationCode` é a operação da nota (7272 transferência, 7273 / 7280 venda entre empresas). Nulo quando não é transferência.",
             "type": "object",
             "properties": {
               "nature": {
@@ -812,6 +856,470 @@
               },
               "withoutInvoice": {
                 "type": "boolean"
+              },
+              "originBranchCode": {
+                "type": "integer",
+                "nullable": true
+              },
+              "isRetail": {
+                "type": "boolean"
+              },
+              "requestId": {
+                "type": "integer",
+                "nullable": true
+              },
+              "reference": {
+                "type": "string",
+                "nullable": true
+              },
+              "invoiceOperationCode": {
+                "type": "integer",
+                "nullable": true
+              }
+            },
+            "nullable": true
+          },
+          "headcoachOnly": {
+            "description": "A transação existe SÓ no HeadCoach: não tem espelho no TOTVS (`totvsTransactionCode` nulo). É o caso do faturamento da empresa 99 desde 13/11/2026, do PDV Crosby das lojas que saíram do TOTVS (ver `headcoachOnly` em general/branches) e da movimentação Brejinho ↔ Matriz.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "isFinalConsumer": {
+            "description": "Faturamento marcado como venda a consumidor final (muda o imposto da nota). Nulo no PDV.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "saleDate": {
+            "description": "Data da venda informada no faturamento, quando é diferente da data do caixa em que a transação entrou. Nulo = a própria data do registro.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "bluecard": {
+            "description": "Compra do crediário BlueCard amarrada a esta venda. O PDV Crosby pede a compra ao BlueCard, o cliente aprova no aplicativo e só então a venda fecha; `schedule` são as parcelas que o cliente aceitou (as mesmas dos títulos em accounts-receivable/documents, portador BLUECARD). `invoiceSentDate` = quando a nota foi enviada ao BlueCard. `canceledInAppDate` preenchido = a compra foi cancelada no aplicativo DEPOIS de a venda existir (precisa de acerto). Nulo nas vendas sem BlueCard e nas feitas antes desta amarração.",
+            "type": "object",
+            "properties": {
+              "purchaseId": {
+                "type": "string",
+                "description": "Identificador da compra no BlueCard."
+              },
+              "document": {
+                "type": "string",
+                "nullable": true,
+                "description": "Referência da tentativa enviada ao BlueCard (HC<loja>-…)."
+              },
+              "value": {
+                "type": "number",
+                "nullable": true,
+                "description": "Valor aprovado em BlueCard (pode ser só parte da venda)."
+              },
+              "installmentQuantity": {
+                "type": "integer",
+                "nullable": true
+              },
+              "schedule": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "installmentCode": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "dueDate": {
+                      "type": "string",
+                      "format": "date",
+                      "nullable": true
+                    },
+                    "value": {
+                      "type": "number",
+                      "nullable": true
+                    }
+                  }
+                }
+              },
+              "approvalDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "linkedDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true,
+                "description": "Quando a compra foi conferida e amarrada à transação."
+              },
+              "linkedBy": {
+                "type": "string",
+                "nullable": true
+              },
+              "invoiceSentDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "canceledInAppDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "canceledInAppReason": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "nullable": true
+          },
+          "exchange": {
+            "description": "Troca no PDV Crosby (origin `Exchange`): cada peça devolvida com a(s) nota(s) em que foi comprada e o valor pago nela (`originInvoices`) — é esse valor que vira Credev. `couponCode` = troca de presente feita pelo cupom (sale-panel/exchange-coupons), com quem comprou em `buyerCode` / `buyerName`. Nulo nas demais transações.",
+            "type": "object",
+            "properties": {
+              "checkedDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true,
+                "description": "Quando as compras do cliente foram conferidas."
+              },
+              "couponCode": {
+                "type": "string",
+                "nullable": true
+              },
+              "buyerCode": {
+                "type": "integer",
+                "nullable": true
+              },
+              "buyerName": {
+                "type": "string",
+                "nullable": true
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "productCode": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "quantity": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "unitValue": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "originInvoices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "accessKey": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Chave da nota em que a peça foi comprada."
+                          },
+                          "invoiceCode": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "serialCode": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "invoiceType": {
+                            "type": "string",
+                            "nullable": true,
+                            "enum": [
+                              "NFe",
+                              "NFCe"
+                            ]
+                          },
+                          "branchCode": {
+                            "type": "integer",
+                            "nullable": true,
+                            "description": "Empresa que emitiu a nota."
+                          },
+                          "issueDate": {
+                            "type": "string",
+                            "format": "date",
+                            "nullable": true
+                          },
+                          "source": {
+                            "type": "string",
+                            "nullable": true,
+                            "enum": [
+                              "HeadCoach",
+                              "Totvs"
+                            ],
+                            "description": "Onde a nota foi emitida."
+                          },
+                          "quantity": {
+                            "type": "number",
+                            "nullable": true,
+                            "description": "Peças desta nota usadas na troca / devolução."
+                          },
+                          "unitValue": {
+                            "type": "number",
+                            "nullable": true,
+                            "description": "Valor pago por peça nessa nota."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "nullable": true
+          },
+          "returnDetails": {
+            "description": "Devolução de mercadoria da expedição (origin `Return`): motivo e operação, a solicitação de origem (`requestId`, em return/requests), a transação / nota original quando é anulação de nota (`originalTransactionCode`, `originalInvoiceCode`, `originalInvoiceAccessKey`) e, na Devolução RFID, as notas de compra referenciadas (`originInvoices`). Nulo nas demais transações.",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "nullable": true
+              },
+              "operationCode": {
+                "type": "integer",
+                "nullable": true
+              },
+              "operationName": {
+                "type": "string",
+                "nullable": true
+              },
+              "requestId": {
+                "type": "integer",
+                "nullable": true
+              },
+              "originalTransactionCode": {
+                "type": "integer",
+                "nullable": true
+              },
+              "originalInvoiceCode": {
+                "type": "integer",
+                "nullable": true
+              },
+              "originalInvoiceAccessKey": {
+                "type": "string",
+                "nullable": true
+              },
+              "originInvoices": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "accessKey": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Chave da nota em que a peça foi comprada."
+                    },
+                    "invoiceCode": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "serialCode": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "invoiceType": {
+                      "type": "string",
+                      "nullable": true,
+                      "enum": [
+                        "NFe",
+                        "NFCe"
+                      ]
+                    },
+                    "branchCode": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "Empresa que emitiu a nota."
+                    },
+                    "issueDate": {
+                      "type": "string",
+                      "format": "date",
+                      "nullable": true
+                    },
+                    "source": {
+                      "type": "string",
+                      "nullable": true,
+                      "enum": [
+                        "HeadCoach",
+                        "Totvs"
+                      ],
+                      "description": "Onde a nota foi emitida."
+                    },
+                    "quantity": {
+                      "type": "number",
+                      "nullable": true,
+                      "description": "Peças desta nota usadas na troca / devolução."
+                    },
+                    "unitValue": {
+                      "type": "number",
+                      "nullable": true,
+                      "description": "Valor pago por peça nessa nota."
+                    }
+                  }
+                }
+              }
+            },
+            "nullable": true
+          },
+          "productSwaps": {
+            "description": "Peças trocadas no faturamento: o pedido pedia `fromProduct…` e saiu `toProduct…` (mesmo modelo em outro tamanho / cor). Lista vazia quando não houve.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fromProductCode": {
+                  "type": "integer",
+                  "nullable": true
+                },
+                "fromProductName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "toProductCode": {
+                  "type": "integer",
+                  "nullable": true
+                },
+                "toProductName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "quantity": {
+                  "type": "number",
+                  "nullable": true
+                }
+              }
+            },
+            "nullable": true
+          },
+          "billingDiscount": {
+            "description": "Desconto dado no faturamento (percentual) e quem liberou, quando passou do limite. Nulo quando não houve.",
+            "type": "object",
+            "properties": {
+              "percentage": {
+                "type": "number",
+                "nullable": true
+              },
+              "releasedBy": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "nullable": true
+          },
+          "suframa": {
+            "description": "Venda para a Zona Franca / área de livre comércio: inscrição SUFRAMA do cliente, a alíquota e o ICMS desonerado na nota. Nulo nas demais.",
+            "type": "object",
+            "properties": {
+              "registration": {
+                "type": "string",
+                "nullable": true
+              },
+              "percentage": {
+                "type": "number",
+                "nullable": true
+              },
+              "exemptIcmsValue": {
+                "type": "number",
+                "nullable": true
+              }
+            },
+            "nullable": true
+          },
+          "missingItemsCredit": {
+            "description": "Peças do pedido que faltaram no faturamento e viraram saldo bônus do cliente (`bonusId` em customer-balance/billing-bonus), com o chamado aberto para o financeiro (`ticketNumber`). `status`: gerado, pendente ou erro. Nulo quando não faltou peça paga.",
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "nullable": true
+              },
+              "value": {
+                "type": "number",
+                "nullable": true
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "productCode": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "productName": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "quantity": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "value": {
+                      "type": "number",
+                      "nullable": true
+                    }
+                  }
+                }
+              },
+              "bonusId": {
+                "type": "integer",
+                "nullable": true
+              },
+              "ticketNumber": {
+                "type": "integer",
+                "nullable": true
+              },
+              "requestedDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "generatedDate": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "createdBy": {
+                "type": "string",
+                "nullable": true
+              },
+              "error": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "nullable": true
+          },
+          "paymentAdjustment": {
+            "description": "Correção da forma de pagamento feita depois do faturamento (texto de como estava e como ficou, o motivo e quem fez). Nulo quando não houve.",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "nullable": true
+              },
+              "to": {
+                "type": "string",
+                "nullable": true
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              },
+              "adjustedBy": {
+                "type": "string",
+                "nullable": true
+              },
+              "date": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
               }
             },
             "nullable": true
@@ -1043,7 +1551,7 @@
             "nullable": true
           },
           "shipping": {
-            "description": "Dados de transporte da nota (faturamento), com as chaves em português como gravado na tela (transportadora, volumes, peso…).",
+            "description": "Dados de transporte da nota (faturamento), com as chaves como gravadas na tela: `code` e `nome` da transportadora, `cnpj` / `cpf`, `ie`, `uf`, `xMun` (cidade), `xEnder` (endereço), `servico`, `volumes`, `pesoB` (peso bruto), `pesoL` (peso líquido) e `modFrete` (0 = por conta do remetente, 1 = do destinatário, 9 = sem frete).",
             "type": "object",
             "additionalProperties": true,
             "nullable": true
@@ -1270,6 +1778,21 @@
             "type": "integer",
             "nullable": true
           },
+          "nfceOperationCode": {
+            "description": "Operação própria da loja para a venda em NFC-e. Nulo = a padrão do PDV (510; 545 nas lojas 95 e 98).",
+            "type": "integer",
+            "nullable": true
+          },
+          "nfeOperationCode": {
+            "description": "Operação própria da loja para a venda em NF-e. Nulo = a padrão do PDV.",
+            "type": "integer",
+            "nullable": true
+          },
+          "exchangeOperationCode": {
+            "description": "Operação própria da loja para a troca (NF-e de devolução). Nulo = a padrão do PDV.",
+            "type": "integer",
+            "nullable": true
+          },
           "lastChangeDate": {
             "description": "Última alteração.",
             "type": "string",
@@ -1382,6 +1905,11 @@
           },
           "transactionCode": {
             "description": "Transação de origem (transaction/transactions).",
+            "type": "integer",
+            "nullable": true
+          },
+          "paymentId": {
+            "description": "Pagamento da transação que gerou o título (paymentId em transaction/transactions/{transactionCode}/payments).",
             "type": "integer",
             "nullable": true
           },
@@ -1617,6 +2145,16 @@
             "type": "integer",
             "nullable": true
           },
+          "reconciledBy": {
+            "description": "Quem conciliou.",
+            "type": "string",
+            "nullable": true
+          },
+          "bluecardExternalId": {
+            "description": "Identificador da parcela no crediário BlueCard (HC-<fatura>-<parcela>): é com ele que o HeadCoach envia a parcela ao BlueCard e que o pagamento feito no aplicativo volta e baixa o título. Só nos títulos de portador BLUECARD; a compra está em `bluecard` da transação.",
+            "type": "string",
+            "nullable": true
+          },
           "settledBy": {
             "description": "Quem baixou (\"automático (na emissão)\" para os que nascem pagos).",
             "type": "string",
@@ -1737,6 +2275,69 @@
           },
           "reconciliationDate": {
             "description": "Quando foi conciliado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
+      "ReceivableSettings": {
+        "type": "object",
+        "description": "Uma linha só, com o que a tela usa para calcular: juros e multa do título em atraso, taxa de cada forma de pagamento (vira `feePercentage` / `feeValue` do título) e em quantos dias cada forma liquida (`settlementDate`).",
+        "properties": {
+          "monthlyInterestPercentage": {
+            "description": "Juros ao mês do título em atraso (%).",
+            "type": "number",
+            "nullable": true
+          },
+          "finePercentage": {
+            "description": "Multa do título em atraso (%).",
+            "type": "number",
+            "nullable": true
+          },
+          "creditCardFeePercentage": {
+            "description": "Taxa do cartão de crédito à vista (%).",
+            "type": "number",
+            "nullable": true
+          },
+          "installmentCreditCardFeePercentage": {
+            "description": "Taxa do cartão de crédito parcelado (%).",
+            "type": "number",
+            "nullable": true
+          },
+          "debitCardFeePercentage": {
+            "description": "Taxa do cartão de débito (%).",
+            "type": "number",
+            "nullable": true
+          },
+          "pixFeePercentage": {
+            "description": "Taxa do Pix (%).",
+            "type": "number",
+            "nullable": true
+          },
+          "creditCardSettlementDays": {
+            "description": "Dias para o cartão de crédito liquidar.",
+            "type": "integer",
+            "nullable": true
+          },
+          "debitCardSettlementDays": {
+            "description": "Dias para o cartão de débito liquidar.",
+            "type": "integer",
+            "nullable": true
+          },
+          "pixSettlementDays": {
+            "description": "Dias para o Pix liquidar.",
+            "type": "integer",
+            "nullable": true
+          },
+          "changedBy": {
+            "description": "Quem alterou por último.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastChangeDate": {
+            "description": "Última alteração.",
             "type": "string",
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
@@ -1932,6 +2533,11 @@
           "barcode": {
             "description": "Linha digitável do boleto.",
             "type": "string",
+            "nullable": true
+          },
+          "hasAttachment": {
+            "description": "Tem documento anexado (nota fiscal / boleto do fornecedor) no HeadCoach.",
+            "type": "boolean",
             "nullable": true
           },
           "expenseCode": {
@@ -2278,6 +2884,13 @@
             "type": "string",
             "nullable": true
           },
+          "paidDate": {
+            "description": "Quando foi marcada como paga (a data do pagamento em si é `paymentDate`).",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
           "paymentDate": {
             "description": "Data do pagamento.",
             "type": "string",
@@ -2438,7 +3051,7 @@
       },
       "BalanceMovement": {
         "type": "object",
-        "description": "Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai.",
+        "description": "Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai. O ajuste manual (`Adjustment`) cobre três coisas, que a `reference` distingue: crédito gerado na tela (\"gerado no HeadCoach\"), transferência de saldo entre lojas (\"transferência entre lojas <origem>→<destino> #código\" — sai de uma loja e entra na outra com a MESMA referência) e saldo zerado (\"saldo zerado\"). Os três só por owner ou admin, com o motivo em `observation`.",
         "properties": {
           "movementId": {
             "description": "Identificador do movimento.",
@@ -2500,7 +3113,7 @@
             "nullable": true
           },
           "reference": {
-            "description": "Referência curta (ex.: troca 242).",
+            "description": "Referência curta (ex.: troca 242; \"transferência entre lojas 5→99 #ABC123\"; \"saldo zerado\").",
             "type": "string",
             "nullable": true
           },
@@ -3060,7 +3673,7 @@
             "nullable": true
           },
           "summary": {
-            "description": "Resumo do caixa gravado no fechamento.",
+            "description": "Resumo do caixa gravado no fechamento, com as chaves da tela: `totalVendas`, `formas` (total por forma de pagamento), `fundoFinal`, `retiradaFechamento`, `pendentes` (vendas sem nota no fechamento) e `contagem` (`dinheiroContado`, `diferencaDinheiro`, `diferencaTotal`).",
             "type": "object",
             "additionalProperties": true,
             "nullable": true
@@ -3139,7 +3752,7 @@
             "nullable": true
           },
           "verification": {
-            "description": "O que foi conferido no encerramento (chaves em português, como na tela).",
+            "description": "O que foi conferido no encerramento, com as chaves da tela: `caixas` (caixas do dia), `comDiferenca` (quantos fecharam com diferença), `vendasPendentes` (vendas sem nota) e `automatico` (encerramento feito sozinho pelo sistema).",
             "type": "object",
             "additionalProperties": true,
             "nullable": true
@@ -3156,6 +3769,37 @@
           },
           "closingDate": {
             "description": "Quando foi encerrado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
+      "CashierDate": {
+        "type": "object",
+        "description": "Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.",
+        "properties": {
+          "branchCode": {
+            "description": "Empresa.",
+            "type": "integer",
+            "example": 95,
+            "nullable": true
+          },
+          "cashierDate": {
+            "description": "Data do caixa em vigor.",
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-18",
+            "nullable": true
+          },
+          "changedBy": {
+            "description": "Quem mudou a data por último.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastChangeDate": {
+            "description": "Quando a data mudou por último.",
             "type": "string",
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
@@ -3768,6 +4412,18 @@
             ],
             "nullable": true
           },
+          "locationChangedBy": {
+            "description": "Quem marcou onde a mercadoria está.",
+            "type": "string",
+            "nullable": true
+          },
+          "locationChangedDate": {
+            "description": "Quando o local foi marcado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
           "source": {
             "description": "Por onde entrou (publico = link público).",
             "type": "string",
@@ -3924,6 +4580,28 @@
             "type": "string",
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "transactionOperationCode": {
+            "description": "Operação da transação de devolução.",
+            "type": "integer",
+            "nullable": true
+          },
+          "transactionRfidTagQuantity": {
+            "description": "Etiquetas RFID lidas na Devolução RFID.",
+            "type": "integer",
+            "nullable": true
+          },
+          "transactionCreatedDate": {
+            "description": "Quando a transação de devolução foi gerada.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "transactionCreatedBy": {
+            "description": "Quem gerou a transação de devolução.",
+            "type": "string",
             "nullable": true
           },
           "createdDate": {
@@ -4278,6 +4956,18 @@
             ],
             "nullable": true
           },
+          "locationChangedBy": {
+            "description": "Quem marcou onde a mercadoria está.",
+            "type": "string",
+            "nullable": true
+          },
+          "locationChangedDate": {
+            "description": "Quando o local foi marcado.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
           "originBranchCode": {
             "description": "Empresa de origem.",
             "type": "integer",
@@ -4398,6 +5088,21 @@
               "Attended",
               "Canceled"
             ],
+            "nullable": true
+          },
+          "transactionOperationCode": {
+            "description": "Operação da transação gerada para a solicitação, quando foi gravada (transferências feitas pela leitura RFID da expedição).",
+            "type": "integer",
+            "nullable": true
+          },
+          "transactionRfidTagQuantity": {
+            "description": "Etiquetas RFID lidas na transferência.",
+            "type": "integer",
+            "nullable": true
+          },
+          "transactionCreatedBy": {
+            "description": "Quem gerou a transação.",
+            "type": "string",
             "nullable": true
           },
           "createdDate": {
@@ -4650,6 +5355,79 @@
           }
         }
       },
+      "RfidTagStatus": {
+        "type": "object",
+        "description": "Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.",
+        "properties": {
+          "rfidTag": {
+            "description": "Etiqueta RFID (EPC).",
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "description": "Último movimento da etiqueta.",
+            "type": "string",
+            "enum": [
+              "Sale",
+              "Return",
+              "Reversal"
+            ],
+            "nullable": true
+          },
+          "branchCode": {
+            "description": "Empresa do último movimento.",
+            "type": "integer",
+            "nullable": true
+          },
+          "transactionCode": {
+            "description": "Transação do último movimento.",
+            "type": "integer",
+            "nullable": true
+          },
+          "productCode": {
+            "description": "Produto.",
+            "type": "integer",
+            "nullable": true
+          },
+          "productName": {
+            "description": "Nome do produto.",
+            "type": "string",
+            "nullable": true
+          },
+          "referenceName": {
+            "description": "Referência.",
+            "type": "string",
+            "nullable": true
+          },
+          "unitValue": {
+            "description": "Valor unitário na transação.",
+            "type": "number",
+            "nullable": true
+          },
+          "customerName": {
+            "description": "Cliente da transação.",
+            "type": "string",
+            "nullable": true
+          },
+          "sellerName": {
+            "description": "Vendedor da transação.",
+            "type": "string",
+            "nullable": true
+          },
+          "invoiceAccessKey": {
+            "description": "Chave da nota.",
+            "type": "string",
+            "nullable": true
+          },
+          "statusDate": {
+            "description": "Quando aconteceu.",
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          }
+        }
+      },
       "RfidInventory": {
         "type": "object",
         "description": "Contagens feitas com o coletor RFID (app Android). A lista traz o resumo por produto; as etiquetas lidas ficam em /inventories/{inventoryId}/rfid-tags.",
@@ -4727,6 +5505,12 @@
             "type": "string",
             "format": "date-time",
             "example": "2026-11-18T17:00:00+00:00",
+            "nullable": true
+          },
+          "device": {
+            "description": "Aparelho que fez a leitura, como o aplicativo informou: `modelo`, `app` (versão do aplicativo), `sdk`, `modo` e `potencia` do leitor. Nulo nos balanços feitos pelo navegador.",
+            "type": "object",
+            "additionalProperties": true,
             "nullable": true
           },
           "observation": {
@@ -5244,7 +6028,7 @@
           "General"
         ],
         "summary": "Empresas (lojas e matriz)",
-        "description": "Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.",
+        "description": "Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -5297,6 +6081,15 @@
             "in": "query",
             "required": false,
             "description": "Trecho da descrição.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "headcoachOnly",
+            "in": "query",
+            "required": false,
+            "description": "Só as lojas que vendem só pelo HeadCoach (true) ou só as demais (false).",
             "schema": {
               "type": "string"
             }
@@ -5419,7 +6212,7 @@
           "General"
         ],
         "summary": "Empresas (lojas e matriz) — um registro",
-        "description": "Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.",
+        "description": "Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.",
         "parameters": [
           {
             "name": "branchCode",
@@ -6043,6 +6836,15 @@
             "schema": {
               "type": "string",
               "example": "101,102"
+            }
+          },
+          {
+            "name": "bluecardPurchaseId",
+            "in": "query",
+            "required": false,
+            "description": "Transação amarrada a esta compra do BlueCard (identificador da compra no BlueCard).",
+            "schema": {
+              "type": "string"
             }
           },
           {
@@ -8643,6 +9445,126 @@
         }
       }
     },
+    "/api/headcoach/accounts-receivable/v1/settings": {
+      "get": {
+        "tags": [
+          "AccountsReceivable"
+        ],
+        "summary": "Parâmetros do contas a receber",
+        "description": "Uma linha só, com o que a tela usa para calcular: juros e multa do título em atraso, taxa de cada forma de pagamento (vira `feePercentage` / `feeValue` do título) e em quantos dias cada forma liquida (`settlementDate`).",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ReceivableSettings"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/headcoach/accounts-payable/v1/documents": {
       "get": {
         "tags": [
@@ -10245,7 +11167,7 @@
           "CustomerBalance"
         ],
         "summary": "Extrato dos saldos",
-        "description": "Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai.",
+        "description": "Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai. O ajuste manual (`Adjustment`) cobre três coisas, que a `reference` distingue: crédito gerado na tela (\"gerado no HeadCoach\"), transferência de saldo entre lojas (\"transferência entre lojas <origem>→<destino> #código\" — sai de uma loja e entra na outra com a MESMA referência) e saldo zerado (\"saldo zerado\"). Os três só por owner ou admin, com o motivo em `observation`.",
         "parameters": [
           {
             "name": "branchCodeList",
@@ -11751,6 +12673,228 @@
                 "example": {
                   "code": "Unauthorized",
                   "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/cashier/v1/cashier-dates": {
+      "get": {
+        "tags": [
+          "Cashier"
+        ],
+        "summary": "Data do caixa de cada empresa",
+        "description": "Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.",
+        "parameters": [
+          {
+            "name": "branchCodeList",
+            "in": "query",
+            "required": false,
+            "description": "Empresas, separadas por vírgula.",
+            "schema": {
+              "type": "string",
+              "example": "95,99"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CashierDate"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/cashier/v1/cashier-dates/{branchCode}": {
+      "get": {
+        "tags": [
+          "Cashier"
+        ],
+        "summary": "Data do caixa de cada empresa — um registro",
+        "description": "Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.",
+        "parameters": [
+          {
+            "name": "branchCode",
+            "in": "path",
+            "required": true,
+            "description": "Código da empresa.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashierDate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
                   "detailedMessage": null
                 }
               }
@@ -14645,6 +15789,291 @@
                 "example": {
                   "code": "Unauthorized",
                   "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/stock/v1/rfid-tag-status": {
+      "get": {
+        "tags": [
+          "Stock"
+        ],
+        "summary": "Situação atual de cada etiqueta RFID",
+        "description": "Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.",
+        "parameters": [
+          {
+            "name": "rfidTagList",
+            "in": "query",
+            "required": false,
+            "description": "Etiquetas, separadas por vírgula.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "branchCodeList",
+            "in": "query",
+            "required": false,
+            "description": "Empresas, separadas por vírgula.",
+            "schema": {
+              "type": "string",
+              "example": "95,99"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Último movimento (aceita lista). Valores: Sale, Return, Reversal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Sale",
+                "Return",
+                "Reversal"
+              ]
+            }
+          },
+          {
+            "name": "productCode",
+            "in": "query",
+            "required": false,
+            "description": "Produto.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "transactionCode",
+            "in": "query",
+            "required": false,
+            "description": "Etiquetas de uma transação.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": false,
+            "description": "A partir de (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": false,
+            "description": "Até (AAAA-MM-DD).",
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-18"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Página (começa em 1).",
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "description": "Itens por página (até 1000).",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RfidTagStatus"
+                      }
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Itens nesta página."
+                    },
+                    "totalItems": {
+                      "type": "integer",
+                      "description": "Total de itens que atendem aos filtros."
+                    },
+                    "totalPages": {
+                      "type": "integer"
+                    },
+                    "hasNext": {
+                      "type": "boolean",
+                      "description": "Há próxima página."
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "pageSize": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Erro interno",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InternalError",
+                  "message": "Erro interno ao consultar",
+                  "detailedMessage": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/headcoach/stock/v1/rfid-tag-status/{rfidTag}": {
+      "get": {
+        "tags": [
+          "Stock"
+        ],
+        "summary": "Situação atual de cada etiqueta RFID — um registro",
+        "description": "Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.",
+        "parameters": [
+          {
+            "name": "rfidTag",
+            "in": "path",
+            "required": true,
+            "description": "Etiqueta RFID (EPC).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfidTagStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido ou desconhecido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "InvalidParameter",
+                  "message": "Parâmetro \"page\" inválido",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Chave de acesso ausente ou inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "Unauthorized",
+                  "message": "Chave de acesso inválida",
+                  "detailedMessage": null
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Registro não encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "NotFound",
+                  "message": "Registro não encontrado",
                   "detailedMessage": null
                 }
               }

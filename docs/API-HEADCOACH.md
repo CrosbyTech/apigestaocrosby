@@ -23,7 +23,7 @@ Cadastros de base: empresas, operações e formas de pagamento. Os códigos daqu
 
 ### GET /api/headcoach/general/v1/branches
 
-Empresas (lojas e matriz) — Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.
+Empresas (lojas e matriz) — Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.
 
 Parâmetros:
 - `branchCodeList` (string) — Códigos das empresas, separados por vírgula.
@@ -32,6 +32,7 @@ Parâmetros:
 - `state` (string) — UF (ex.: RN).
 - `cnpj` (string) — CNPJ exato, só dígitos.
 - `name` (string) — Trecho da descrição.
+- `headcoachOnly` (string) — Só as lojas que vendem só pelo HeadCoach (true) ou só as demais (false).
 - `page` (integer) — Página (começa em 1).
 - `pageSize` (integer) — Itens por página (até 1000).
 
@@ -39,7 +40,7 @@ Resposta: página de `Branch`
 
 ### GET /api/headcoach/general/v1/branches/{branchCode}
 
-Empresas (lojas e matriz) — um registro — Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.
+Empresas (lojas e matriz) — um registro — Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.
 
 Parâmetros:
 - `branchCode` (caminho, obrigatório) — Código da empresa.
@@ -81,7 +82,7 @@ Resposta: página de `PaymentMethod`
 
 Esquemas:
 
-**Branch** — Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.
+**Branch** — Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.
 
 - `branchCode` (integer) — Código da empresa (o mesmo do TOTVS).
 - `description` (string) — Descrição da empresa.
@@ -93,6 +94,10 @@ Esquemas:
 - `stateRegistration` (string) — Inscrição estadual.
 - `state` (string) — UF.
 - `city` (string) — Cidade.
+- `cityIbgeCode` (integer) — Código IBGE da cidade.
+- `address` (object) — Endereço do cadastro, com as chaves do TOTVS: cep, publicPlace (tipo do logradouro), address, addressNumber, complement, neighborhood, cityName, stateAbbreviation, ibgeCityCode.
+- `taxRegime` (string) — Regime tributário com que o HeadCoach emite as notas da empresa: `SimplesNacional` (CRT 1, sem ICMS destacado — lojas dos grupos IRMAOS) ou `Normal` (CRT 3). Nulo nas franquias (o HeadCoach não emite por elas). Valores: SimplesNacional, Normal.
+- `headcoachOnly` (boolean) — A loja vende só pelo PDV Crosby do HeadCoach e não lança mais venda no TOTVS (venda, nota, contas a receber, caixa e crediário BlueCard ficam no HeadCoach).
 - `isActive` (boolean) — Empresa ativa.
 - `isOwn` (boolean) — Empresa própria (não franquia).
 - `lastChangeDate` (date-time) — Última alteração do cadastro.
@@ -140,6 +145,7 @@ Parâmetros:
 - `orderKey` (string) — Chave do pedido no Dryland (exata).
 - `cashierCode` (integer) — Transações de um caixa.
 - `transactionCodeList` (string) — Números das transações, separados por vírgula.
+- `bluecardPurchaseId` (string) — Transação amarrada a esta compra do BlueCard (identificador da compra no BlueCard).
 - `startChangeDate` (string) — Alteradas a partir de (AAAA-MM-DD) — para sincronização.
 - `page` (integer) — Página (começa em 1).
 - `pageSize` (integer) — Itens por página (até 1000).
@@ -252,6 +258,8 @@ Esquemas:
 - `productName` (string) — Nome do produto.
 - `referenceName` (string) — Referência (modelo).
 - `ncm` (string) — NCM.
+- `cest` (string) — CEST, quando o produto tem.
+- `fiscalType` (string) — Tipo fiscal da peça na nota: `OwnProduction` (produção própria) ou `Purchased` (adquirida de terceiros). É o que decide o CFOP. Nulo nas transações antigas. Valores: OwnProduction, Purchased.
 - `cfop` (integer) — CFOP do item na nota.
 - `measureUnit` (string) — Unidade.
 - `quantity` (number) — Quantidade.
@@ -295,6 +303,7 @@ Esquemas:
 - `cancelProtocol` (string) — Protocolo do evento de cancelamento.
 - `cancelReason` (string) — Justificativa do cancelamento enviada à SEFAZ.
 - `consultUrl` (string) — Endereço de consulta da NFC-e pela chave.
+- `qrCodeUrl` (string) — Conteúdo do QR Code da NFC-e (o endereço de consulta que vai impresso no cupom). Nulo na NF-e.
 - `errorMessage` (string) — Erro ao emitir, quando houve.
 - `customerCode` (integer) — Código do cliente da transação.
 - `customerName` (string) — Nome do cliente.
@@ -331,7 +340,18 @@ Esquemas:
 - `operationCode` (integer) — Operação (general/operations).
 - `channel` (string) — Canal de venda do pedido (só faturamento). `Bonification` = bonificação: peças dadas ao cliente, sem pagamento (ver `bonification`). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.
 - `bonification` (object) — Bonificação (operação 5910 do faturamento avulso): peças dadas ao cliente, sem custo para ele. A nota sai com cada peça no custo `costName`, sem pagamento e sem contas a receber; `totalValue` é o valor da nota, não uma venda. `reason` é a justificativa obrigatória de quem fez. Nulo nas demais transações.
-- `transfer` (object) — Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. Nulo quando não é transferência.
+- `transfer` (object) — Transferência de mercadoria (origin `Transfer`): loja de destino e a natureza (`Transfer` entre CNPJs da mesma empresa, `Sale` entre empresas diferentes). `withoutInvoice` = true na movimentação entre Brejinho (99) e Matriz (1): é o mesmo estoque em dois CNPJs, então fica só a transação e a saída das peças, sem nota fiscal — a transação aparece atendida e sem itens em /invoices. `isRetail` = true na Transferência entre Lojas do varejo (loja → loja, ou loja → Brejinho); `originBranchCode` é a loja de origem quando gravada (nulo nas antigas: é a própria empresa da transação); `requestId` liga à solicitação em transfer/requests e `invoiceOperationCode` é a operação da nota (7272 transferência, 7273 / 7280 venda entre empresas). Nulo quando não é transferência.
+- `headcoachOnly` (boolean) — A transação existe SÓ no HeadCoach: não tem espelho no TOTVS (`totvsTransactionCode` nulo). É o caso do faturamento da empresa 99 desde 13/11/2026, do PDV Crosby das lojas que saíram do TOTVS (ver `headcoachOnly` em general/branches) e da movimentação Brejinho ↔ Matriz.
+- `isFinalConsumer` (boolean) — Faturamento marcado como venda a consumidor final (muda o imposto da nota). Nulo no PDV.
+- `saleDate` (date) — Data da venda informada no faturamento, quando é diferente da data do caixa em que a transação entrou. Nulo = a própria data do registro.
+- `bluecard` (object) — Compra do crediário BlueCard amarrada a esta venda. O PDV Crosby pede a compra ao BlueCard, o cliente aprova no aplicativo e só então a venda fecha; `schedule` são as parcelas que o cliente aceitou (as mesmas dos títulos em accounts-receivable/documents, portador BLUECARD). `invoiceSentDate` = quando a nota foi enviada ao BlueCard. `canceledInAppDate` preenchido = a compra foi cancelada no aplicativo DEPOIS de a venda existir (precisa de acerto). Nulo nas vendas sem BlueCard e nas feitas antes desta amarração.
+- `exchange` (object) — Troca no PDV Crosby (origin `Exchange`): cada peça devolvida com a(s) nota(s) em que foi comprada e o valor pago nela (`originInvoices`) — é esse valor que vira Credev. `couponCode` = troca de presente feita pelo cupom (sale-panel/exchange-coupons), com quem comprou em `buyerCode` / `buyerName`. Nulo nas demais transações.
+- `returnDetails` (object) — Devolução de mercadoria da expedição (origin `Return`): motivo e operação, a solicitação de origem (`requestId`, em return/requests), a transação / nota original quando é anulação de nota (`originalTransactionCode`, `originalInvoiceCode`, `originalInvoiceAccessKey`) e, na Devolução RFID, as notas de compra referenciadas (`originInvoices`). Nulo nas demais transações.
+- `productSwaps` (array) — Peças trocadas no faturamento: o pedido pedia `fromProduct…` e saiu `toProduct…` (mesmo modelo em outro tamanho / cor). Lista vazia quando não houve.
+- `billingDiscount` (object) — Desconto dado no faturamento (percentual) e quem liberou, quando passou do limite. Nulo quando não houve.
+- `suframa` (object) — Venda para a Zona Franca / área de livre comércio: inscrição SUFRAMA do cliente, a alíquota e o ICMS desonerado na nota. Nulo nas demais.
+- `missingItemsCredit` (object) — Peças do pedido que faltaram no faturamento e viraram saldo bônus do cliente (`bonusId` em customer-balance/billing-bonus), com o chamado aberto para o financeiro (`ticketNumber`). `status`: gerado, pendente ou erro. Nulo quando não faltou peça paga.
+- `paymentAdjustment` (object) — Correção da forma de pagamento feita depois do faturamento (texto de como estava e como ficou, o motivo e quem fez). Nulo quando não houve.
 - `transactionDate` (date-time) — Data e hora do registro.
 - `cashierCode` (integer) — Caixa em que a transação entrou (cashier/cashiers).
 - `cashierDate` (date) — Data do caixa, quando gravada na transação.
@@ -356,7 +376,7 @@ Esquemas:
 - `usedCashbackWriteOff` (object) — Baixa do cashback usado na venda: quanto saiu de fato do saldo bônus do TOTVS e de que lojas (`branches`). `value` zero com `error` preenchido = o desconto ficou na venda mas a baixa não aconteceu. Nulo nas vendas anteriores a 19/11/2026, que não têm esse registro.
 - `usedCashbackRefund` (object) — Cashback que a venda tinha usado e voltou para o cliente quando ela foi cancelada (nulo se não houve devolução). O valor volta no saldo bônus do TOTVS, nas lojas de onde tinha saído (`branches`), valendo até `validUntil`. `branchCode` é a loja da venda.
 - `paymentSchedule` (array) — Parcelas combinadas no pedido para o boleto (faturamento).
-- `shipping` (object) — Dados de transporte da nota (faturamento), com as chaves em português como gravado na tela (transportadora, volumes, peso…).
+- `shipping` (object) — Dados de transporte da nota (faturamento), com as chaves como gravadas na tela: `code` e `nome` da transportadora, `cnpj` / `cpf`, `ie`, `uf`, `xMun` (cidade), `xEnder` (endereço), `servico`, `volumes`, `pesoB` (peso bruto), `pesoL` (peso líquido) e `modFrete` (0 = por conta do remetente, 1 = do destinatário, 9 = sem frete).
 - `paymentReceipts` (array) — Comprovantes de pagamento anexados (endereços dos arquivos).
 - `observation` (string) — Observação.
 - `createdBy` (string) — Usuário que registrou.
@@ -461,6 +481,7 @@ Esquemas:
 - `cancelProtocol` (string) — Protocolo do evento de cancelamento.
 - `cancelReason` (string) — Justificativa do cancelamento enviada à SEFAZ.
 - `consultUrl` (string) — Endereço de consulta da NFC-e pela chave.
+- `qrCodeUrl` (string) — Conteúdo do QR Code da NFC-e (o endereço de consulta que vai impresso no cupom). Nulo na NF-e.
 - `errorMessage` (string) — Erro ao emitir, quando houve.
 - `customerCode` (integer) — Código do cliente da transação.
 - `customerName` (string) — Nome do cliente.
@@ -491,6 +512,9 @@ Esquemas:
 - `nextNfceCode` (integer) — Próximo número de NFC-e.
 - `nfeSerialCode` (integer) — Série da NF-e.
 - `nextNfeCode` (integer) — Próximo número de NF-e.
+- `nfceOperationCode` (integer) — Operação própria da loja para a venda em NFC-e. Nulo = a padrão do PDV (510; 545 nas lojas 95 e 98).
+- `nfeOperationCode` (integer) — Operação própria da loja para a venda em NF-e. Nulo = a padrão do PDV.
+- `exchangeOperationCode` (integer) — Operação própria da loja para a troca (NF-e de devolução). Nulo = a padrão do PDV.
 - `lastChangeDate` (date-time) — Última alteração.
 
 ## AccountsReceivable — `accounts-receivable`
@@ -572,6 +596,16 @@ Parâmetros:
 
 Resposta:  `ReceivableReconciliation`
 
+### GET /api/headcoach/accounts-receivable/v1/settings
+
+Parâmetros do contas a receber — Uma linha só, com o que a tela usa para calcular: juros e multa do título em atraso, taxa de cada forma de pagamento (vira `feePercentage` / `feeValue` do título) e em quantos dias cada forma liquida (`settlementDate`).
+
+Parâmetros:
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `ReceivableSettings`
+
 Esquemas:
 
 **ReceivableSettlement** — Recebimento de título que estava em aberto (boleto / fatura), com juros, multa e desconto. Não há estorno de baixa.
@@ -597,6 +631,7 @@ Esquemas:
 - `receivableCode` (integer) — Número da fatura.
 - `installmentCode` (integer) — Parcela.
 - `transactionCode` (integer) — Transação de origem (transaction/transactions).
+- `paymentId` (integer) — Pagamento da transação que gerou o título (paymentId em transaction/transactions/{transactionCode}/payments).
 - `origin` (string) — Sistema de origem: PDV ou faturamento da expedição. Valores: Pos, Billing.
 - `channel` (string) — Canal de venda (faturamento). Valores: Reseller, Franchise, Retail, Multibrand, Transfer, Return, General, Bonification.
 - `operationCode` (integer) — Operação da transação.
@@ -634,6 +669,8 @@ Esquemas:
 - `needsReconciliation` (boolean) — Título de cartão ou Pix que entra na conciliação D+1.
 - `reconciliationDate` (date-time) — Quando foi conciliado.
 - `reconciliationId` (integer) — Conciliação que fechou o título (/reconciliations).
+- `reconciledBy` (string) — Quem conciliou.
+- `bluecardExternalId` (string) — Identificador da parcela no crediário BlueCard (HC-<fatura>-<parcela>): é com ele que o HeadCoach envia a parcela ao BlueCard e que o pagamento feito no aplicativo volta e baixa o título. Só nos títulos de portador BLUECARD; a compra está em `bluecard` da transação.
 - `settledBy` (string) — Quem baixou ("automático (na emissão)" para os que nascem pagos).
 - `settledDate` (date-time) — Quando foi baixado.
 - `cancelDate` (date-time) — Quando foi cancelado.
@@ -656,6 +693,20 @@ Esquemas:
 - `observation` (string) — Observação.
 - `reconciledBy` (string) — Quem conciliou.
 - `reconciliationDate` (date-time) — Quando foi conciliado.
+
+**ReceivableSettings** — Uma linha só, com o que a tela usa para calcular: juros e multa do título em atraso, taxa de cada forma de pagamento (vira `feePercentage` / `feeValue` do título) e em quantos dias cada forma liquida (`settlementDate`).
+
+- `monthlyInterestPercentage` (number) — Juros ao mês do título em atraso (%).
+- `finePercentage` (number) — Multa do título em atraso (%).
+- `creditCardFeePercentage` (number) — Taxa do cartão de crédito à vista (%).
+- `installmentCreditCardFeePercentage` (number) — Taxa do cartão de crédito parcelado (%).
+- `debitCardFeePercentage` (number) — Taxa do cartão de débito (%).
+- `pixFeePercentage` (number) — Taxa do Pix (%).
+- `creditCardSettlementDays` (integer) — Dias para o cartão de crédito liquidar.
+- `debitCardSettlementDays` (integer) — Dias para o cartão de débito liquidar.
+- `pixSettlementDays` (integer) — Dias para o Pix liquidar.
+- `changedBy` (string) — Quem alterou por último.
+- `lastChangeDate` (date-time) — Última alteração.
 
 ## AccountsPayable — `accounts-payable`
 
@@ -824,6 +875,7 @@ Esquemas:
 - `paymentMethod` (string) — Forma de pagamento prevista. Valores: Pix, BankSlip, Transfer, DirectDebit, Card, Cash, Other.
 - `pixKey` (string) — Chave Pix ou Pix copia e cola.
 - `barcode` (string) — Linha digitável do boleto.
+- `hasAttachment` (boolean) — Tem documento anexado (nota fiscal / boleto do fornecedor) no HeadCoach.
 - `expenseCode` (integer) — Despesa (a da linha principal do rateio).
 - `expenseName` (string) — Nome da despesa.
 - `costCenterCode` (integer) — Centro de custo (o da linha principal do rateio).
@@ -876,6 +928,7 @@ Esquemas:
 - `includedBy` (string) — Quem incluiu o pagamento no banco.
 - `inclusionDate` (date-time) — Quando foi incluída no banco.
 - `paidBy` (string) — Quem marcou como paga.
+- `paidDate` (date-time) — Quando foi marcada como paga (a data do pagamento em si é `paymentDate`).
 - `paymentDate` (date) — Data do pagamento.
 - `settlementId` (integer) — Baixa gravada na duplicata (settlementId em /settlements).
 - `returnedBy` (string) — Quem devolveu ao contas a pagar.
@@ -919,7 +972,7 @@ Resposta: página de `CustomerBalance`
 
 ### GET /api/headcoach/customer-balance/v1/movements
 
-Extrato dos saldos — Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai.
+Extrato dos saldos — Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai. O ajuste manual (`Adjustment`) cobre três coisas, que a `reference` distingue: crédito gerado na tela ("gerado no HeadCoach"), transferência de saldo entre lojas ("transferência entre lojas <origem>→<destino> #código" — sai de uma loja e entra na outra com a MESMA referência) e saldo zerado ("saldo zerado"). Os três só por owner ou admin, com o motivo em `observation`.
 
 Parâmetros:
 - `branchCodeList` (string) — Empresas, separadas por vírgula.
@@ -999,7 +1052,7 @@ Esquemas:
 - `createdDate` (date-time) — Quando o saldo foi criado.
 - `lastChangeDate` (date-time) — Última alteração.
 
-**BalanceMovement** — Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai.
+**BalanceMovement** — Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai. O ajuste manual (`Adjustment`) cobre três coisas, que a `reference` distingue: crédito gerado na tela ("gerado no HeadCoach"), transferência de saldo entre lojas ("transferência entre lojas <origem>→<destino> #código" — sai de uma loja e entra na outra com a MESMA referência) e saldo zerado ("saldo zerado"). Os três só por owner ou admin, com o motivo em `observation`.
 
 - `movementId` (integer) — Identificador do movimento.
 - `branchCode` (integer) — Empresa do saldo.
@@ -1010,7 +1063,7 @@ Esquemas:
 - `balanceAfterValue` (number) — Saldo depois do movimento.
 - `transactionCode` (integer) — Transação ligada (venda que usou, ou troca que gerou).
 - `returnId` (integer) — Devolução que gerou o crédito (return/returns).
-- `reference` (string) — Referência curta (ex.: troca 242).
+- `reference` (string) — Referência curta (ex.: troca 242; "transferência entre lojas 5→99 #ABC123"; "saldo zerado").
 - `observation` (string) — Descrição do movimento.
 - `createdBy` (string) — Quem fez.
 - `movementDate` (date-time) — Quando aconteceu.
@@ -1138,6 +1191,26 @@ Parâmetros:
 
 Resposta: página de `CashierDayClosing`
 
+### GET /api/headcoach/cashier/v1/cashier-dates
+
+Data do caixa de cada empresa — Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.
+
+Parâmetros:
+- `branchCodeList` (string) — Empresas, separadas por vírgula.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `CashierDate`
+
+### GET /api/headcoach/cashier/v1/cashier-dates/{branchCode}
+
+Data do caixa de cada empresa — um registro — Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.
+
+Parâmetros:
+- `branchCode` (caminho, obrigatório) — Código da empresa.
+
+Resposta:  `CashierDate`
+
 Esquemas:
 
 **CashierMovement** — Entradas e saídas de dinheiro do caixa fora das vendas: suprimento, retirada (sangria) e a retirada do fechamento.
@@ -1191,7 +1264,7 @@ Esquemas:
 - `closingWithdrawalValue` (number) — Retirada feita no fechamento.
 - `differenceValue` (number) — Diferença total do fechamento.
 - `cashDifferenceValue` (number) — Diferença no dinheiro.
-- `summary` (object) — Resumo do caixa gravado no fechamento.
+- `summary` (object) — Resumo do caixa gravado no fechamento, com as chaves da tela: `totalVendas`, `formas` (total por forma de pagamento), `fundoFinal`, `retiradaFechamento`, `pendentes` (vendas sem nota no fechamento) e `contagem` (`dinheiroContado`, `diferencaDinheiro`, `diferencaTotal`).
 - `closingObservation` (string) — Observação do fechamento.
 - `reopenedDate` (date-time) — Quando foi reaberto.
 - `reopenedBy` (string) — Quem reabriu.
@@ -1206,10 +1279,17 @@ Esquemas:
 - `branchCode` (integer) — Empresa.
 - `cashierDate` (date) — Dia encerrado.
 - `nextCashierDate` (date) — Data do caixa depois do encerramento.
-- `verification` (object) — O que foi conferido no encerramento (chaves em português, como na tela).
+- `verification` (object) — O que foi conferido no encerramento, com as chaves da tela: `caixas` (caixas do dia), `comDiferenca` (quantos fecharam com diferença), `vendasPendentes` (vendas sem nota) e `automatico` (encerramento feito sozinho pelo sistema).
 - `authorizedBy` (string) — Quem autorizou, quando precisou de senha.
 - `closedBy` (string) — Quem encerrou.
 - `closingDate` (date-time) — Quando foi encerrado.
+
+**CashierDate** — Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.
+
+- `branchCode` (integer) — Empresa.
+- `cashierDate` (date) — Data do caixa em vigor.
+- `changedBy` (string) — Quem mudou a data por último.
+- `lastChangeDate` (date-time) — Quando a data mudou por último.
 
 ## Billing — `billing`
 
@@ -1438,6 +1518,8 @@ Esquemas:
 - `status` (string) — Situação da solicitação. Valores: AwaitingEvaluation, AwaitingReturn, InReturn, Completed, Canceled.
 - `returnType` (string) — Devolução comum ou por defeito. Valores: Regular, Defect.
 - `location` (string) — Onde a mercadoria está. Valores: InTransit, Headquarters, Local.
+- `locationChangedBy` (string) — Quem marcou onde a mercadoria está.
+- `locationChangedDate` (date-time) — Quando o local foi marcado.
 - `source` (string) — Por onde entrou (publico = link público).
 - `customerCode` (integer) — Código do cliente.
 - `customerName` (string) — Nome do cliente.
@@ -1466,6 +1548,10 @@ Esquemas:
 - `transactionValue` (number) — Valor da transação.
 - `transactionStatus` (string) — Situação da transação. Valores: InProgress, Closed, ExternalProcess, Attended, Canceled.
 - `transactionAttendedDate` (date-time) — Quando a transação foi atendida.
+- `transactionOperationCode` (integer) — Operação da transação de devolução.
+- `transactionRfidTagQuantity` (integer) — Etiquetas RFID lidas na Devolução RFID.
+- `transactionCreatedDate` (date-time) — Quando a transação de devolução foi gerada.
+- `transactionCreatedBy` (string) — Quem gerou a transação de devolução.
 - `createdDate` (date-time) — Quando a solicitação foi feita.
 - `lastChangeDate` (date-time) — Última alteração.
 - `returns` (array de Return) — Devoluções recebidas desta solicitação (só vem com expand=returns)
@@ -1598,6 +1684,8 @@ Esquemas:
 - `requestId` (integer) — Identificador da solicitação.
 - `status` (string) — Situação da solicitação. Valores: AwaitingTransfer, InTransfer, Completed, Canceled.
 - `location` (string) — Onde a mercadoria está. Valores: Origin, InTransit, Destination.
+- `locationChangedBy` (string) — Quem marcou onde a mercadoria está.
+- `locationChangedDate` (date-time) — Quando o local foi marcado.
 - `originBranchCode` (integer) — Empresa de origem.
 - `originBranchName` (string) — Nome da origem.
 - `destinationBranchCode` (integer) — Empresa de destino.
@@ -1620,6 +1708,9 @@ Esquemas:
 - `invoiceAccessKey` (string) — Chave da nota de saída.
 - `totvsTransactionCode` (integer) — Transação no TOTVS (transferências antigas, feitas lá).
 - `totvsTransactionStatus` (string) — Situação dessa transação. Valores: InProgress, Closed, ExternalProcess, Attended, Canceled.
+- `transactionOperationCode` (integer) — Operação da transação gerada para a solicitação, quando foi gravada (transferências feitas pela leitura RFID da expedição).
+- `transactionRfidTagQuantity` (integer) — Etiquetas RFID lidas na transferência.
+- `transactionCreatedBy` (string) — Quem gerou a transação.
 - `createdDate` (date-time) — Quando foi solicitada.
 - `lastChangeDate` (date-time) — Última alteração.
 - `transfers` (array de Transfer) — Transferências efetivadas desta solicitação (só vem com expand=transfers)
@@ -1742,6 +1833,32 @@ Parâmetros:
 
 Resposta: página de `RfidMovement`
 
+### GET /api/headcoach/stock/v1/rfid-tag-status
+
+Situação atual de cada etiqueta RFID — Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.
+
+Parâmetros:
+- `rfidTagList` (string) — Etiquetas, separadas por vírgula.
+- `branchCodeList` (string) — Empresas, separadas por vírgula.
+- `status` (string) — Último movimento (aceita lista). Valores: Sale, Return, Reversal.
+- `productCode` (integer) — Produto.
+- `transactionCode` (integer) — Etiquetas de uma transação.
+- `startDate` (string) — A partir de (AAAA-MM-DD).
+- `endDate` (string) — Até (AAAA-MM-DD).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `RfidTagStatus`
+
+### GET /api/headcoach/stock/v1/rfid-tag-status/{rfidTag}
+
+Situação atual de cada etiqueta RFID — um registro — Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.
+
+Parâmetros:
+- `rfidTag` (caminho, obrigatório) — Etiqueta RFID (EPC).
+
+Resposta:  `RfidTagStatus`
+
 ### GET /api/headcoach/stock/v1/inventories
 
 Balanços RFID — Contagens feitas com o coletor RFID (app Android). A lista traz o resumo por produto; as etiquetas lidas ficam em /inventories/{inventoryId}/rfid-tags.
@@ -1828,6 +1945,21 @@ Esquemas:
 - `invoiceAccessKey` (string) — Chave da nota.
 - `movementDate` (date-time) — Quando aconteceu.
 
+**RfidTagStatus** — Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.
+
+- `rfidTag` (string) — Etiqueta RFID (EPC).
+- `status` (string) — Último movimento da etiqueta. Valores: Sale, Return, Reversal.
+- `branchCode` (integer) — Empresa do último movimento.
+- `transactionCode` (integer) — Transação do último movimento.
+- `productCode` (integer) — Produto.
+- `productName` (string) — Nome do produto.
+- `referenceName` (string) — Referência.
+- `unitValue` (number) — Valor unitário na transação.
+- `customerName` (string) — Cliente da transação.
+- `sellerName` (string) — Vendedor da transação.
+- `invoiceAccessKey` (string) — Chave da nota.
+- `statusDate` (date-time) — Quando aconteceu.
+
 **RfidInventory** — Contagens feitas com o coletor RFID (app Android). A lista traz o resumo por produto; as etiquetas lidas ficam em /inventories/{inventoryId}/rfid-tags.
 
 - `inventoryId` (integer) — Identificador do balanço.
@@ -1843,6 +1975,7 @@ Esquemas:
 - `readQuantity` (integer) — Leituras feitas (uma etiqueta pode ser lida várias vezes).
 - `productSummary` (array) — Resumo por produto (chaves em português, como gravado pelo app).
 - `productSummaryDate` (date-time) — Quando o resumo por produto foi calculado.
+- `device` (object) — Aparelho que fez a leitura, como o aplicativo informou: `modelo`, `app` (versão do aplicativo), `sdk`, `modo` e `potencia` do leitor. Nulo nos balanços feitos pelo navegador.
 - `observation` (string) — Observação.
 - `createdDate` (date-time) — Quando o balanço chegou ao servidor.
 

@@ -1,6 +1,8 @@
 // API HEADCOACH › general — cadastros de base que os outros módulos referenciam.
 import { criarModulo, f, q, rotaCalculada, paginarEmMemoria } from './_engine.js';
 import { PAYMENT_METHOD_INFO } from './_maps.js';
+import { simplesDe } from '../../services/pdvFiscal.js';
+import { ehSoHeadcoach, lojasSoHeadcoach } from '../../utils/lojasHeadcoach.js';
 
 const modulo = criarModulo({
   nome: 'general',
@@ -13,7 +15,7 @@ modulo.recurso({
   path: '/branches',
   table: 'erp_empresas',
   summary: 'Empresas (lojas e matriz)',
-  description: 'Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias.',
+  description: 'Todas as empresas do grupo, com CNPJ e a pessoa correspondente. `isOwn` separa as empresas próprias das franquias. `headcoachOnly` marca as lojas que já vendem só pelo PDV Crosby do HeadCoach (não lançam mais venda no TOTVS): as vendas delas estão em transaction/transactions e não em consultas do TOTVS.',
   key: [{ param: 'branchCode', col: 'code', type: 'integer', description: 'Código da empresa.' }],
   order: [['code', true]],
   fields: [
@@ -27,6 +29,10 @@ modulo.recurso({
     f('stateRegistration', 'ie', 'string', 'Inscrição estadual.'),
     f('state', 'uf', 'string', 'UF.'),
     f('city', 'cidade', 'string', 'Cidade.'),
+    f('cityIbgeCode', 'cidade_ibge', 'integer', 'Código IBGE da cidade.'),
+    f('address', 'endereco', 'object', 'Endereço do cadastro, com as chaves do TOTVS: cep, publicPlace (tipo do logradouro), address, addressNumber, complement, neighborhood, cityName, stateAbbreviation, ibgeCityCode.'),
+    f('taxRegime', (e) => (e.propria ? (simplesDe(e.cnpj) ? 'SimplesNacional' : 'Normal') : null), 'string', 'Regime tributário com que o HeadCoach emite as notas da empresa: `SimplesNacional` (CRT 1, sem ICMS destacado — lojas dos grupos IRMAOS) ou `Normal` (CRT 3). Nulo nas franquias (o HeadCoach não emite por elas).', { cols: ['propria', 'cnpj'], enum: ['SimplesNacional', 'Normal'] }),
+    f('headcoachOnly', (e) => ehSoHeadcoach(e.code), 'boolean', 'A loja vende só pelo PDV Crosby do HeadCoach e não lança mais venda no TOTVS (venda, nota, contas a receber, caixa e crediário BlueCard ficam no HeadCoach).', { cols: ['code'] }),
     f('isActive', 'ativo', 'boolean', 'Empresa ativa.'),
     f('isOwn', 'propria', 'boolean', 'Empresa própria (não franquia).'),
     f('lastChangeDate', 'atualizado_em', 'date-time', 'Última alteração do cadastro.'),
@@ -38,6 +44,13 @@ modulo.recurso({
     q('state', 'string', 'uf', 'UF (ex.: RN).'),
     q('cnpj', 'digits', 'cnpj', 'CNPJ exato, só dígitos.'),
     q('name', 'text', 'descricao', 'Trecho da descrição.'),
+    q('headcoachOnly', 'custom', null, 'Só as lojas que vendem só pelo HeadCoach (true) ou só as demais (false).', {
+      apply: (qy, valor, ruim) => {
+        const v = String(valor).toLowerCase();
+        if (!['true', 'false'].includes(v)) ruim('Use true ou false.');
+        return v === 'true' ? qy.in('code', lojasSoHeadcoach()) : qy.not('code', 'in', `(${lojasSoHeadcoach().join(',')})`);
+      },
+    }),
   ],
 });
 

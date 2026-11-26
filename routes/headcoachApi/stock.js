@@ -149,6 +149,39 @@ modulo.recurso({
 });
 
 modulo.recurso({
+  name: 'RfidTagStatus',
+  path: '/rfid-tag-status',
+  table: 'pdv_epc_situacao',
+  summary: 'Situação atual de cada etiqueta RFID',
+  description: 'Uma linha por etiqueta (EPC) com o ÚLTIMO movimento dela nas transações: `Sale` = a peça saiu numa venda / transferência e não voltou; `Return` = voltou numa troca ou devolução; `Reversal` = a transação foi cancelada. É o que o PDV consulta para não vender duas vezes a mesma peça. O histórico completo está em /rfid-movements.',
+  key: [{ param: 'rfidTag', col: 'epc', type: 'string', description: 'Etiqueta RFID (EPC).' }],
+  order: [['ocorrido_em', false]],
+  fields: [
+    f('rfidTag', 'epc', 'string', 'Etiqueta RFID (EPC).'),
+    f('status', 'tipo', 'string', 'Último movimento da etiqueta.', { map: RFID_MOVEMENT }),
+    f('branchCode', 'empresa', 'integer', 'Empresa do último movimento.'),
+    f('transactionCode', 'venda_id', 'integer', 'Transação do último movimento.'),
+    f('productCode', 'product_code', 'integer', 'Produto.'),
+    f('productName', 'produto_nome', 'string', 'Nome do produto.'),
+    f('referenceName', 'referencia', 'string', 'Referência.'),
+    f('unitValue', 'valor_unit', 'number', 'Valor unitário na transação.'),
+    f('customerName', 'cliente_nome', 'string', 'Cliente da transação.'),
+    f('sellerName', 'vendedor_nome', 'string', 'Vendedor da transação.'),
+    f('invoiceAccessKey', 'chave_nf', 'string', 'Chave da nota.'),
+    f('statusDate', 'ocorrido_em', 'date-time', 'Quando aconteceu.'),
+  ],
+  filters: [
+    q('rfidTagList', 'stringList', 'epc', 'Etiquetas, separadas por vírgula.'),
+    q('branchCodeList', 'intList', 'empresa', 'Empresas, separadas por vírgula.'),
+    q('status', 'enum', 'tipo', 'Último movimento (aceita lista).', { map: inverso(RFID_MOVEMENT) }),
+    q('productCode', 'int', 'product_code', 'Produto.'),
+    q('transactionCode', 'int', 'venda_id', 'Etiquetas de uma transação.'),
+    q('startDate', 'startDate', 'ocorrido_em', 'A partir de (AAAA-MM-DD).'),
+    q('endDate', 'endDate', 'ocorrido_em', 'Até (AAAA-MM-DD).'),
+  ],
+});
+
+modulo.recurso({
   name: 'RfidInventory',
   path: '/inventories',
   table: 'balanco_rfid_arquivos',
@@ -170,6 +203,7 @@ modulo.recurso({
     f('readQuantity', 'qtd_leituras', 'integer', 'Leituras feitas (uma etiqueta pode ser lida várias vezes).'),
     f('productSummary', 'resumo_produtos', 'array', 'Resumo por produto (chaves em português, como gravado pelo app).', { items: { type: 'object', additionalProperties: true } }),
     f('productSummaryDate', 'resumo_em', 'date-time', 'Quando o resumo por produto foi calculado.'),
+    f('device', 'dispositivo', 'object', 'Aparelho que fez a leitura, como o aplicativo informou: `modelo`, `app` (versão do aplicativo), `sdk`, `modo` e `potencia` do leitor. Nulo nos balanços feitos pelo navegador.'),
     f('observation', 'observacao', 'string', 'Observação.'),
     f('createdDate', 'criado_em', 'date-time', 'Quando o balanço chegou ao servidor.'),
   ],

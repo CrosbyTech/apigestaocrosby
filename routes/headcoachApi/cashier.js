@@ -90,7 +90,7 @@ modulo.recurso({
     f('closingWithdrawalValue', 'retirada_fechamento', 'number', 'Retirada feita no fechamento.'),
     f('differenceValue', 'diferenca', 'number', 'Diferença total do fechamento.'),
     f('cashDifferenceValue', 'diferenca_dinheiro', 'number', 'Diferença no dinheiro.'),
-    f('summary', 'resumo', 'object', 'Resumo do caixa gravado no fechamento.'),
+    f('summary', 'resumo', 'object', 'Resumo do caixa gravado no fechamento, com as chaves da tela: `totalVendas`, `formas` (total por forma de pagamento), `fundoFinal`, `retiradaFechamento`, `pendentes` (vendas sem nota no fechamento) e `contagem` (`dinheiroContado`, `diferencaDinheiro`, `diferencaTotal`).'),
     f('closingObservation', 'observacao_fechamento', 'string', 'Observação do fechamento.'),
     f('reopenedDate', 'reaberto_em', 'date-time', 'Quando foi reaberto.'),
     f('reopenedBy', 'reaberto_por', 'string', 'Quem reabriu.'),
@@ -124,7 +124,7 @@ modulo.recurso({
     f('branchCode', 'empresa', 'integer', 'Empresa.'),
     f('cashierDate', 'data_caixa', 'date', 'Dia encerrado.'),
     f('nextCashierDate', 'proxima_data', 'date', 'Data do caixa depois do encerramento.'),
-    f('verification', 'verificacao', 'object', 'O que foi conferido no encerramento (chaves em português, como na tela).'),
+    f('verification', 'verificacao', 'object', 'O que foi conferido no encerramento, com as chaves da tela: `caixas` (caixas do dia), `comDiferenca` (quantos fecharam com diferença), `vendasPendentes` (vendas sem nota) e `automatico` (encerramento feito sozinho pelo sistema).'),
     f('authorizedBy', 'autorizado_por', 'string', 'Quem autorizou, quando precisou de senha.'),
     f('closedBy', 'por', 'string', 'Quem encerrou.'),
     f('closingDate', 'em', 'date-time', 'Quando foi encerrado.'),
@@ -134,6 +134,23 @@ modulo.recurso({
     q('startCashierDate', 'startDay', 'data_caixa', 'Dia encerrado a partir de (AAAA-MM-DD).'),
     q('endCashierDate', 'endDay', 'data_caixa', 'Dia encerrado até (AAAA-MM-DD).'),
   ],
+});
+
+modulo.recurso({
+  name: 'CashierDate',
+  path: '/cashier-dates',
+  table: 'hc_caixa_datas',
+  summary: 'Data do caixa de cada empresa',
+  description: 'Em que dia o caixa de cada empresa está AGORA. Toda transação entra com essa data (`cashierDate`); ela avança no encerramento do dia (/day-closings) e pode ser voltada por quem tem permissão. Empresa que não aparece aqui ainda não abriu caixa no HeadCoach.',
+  key: [{ param: 'branchCode', col: 'empresa', type: 'integer', description: 'Código da empresa.' }],
+  order: [['empresa', true]],
+  fields: [
+    f('branchCode', 'empresa', 'integer', 'Empresa.', { example: 95 }),
+    f('cashierDate', 'data_caixa', 'date', 'Data do caixa em vigor.'),
+    f('changedBy', 'atualizado_por', 'string', 'Quem mudou a data por último.'),
+    f('lastChangeDate', 'atualizado_em', 'date-time', 'Quando a data mudou por último.'),
+  ],
+  filters: [q('branchCodeList', 'intList', 'empresa', 'Empresas, separadas por vírgula.')],
 });
 
 export default modulo;

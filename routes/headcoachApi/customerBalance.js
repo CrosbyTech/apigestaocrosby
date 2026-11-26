@@ -28,7 +28,7 @@ const MOVEMENT = {
   path: '/movements',
   table: 'hc_cliente_saldos_mov',
   summary: 'Extrato dos saldos',
-  description: 'Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai.',
+  description: 'Cada entrada e saída do saldo: carga inicial vinda do TOTVS, crédito de devolução ou troca, uso como pagamento, estorno por cancelamento, ajuste manual e acerto diário do cashback. `value` positivo entra, negativo sai. O ajuste manual (`Adjustment`) cobre três coisas, que a `reference` distingue: crédito gerado na tela ("gerado no HeadCoach"), transferência de saldo entre lojas ("transferência entre lojas <origem>→<destino> #código" — sai de uma loja e entra na outra com a MESMA referência) e saldo zerado ("saldo zerado"). Os três só por owner ou admin, com o motivo em `observation`.',
   order: [['id', false]],
   fields: [
     f('movementId', 'id', 'integer', 'Identificador do movimento.'),
@@ -40,7 +40,7 @@ const MOVEMENT = {
     f('balanceAfterValue', 'saldo_depois', 'number', 'Saldo depois do movimento.'),
     f('transactionCode', 'venda_id', 'integer', 'Transação ligada (venda que usou, ou troca que gerou).'),
     f('returnId', 'devolucao_trx_id', 'integer', 'Devolução que gerou o crédito (return/returns).'),
-    f('reference', 'referencia', 'string', 'Referência curta (ex.: troca 242).'),
+    f('reference', 'referencia', 'string', 'Referência curta (ex.: troca 242; "transferência entre lojas 5→99 #ABC123"; "saldo zerado").'),
     f('observation', 'observacao', 'string', 'Descrição do movimento.'),
     f('createdBy', 'por', 'string', 'Quem fez.'),
     f('movementDate', 'em', 'date-time', 'Quando aconteceu.'),
