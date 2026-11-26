@@ -26,6 +26,7 @@ import { asyncHandler, successResponse, errorResponse } from '../utils/errorHand
 import { calcularReceitaFinanceira } from './receitaFinanceira.routes.js';
 import supabase from '../config/supabase.js';
 import { DRYLAND_URL, DRYLAND_KEY } from '../services/drylandBaixas.js';
+import { vaConciliado, VA_CONCILIADO_DESDE } from '../services/forecastVaConciliado.js';
 
 const router = express.Router();
 
@@ -43,7 +44,7 @@ const ehClienteFranquia = (nome) => {
 };
 
 // Operação do drill de expedição que NÃO é showroom (é o Bazar, contado à parte)
-const OP_BAZAR_EXPEDICAO = 887;
+const OPS_BAZAR_EXPEDICAO = new Set([887, 888, 889]); // mesmo recorte do BAZAR no semanal (FAT_VEND_BAZAR_OPS)
 
 // CREDEV (Niziany, 28/10/2026): vem do Contas a Receber — faturas com forma de
 // pagamento CREDEV (tp_documento 20), por data de emissão, só das FILIAIS
@@ -176,7 +177,7 @@ async function calcularMes(mes) {
   const drill = payload.drill || {};
   for (const bloco of Object.values(drill)) {
     for (const e of bloco?.expedicao || []) {
-      if (Number(e.op) === OP_BAZAR_EXPEDICAO) continue; // é bazar, já contado
+      if (OPS_BAZAR_EXPEDICAO.has(Number(e.op))) continue; // é bazar, já contado
       const v = Number(e.valor) || 0;
       if (ehClienteFranquia(e.cliente_nome)) showroomFranquia += v;
       else showroomMultimarcas += v;
@@ -553,7 +554,9 @@ async function calcularVales(mes, base, linhasFolha) {
     return Math.round(t * 100) / 100;
   };
   const vtPago = somaExp(EXP_VALE_TRANSPORTE);
-  const vaPago = somaExp(EXP_VALE_ALIMENTACAO);
+  // A partir de out/2026 o VA vem dos pagamentos CONCILIADOS (Solicitações, Liberação,
+  // Contas a Pagar HeadCoach), pelo vencimento no mês (Niziany, 26/11/2026).
+  const vaPago = mes >= VA_CONCILIADO_DESDE ? (await vaConciliado(mes)).total : somaExp(EXP_VALE_ALIMENTACAO);
   // Desconto de VT do funcionário (folha) — abate do custo da empresa.
   let vtDesc = 0;
   for (const l of linhasFolha || []) {
