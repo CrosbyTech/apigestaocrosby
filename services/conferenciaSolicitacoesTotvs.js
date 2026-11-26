@@ -14,6 +14,8 @@ import { postTotvs } from './bluecardLimite.js';
 
 const INTERVALO_MS = Number(process.env.CONFERENCIA_BAIXAS_INTERVALO_MIN || 30) * 60 * 1000;
 const DIAS_PROCESSADAS = Number(process.env.CONFERENCIA_BAIXAS_DIAS || 45);
+// Faturas do HeadCoach (nº >= 9.000.000.000) não existem no TOTVS: ficam fora da conferência (BRUCE, 26/11/2026)
+const FATURA_HC = 9000000000;
 const AUTOR = 'conferência TOTVS'; // só na observação (processado_por é UUID)
 const agoraBR = () => new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }).slice(0, 16);
 
@@ -36,13 +38,14 @@ export async function conferir({ limite = 400 } = {}) {
   const resumo = { conferidas: 0, viraram_processadas: 0, voltaram_pendentes: 0, nao_encontradas: 0, erros: 0, detalhes: [] };
   const desde = new Date(Date.now() - DIAS_PROCESSADAS * 86400000).toISOString();
   const [{ data: pend }, { data: proc }] = await Promise.all([
-    supabase.from('solicitacoes_baixa').select('id, cd_empresa, cd_cliente, nm_cliente, nr_fat, nr_parcela, vl_fatura, observacao, origem').eq('status', 'pendente').gt('nr_fat', 0).limit(limite),
+    supabase.from('solicitacoes_baixa').select('id, cd_empresa, cd_cliente, nm_cliente, nr_fat, nr_parcela, vl_fatura, observacao, origem').eq('status', 'pendente').gt('nr_fat', 0).lt('nr_fat', FATURA_HC).limit(limite),
     supabase
       .from('solicitacoes_baixa')
       .select('id, cd_empresa, cd_cliente, nm_cliente, nr_fat, nr_parcela, vl_fatura, observacao, origem, processado_por')
       .eq('status', 'processada')
       .gte('processado_em', desde)
       .gt('nr_fat', 0)
+      .lt('nr_fat', FATURA_HC) // fatura do HeadCoach não existe no TOTVS (baixa no HeadCoach)
       .limit(limite),
   ]);
   const agora = new Date().toISOString();

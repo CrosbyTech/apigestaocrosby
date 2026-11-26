@@ -7,6 +7,7 @@ import {
 } from '../utils/errorHandler.js';
 import { getToken, getTokenInfo } from '../utils/totvsTokenManager.js';
 import { removerAbatidas } from '../utils/contasPagarAbatidas.js';
+import { titulosHcFormatoTotvs } from '../services/hcContasReceber.js';
 import {
   httpsAgent,
   httpAgent,
@@ -349,9 +350,30 @@ router.post(
         `✅ Busca concluída: ${allItems.length} faturas em ${currentPage - 1} páginas`,
       );
 
+      // Portal de Títulos (MTM e Franquias): junta os títulos do HeadCoach do
+      // cliente, no mesmo formato (João/BRUCE, 26/11/2026). Só quando a tela
+      // pede (incluirHeadcoach), para não mudar as outras telas.
+      let qtdHeadcoach = 0;
+      if (req.body?.incluirHeadcoach) {
+        try {
+          const f = req.body?.filter || {};
+          const hc = await titulosHcFormatoTotvs({
+            clientes: f.customerCodeList || [],
+            cpfCnpj: f.customerCpfCnpjList || [],
+            // títulos do HeadCoach são todos da empresa 99: não filtra pelas filiais da tela
+            soAbertos: Boolean(f.hasOpenInvoices),
+          });
+          qtdHeadcoach = hc.length;
+          allItems = allItems.concat(hc);
+        } catch (e) {
+          console.warn(`⚠️ search-all: títulos do HeadCoach não vieram (${e.message})`);
+        }
+      }
+
       successResponse(
         res,
         {
+          qtdHeadcoach,
           items: allItems,
           totalItems: allItems.length,
           pagesSearched: currentPage - 1,

@@ -16,6 +16,7 @@ import {
 import supabaseFiscal from '../config/supabaseFiscal.js';
 import supabasePrincipal from '../config/supabase.js';
 import { espelharEscritaAR } from '../services/erp/contasReceber.js';
+import { baixarTituloPorSolicitacao, BASE_FATURA as BASE_FATURA_HC } from '../services/hcContasReceber.js';
 
 const router = express.Router();
 
@@ -1941,10 +1942,14 @@ router.post(
       // pagamento com a soma (título + juros de cada). O 1º item do grupo faz a
       // chamada; os demais pulam o loop e recebem o mesmo resultado no fim.
       // Pix separados (grupos diferentes ou sem grupo) = baixas separadas.
+      // Fatura do HeadCoach (nº >= 9.000.000.000) não existe no TOTVS: é baixada
+      // no contas a receber do HeadCoach (João/BRUCE, 26/11/2026) e fica fora do
+      // agrupamento de Pix (que é uma chamada só ao TOTVS).
+      const ehFaturaHc = (it) => Number(it?.receivableCode) >= BASE_FATURA_HC;
       const grupos = new Map();
       items.forEach((it, idx) => {
         const g = String(it.grupo || '').trim();
-        if (!g) return;
+        if (!g || ehFaturaHc(it)) return;
         if (!grupos.has(g)) grupos.set(g, []);
         grupos.get(g).push(idx);
       });
@@ -1962,6 +1967,30 @@ router.post(
       // Processamos cada item individualmente para melhor controle de erros
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
+        if (ehFaturaHc(item)) {
+          const rc = inteiro(item.receivableCode);
+          const ic = inteiro(item.installmentCode);
+          const bc = inteiro(item.branchCode);
+          try {
+            const t = await baixarTituloPorSolicitacao({
+              empresa: bc,
+              fatura: rc,
+              parcela: ic,
+              dataPagamento: item.settlementDate,
+              paidValue: numero(item.paidValue),
+              interestValue: numero(item.interestValue) || 0,
+              forma: item.card ? 'cartao' : item.formaRecebimento || null,
+              observacao: item.observacao || 'Baixa pela Solicitação de Baixa',
+              por: req.body?.usuario || req.body?.user_email || null,
+            });
+            console.log(`✅ [${i + 1}/${items.length}] Fatura ${rc} é do HeadCoach: baixada no contas a receber do HeadCoach`);
+            results.push({ index: i, receivableCode: rc, installmentCode: ic, branchCode: bc, success: true, origem: 'headcoach', data: { tituloId: t.id, situacao: t.situacao } });
+          } catch (e) {
+            console.error(`❌ [${i + 1}/${items.length}] Fatura ${rc} (HeadCoach): ${e.message}`);
+            errors.push({ index: i, receivableCode: rc, installmentCode: ic, branchCode: bc, success: false, origem: 'headcoach', error: e.message, errorMessages: [e.message], status: e.status || 500 });
+          }
+          continue;
+        }
         const membros = membrosDe(i);
         if (membros[0] !== i) continue; // já vai na chamada do 1º título do mesmo Pix
         const branchCode =

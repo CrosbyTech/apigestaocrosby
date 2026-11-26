@@ -537,6 +537,146 @@ export async function baixarTitulo(user, id, b = {}) {
   return atual;
 }
 
+/**
+ * Baixa pela SOLICITAÇÃO DE BAIXA (João/BRUCE, 26/11/2026, aprovado pelo Yago).
+ * A fatura do HeadCoach (nº >= BASE_FATURA) não existe no TOTVS: quando a tela
+ * Solicitações de Baixa processa, o POST /api/totvs/invoices-settle manda esses
+ * itens para cá em vez do TOTVS. A aprovação já aconteceu na tela (por isso
+ * não pede senha); localiza o título por fatura + parcela.
+ * paidValue = valor do título, interestValue = juros (mesmo contrato do TOTVS).
+ */
+export async function baixarTituloPorSolicitacao({ empresa, fatura, parcela, dataPagamento, paidValue, interestValue = 0, forma = null, observacao = null, por = null }) {
+  const nFat = Number(fatura);
+  if (!(nFat >= BASE_FATURA)) throw new CrError(`A fatura ${fatura} não é do HeadCoach`, 'NAO_HC');
+  const lista = await q(supabase.from('hc_cr_titulos').select('*').eq('fatura', nFat).eq('parcela', Number(parcela) || 1));
+  const t = (lista || []).find((x) => !empresa || Number(x.empresa) === Number(empresa)) || (lista || [])[0];
+  if (!t) throw new CrError(`Fatura ${nFat}/${parcela} não encontrada no contas a receber do HeadCoach`, 'NOT_FOUND', 404);
+  if (t.situacao !== 'aberto') throw new CrError(`A fatura ${nFat}/${parcela} já está ${t.situacao} no HeadCoach`, 'JA_BAIXADO', 409);
+  const data = ehData(String(dataPagamento || '').slice(0, 10)) ? String(dataPagamento).slice(0, 10) : hojeBrasil();
+  const valor = round2(t.valor);
+  const pago = round2(num(paidValue));
+  // valor diferente do título: não arrisca desconto/juros por conta própria
+  if (Math.abs(pago - valor) > 0.01) {
+    throw new CrError(`Valor pago (R$ ${pago.toFixed(2)}) diferente do título (R$ ${valor.toFixed(2)}): baixe pela tela Contas a Receber do HeadCoach`, 'VALOR_DIFERENTE', 409);
+  }
+  const juros = Math.max(0, round2(num(interestValue)));
+  const recebido = round2(valor + juros);
+  const agora = new Date().toISOString();
+  const quemBaixou = por || 'solicitação de baixa';
+  const { data: atual, error } = await supabase
+    .from('hc_cr_titulos')
+    .update({
+      situacao: 'pago',
+      data_pagamento: data,
+      data_liquidacao: data,
+      valor_pago: recebido,
+      valor_liquido: recebido,
+      juros,
+      multa: 0,
+      desconto: 0,
+      baixado_por: quemBaixou,
+      baixado_em: agora,
+    })
+    .eq('id', t.id)
+    .eq('situacao', 'aberto')
+    .select()
+    .maybeSingle();
+  if (error) throw falhaDb(error);
+  if (!atual) throw new CrError('Este título acabou de ser baixado por outra pessoa', 'JA_BAIXADO', 409);
+  await q(
+    supabase.from('hc_cr_baixas').insert({
+      titulo_id: t.id,
+      data_pagamento: data,
+      valor_titulo: valor,
+      juros,
+      multa: 0,
+      desconto: 0,
+      valor_recebido: recebido,
+      forma_recebimento: String(forma || '').trim() || null,
+      conta: null,
+      observacao: String(observacao || 'Baixa pela Solicitação de Baixa').trim(),
+      por_id: null,
+      por: quemBaixou,
+    }),
+  );
+  console.log(`💵 [contas a receber] baixa pela solicitação: fatura ${t.fatura}/${t.parcela} R$ ${recebido.toFixed(2)} · ${quemBaixou}`);
+  return atual;
+}
+
+/**
+ * Títulos do HeadCoach no formato do TOTVS (accounts-receivable/v2/documents),
+ * para o PORTAL DE TÍTULOS (MTM e Franquias) juntar com os do TOTVS
+ * (João/BRUCE, 26/11/2026, aprovado pelo Yago). Usado pelo
+ * POST /api/totvs/accounts-receivable/search-all quando a tela manda
+ * `incluirHeadcoach: true`. soAbertos = filtro "em aberto / vencidos".
+ */
+export async function titulosHcFormatoTotvs({ clientes = [], cpfCnpj = [], empresas = [], soAbertos = false } = {}) {
+  const cods = [...new Set((clientes || []).map(Number).filter((n) => n > 0))];
+  const docs = [...new Set((cpfCnpj || []).map((d) => String(d || '').replace(/\D/g, '')).filter(Boolean))];
+  if (!cods.length && !docs.length) return [];
+  let qy = supabase.from('hc_cr_titulos').select('*').neq('situacao', 'cancelado').order('vencimento', { ascending: false }).limit(2000);
+  qy = cods.length ? qy.in('cliente_code', cods) : qy.in('cliente_cpf_cnpj', docs);
+  if ((empresas || []).length) qy = qy.in('empresa', empresas.map(Number));
+  if (soAbertos) qy = qy.eq('situacao', 'aberto');
+  const titulos = (await q(qy)) || [];
+  if (!titulos.length) return [];
+  // boleto emitido na Pagar.me (linha digitável / link), quando houver
+  const { data: boletos } = await supabase
+    .from('pagarme_boletos')
+    .select('nr_fatura, nr_parcela, linha_digitavel, boleto_url, nosso_numero, status, created_at')
+    .in('nr_fatura', [...new Set(titulos.map((t) => Number(t.fatura)))])
+    .is('cancelado_em', null)
+    .order('created_at', { ascending: false });
+  const boletoDe = new Map();
+  for (const b of boletos || []) {
+    const k = `${b.nr_fatura}-${b.nr_parcela || 1}`;
+    if (!boletoDe.has(k)) boletoDe.set(k, b);
+  }
+  const hoje = hojeBrasil();
+  const diasEntre = (a, b) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000);
+  return titulos.map((t) => {
+    const venc = String(t.vencimento || '').slice(0, 10);
+    const pago = t.situacao === 'pago';
+    const atraso = !pago && venc && venc < hoje ? diasEntre(venc, hoje) : 0;
+    const bol = boletoDe.get(`${t.fatura}-${t.parcela || 1}`);
+    return {
+      origem: 'headcoach',
+      branchCode: Number(t.empresa),
+      customerCode: Number(t.cliente_code),
+      customerName: t.cliente_nome || null,
+      customerCpfCnpj: t.cliente_cpf_cnpj || null,
+      receivableCode: Number(t.fatura),
+      installmentCode: Number(t.parcela) || 1,
+      issueDate: t.emissao,
+      expiredDate: t.vencimento,
+      paymentDate: pago ? t.data_pagamento : null,
+      settlementDate: pago ? t.data_liquidacao || t.data_pagamento : null,
+      installmentValue: round2(t.valor),
+      paidValue: pago ? round2(t.valor_pago) : 0,
+      netValue: round2(t.valor_liquido ?? t.valor),
+      discountValue: round2(t.desconto || 0),
+      rebateValue: 0,
+      interestValue: round2(t.juros || 0),
+      assessmentValue: round2(t.multa || 0),
+      barCode: null,
+      digitableLine: bol?.linha_digitavel || null,
+      ourNumber: bol?.nosso_numero || null,
+      boletoUrl: bol?.boleto_url || null,
+      qrCodePix: null,
+      status: 1, // normal (cancelado não entra)
+      documentType: t.tipo_documento ?? 1,
+      billingType: null,
+      dischargeType: pago ? 1 : 0,
+      chargeType: null,
+      bearerCode: t.portador ?? null,
+      bearerName: `HEADCOACH${t.forma ? ` (${t.forma})` : ''}`,
+      canceled: false,
+      calculatedValues: { daysLate: atraso, increaseValue: 0, interestValue: 0, fineValue: 0, discountValue: 0, correctedValue: round2(t.valor) },
+      invoice: t.nf_numero ? [{ invoiceCode: t.nf_numero, serialCode: t.nf_serie, accessKey: t.nf_chave }] : null,
+    };
+  });
+}
+
 // ─── conciliação D+1 (cartão e Pix) ──────────────────────────────────────────
 const chaveGrupo = (t) => `${t.empresa}|${String(t.data_liquidacao).slice(0, 10)}|${t.forma}|${t.portador || ''}`;
 
