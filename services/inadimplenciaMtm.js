@@ -123,7 +123,8 @@ async function inadimplenciaPorVendedor(hoje) {
   const clientes = new Map();
   for (const f of faturas) {
     const cd = String(f.cd_cliente);
-    if (!clientes.has(cd)) clientes.set(cd, { cd_cliente: cd, nome: f.nm_cliente || nomes.get(cd) || `Cliente ${cd}`, valor: 0, dias: 0 });
+    // nome do cadastro de multimarcas primeiro: o título às vezes traz só o CNPJ
+    if (!clientes.has(cd)) clientes.set(cd, { cd_cliente: cd, nome: nomes.get(cd) || f.nm_cliente || `Cliente ${cd}`, valor: 0, dias: 0 });
     const c = clientes.get(cd);
     c.valor += parseFloat(f.vl_fatura) || 0;
     if (f.dt_vencimento) c.dias = Math.max(c.dias, diasEntre(f.dt_vencimento, hoje));
