@@ -223,6 +223,8 @@ export async function fetchBranchTotalsFromTotvs({
   refreshToken,
   logTag = 'BranchTotals',
   operations, // se fornecido, sobrescreve SPECIAL_OPERATIONS para TODAS as filiais
+  gross = false, // true = faturamento BRUTO da loja (sem filtro de operações),
+  //               alinhado ao /sale-panel/ranking-faturamento do portal Dryland
 }) {
   if (!Array.isArray(branchs) || branchs.length === 0) {
     return {
@@ -237,12 +239,18 @@ export async function fetchBranchTotalsFromTotvs({
   const overrideOps =
     Array.isArray(operations) && operations.length > 0 ? operations : null;
   const specialSet = new Set(SPECIAL_BRANCH_CODES);
-  const specialBranchs = overrideOps
-    ? branchs
-    : branchs.filter((b) => specialSet.has(b));
-  const otherBranchs = overrideOps
+  // gross: ignora o split especial e manda TODAS as filiais sem filtro de
+  // operações (= faturamento bruto, como o ranking-faturamento do Dryland).
+  const specialBranchs = gross
     ? []
-    : branchs.filter((b) => !specialSet.has(b));
+    : overrideOps
+      ? branchs
+      : branchs.filter((b) => specialSet.has(b));
+  const otherBranchs = gross
+    ? branchs
+    : overrideOps
+      ? []
+      : branchs.filter((b) => !specialSet.has(b));
 
   const endpoint = `${TOTVS_BASE_URL}/sale-panel/v2/totals-branch/search`;
   let token = initialToken;

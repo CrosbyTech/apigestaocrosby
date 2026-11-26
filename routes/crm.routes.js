@@ -3222,6 +3222,7 @@ router.post(
         datemax: lastDay,
         refreshToken: async () => (await getToken(true)).access_token,
         logTag: 'metas-reuniao',
+        gross: true, // realizado = faturamento bruto da loja (alinhado ao Dryland)
       });
     } catch (err) {
       return errorResponse(res, err.message, 500, 'TOTVS_ERROR');
@@ -3411,6 +3412,7 @@ router.post(
           datemax,
           refreshToken: refreshTk,
           logTag: 'crescimento-atual',
+          gross: true, // bruto = alinhado ao Dryland
         }),
         fetchBranchTotalsFromTotvs({
           initialToken: accessToken,
@@ -3419,6 +3421,7 @@ router.post(
           datemax: datemax_prev,
           refreshToken: refreshTk,
           logTag: 'crescimento-anterior',
+          gross: true, // bruto = alinhado ao Dryland (ano anterior na mesma base)
         }),
       ]);
     } catch (err) {
@@ -10306,6 +10309,7 @@ router.post(
         return data.access_token;
       },
       logTag: 'CRM/BranchesTotals',
+      gross: true, // realizado por loja = faturamento bruto (alinhado ao Dryland)
     });
 
     // Resolve metas pelo metaType + datas
