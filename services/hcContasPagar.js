@@ -445,6 +445,17 @@ export async function listarTitulos(user, f = {}) {
     const [dup, parc] = String(f.duplicata || '').split('/').map((s) => s.replace(/\D/g, '')); // "1" = a duplicata inteira; "1/12" = só a parcela 12
     if (dup) qy = qy.eq('duplicata', Number(dup));
     if (parc) qy = qy.eq('parcela', Number(parc));
+    // pesquisa por valor (Titia, 26/11/2026): "1.234,56" ou "1234.56"; acha pelo valor do
+    // título ou pelo valor pago (guia paga com juros), com tolerância de 1 centavo
+    const valorTxt = String(f.valor || '').trim();
+    if (valorTxt) {
+      const v = Number(valorTxt.includes(',') ? valorTxt.replace(/\./g, '').replace(',', '.') : valorTxt);
+      if (Number.isFinite(v) && v > 0) {
+        const a = round2(v - 0.01);
+        const b = round2(v + 0.01);
+        qy = qy.or(`and(valor.gte.${a},valor.lte.${b}),and(valor_pago.gte.${a},valor_pago.lte.${b})`);
+      }
+    }
     if (busca) {
       const dig = busca.replace(/\D/g, '');
       if (/^\d+$/.test(busca) && dig.length <= 9) qy = qy.eq('fornecedor_code', Number(dig));

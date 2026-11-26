@@ -2290,10 +2290,20 @@ export async function detalheConciliacao(id) {
       const token = tokenData?.access_token;
       if (token && branch && dup) {
         const h = { headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` }, httpsAgent, timeout: 30000 };
-        const filter = { branchCodeList: [Number(branch)], duplicateCodeList: [Number(dup)] };
+        // o filtro duplicateCodeList do TOTVS é int32: duplicata acima de 2.147.483.647 (ex.: FGTS
+        // 3009202601) volta 400. Nesse caso busca pelo fornecedor + vencimento e separa pelo número.
+        const dupGrande = Number(dup) > 2147483647;
+        const filter = { branchCodeList: [Number(branch)] };
+        if (!dupGrande) filter.duplicateCodeList = [Number(dup)];
         if (forn) filter.supplierCodeList = [Number(forn)];
-        const r = await axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter, page: 1, pageSize: 20 }, h);
-        const it = (r.data?.items || []).find((x) => String(x.installmentCode) === String(parc)) || (r.data?.items || [])[0];
+        const venc = String(ref.vencimento || ref.data || '').slice(0, 10);
+        if (dupGrande && /^\d{4}-\d{2}-\d{2}$/.test(venc)) {
+          filter.startDueDate = `${addDias(venc, -5)}T00:00:00`;
+          filter.endDueDate = `${addDias(venc, 5)}T23:59:59`;
+        }
+        const r = await axios.post(`${TOTVS_BASE_URL}/accounts-payable/v2/duplicates/search`, { filter, page: 1, pageSize: dupGrande ? 100 : 20 }, h);
+        const achados = (r.data?.items || []).filter((x) => !dupGrande || String(x.duplicateCode) === String(dup));
+        const it = achados.find((x) => String(x.installmentCode) === String(parc)) || achados[0];
         if (it) {
           await nomesFornecedores([it.supplierCode], token).catch(() => {});
           let empresaNome = null;
