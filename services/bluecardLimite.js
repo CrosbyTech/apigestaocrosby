@@ -23,6 +23,7 @@
  */
 import axios from 'axios';
 import supabase from '../config/supabase.js';
+import { lojaDaCompraHeadcoach } from '../utils/lojasHeadcoach.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import {
   TOTVS_BASE_URL,
@@ -271,6 +272,39 @@ export async function lerLimitesFinanceiros(customerCode, branchCodes) {
 //    (snapshot em limites_anteriores) — para o crediário, 0.
 // ─────────────────────────────────────────────────────────────────────
 
+// ─── LOJA SÓ-HEADCOACH (utils/lojasHeadcoach.js) ────────────────────────────
+// A venda fecha no PDV Crosby, não no TOTVS: não existe trava de limite para abrir.
+// A janela fica registrada (é ela que o vigia fecha quando a venda aparece no HeadCoach
+// e que a rota /liberacoes mostra ao app), marcada em limites_anteriores.headcoach, e
+// NADA é lido nem gravado no TOTVS — nem para abrir, nem para fechar.
+export const ehJanelaHeadcoach = (lib) => lib?.limites_anteriores?.headcoach === true;
+
+async function abrirJanelaHeadcoach(compra, cpf, valorCents, filial) {
+  // o cadastro ainda vem do TOTVS (nome e código do cliente); se não responder, a janela abre só com o CPF
+  const cliente = await buscarClientePorCpf(cpf).catch(() => null);
+  const agora = new Date().toISOString();
+  const error = await upsertLiberacaoTolerante({
+    compra_id: compra.id,
+    documento: compra.documento || null,
+    cpf,
+    nome: cliente?.name || null,
+    customer_code: cliente?.code || null,
+    branch_code: filial,
+    branch_codes: [filial],
+    valor_cents: valorCents,
+    abertos_cents: 0,
+    limite_cents: 0,
+    titulos_previos: [],
+    status: 'liberado',
+    liberado_em: agora,
+    atualizado_em: agora,
+    limites_anteriores: { headcoach: true },
+  });
+  if (error) throw new Error(`registrar liberação (loja só-HeadCoach): ${error.message}`);
+  console.log(`💳 [bluecard] compra aprovada na loja ${filial} (só HeadCoach): cpf=${cpf} compra=${compra.id} valor=R$${(valorCents / 100).toFixed(2)} — aguardando a venda no PDV Crosby (nada gravado no TOTVS)`);
+  return { cliente, limiteReais: 0, branchCodes: [filial], janelasAbertas: 1, headcoach: true };
+}
+
 function allowlistPiloto() {
   return (process.env.BLUECARD_LIMITE_BRANCH_CODES || '')
     .split(',')
@@ -398,6 +432,11 @@ export async function liberarLimiteParaCompra(compra) {
     return { jaProcessada: true, status: existente.status };
   }
 
+  // loja que vende só pelo HeadCoach: sem limite no TOTVS (ver abrirJanelaHeadcoach)
+  // (compra pedida pelo PDV Crosby: a loja vem do documento "HC<loja>-…", mesmo sem `filial` no aviso)
+  const lojaHc = lojaDaCompraHeadcoach(compra);
+  if (lojaHc) return abrirJanelaHeadcoach(compra, cpf, valorCents, lojaHc);
+
   const cliente = await buscarClientePorCpf(cpf);
   if (!cliente) throw new Error(`CPF ${cpf} não encontrado no TOTVS`);
 
@@ -491,6 +530,12 @@ export async function zerarLimite(liberacao, novoStatus) {
       .eq('compra_id', liberacao.compra_id)
       .maybeSingle();
     anteriores = data?.limites_anteriores || {};
+  }
+  // janela de loja só-HeadCoach: não houve limite gravado no TOTVS — só fecha o registro
+  if (anteriores?.headcoach === true) {
+    await supabase.from('bluecard_liberacoes').update({ status: novoStatus, zerado_em: new Date().toISOString(), atualizado_em: new Date().toISOString() }).eq('compra_id', liberacao.compra_id);
+    console.log(`💳 [bluecard] janela fechada (${novoStatus}): cpf=${liberacao.cpf} compra=${liberacao.compra_id} — loja só-HeadCoach, nada a desfazer no TOTVS`);
+    return;
   }
 
   // Com outra janela aberta o limite dela depende dos títulos em aberto de

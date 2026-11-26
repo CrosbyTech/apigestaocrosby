@@ -28,6 +28,7 @@
  * novas e a dedupe passa a ser pela observação (busca textual).
  */
 import supabase from '../config/supabase.js';
+import { baixarParcelaPagaNoApp } from './bluecardHeadcoach.js';
 import { postTotvs, buscarClientePorCpf, TOTVS_STATUS_NORMAL } from './bluecardLimite.js';
 import { gatewayIdDaCobranca } from './pagarmeBoletos.js';
 import { getToken } from '../utils/totvsTokenManager.js';
@@ -176,6 +177,15 @@ export async function abrirSolicitacoesBaixaPix(body) {
   const resultado = { inseridas: 0, ja_existiam: 0, sem_titulo: 0, detalhes: [] };
 
   for (const p of parcelas) {
+    // Parcela do contas a receber do HEADCOACH (venda do PDV Crosby): a baixa é feita lá, na hora —
+    // não existe título no TOTVS para abrir solicitação. (25/11/2026)
+    const hc = await baixarParcelaPagaNoApp(p, { cpf, dataPagamento: dtPagamento, jurosCents: Math.round((encargos * Number(p.valor_cents || 0)) / somaParcelas), referencia: pg.cobranca_id, nsu: nsuExterno });
+    if (hc) {
+      if (hc.resultado === 'baixado_headcoach') resultado.baixadas_headcoach = (resultado.baixadas_headcoach || 0) + 1;
+      else resultado.ja_baixados = (resultado.ja_baixados || 0) + 1;
+      resultado.detalhes.push({ parcela_id: p.parcela_id, titulo: hc.externoId, criterio: 'headcoach', resultado: hc.resultado });
+      continue;
+    }
     const achado = localizarTitulo(p, titulos, usados);
     const t = achado?.titulo || null;
     if (t) usados.add(`${t.receivableCode}-${t.installmentCode}`);

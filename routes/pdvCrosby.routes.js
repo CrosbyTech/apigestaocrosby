@@ -29,6 +29,7 @@ import express from 'express';
 import QRCode from 'qrcode';
 import supabase from '../config/supabase.js';
 import { asyncHandler, successResponse, errorResponse } from '../utils/errorHandler.js';
+import { limiteDoCliente, solicitarAprovacao, situacaoDaCompra, conferirCompraParaVenda, avisarFiscalDaVenda, BluecardPdvError } from '../services/bluecardPdv.js';
 import {
   FiscalError,
   buscarConfig,
@@ -84,6 +85,11 @@ const TIPOS = ['nfce', 'nfe', 'troca'];
 // limite — "deixe livre por enquanto".
 const FORMAS = ['dinheiro', 'pix', 'credito', 'debito', 'credito_loja', 'adiantamento', 'bluecard', 'vale_troca'];
 const BLUECARD_MAX_PARCELAS = 4; // teto de parcelas do BlueCard
+// BlueCard no PDV (25/11/2026): o PDV pede a compra, o cliente aprova no app e a venda destrava
+// (services/bluecardPdv.js). Durante a troca de versão dos caixas, a venda em BlueCard SEM a compra
+// aprovada ainda é aceita (o vigia amarra depois pelo aviso do app); para passar a exigir sempre,
+// defina BLUECARD_PDV_EXIGIR_APROVACAO=true no ambiente.
+const bluecardExigeAprovacao = () => String(process.env.BLUECARD_PDV_EXIGIR_APROVACAO || 'false').toLowerCase() === 'true';
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const hojeBrasil = () =>
   new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -609,6 +615,7 @@ router.post(
 
     // Pagamentos
     const pagamentos = [];
+    let pedidoBluecard = null; // { compraId, valor, parcelas } do pagamento em BlueCard
     if (tipoVenda === 'troca') {
       pagamentos.push({ forma: 'vale_troca', valor: total, parcelas: 1 });
     } else {
@@ -625,6 +632,8 @@ router.post(
           if (!b.cliente?.code) return errorResponse(res, 'BlueCard exige o cliente identificado na venda', 400, 'BLUECARD_SEM_CLIENTE');
           const n = parseInt(p.parcelas, 10) || 1;
           if (n < 1 || n > BLUECARD_MAX_PARCELAS) return errorResponse(res, `BlueCard: de 1 a ${BLUECARD_MAX_PARCELAS} parcelas`, 400, 'BLUECARD_PARCELAS');
+          if (pedidoBluecard) return errorResponse(res, 'Só um pagamento em BlueCard por venda', 400, 'BLUECARD_DUPLICADO');
+          pedidoBluecard = { compraId: p.bluecardCompraId ? String(p.bluecardCompraId) : null, valor, parcelas: n };
         }
         pagamentos.push({
           forma,
@@ -664,6 +673,23 @@ router.post(
         return errorResponse(res, `Pagamentos (R$ ${round2(soma - troco).toFixed(2)}) não fecham com o total da venda (R$ ${total.toFixed(2)})`, 400, 'PAYMENT_MISMATCH');
       }
     }
+    // BLUECARD: a venda só fecha com a compra APROVADA pelo cliente no app (conferido direto no BlueCard)
+    let bluecardInfo = null;
+    if (pedidoBluecard) {
+      if (pedidoBluecard.compraId) {
+        try {
+          bluecardInfo = await conferirCompraParaVenda({ compraId: pedidoBluecard.compraId, cpf: b.cliente?.cpfCnpj, valorBluecard: pedidoBluecard.valor, parcelas: pedidoBluecard.parcelas });
+        } catch (err) {
+          if (err instanceof BluecardPdvError) return errorResponse(res, err.message, err.status, err.code);
+          throw err;
+        }
+      } else if (bluecardExigeAprovacao()) {
+        return errorResponse(res, 'BlueCard: peça a aprovação do cliente no app antes de fechar a venda (atualize o PDV se a opção não aparecer)', 409, 'BLUECARD_SEM_APROVACAO');
+      } else {
+        console.warn(`⚠️ [PDV Crosby] venda em BlueCard sem a compra aprovada (caixa em versão antiga?): empresa ${empresa}, R$ ${pedidoBluecard.valor}`);
+      }
+    }
+
     // CREDEV e ADIANTAMENTO: só com cliente identificado e até o saldo dele NESTA loja
     const usoSaldos = usoDosPagamentos(pagamentos);
     if (usoSaldos.credev > 0 || usoSaldos.adiantamento > 0) {
@@ -723,6 +749,8 @@ router.post(
     // paga com o Credev que ela gerou — guarda o nº da troca para rastrear
     const trocaVendaId = parseInt(b.trocaVendaId, 10) || null;
     if (!troca && trocaVendaId) cabecalho.pedido_info = { trocaVendaId };
+    // compra do BlueCard amarrada à transação (com os vencimentos que o cliente aceitou no app)
+    if (bluecardInfo) cabecalho.pedido_info = { ...(cabecalho.pedido_info || {}), bluecard: bluecardInfo };
     // HEADCOACH › CAIXA: só vende com o caixa da empresa aberto (Yago, 12/11/2026);
     // a venda entra nesse caixa
     const caixa = await caixaAbertoPara(empresa);
@@ -1035,6 +1063,50 @@ router.post(
   }),
 );
 
+// ─── BLUECARD NO PDV (services/bluecardPdv.js) ───────────────────────────────
+//   GET  /bluecard/limite?cpf=&valor=     limite do cliente no BlueCard (e se o valor cabe)
+//   POST /bluecard/solicitar              pede a compra: o cliente aprova no app (10 minutos)
+//   GET  /bluecard/compras/:id            situação: pendente | aprovada | recusada | cancelada | expirada
+const respondeBluecard = (res, err) => {
+  if (err instanceof BluecardPdvError) return errorResponse(res, err.message, err.status, err.code);
+  console.error('[PDV Crosby] BlueCard:', err);
+  return errorResponse(res, err.message || 'Erro ao falar com o BlueCard', 500, 'BLUECARD_ERROR');
+};
+router.get(
+  '/bluecard/limite',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await limiteDoCliente({ cpf: req.query.cpf, valor: Number(req.query.valor) > 0 ? Number(req.query.valor) : null });
+      return successResponse(res, r, r.pode ? 'Limite do BlueCard' : r.motivo || 'Sem limite no BlueCard');
+    } catch (err) {
+      return respondeBluecard(res, err);
+    }
+  }),
+);
+router.post(
+  '/bluecard/solicitar',
+  asyncHandler(async (req, res) => {
+    try {
+      const b = req.body || {};
+      const r = await solicitarAprovacao({ empresa: b.empresa, empresaNome: b.empresaNome || null, cpf: b.cpf, valor: b.valor, parcelas: b.parcelas, vendedorCode: b.vendedorCode, vendedorNome: b.vendedorNome, itens: b.itens });
+      return successResponse(res, r, 'Pedido enviado: o cliente precisa aprovar no app do BlueCard', 201);
+    } catch (err) {
+      return respondeBluecard(res, err);
+    }
+  }),
+);
+router.get(
+  '/bluecard/compras/:id',
+  asyncHandler(async (req, res) => {
+    try {
+      const r = await situacaoDaCompra(req.params.id);
+      return successResponse(res, r, `Compra ${r.status}`);
+    } catch (err) {
+      return respondeBluecard(res, err);
+    }
+  }),
+);
+
 // ─── Emissão ─────────────────────────────────────────────────────────────────
 const emitindo = new Set(); // trava por venda (evita duplo clique)
 
@@ -1153,6 +1225,8 @@ export async function emitirVendaPdv(id) {
     await supabase.from('pdv_vendas').update({ status: envio.autorizada ? 'autorizada' : 'rejeitada' }).eq('id', id);
     // HEADCOACH › CONTAS A RECEBER: nota autorizada gera os títulos da venda
     if (envio.autorizada) sincronizarVendaEmSegundoPlano(id);
+    // BLUECARD: nota e itens seguem para o app (lá isso confirma a venda) — em segundo plano, não segura o caixa
+    if (envio.autorizada && venda.pedido_info?.bluecard?.compraId) avisarFiscalDaVenda(id);
     // TROCA autorizada: o valor devolvido vira CREDEV do cliente nesta loja
     if (envio.autorizada && venda.tipo_venda === 'troca') {
       await creditarTroca(venda, { por: venda.criado_por || null, nf: `${numero}/${serie}` }).catch((e) =>

@@ -28,6 +28,7 @@ import supabase from '../config/supabase.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 import { notificarPagamento } from '../services/bluecardClient.js';
+import { sincronizarPagamentosHeadcoach } from '../services/bluecardHeadcoach.js';
 import { retentarEventosPagamentoPix } from '../services/bluecardBaixaPagarme.js';
 
 const ENABLED =
@@ -81,6 +82,15 @@ export async function executarBluecardPagamentosSync() {
   }
   rodando = true;
   try {
+    // Parcelas do contas a receber do HeadCoach (vendas do PDV Crosby): o que foi baixado lá vira
+    // 'pago' no espelho — o aviso ao BlueCard sai junto com os demais, mais abaixo. Sem TOTVS.
+    let pagosHc = 0;
+    try {
+      pagosHc = (await sincronizarPagamentosHeadcoach()).pagos;
+    } catch (e) {
+      console.error(`❌ [bluecard-pagamentos] parcelas do HeadCoach: ${e.message}`);
+    }
+
     const { data: abertos, error } = await supabase
       .from('bluecard_titulos')
       .select(
@@ -191,9 +201,9 @@ export async function executarBluecardPagamentosSync() {
       }
     }
 
-    if (pagosNovos > 0 || avisados > 0) {
+    if (pagosNovos > 0 || avisados > 0 || pagosHc > 0) {
       console.log(
-        `💳 [bluecard-pagamentos] ${pagosNovos} pago(s) novo(s) no TOTVS, ${avisados} aviso(s) enviados ao BlueCard`,
+        `💳 [bluecard-pagamentos] ${pagosNovos} pago(s) novo(s) no TOTVS, ${pagosHc} no HeadCoach, ${avisados} aviso(s) enviados ao BlueCard`,
       );
     }
     return { abertos: abertos?.length || 0, pagosNovos, avisados };

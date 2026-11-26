@@ -25,6 +25,8 @@
 import express from 'express';
 import { createHash } from 'node:crypto';
 import supabase from '../config/supabase.js';
+import { lojaDaCompraHeadcoach } from '../utils/lojasHeadcoach.js';
+import { titulosHeadcoachDoCliente, vendasHeadcoachDoCliente, transacoesBluecard } from '../services/bluecardHeadcoach.js';
 import { exigirAssinaturaBluecard } from '../utils/bluecardHmac.js';
 import {
   limiteAutoAtivo,
@@ -112,7 +114,8 @@ async function processarEvento(id, evento, body) {
         // exato aprovado; é o que destrava o PDV a fechar a venda
         // FATURA - BLUECARD (cliente vive com limite 0). O watchdog
         // (bluecard-limite.job.js) zera de volta depois.
-        if (limiteAutoAtivo()) {
+        // Loja só-HeadCoach: registra a janela (sem tocar o TOTVS) para o vigia amarrar a venda do PDV Crosby.
+        if (limiteAutoAtivo() || lojaDaCompraHeadcoach(body?.compra)) {
           await liberarLimiteParaCompra(body?.compra || {});
         } else {
           console.log(
@@ -183,14 +186,23 @@ async function processarEvento(id, evento, body) {
           if (e) throw new Error(`cancelar títulos: ${e.message}`);
 
           // Se o limite estava liberado aguardando a venda fechar, fecha a janela.
-          if (limiteAutoAtivo()) {
+          {
             const { data: lib } = await supabase
               .from('bluecard_liberacoes')
-              .select('compra_id, cpf, nome')
+              .select('compra_id, cpf, nome, limites_anteriores, branch_code, branch_codes, customer_code')
               .eq('compra_id', compraId)
               .eq('status', 'liberado')
               .maybeSingle();
-            if (lib) await zerarLimite(lib, 'zerado_cancelado');
+            if (lib && (limiteAutoAtivo() || lib.limites_anteriores?.headcoach === true)) await zerarLimite(lib, 'zerado_cancelado');
+          }
+          // compra cancelada no app DEPOIS de vendida pelo PDV Crosby: fica marcado na transação para o financeiro ver
+          {
+            const { data: vendida } = await supabase.from('pdv_vendas').select('id, empresa, status, pedido_info').eq('pedido_info->bluecard->>compraId', compraId).neq('status', 'cancelada').limit(1);
+            if (vendida?.[0]) {
+              const v = vendida[0];
+              await supabase.from('pdv_vendas').update({ pedido_info: { ...v.pedido_info, bluecard: { ...v.pedido_info.bluecard, canceladaNoApp: { em: new Date().toISOString(), motivo: body?.compra?.motivo || null } } } }).eq('id', v.id);
+              console.error(`🚨 [bluecard] compra ${compraId} CANCELADA no app (motivo="${body?.compra?.motivo}"), mas foi vendida pelo PDV Crosby: transação ${v.id}, loja ${v.empresa} — conferir com o BlueCard`);
+            }
           }
         }
         console.log(
@@ -316,6 +328,18 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
     const cliente = cpf
       ? await buscarClientePorCpf(cpf)
       : await buscarClientePorCnpj(cnpj);
+    // Parcelas BlueCard do contas a receber do HeadCoach (vendas do PDV Crosby): identificador
+    // HC-<fatura>-<parcela>. Entram junto com as do TOTVS — o cliente pode ter das duas origens.
+    const titulosHc = await titulosHeadcoachDoCliente({ cpf: cpf || cnpj, customerCode: cliente?.code || null, desde: desde || null, incluirCancelados });
+    if (!cliente && titulosHc.length) {
+      const lista = titulosHc.filter((x) => (status === 'todos' ? true : x.status === status));
+      return res.json({
+        cliente: { [cpf ? 'cpf' : 'cnpj']: cpf || cnpj, nome: null, codigo_totvs: null },
+        total_aberto_cents: titulosHc.filter((x) => x.status === 'aberto' && x.situacao === 'normal').reduce((n, x) => n + x.valor_cents, 0),
+        quantidade: lista.length,
+        titulos: lista,
+      });
+    }
     if (!cliente) {
       return res.status(404).json({
         erro: {
@@ -384,6 +408,11 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
       })
       .filter((t) => (status === 'todos' ? true : t.status === status));
 
+    // + as parcelas do HeadCoach (mais novas primeiro, como as do TOTVS)
+    const doHeadcoach = titulosHc.filter((x) => (status === 'todos' ? true : x.status === status));
+    totalAbertoCents += titulosHc.filter((x) => x.status === 'aberto' && x.situacao === 'normal').reduce((n, x) => n + x.valor_cents, 0);
+    const todos = [...doHeadcoach, ...titulos];
+
     res.json({
       cliente: {
         [cpf ? 'cpf' : 'cnpj']: cpf || cnpj,
@@ -391,8 +420,8 @@ router.get('/faturas', exigirAssinaturaBluecard, async (req, res) => {
         codigo_totvs: cliente.code,
       },
       total_aberto_cents: totalAbertoCents,
-      quantidade: titulos.length,
-      titulos,
+      quantidade: todos.length,
+      titulos: todos,
     });
   } catch (e) {
     console.error('❌ [bluecard/faturas] consulta falhou:', e.message);
@@ -664,7 +693,26 @@ router.get('/vendas', exigirAssinaturaBluecard, async (req, res) => {
   }
 
   try {
-    const dados = await listarVendasCliente(cpf, desde, { refresh });
+    let dados = await listarVendasCliente(cpf, desde, { refresh });
+    // + as vendas feitas pelo PDV Crosby (HeadCoach), que não existem no TOTVS
+    const vendasHc = await vendasHeadcoachDoCliente({ cpf, customerCode: dados?.cliente?.codigo_totvs || null, desde });
+    if (vendasHc.length) {
+      const vendas = [...vendasHc, ...(dados?.vendas || [])].sort((a, b) => (a.data < b.data ? 1 : a.data > b.data ? -1 : 0));
+      const soma = (l, k) => l.reduce((n, v) => n + Number(v[k] || 0), 0);
+      dados = {
+        cliente: dados?.cliente || { codigo_totvs: null, nome: null, cpf },
+        desde,
+        resumo: {
+          vendas: vendas.length,
+          vendas_com_bluecard: vendas.filter((v) => v.usou_bluecard).length,
+          total_cents: soma(vendas, 'valor_total_cents'),
+          bluecard_cents: soma(vendas, 'valor_bluecard_cents'),
+          extra_cents: soma(vendas, 'valor_extra_cents'),
+          extra_em_vendas_bluecard_cents: soma(vendas.filter((v) => v.usou_bluecard), 'valor_extra_cents'),
+        },
+        vendas,
+      };
+    }
     if (!dados) {
       return res.status(404).json({
         erro: { codigo: 'cliente_nao_encontrado', mensagem: 'CPF sem cadastro no TOTVS', detalhe: null },
@@ -683,10 +731,50 @@ router.get('/vendas', exigirAssinaturaBluecard, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/bluecard/transacoes?desde=AAAA-MM-DD&ate=AAAA-MM-DD[&cpf=][&compra_id=][&status=]
+//
+// Transações do PDV Crosby (HeadCoach) pagas com BlueCard, POR PERÍODO — para o
+// BlueCard conciliar o dia (pedido do Felipe, 25/11/2026). Cada uma traz a compra
+// do BlueCard (compra_id), a nota, os itens, a loja, o vendedor e a situação:
+// pendente | fechada | cancelada | devolvida | devolvida_parcial. Datas no horário
+// de Brasília. Período máximo de 93 dias; sem `ate`, vai até hoje.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/transacoes', exigirAssinaturaBluecard, async (req, res) => {
+  const ehDia = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+  const hoje = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const desde = String(req.query.desde || '');
+  const ate = req.query.ate ? String(req.query.ate) : hoje;
+  const compraId = req.query.compra_id ? String(req.query.compra_id) : null;
+  const cpf = String(req.query.cpf || '').replace(/\D/g, '');
+  const invalido = (mensagem) => res.status(400).json({ erro: { codigo: 'campo_invalido', mensagem, detalhe: null } });
+  if (!compraId && !ehDia(desde)) return invalido('informe desde=AAAA-MM-DD (ou compra_id)');
+  if (!ehDia(ate)) return invalido('ate deve ser AAAA-MM-DD');
+  const inicio = ehDia(desde) ? desde : '2026-11-01';
+  if (inicio > ate) return invalido('desde não pode ser depois de ate');
+  if ((Date.parse(ate) - Date.parse(inicio)) / 86400000 > 93) return invalido('período máximo de 93 dias');
+  if (cpf && cpf.length !== 11) return invalido('cpf deve ter 11 dígitos');
+  try {
+    let transacoes = await transacoesBluecard({ desde: inicio, ate, cpf: cpf || null, compraId });
+    const status = String(req.query.status || '').toLowerCase();
+    if (status) transacoes = transacoes.filter((t) => t.status === status || (status === 'devolvida' && t.status === 'devolvida_parcial'));
+    return res.json({
+      desde: inicio,
+      ate,
+      quantidade: transacoes.length,
+      total_bluecard_cents: transacoes.filter((t) => t.status !== 'cancelada' && t.status !== 'pendente').reduce((n, t) => n + t.valor_bluecard_cents, 0),
+      transacoes,
+    });
+  } catch (e) {
+    console.error('❌ [bluecard/transacoes]', e.message);
+    return res.status(500).json({ erro: { codigo: 'erro_interno', mensagem: 'Falha ao ler as transações', detalhe: e.message } });
+  }
+});
+
 // Fecha a janela de limite de uma compra se ela ainda estiver 'liberado'
 // (usado por compra.recusada / compra.cancelada). Sem janela → não faz nada.
 async function fecharJanelaSeAberta(compraId, novoStatus) {
-  if (!compraId || !limiteAutoAtivo()) return;
+  if (!compraId) return;
   const { data: lib } = await supabase
     .from('bluecard_liberacoes')
     .select('*')
@@ -694,6 +782,8 @@ async function fecharJanelaSeAberta(compraId, novoStatus) {
     .eq('status', 'liberado')
     .maybeSingle();
   if (!lib) return;
+  // janela do TOTVS só é fechada com o gatilho ligado; a de loja só-HeadCoach fecha sempre
+  if (!limiteAutoAtivo() && lib.limites_anteriores?.headcoach !== true) return;
   await zerarLimite(lib, novoStatus);
   console.log(`💳 [bluecard-limite] janela da compra ${compraId} fechada por ${novoStatus}`);
   notificarLiberacaoFechada(compraId, 'liberacao.cancelada', { valor_cents: lib.valor_cents }).catch((e) =>

@@ -235,7 +235,13 @@ export function montarTitulos(venda, cfg, extra = {}) {
     if (formaTitulo === 'boleto') {
       // parcelas do pedido (cobranca.parcelas); sem elas, parcelas iguais a cada 30 dias
       let parcs = !bluecard && Array.isArray(venda.cobranca?.parcelas) && venda.cobranca.parcelas.length ? venda.cobranca.parcelas : null;
-      if (bluecard) {
+      // BlueCard com a compra aprovada pelo PDV: as parcelas são as que o cliente aceitou no app
+      // (datas e valores do BlueCard) — quando a quantidade e a soma fecham com o pagamento
+      const doApp = bluecard ? venda.pedido_info?.bluecard?.vencimentos : null;
+      if (bluecard && Array.isArray(doApp) && doApp.length === Math.max(1, Number(p.parcelas) || 1) && Math.abs(doApp.reduce((s, x) => s + Number(x.valor_cents || 0), 0) - Math.round(valor * 100)) <= 1 && doApp.every((x) => ehData(String(x.vencimento || '').slice(0, 10)))) {
+        const sobra = Math.round(valor * 100) - doApp.reduce((s, x) => s + Number(x.valor_cents || 0), 0);
+        parcs = doApp.map((x, i) => ({ vencimento: String(x.vencimento).slice(0, 10), valor: round2((Number(x.valor_cents) + (i === doApp.length - 1 ? sobra : 0)) / 100) }));
+      } else if (bluecard) {
         // BlueCard: parcelas mensais no mesmo dia do mês (1ª um mês depois da compra).
         // Como no TOTVS (FATURA - BLUECARD: 400,00 em 3x = 134 + 133 + 133): as parcelas
         // saem em reais inteiros e a diferença vai na 1ª.
@@ -304,7 +310,7 @@ export function montarTitulos(venda, cfg, extra = {}) {
 }
 
 const SELECT_VENDA =
-  'id, empresa, origem, canal, tipo_venda, operacao, status, cliente_code, cliente_nome, cliente_cpf_cnpj, vendedor_code, vendedor_nome, total, criado_em, caixa_id, cobranca, pdv_venda_pagamentos(*), pdv_notas_fiscais(modelo, serie, numero, chave, status, dh_autorizacao, criado_em)';
+  'id, empresa, origem, canal, tipo_venda, operacao, status, cliente_code, cliente_nome, cliente_cpf_cnpj, vendedor_code, vendedor_nome, total, criado_em, caixa_id, cobranca, pedido_info, pdv_venda_pagamentos(*), pdv_notas_fiscais(modelo, serie, numero, chave, status, dh_autorizacao, criado_em)';
 
 /**
  * Gera (ou acerta) os títulos de uma venda. Idempotente: venda autorizada sem

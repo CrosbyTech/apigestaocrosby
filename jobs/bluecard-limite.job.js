@@ -21,7 +21,14 @@
  *
  *   3. RETRY: compra.aprovada que falhou no webhook é retentada por 24h.
  *
- * Só roda com BLUECARD_LIMITE_AUTO_ENABLED=true (mesma flag do webhook).
+ * A parte do TOTVS só roda com BLUECARD_LIMITE_AUTO_ENABLED=true (mesma flag do webhook).
+ *
+ * VENDA PELO HEADCOACH (25/11/2026): antes de olhar o TOTVS, o vigia procura a venda no
+ * PDV Crosby (pdv_vendas com pagamento 'bluecard' do mesmo cliente e valor). Achou → amarra
+ * a compra à transação, alinha as parcelas ao calendário do app, espelha os títulos como
+ * HC-<fatura>-<parcela> e avisa o BlueCard. Nas lojas só-HeadCoach o TOTVS nem é consultado.
+ * (Até aqui a venda do PDV Crosby nunca era vista: a janela expirava e o app cancelava uma
+ * compra vendida de verdade.) Esta parte roda SEMPRE, com a flag do TOTVS ligada ou não.
  */
 import cron from 'node-cron';
 import axios from 'axios';
@@ -34,7 +41,11 @@ import {
   liberarLimiteParaCompra,
   TOTVS_STATUS_NORMAL,
 } from '../services/bluecardLimite.js';
-import { notificarVendaRegistrada, notificarLiberacaoFechada } from '../services/bluecardClient.js';
+import { notificarVendaRegistrada, notificarLiberacaoFechada, enviarFaturas } from '../services/bluecardClient.js';
+import { ehJanelaHeadcoach } from '../services/bluecardLimite.js';
+import { vendasBluecardDoCliente, casarVenda, vincularCompraAVenda } from '../services/bluecardHeadcoach.js';
+import { lojaDaCompraHeadcoach } from '../utils/lojasHeadcoach.js';
+import { avisarFiscalDaVenda } from '../services/bluecardPdv.js';
 
 // A cada minuto: enquanto o limite está alto, o cliente pode fechar uma
 // segunda venda sem passar pelo app — que é justamente o antifraude que a
@@ -89,6 +100,8 @@ async function retentarLiberacoesComErro() {
     .limit(20);
 
   for (const ev of eventos || []) {
+    // compra de loja que ainda vende pelo TOTVS só é retentada com o gatilho do TOTVS ligado
+    if (!limiteAutoAtivo() && !lojaDaCompraHeadcoach(ev.payload?.compra)) continue;
     try {
       await liberarLimiteParaCompra(ev.payload?.compra || {});
       await supabase
@@ -181,8 +194,46 @@ async function consumir(lib, doc) {
   );
 }
 
+// A venda desta compra foi feita no PDV Crosby: amarra, espelha os títulos e avisa o BlueCard.
+async function consumirHeadcoach(lib, venda) {
+  const r = await vincularCompraAVenda(lib, venda);
+  await supabase
+    .from('bluecard_liberacoes')
+    .update({ venda_detectada_em: new Date().toISOString(), documento: lib.documento || String(venda.fatura) })
+    .eq('compra_id', lib.compra_id);
+  await zerarLimite(lib, 'consumido');
+  // a nota e os itens (só envia se ainda não foi — é o que confirma a venda no app)
+  await avisarFiscalDaVenda(venda.id);
+  try {
+    await notificarVendaRegistrada(lib.compra_id, String(venda.fatura));
+  } catch (e) {
+    console.warn(`⚠️ [bluecard-limite] app não aceitou /vendas/${lib.compra_id}/registrada (venda HeadCoach ${venda.id}): ${e.message}`);
+  }
+  // as parcelas vão com o identificador do HeadCoach: é por ele que os pagamentos se casam depois
+  if (r.titulos.length) {
+    try {
+      await enviarFaturas(
+        {
+          cpf: lib.cpf,
+          compra_id: lib.compra_id,
+          boletos: r.titulos.map((x) => ({ externo_id: `HC-${x.fatura}-${x.parcela}`, parcela: Number(x.parcela), de: r.titulos.length, valor_cents: Math.round(Number(x.valor) * 100), vencimento: String(x.vencimento).slice(0, 10), linha_digitavel: null, codigo_barras: null, url_pdf: null, pix_copia_e_cola: null })),
+        },
+        `faturas:${lib.compra_id}:${venda.fatura}`,
+      );
+    } catch (e) {
+      console.warn(`⚠️ [bluecard-limite] app não aceitou as parcelas da compra ${lib.compra_id} (venda HeadCoach ${venda.id}): ${e.message} — a varredura deles casa pela consulta de faturas`);
+    }
+  }
+  console.log(
+    `✅ [bluecard-limite] venda do PDV Crosby detectada: compra=${lib.compra_id} cpf=${lib.cpf} transação=${venda.id} loja=${venda.empresa} ` +
+      `fatura=${venda.fatura} (${r.titulos.length} parcela(s)${r.alinhamento?.mudou ? ', postas no calendário do app' : r.alinhamento?.alinhadas ? '' : ` — parcelas NÃO alinhadas: ${r.alinhamento?.motivo}`})`,
+  );
+}
+
+// venda registrada no PDV Crosby cuja nota ainda não saiu: a janela não expira enquanto isso (até 24 h)
+const ESPERA_NOTA_MIN = 24 * 60;
+
 export async function executarBluecardLimiteWatchdog() {
-  if (!limiteAutoAtivo()) return { desativado: true };
   if (rodando) return { pulado: true };
   rodando = true;
   try {
@@ -206,19 +257,57 @@ export async function executarBluecardLimiteWatchdog() {
     }
 
     for (const [cpf, libs] of porCpf) {
-      let docs = [];
+      // 0) vendas feitas pelo PDV Crosby (HeadCoach) — valem para qualquer loja
+      let vendasHc = [];
       try {
-        docs = await documentosNovos(libs);
+        const desde = libs.reduce((m, l) => (l.liberado_em < m ? l.liberado_em : m), libs[0].liberado_em);
+        vendasHc = await vendasBluecardDoCliente({ cpf, customerCode: libs.find((l) => l.customer_code)?.customer_code || null, desdeIso: desde });
       } catch (e) {
-        console.error(`❌ [bluecard-limite] títulos do cpf ${cpf}: ${e.message}`);
+        console.error(`❌ [bluecard-limite] vendas do PDV Crosby do cpf ${cpf}: ${e.message}`);
+      }
+      const usadasHc = new Set();
+      // o TOTVS só é consultado para janela de loja que ainda vende por lá, e com o gatilho ligado
+      const libsTotvs = limiteAutoAtivo() ? libs.filter((l) => !ehJanelaHeadcoach(l)) : [];
+      let docs = [];
+      if (libsTotvs.length) {
+        try {
+          docs = await documentosNovos(libsTotvs);
+        } catch (e) {
+          console.error(`❌ [bluecard-limite] títulos do cpf ${cpf}: ${e.message}`);
+        }
       }
 
       for (const lib of libs) {
         try {
+          const idadeMinHc = (Date.now() - new Date(lib.liberado_em).getTime()) / 60000;
+          const vendaHc = casarVenda(lib, vendasHc, usadasHc);
+          if (vendaHc) {
+            usadasHc.add(vendaHc.id);
+            if (vendaHc.status === 'autorizada') {
+              await consumirHeadcoach(lib, vendaHc);
+              consumidas++;
+              continue;
+            }
+            // a venda existe mas a nota ainda não saiu: não expira (a loja pode emitir de novo)
+            if (idadeMinHc <= ESPERA_NOTA_MIN) continue;
+          }
+          // janela que não é do TOTVS (loja só-HeadCoach, ou gatilho do TOTVS desligado): só expira
+          if (!libsTotvs.includes(lib)) {
+            if (!ehJanelaHeadcoach(lib)) continue;
+            if (idadeMinHc > TIMEOUT_MIN) {
+              await zerarLimite(lib, 'zerado_expirado');
+              expiradas++;
+              console.warn(`⏱️ [bluecard-limite] compra aprovada sem venda no PDV Crosby (${Math.round(idadeMinHc)}min): compra=${lib.compra_id} cpf=${lib.cpf} loja=${lib.branch_code}`);
+              notificarLiberacaoFechada(lib.compra_id, 'liberacao.expirada', { valor_cents: lib.valor_cents, liberado_em: lib.liberado_em }).catch((e) =>
+                console.warn(`⚠️ [bluecard-limite] aviso liberacao.expirada falhou: ${e.message}`),
+              );
+            }
+            continue;
+          }
           // 1) A venda desta janela fechou? Primeiro documento de MESMO valor;
           //    se é a única janela do cliente, qualquer documento novo serve.
           let i = docs.findIndex((d) => Math.abs(d.totalCents - Number(lib.valor_cents)) <= TOLERANCIA_CENTS);
-          if (i < 0 && libs.length === 1 && docs.length) i = 0;
+          if (i < 0 && libsTotvs.length === 1 && docs.length) i = 0;
           if (i >= 0) {
             const [doc] = docs.splice(i, 1);
             await consumir(lib, doc);
@@ -266,10 +355,8 @@ export async function executarBluecardLimiteWatchdog() {
 }
 
 export function iniciarBluecardLimiteWatchdog() {
-  if (!limiteAutoAtivo()) {
-    console.log('⏸️ [bluecard-limite] watchdog desativado (BLUECARD_LIMITE_AUTO_ENABLED != true)');
-    return;
-  }
+  // roda sempre: a parte do HeadCoach (venda pelo PDV Crosby) não depende do gatilho do TOTVS
+  if (!limiteAutoAtivo()) console.log('ℹ️ [bluecard-limite] gatilho do TOTVS desligado (BLUECARD_LIMITE_AUTO_ENABLED != true): o vigia cuida só das vendas pelo HeadCoach');
   cron.schedule(
     CRON_EXPR,
     () =>

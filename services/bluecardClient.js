@@ -99,6 +99,25 @@ export function criarCompra(compra, idempotencyKey) {
   return chamar('POST', '/api/v1/compras', compra, { idempotencyKey });
 }
 
+/**
+ * Limite do cliente no BlueCard, para o PDV mostrar antes da venda (Felipe, 25/11/2026):
+ * POST /api/v1/bluecard/elegibilidade { cpf, valor_cents? } → disponivel_cents, parcelas_possiveis
+ * e, com valor_cents, se aquela venda cabe. É só consulta (não cria nada).
+ */
+export function consultarElegibilidade(cpf, valorCents = null) {
+  const corpo = { cpf: String(cpf || '').replace(/\D/g, '') };
+  if (Number(valorCents) > 0) corpo.valor_cents = Math.round(Number(valorCents));
+  return chamar('POST', '/api/v1/bluecard/elegibilidade', corpo);
+}
+
+/**
+ * Depois de faturar: nota e itens da venda. No BlueCard esta chamada já vale como a confirmação
+ * da venda (Felipe, 25/11/2026). PATCH /api/v1/compras/{id}/fiscal { itens, nf_numero, nf_serie, nf_chave, nf_emitida_em }.
+ */
+export function enviarFiscal(compraId, fiscal) {
+  return chamar('PATCH', `/api/v1/compras/${encodeURIComponent(compraId)}/fiscal`, fiscal, { idempotencyKey: `fiscal:${compraId}:${fiscal?.nf_chave || fiscal?.nf_numero || ''}` });
+}
+
 /** Consultar aprovação — sem efeito colateral, pode fazer polling ~2s. */
 export function consultarCompra(id) {
   return chamar('GET', `/api/v1/compras/${id}`);
