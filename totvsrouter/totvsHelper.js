@@ -235,6 +235,37 @@ export async function fetchBranchTotalsFromTotvs({
     };
   }
 
+  // gross: faturamento BRUTO da loja = MESMA fonte do portal Dryland
+  // (/sale-panel/ranking-faturamento). totals-branch (abaixo) conta diferente
+  // e fica menor pras lojas com atacado; o ranking é a fonte que o usuário
+  // compara. Em falha, cai no fluxo totals-branch (no-ops) como fallback.
+  if (gross) {
+    try {
+      const internalBase = `http://localhost:${process.env.PORT || 4100}`;
+      const r = await axios.post(
+        `${internalBase}/api/totvs/sale-panel/ranking-faturamento`,
+        { datemin, datemax, branchs },
+        { timeout: 120000 },
+      );
+      const dataRow = r.data?.data?.dataRow || r.data?.dataRow || [];
+      if (Array.isArray(dataRow) && dataRow.length > 0) {
+        const total = dataRow.reduce(
+          (acc, t) => ({
+            invoice_qty: acc.invoice_qty + Number(t.invoice_qty || 0),
+            invoice_value: acc.invoice_value + Number(t.invoice_value || 0),
+            itens_qty: acc.itens_qty + Number(t.itens_qty || 0),
+          }),
+          { invoice_qty: 0, invoice_value: 0, itens_qty: 0 },
+        );
+        return { dataRow, dataRowLastYear: [], total, totalLastYear: null };
+      }
+    } catch (e) {
+      console.warn(
+        `[${logTag}] gross ranking-faturamento falhou (${e.message}) — fallback totals-branch`,
+      );
+    }
+  }
+
   // Modo override: usa operations fornecidas pra todas as filiais (sem split special/other)
   const overrideOps =
     Array.isArray(operations) && operations.length > 0 ? operations : null;
