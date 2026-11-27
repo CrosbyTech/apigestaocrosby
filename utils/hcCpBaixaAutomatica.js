@@ -71,7 +71,8 @@ const mesmoLugar = (saidas) => saidas.every((l) => l.conta_id === saidas[0].cont
  * @param liberacoes [{ id, valor, titulo: { fornecedor_code, fornecedor_nome, fornecedor_cpf_cnpj, vencimento } }]
  * @param saidas     [{ id, conta_id, data, valor (negativo), contraparte_nome, contraparte_doc, memo }] — já sem as transferências entre contas
  * @param opcoes     { pontuar(nomeFornecedor, textoDoExtrato) → 0..1, usadas: Set de ids de saídas que já pagaram outra coisa }
- * @returns {{ casadas: [{ tipo: 'individual'|'soma', liberacoes: [id], saida, pontos }], semSaida: [{ id, motivo }] }}
+ * @returns {{ casadas: [{ tipo: 'individual'|'soma', liberacoes: [id], saida, pontos }], semSaida: [{ id, motivo }], sugestoes: [{ id, saidas: [{ saida, pontos }] }] }}
+ *   semSaida traz todas as que não casaram; as que têm saída de mesmo valor para escolher também vêm em sugestoes.
  */
 export function casarIncluidos(liberacoes, saidas, { pontuar, usadas = new Set() } = {}) {
   if (typeof pontuar !== 'function') throw new Error('casarIncluidos precisa da função que pontua o nome');
@@ -157,5 +158,50 @@ export function casarIncluidos(liberacoes, saidas, { pontuar, usadas = new Set()
   }
 
   const semSaida = libs.filter((l) => !feitas.has(l.id)).map((l) => ({ id: l.id, motivo: motivo.get(l.id) || 'nenhuma saída deste valor para o fornecedor nos extratos do período' }));
-  return { casadas, semSaida };
+
+  // ── 3) SUGESTÕES (Yago, 27/11/2026): a liberação que não casou sozinha, mas tem saída livre de valor
+  //    IGUAL no extrato (o nome veio diferente, ou há mais de uma possível). O sistema não baixa:
+  //    mostra as saídas e o usuário marca qual é e aprova. A mais parecida com o fornecedor vem primeiro.
+  const sugestoes = [];
+  for (const lib of libs) {
+    if (feitas.has(lib.id)) continue;
+    const V = centavos(lib.valor);
+    const possiveis = livres
+      .filter((l) => !tomadas.has(l.id) && centavos(l.valor) === V)
+      .map((l) => ({ saida: l, pontos: doFornecedor(lib.titulo, l) }))
+      .sort((a, b) => b.pontos - a.pontos || String(b.saida.data).localeCompare(String(a.saida.data)));
+    if (possiveis.length) sugestoes.push({ id: lib.id, saidas: possiveis });
+  }
+  return { casadas, semSaida, sugestoes };
+}
+
+/**
+ * Confere as sugestões que o usuário aprovou na tela contra o que o extrato oferece AGORA:
+ * a saída tem de continuar entre as possíveis daquela liberação, e cada saída paga uma só.
+ * @param escolhidas [{ id (liberação), lancamentoId }]
+ * @param sugestoes  o que casarIncluidos devolveu agora
+ * @returns {{ aceitas: [{ id, saida, pontos }], recusadas: [{ id, motivo }] }}
+ */
+export function conferirEscolhas(escolhidas, sugestoes) {
+  const porLiberacao = new Map((sugestoes || []).map((s) => [Number(s.id), s]));
+  const aceitas = [];
+  const recusadas = [];
+  const liberacoesVistas = new Set();
+  const saidasVistas = new Set();
+  for (const e of Array.isArray(escolhidas) ? escolhidas : []) {
+    const id = Number(e?.id);
+    const lancamento = String(e?.lancamentoId ?? '');
+    if (!Number.isInteger(id) || id <= 0 || !lancamento || liberacoesVistas.has(id)) continue;
+    liberacoesVistas.add(id);
+    const s = porLiberacao.get(id);
+    const c = s?.saidas.find((x) => String(x.saida.id) === lancamento);
+    if (!s) recusadas.push({ id, motivo: 'não há mais saída de mesmo valor livre no extrato para esta duplicata' });
+    else if (!c) recusadas.push({ id, motivo: 'a saída escolhida não está mais disponível no extrato (foi usada ou o extrato mudou)' });
+    else if (saidasVistas.has(lancamento)) recusadas.push({ id, motivo: 'a mesma saída foi escolhida para outra duplicata: cada saída paga uma só' });
+    else {
+      saidasVistas.add(lancamento);
+      aceitas.push({ id, saida: c.saida, pontos: c.pontos });
+    }
+  }
+  return { aceitas, recusadas };
 }

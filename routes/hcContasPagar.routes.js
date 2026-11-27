@@ -25,8 +25,9 @@
 //   POST /liberacoes/banco              { ids, banco }  o mesmo banco para várias liberações de uma vez (vazio = limpar)
 //   POST /liberacoes/pagar              { ids, dataPagamento, banco, senha }  grava a baixa (sem estorno)
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
-//   POST /liberacoes/baixa-automatica   { confirmar?, ids?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 30 dias para trás);
-//                                       sem confirmar = só mostra o que achou; com confirmar + senha = grava a baixa das ids
+//   POST /liberacoes/baixa-automatica   { confirmar?, ids?, escolhidas?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 30 dias para trás);
+//                                       sem confirmar = só mostra o que achou (casadas + sugestoes + semSaida); com confirmar + senha = grava a
+//                                       baixa das ids e das escolhidas [{ id, lancamentoId }] (sugestões que o usuário marcou e aprovou)
 //   POST /totvs/liberar                 { itens } títulos da Consulta antiga (TOTVS) → cria a duplicata aqui (em aberto) e manda para a Liberação de Pagamento do HeadCoach
 //   POST /solicitacoes/:id/enviar       Solicitação Crosby aprovada (ou no status Nota Fiscal: a duplicata nasce NÃO ESCRITURADA) → duplicata no contas a pagar (financeiro ou setor FINANCEIRO)
 //   POST /solicitacoes/:id/liberar      Solicitação Crosby (enviada ou Nota Fiscal) → Liberação de Pagamento do HeadCoach (cria a duplicata se ainda não existir)
@@ -119,7 +120,7 @@ router.post(
     (req) => baixaAutomatica(req.user, req.body || {}),
     (r) =>
       r.simulacao
-        ? `${tantas(r.casadas.length, 'pagamento achado', 'pagamentos achados')} nos extratos de ${r.incluidas} incluída(s)`
+        ? `${tantas(r.casadas.length, 'pagamento achado', 'pagamentos achados')} nos extratos de ${r.incluidas} incluída(s)${r.sugestoes?.length ? ` · ${tantas(r.sugestoes.length, 'sugestão para você conferir', 'sugestões para você conferir')}` : ''}`
         : comIgnoradas(`${tantas(r.pagas, 'duplicata baixada', 'duplicatas baixadas')} pelo extrato · R$ ${Number(r.valorPago).toFixed(2).replace('.', ',')}`, r),
   ),
 );

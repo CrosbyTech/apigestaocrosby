@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { casarIncluidos, janelaDosExtratos, bancoDaConta, pontosDaSaida, contraparteDaSaida, addDias, DIAS_ATRAS } from '../utils/hcCpBaixaAutomatica.js';
+import { casarIncluidos, conferirEscolhas, janelaDosExtratos, bancoDaConta, pontosDaSaida, contraparteDaSaida, addDias, DIAS_ATRAS } from '../utils/hcCpBaixaAutomatica.js';
 
 // pontuação simples de nome para o teste: fração das palavras do fornecedor que aparecem no extrato
 const pontuar = (a, b) => {
@@ -164,8 +164,79 @@ describe('entradas inválidas', () => {
   });
 
   it('listas vazias', () => {
-    expect(casar([], [saida(1, 10)])).toEqual({ casadas: [], semSaida: [] });
+    expect(casar([], [saida(1, 10)])).toEqual({ casadas: [], semSaida: [], sugestoes: [] });
     expect(casar([lib(1, 10)], []).semSaida).toHaveLength(1);
-    expect(casar(null, null)).toEqual({ casadas: [], semSaida: [] });
+    expect(casar(null, null)).toEqual({ casadas: [], semSaida: [], sugestoes: [] });
+  });
+});
+
+describe('sugestões: valor igual no extrato, mas o nome não bate', () => {
+  it('a liberação não casa sozinha e a saída de mesmo valor vem como sugestão', () => {
+    const r = casar([lib(1, 14250, 'J L DA LIMA CANDIDO')], [saida(7, 14250, 'LENIVALDO CANDIDO DOS SANTOS', { data: '2026-11-26' })]);
+    expect(r.casadas).toEqual([]);
+    expect(r.semSaida.map((x) => x.id)).toEqual([1]);
+    expect(r.sugestoes).toHaveLength(1);
+    expect(r.sugestoes[0].id).toBe(1);
+    expect(r.sugestoes[0].saidas.map((x) => x.saida.id)).toEqual([7]);
+  });
+
+  it('valor diferente por um centavo nunca vira sugestão', () => {
+    const r = casar([lib(1, 655, 'C A V DO NASCIMENTO AVIAMENTOS')], [saida(7, 655.01, 'CRISTYAN ALEX VICENTE DO NASCIMENTO')]);
+    expect(r.sugestoes).toEqual([]);
+  });
+
+  it('a saída que já pagou outra duplicata (casou sozinha) não é oferecida', () => {
+    const r = casar([lib(1, 100, 'ALARES TELECOM'), lib(2, 100, 'PADARIA DO ZE', { code: 20, doc: '11111111000111' })], [saida(7, 100, 'ALARES TELECOM')]);
+    expect(r.casadas.map((c) => c.liberacoes)).toEqual([[1]]);
+    expect(r.sugestoes).toEqual([]);
+  });
+
+  it('saída já conciliada com outra coisa não é oferecida', () => {
+    const r = casar([lib(1, 47.5, 'JILVANE MARIA LIMA DA SILVA')], [saida(7, 47.5, 'MP 48221435JILVA')], new Set([7]));
+    expect(r.sugestoes).toEqual([]);
+  });
+
+  it('várias saídas do mesmo valor: todas são oferecidas, a de nome mais parecido primeiro', () => {
+    const r = casar([lib(1, 300, 'MARIA SOUZA LIMA', { doc: '' })], [saida(7, 300, 'JOAO PEREIRA', { data: '2026-11-25' }), saida(8, 300, 'MARIA SOUZA', { data: '2026-11-20' }), saida(9, 300, 'PEDRO ALVES', { data: '2026-11-26' })]);
+    // "MARIA SOUZA" tem 2 das 3 palavras (0,66) → casaria sozinha; por isso o teste usa um nome que fica abaixo do mínimo
+    const r2 = casar([lib(1, 300, 'MARIA SOUZA LIMA SANTOS OLIVEIRA', { doc: '' })], [saida(7, 300, 'JOAO PEREIRA', { data: '2026-11-25' }), saida(8, 300, 'MARIA SOUZA', { data: '2026-11-20' }), saida(9, 300, 'PEDRO ALVES', { data: '2026-11-26' })]);
+    expect(r.casadas).toHaveLength(1);
+    expect(r2.casadas).toEqual([]);
+    expect(r2.sugestoes[0].saidas.map((x) => x.saida.id)).toEqual([8, 9, 7]);
+  });
+
+  it('mais saídas possíveis do que liberações, em dias diferentes: vira sugestão para o usuário escolher', () => {
+    const r = casar([lib(1, 163.91)], [saida(7, 163.91, 'ALARES TELECOM', { data: '2026-11-18' }), saida(8, 163.91, 'ALARES TELECOM', { data: '2026-11-23' })]);
+    expect(r.casadas).toEqual([]);
+    expect(r.sugestoes[0].saidas.map((x) => x.saida.id)).toEqual([8, 7]);
+  });
+});
+
+describe('sugestões aprovadas pelo usuário', () => {
+  const sugestoes = [
+    { id: 1, saidas: [{ saida: { id: 7 }, pontos: 0.2 }, { saida: { id: 8 }, pontos: 0 }] },
+    { id: 2, saidas: [{ saida: { id: 7 }, pontos: 0 }] },
+  ];
+  it('aceita a saída que continua entre as possíveis', () => {
+    const r = conferirEscolhas([{ id: 1, lancamentoId: 8 }], sugestoes);
+    expect(r.aceitas.map((x) => [x.id, x.saida.id])).toEqual([[1, 8]]);
+    expect(r.recusadas).toEqual([]);
+  });
+  it('a mesma saída não paga duas duplicatas', () => {
+    const r = conferirEscolhas([{ id: 1, lancamentoId: 7 }, { id: 2, lancamentoId: '7' }], sugestoes);
+    expect(r.aceitas.map((x) => x.id)).toEqual([1]);
+    expect(r.recusadas).toEqual([{ id: 2, motivo: 'a mesma saída foi escolhida para outra duplicata: cada saída paga uma só' }]);
+  });
+  it('saída que não está mais disponível, ou duplicata sem sugestão: recusa com o motivo', () => {
+    const r = conferirEscolhas([{ id: 1, lancamentoId: 99 }, { id: 5, lancamentoId: 7 }], sugestoes);
+    expect(r.aceitas).toEqual([]);
+    expect(r.recusadas.map((x) => x.id)).toEqual([1, 5]);
+    expect(r.recusadas[0].motivo).toMatch(/não está mais disponível/);
+    expect(r.recusadas[1].motivo).toMatch(/não há mais saída/);
+  });
+  it('ignora lixo e duplicata repetida no pedido', () => {
+    const r = conferirEscolhas([null, { id: 'x', lancamentoId: 7 }, { id: 1 }, { id: 1, lancamentoId: 7 }, { id: 1, lancamentoId: 8 }], sugestoes);
+    expect(r.aceitas.map((x) => [x.id, x.saida.id])).toEqual([[1, 7]]);
+    expect(conferirEscolhas(undefined, sugestoes)).toEqual({ aceitas: [], recusadas: [] });
   });
 });
