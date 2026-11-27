@@ -185,10 +185,14 @@ export async function importarTechfin({ arquivos, usuario = null, simular = fals
       .sort((a, b) => diffDias(a.data, dLiq) - diffDias(b.data, dLiq) || (concPorLanc.has(a.id) ? 1 : 0) - (concPorLanc.has(b.id) ? 1 : 0));
     let l = cands[0];
     let contaLinha = conta;
-    if (!l) {
+    if (!l && !r.conta?.numero) {
       // relatório sem conta de destino ("-/-/-"): o repasse pode ter caído em
       // outra conta do grupo (ex.: Sicredi central). Vale se for crédito único.
-      const outras = linhas.filter((x) => x.conta_id !== conta.id && !linhasUsadas.has(x.id) && cents(x.valor) === alvo && diffDias(x.data, dLiq) >= 0 && diffDias(x.data, dLiq) <= JANELA_EXTRATO);
+      // Com a conta informada NÃO procura em outra: o repasse de Canguaretama (Stone 0006-20,
+      // extrato ainda não importado) casou por coincidência de valor com um Pix da conta
+      // Pagar.me do Midway em 09/11/2026. Conta Pagar.me nunca recebe repasse da Techfin.
+      const ehPagarme = (x) => String(contas.find((c) => c.id === x.conta_id)?.banco || '').toUpperCase() === 'PAGARME';
+      const outras = linhas.filter((x) => x.conta_id !== conta.id && !ehPagarme(x) && !linhasUsadas.has(x.id) && cents(x.valor) === alvo && diffDias(x.data, dLiq) >= 0 && diffDias(x.data, dLiq) <= JANELA_EXTRATO);
       if (outras.length === 1) {
         l = outras[0];
         contaLinha = contas.find((c) => c.id === l.conta_id) || conta;
