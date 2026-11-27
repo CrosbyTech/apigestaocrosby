@@ -19,6 +19,7 @@
 // ============================================================================
 import axios from 'axios';
 import { drylandRpc } from './pedidosVendaDryland.js';
+import { itensDoCardBrejinho, totaisDosItens } from './brejinhoItens.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 
@@ -191,7 +192,15 @@ export async function obterBrejinho(id) {
     const info = await produtos(transacao.itens.map((i) => i.productCode));
     transacao.itens = transacao.itens.map((i) => ({ ...i, ...(info.get(i.productCode) || {}) }));
   }
-  return { pedido: { ...enxuto(p), log: Array.isArray(p.log) ? p.log : [], anexos: p.anexos || p.cancel_anexos || [] }, transacao, transacaoErro };
+  // peças gravadas no próprio card (cards do showroom sem transação) — services/brejinhoItens.js
+  const doCard = itensDoCardBrejinho(p.raw);
+  return {
+    pedido: { ...enxuto(p), customer_code: p.customer_code || null, log: Array.isArray(p.log) ? p.log : [], anexos: p.anexos || p.cancel_anexos || [] },
+    transacao,
+    transacaoErro,
+    itensCard: doCard.itens,
+    itensCardIgnorados: doCard.ignoradas,
+  };
 }
 
 // forma de pagamento do Dryland → texto que o Faturamento entende
@@ -206,8 +215,8 @@ function formaTexto(cond) {
 /** Card no formato da fila de faturamento, para a tela Expedição → Faturamento. */
 export async function cardBrejinho(chave) {
   const id = String(chave).replace(/^BRJ:/i, '');
-  const { pedido: p, transacao, transacaoErro } = await obterBrejinho(id);
-  const itens = (transacao?.itens || []).map((i) => ({
+  const { pedido: p, transacao, transacaoErro, itensCard, itensCardIgnorados } = await obterBrejinho(id);
+  const daTransacao = (transacao?.itens || []).map((i) => ({
     cod: String(i.productCode),
     descricao: i.nome || `Produto ${i.productCode}`,
     cor: i.cor || null,
@@ -215,6 +224,11 @@ export async function cardBrejinho(chave) {
     qtd: i.quantidade,
     preco: Math.round((i.valorUnit - i.descontoUnit) * 100) / 100,
   }));
+  // Peças: as da transação da remessa, quando o card tem uma; card sem transação
+  // (showroom novo) → as que o Dryland gravou no próprio card (raw.itens)
+  const itensFonte = daTransacao.length ? 'transacao' : itensCard.length ? 'card' : null;
+  const itens = daTransacao.length ? daTransacao : itensCard;
+  const totCard = totaisDosItens(itensCard);
   const card = {
     id: `BRJ:${p.id}`,
     origem: 'brejinho',
@@ -226,7 +240,7 @@ export async function cardBrejinho(chave) {
     criado_em: p.criado_em,
     dados: {
       nome_cliente: p.cliente,
-      codigo_cliente: transacao?.customerCode ? String(transacao.customerCode) : null,
+      codigo_cliente: transacao?.customerCode ? String(transacao.customerCode) : p.customer_code ? String(p.customer_code) : null,
       cod_vendedor: transacao?.sellerCode ? String(transacao.sellerCode) : null,
       itens,
       forma_pagamento: formaTexto(p.cond_pagamento),
@@ -251,6 +265,9 @@ export async function cardBrejinho(chave) {
         cond_pagamento: p.cond_pagamento,
         parcelas: p.parcelas,
         qtd_pecas: p.qtd_pecas,
+        // de onde vieram as peças: 'transacao' (remessa antiga) ou 'card' (raw.itens do Dryland)
+        itens_fonte: itensFonte,
+        itens_card: { linhas: itensCard.length, pecas: totCard.pecas, valor: totCard.valor, ignoradas: itensCardIgnorados },
       },
     },
   };
