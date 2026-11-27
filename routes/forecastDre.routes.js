@@ -146,6 +146,53 @@ const hojeIso = () => new Date().toISOString().slice(0, 10);
 // venda). Evita martelar o sale-panel (TOTVS) a cada abertura da tela.
 const CACHE = new Map(); // mes → { dados, expira }
 
+// Ajustes manuais do New Forecast (Niziany, 26/11/2026): a célula âmbar de uma
+// semana troca o valor do painel naquela semana. O Forecast aplica a mesma
+// troca (override − painel) na linha do canal, para a Receita Líquida bater
+// com o TOTAL do New Forecast. Só canais automáticos com linha própria na DRE.
+const NF_AJUSTE_LINHA = {
+  VAREJO: { fonte: 'VAREJO', linha: 'varejo' },
+  BAZAR: { fonte: 'BAZAR', linha: 'bazar' },
+  FRANQUIAS: { fonte: 'FRANQUIAS', linha: 'franquia' },
+  BLUECRED: { fonte: 'BLUECRED', linha: 'bluecred' },
+  'MAGAZINE JESUS': { fonte: 'RICARDO_ELETRO', linha: 'imobilizado' },
+};
+async function ajustesNewForecast(mes, base) {
+  const { data, error } = await supabase
+    .from('new_forecast_config')
+    .select('semanas, overrides')
+    .eq('period_key', `${mes}-01|${ultimoDia(mes)}`)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  const pend = [];
+  for (const [canal, porSemana] of Object.entries(data?.overrides || {})) {
+    const map = NF_AJUSTE_LINHA[canal];
+    if (!map) continue;
+    for (const [k, v] of Object.entries(porSemana || {})) {
+      if (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) continue;
+      pend.push({ canal, k, valor: Number(v), ...map });
+    }
+  }
+  const semanas = (data?.semanas || []).filter((s) => pend.some((p) => p.k === `s${s.s}`));
+  if (!pend.length || !semanas.length) return { deltas: {}, itens: [] };
+  const resp = await axios.post(
+    `${base}/api/totvs/sale-panel/faturamento-vendedor-semanal`,
+    { datemin: `${mes}-01`, datemax: ultimoDia(mes), usarCache: true, salvar: false, semanas },
+    { timeout: 600000 },
+  );
+  const canais = (resp.data?.data || resp.data || {}).canais || {};
+  const deltas = {};
+  const itens = [];
+  for (const p of pend) {
+    if (!semanas.some((s) => `s${s.s}` === p.k)) continue;
+    const painel = Number(canais[p.fonte]?.[p.k]) || 0;
+    const delta = r2(p.valor - painel);
+    deltas[p.linha] = r2((deltas[p.linha] || 0) + delta);
+    itens.push({ canal: p.canal, semana: p.k, manual: p.valor, painel: r2(painel), delta });
+  }
+  return { deltas, itens };
+}
+
 async function calcularMes(mes) {
   const datemin = `${mes}-01`;
   const datemax = ultimoDia(mes);
@@ -184,7 +231,16 @@ async function calcularMes(mes) {
     }
   }
 
-  const franquia = franquiasBase + showroomFranquia;
+  // Ajustes manuais do New Forecast (override − painel), por linha
+  let ajustes = { deltas: {}, itens: [] };
+  try {
+    ajustes = await ajustesNewForecast(mes, base);
+  } catch (e) {
+    console.warn(`[forecast-dre ajustes NF ${mes}] ${e.message}`);
+  }
+  const aj = (linha) => ajustes.deltas[linha] || 0;
+
+  const franquia = franquiasBase + showroomFranquia + aj('franquia');
   const multimarcas = multimarcasBase + showroomMultimarcas;
 
   // CREDEV do Contas a Receber: total (linha CREDEV) + por canal (visualização).
@@ -201,16 +257,17 @@ async function calcularMes(mes) {
 
   const dados = {
     mes,
-    varejo: r2(varejo),
+    varejo: r2(varejo + aj('varejo')),
     multimarcas: r2(multimarcas),
     franquia: r2(franquia),
     revenda: r2(revenda),
-    bazar: r2(bazar),
-    bluecred: r2(bluecred),
-    imobilizado: r2(imobilizado),
+    bazar: r2(bazar + aj('bazar')),
+    bluecred: r2(bluecred + aj('bluecred')),
+    imobilizado: r2(imobilizado + aj('imobilizado')),
     credev,
     credev_canais: credevCanais,
     detalhe: {
+      ajustes_new_forecast: ajustes.itens,
       franquias_base: r2(franquiasBase),
       multimarcas_base: r2(multimarcasBase),
       showroom_franquia: r2(showroomFranquia),
@@ -902,7 +959,52 @@ async function calcularFrete(mes) {
 // Despesa de PJ (Niziany 29/10): pago no mês nos Contratos PJ do Dryland
 // (aba Contratos PJ, RPC dp_pj_listar). Abre por NOME do contratado. É a linha
 // "PJ" da DRE (r25), separada do Pessoal Fixo — NÃO entra no totalFixo.
-async function calcularPJ(mes, token) {
+// A partir de out/2026 (Niziany, 26/11/2026 — rescisão da Monaisa): entram também
+// os títulos TOTVS da natureza 6018 (SERVICOS PRESTADOS POR TERCEIROS) emitidos
+// no mês cujo prestador NÃO tem pagamento no Dryland na competência (rescisão,
+// distrato, lançamento fora do padrão). O nome do Dryland traz o código do
+// fornecedor TOTVS ("NOME - 77757"); sem código, casa pelo nome.
+const PJ_EXP = 6018;
+const PJ_TOTVS_DESDE = '2026-10';
+async function pjSoNoTotvs(mes, base, nomesDryland) {
+  const filiais = await getFiliais(base);
+  const resp = await axios.post(
+    `${base}/api/totvs/accounts-payable/search`,
+    {
+      dt_inicio: `${mes}-01`,
+      dt_fim: ultimoDia(mes),
+      modo: 'emissao',
+      situacao: 'N',
+      previsao: 'TODOS',
+      filtroPagamento: 'TODOS',
+      expenseCodeList: [PJ_EXP],
+      branches: filiais,
+    },
+    { timeout: 300000 },
+  );
+  const codigos = new Set();
+  const tokens = [];
+  for (const n of nomesDryland) {
+    const cod = String(n.nome || '').match(/-\s*(\d{3,})\s*$/);
+    if (cod) codigos.add(Number(cod[1]));
+    else tokens.push(nz(n.nome).split(/\s+/).filter((t) => t.length > 1));
+  }
+  const extras = new Map();
+  for (const it of resp.data?.data?.data || []) {
+    if (Number(it.cd_ccusto) === 999) continue;
+    const forn = Number(it.cd_fornecedor);
+    const nomeTotvs = nz(it.nm_fornecedor);
+    if (codigos.has(forn)) continue;
+    if (tokens.some((ts) => ts.length && ts.every((t) => nomeTotvs.split(/\s+/).includes(t)))) continue;
+    const v = valorDaNatureza(it, PJ_EXP, Number(it.vl_duplicata) || 0);
+    if (!v) continue;
+    const nome = `${it.nm_fornecedor || '(sem nome)'} - ${forn} (TOTVS, sem pagamento no Dryland)`;
+    extras.set(nome, (extras.get(nome) || 0) + v);
+  }
+  return [...extras].map(([nome, valor]) => ({ nome, valor: Math.round(valor * 100) / 100 }));
+}
+
+async function calcularPJ(mes, token, base) {
   const r = await drylandRpcDp('dp_pj_listar', { p_token: token });
   const contratos = (r && r.contratos) || [];
   const nomes = [];
@@ -914,6 +1016,16 @@ async function calcularPJ(mes, token) {
     if (pago > 0) {
       nomes.push({ nome: c.nome || '(sem nome)', valor: Math.round(pago * 100) / 100 });
       total += pago;
+    }
+  }
+  if (base && mes >= PJ_TOTVS_DESDE) {
+    try {
+      for (const x of await pjSoNoTotvs(mes, base, nomes)) {
+        nomes.push(x);
+        total += x.valor;
+      }
+    } catch (e) {
+      console.warn(`[forecast-dre pj totvs ${mes}] ${e.message}`);
     }
   }
   nomes.sort((a, b) => b.valor - a.valor);
@@ -1195,7 +1307,7 @@ async function calcularPessoalFixo(mes) {
     let pjTotal = 0;
     let pjNomes = [];
     try {
-      const pj = await calcularPJ(mes, lg.token);
+      const pj = await calcularPJ(mes, lg.token, base);
       pjTotal = pj.total;
       pjNomes = pj.nomes;
     } catch (e) {
