@@ -26,6 +26,7 @@ import { verificarSenhaAutorizador, AutorizacaoError } from './autorizacaoSenha.
 import { empresasDoUsuario } from './hcCaixa.js';
 import { empresasRestritasDoUsuario } from '../utils/empresasUsuario.js';
 import { solicitacaoAposBaixa } from './solicitacaoVinculoHc.js';
+import { veioDeSolicitacao, resumoDaSolicitacao } from '../utils/hcCpSolicitacaoOrigem.js';
 
 export class CpError extends Error {
   constructor(message, code = 'HC_CP', status = 400) {
@@ -520,7 +521,15 @@ export async function detalheTitulo(user, id) {
     anexoUrl = data?.signedUrl || null;
   }
   const liberacoes = await q(supabase.from('hc_cp_liberacoes').select('*').eq('titulo_id', t.id).order('id'));
-  return { titulo: { ...t, tela: situacaoDeTela(t), liberacao: (liberacoes || []).find((l) => !['pago', 'cancelado'].includes(l.status)) || null }, baixas: baixas || [], parcelas: irmas || [], liberacoes: liberacoes || [], anexoUrl };
+  // duplicata que nasceu de Solicitação Crosby: quem pediu, por quê, observação e anexos
+  // (a Liberação de Pagamento abre isso ao clicar na duplicata — Yago, 27/11/2026)
+  let solicitacao = null;
+  if (veioDeSolicitacao(t)) {
+    const { data: sol, error: erroSol } = await supabase.from('solicitacoes_crosby').select('*').eq('id', t.origem_ref).maybeSingle();
+    if (erroSol) console.warn(`[contas a pagar] solicitação de origem da duplicata ${t.id}: ${erroSol.message}`);
+    solicitacao = resumoDaSolicitacao(sol);
+  }
+  return { titulo: { ...t, tela: situacaoDeTela(t), liberacao: (liberacoes || []).find((l) => !['pago', 'cancelado'].includes(l.status)) || null }, baixas: baixas || [], parcelas: irmas || [], liberacoes: liberacoes || [], solicitacao, anexoUrl };
 }
 
 // ─── alteração (só em aberto) ────────────────────────────────────────────────
