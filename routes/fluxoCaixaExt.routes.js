@@ -490,7 +490,7 @@ router.post(
     if (!de || !ate) return errorResponse(res, 'Informe de e ate (AAAA-MM-DD).', 400);
     try {
       const r = await conciliacao.conciliarAutomatico({ contaId: contaId ? Number(contaId) : null, de: String(de), ate: String(ate), usuario: usuarioDe(req), simular: !!req.body?.simular, apenas: req.body?.apenas || null });
-      return successResponse(res, r, `${r.conciliadas.length} de ${r.pendentes} saída(s) conciliada(s) automaticamente`);
+      return successResponse(res, r, `${r.conciliadas.length} de ${r.pendentes} linha(s) conciliada(s) automaticamente (saídas e entradas)`);
     } catch (e) {
       return tratar(res, e);
     }

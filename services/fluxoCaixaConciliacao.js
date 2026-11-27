@@ -1551,6 +1551,8 @@ async function cruzarDepositoComTotvs(loja, stonecode, parcelas) {
 }
 
 // ─── entradas Stone: depósitos do arquivo de conciliação ─────
+// dia de hoje no fuso das lojas (UTC−3)
+export const hojeLocalIso = (agora = new Date()) => new Date(agora.getTime() - 3 * 3600 * 1000).toISOString().slice(0, 10);
 const fmtBr = (v) => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const lojaStoneDoCnpj = (cnpj) => STONE_LOJAS.find((l) => l.cnpj === soDigitos(cnpj) && l.apiKey && l.stonecode) || null;
 // inclui o texto novo da Stone (29/10/2026+) "Recebimento de vendas Valor referente à liquidação…", que entrou como "outros" nas importações antigas
@@ -1602,7 +1604,11 @@ async function fonteStone(loja, { de, ate }) {
       erros.push(...r.erros.map((e) => ({ ...e, code })));
       for (const dia of r.dias) itens.push(...depositosStoneDoDia(dia, loja, code));
     }
-    const avisos = erros.length ? [`Stone ${loja.nome}: ${erros.length} dia(s) sem arquivo (${erros[0].data}: ${erros[0].erro})`] : [];
+    // só dia PASSADO sem arquivo é problema; de hoje em diante o arquivo ainda não existe (sai às 5h do dia
+    // seguinte). A janela vai até o fim do mês + 5 dias × cada StoneCode: o Midway mostrava "27 dia(s) sem arquivo".
+    const hoje = hojeLocalIso();
+    const passados = [...new Set(erros.filter((e) => e.data < hoje).map((e) => e.data))].sort();
+    const avisos = passados.length ? [`Stone ${loja.nome}: ${passados.length} dia(s) passado(s) sem arquivo (${passados.slice(0, 5).join(', ')}${passados.length > 5 ? '…' : ''}: ${erros.find((e) => e.data === passados[0]).erro})`] : [];
     const diasComErro = new Set(erros.map((e) => e.data));
     return { itens, avisos, diasComErro, em: Date.now() };
   })();
@@ -2585,7 +2591,9 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
   const temSaida = pendentes.some((l) => l.valor < 0 && !ehLinhaFolha(l));
   const fontes = temSaida ? await carregarFontes({ de, ate }) : { avisos: [] };
   const usados = await usadosNaJanela({ de, ate });
-  const resultado = { pendentes: pendentes.length, conciliadas: [], ambiguas: [], semCandidato: 0, avisos: [...fontes.avisos] };
+  // aguardandoArquivo: entradas de cartão de hoje — o arquivo da Stone do dia só sai amanhã às 5h
+  const resultado = { pendentes: pendentes.length, conciliadas: [], ambiguas: [], semCandidato: 0, aguardandoArquivo: 0, avisos: [...fontes.avisos] };
+  const hoje = hojeLocalIso();
   const stonePorCnpj = new Map();
   const crPorCnpj = new Map();
 
@@ -2634,6 +2642,10 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
       }
       const fonte = stonePorCnpj.get(loja.cnpj);
       candidatos = candidatosEntradaStone(l, fonte.itens, usados);
+      if (!candidatos.length && String(l.data) >= hoje) {
+        resultado.aguardandoArquivo += 1;
+        continue;
+      }
       if (ehDepositoRedeProvavel(l, candidatos, !(fonte.diasComErro || new Set()).has(l.data))) {
         const c = conciliacaoDepositoRede(l);
         try {
