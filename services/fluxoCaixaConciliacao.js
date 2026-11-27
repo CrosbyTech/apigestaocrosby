@@ -1684,6 +1684,47 @@ const conciliacaoDepositoRede = (l) => ({
   justificativa: `Depósito da Rede (venda na maquininha Rede${l.bandeira ? ` · ${l.bandeira}` : ''}, repassada à conta Stone)`,
 });
 
+// Depósito liberado com atraso (Ayrton Senna, conta 0014-30, 18–19/11/2026): a conta Stone da
+// loja só começou a receber em 18/11 e a Stone creditou de uma vez 34 depósitos que o arquivo
+// dela data de 13/10 a 16/11 — todos com valor idêntico, um para um. A folga normal é de 2 dias,
+// então nenhum casava. Só vale quando o arquivo do dia da linha já foi lido e não tem o depósito:
+// procura um depósito ANTERIOR (3 a 37 dias), livre e de valor igual ao centavo.
+// 37 dias = o maior atraso visto; cabe na janela de ±40 dias do controle de uso.
+export const ATRASO_MAX_DIAS = 37;
+function pontuarEntradaStoneAtrasada(l, c, usado = 0) {
+  const valorL = round2(Number(l.valor));
+  if (Math.abs(c.valor - valorL) > VALOR_TOL) return null;
+  if (usado > VALOR_TOL) return null;
+  const atraso = diffDias(l.data, c.data); // positivo = entrou na conta depois da data do arquivo
+  if (atraso < 3 || atraso > ATRASO_MAX_DIAS) return null;
+  const motivos = ['valor igual', `depósito de ${c.data.slice(8, 10)}/${c.data.slice(5, 7)} creditado ${atraso} dias depois`];
+  let score = 70;
+  const cat = String(l.categoria || '');
+  const linhaAntecip = cat === 'antecipacao';
+  const depAntecip = c.stone?.tipo === 'ANTECIPACAO';
+  if (['antecipacao', 'cartao'].includes(cat) && linhaAntecip !== depAntecip && c.stone?.tipo !== 'MISTO') {
+    score -= 10; // extrato diz antecipação e o depósito não (ou o contrário): fica para conferir
+    motivos.push('tipo diferente do extrato: confira');
+  }
+  return { ...c, score, motivos, parcial: false, valorDuplicata: c.valor, restanteAntes: c.valor, restanteDepois: 0, atrasoDias: atraso };
+}
+export function candidatosEntradaStoneAtrasada(l, itens, usados = new Map()) {
+  const lista = [];
+  for (const c of itens || []) {
+    const p = pontuarEntradaStoneAtrasada(l, c, usados.get(`${c.origem}:${c.id}`) || 0);
+    if (p) lista.push(p);
+  }
+  // o mais recente primeiro; dois depósitos livres de mesmo valor ficam empatados (a linha vai para conferir)
+  lista.sort((a, b) => b.score - a.score || a.atrasoDias - b.atrasoDias);
+  return lista.slice(0, 8);
+}
+// depósitos dos dias anteriores à janela mensal (só é lido quando alguma linha precisa)
+async function itensStoneAtrasados(loja, fonte, { de, ate }) {
+  const janela = janelaMensal({ de, ate });
+  const extra = await fonteStone(loja, { de: addDias(janela.de, -ATRASO_MAX_DIAS), ate: addDias(janela.de, -1) }).catch(() => ({ itens: [] }));
+  return [...(fonte.itens || []), ...(extra.itens || [])];
+}
+
 export function candidatosEntradaStone(l, itens, usados = new Map()) {
   const lista = [];
   for (const c of itens || []) {
@@ -2573,7 +2614,10 @@ export async function buscarCandidatos(lancamentoId) {
     if (!loja) return { lancamento: l, candidatos: [], avisos: [`Conta Stone sem chave da API de Conciliação cadastrada (CNPJ ${l.conta_cnpj || '?'}). Cadastre em config/stoneConciliacao.js.`] };
     const f = await fonteStone(loja, janelaMensal({ de: l.data, ate: l.data }));
     const usados = await usadosNaJanela({ de: l.data, ate: l.data });
-    const candidatos = candidatosEntradaStone(l, f.itens, usados);
+    let candidatos = candidatosEntradaStone(l, f.itens, usados);
+    if (!candidatos.length && String(l.data) < hojeLocalIso() && !(f.diasComErro || new Set()).has(l.data)) {
+      candidatos = candidatosEntradaStoneAtrasada(l, await itensStoneAtrasados(loja, f, { de: l.data, ate: l.data }), usados);
+    }
     return { lancamento: l, candidatos, avisos: f.avisos, decisao: decidir(candidatos) };
   }
   if (ehLinhaFolha(l)) {
@@ -2702,6 +2746,11 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
         resultado.aguardandoArquivo += 1;
         continue;
       }
+      // arquivo do dia lido e sem o depósito: pode ser depósito antigo creditado com atraso
+      if (!candidatos.length && !(fonte.diasComErro || new Set()).has(l.data)) {
+        if (!fonte.comAtrasados) fonte.comAtrasados = await itensStoneAtrasados(loja, fonte, { de, ate });
+        candidatos = candidatosEntradaStoneAtrasada(l, fonte.comAtrasados, usados);
+      }
       const doDia = pendentes.filter((x) => x.conta_id === l.conta_id && x.data === l.data && x.valor > 0 && ehEntradaStone(x));
       if (ehDepositoRedeProvavel(l, candidatos, !(fonte.diasComErro || new Set()).has(l.data)) && diaComDepositoDeOutraData(doDia, fonte.itens)) {
         resultado.semCandidato += 1;
@@ -2734,7 +2783,7 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
         pontuacao: esc.score,
       });
       marcarUso(usados, esc.origem, esc.id, l.valor);
-      resultado.conciliadas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, origem: esc.origem, nome: esc.nome, score: esc.score });
+      resultado.conciliadas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, origem: esc.origem, nome: esc.nome, score: esc.score, ...(esc.atrasoDias ? { atrasoDias: esc.atrasoDias, dataDeposito: esc.data } : {}) });
       } catch (e) {
         resultado.avisos.push(`${l.data} ${Number(l.valor).toFixed(2)}: ${e.message}`);
         resultado.ambiguas.push({ lancamentoId: l.id, data: l.data, valor: l.valor, contraparte: l.contraparte_nome, motivo: `não gravou: ${e.message}`, candidatos: candidatos.slice(0, 5) });

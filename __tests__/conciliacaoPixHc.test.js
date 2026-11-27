@@ -116,3 +116,36 @@ describe('dia com data deslocada não vira depósito da Rede', () => {
     expect(diaComDepositoDeOutraData([], itens)).toBe(false);
   });
 });
+
+describe('depósito da Stone creditado com atraso', () => {
+  const dep = (extra = {}) => ({ origem: 'STONE', id: '721|2026-11-05|1', valor: 503.12, data: '2026-11-05', nome: 'STONE', stone: { tipo: 'LIQUIDACAO' }, ...extra });
+  const linhaStone = (extra = {}) => ({ id: 1, data: '2026-11-19', valor: 503.12, categoria: 'cartao', ...extra });
+
+  test('valor idêntico, depósito anterior e único → concilia sozinho', async () => {
+    const { candidatosEntradaStoneAtrasada, decidir: dec } = await import('../services/fluxoCaixaConciliacao.js');
+    const c = candidatosEntradaStoneAtrasada(linhaStone(), [dep()]);
+    expect(c).toHaveLength(1);
+    expect(c[0].score).toBe(70);
+    expect(c[0].motivos[1]).toBe('depósito de 05/11 creditado 14 dias depois');
+    expect(dec(c).automatico).toBe(true);
+  });
+
+  test('fora da faixa de 3 a 37 dias, depósito posterior, outro valor ou já usado não entra', async () => {
+    const { candidatosEntradaStoneAtrasada } = await import('../services/fluxoCaixaConciliacao.js');
+    expect(candidatosEntradaStoneAtrasada(linhaStone(), [dep({ data: '2026-11-17' })])).toEqual([]); // 2 dias: regra normal
+    expect(candidatosEntradaStoneAtrasada(linhaStone(), [dep({ data: '2026-10-10' })])).toEqual([]); // 40 dias
+    expect(candidatosEntradaStoneAtrasada(linhaStone(), [dep({ data: '2026-11-25' })])).toEqual([]); // depósito depois da linha
+    expect(candidatosEntradaStoneAtrasada(linhaStone(), [dep({ valor: 503.2 })])).toEqual([]);
+    expect(candidatosEntradaStoneAtrasada(linhaStone(), [dep()], new Map([['STONE:721|2026-11-05|1', 503.12]]))).toEqual([]);
+  });
+
+  test('dois depósitos livres de mesmo valor ou tipo diferente do extrato ficam para conferir', async () => {
+    const { candidatosEntradaStoneAtrasada, decidir: dec } = await import('../services/fluxoCaixaConciliacao.js');
+    const dois = candidatosEntradaStoneAtrasada(linhaStone({ valor: 0.02 }), [dep({ valor: 0.02, data: '2026-10-23' }), dep({ id: 'x', valor: 0.02, data: '2026-10-30' })]);
+    expect(dois).toHaveLength(2);
+    expect(dec(dois).automatico).toBe(false);
+    const tipo = candidatosEntradaStoneAtrasada(linhaStone(), [dep({ stone: { tipo: 'ANTECIPACAO' } })]);
+    expect(tipo[0].score).toBe(60);
+    expect(dec(tipo).automatico).toBe(false);
+  });
+});
