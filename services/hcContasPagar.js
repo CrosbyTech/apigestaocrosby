@@ -148,11 +148,12 @@ export async function buscarFornecedores(user, termo) {
   const t = String(termo || '').trim();
   if (t.length < 2) return [];
   const dig = t.replace(/\D/g, '');
-  let qy = supabase.from('erp_pessoas').select('code, nome, fantasia, cpf_cnpj').eq('is_fornecedor', true);
+  // qualquer pessoa do cadastro pode receber; quem está marcado como fornecedor vem primeiro
+  let qy = supabase.from('erp_pessoas').select('code, nome, fantasia, cpf_cnpj, is_fornecedor');
   if (/^\d+$/.test(t) && dig.length <= 9) qy = qy.eq('code', Number(dig));
   else if (dig.length >= 11 && dig.length === t.replace(/[\s.\-/]/g, '').length) qy = qy.eq('cpf_cnpj', dig);
   else qy = qy.or(`nome.ilike.%${t.replace(/[%_,()]/g, ' ')}%,fantasia.ilike.%${t.replace(/[%_,()]/g, ' ')}%`);
-  return q(qy.order('nome').limit(30));
+  return q(qy.order('is_fornecedor', { ascending: false }).order('nome').limit(30));
 }
 
 // ─── rateio (sem banco) ──────────────────────────────────────────────────────
@@ -353,7 +354,7 @@ async function completarCadastros(comum) {
     comum.portador_code ? q(supabase.from('erp_portadores').select('code, descricao').eq('code', comum.portador_code).maybeSingle()) : null,
   ]);
   if (!forn) throw new CpError(`Fornecedor ${comum.fornecedor_code} não existe no cadastro`, 'FORNECEDOR', 404);
-  if (!forn.is_fornecedor) throw new CpError(`${forn.nome} não está marcado como fornecedor no cadastro`, 'FORNECEDOR');
+  // a marca "fornecedor" do cadastro não trava mais a duplicata (era bloqueio do TOTVS — Yago, 27/11/2026)
   if (comum.portador_code && !port) throw new CpError(`Portador ${comum.portador_code} não existe`, 'PORTADOR', 404);
   return { ...comum, fornecedor_nome: forn.nome, fornecedor_cpf_cnpj: forn.cpf_cnpj || null, portador_nome: port?.descricao || null };
 }

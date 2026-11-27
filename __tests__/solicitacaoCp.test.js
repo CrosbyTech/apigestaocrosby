@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { payloadDaSolicitacao, formaDoCp, tipoDocumentoDoCp, inclusaoDaSolicitacao, escolherFornecedor, observacaoDaSolicitacao, STATUS_QUE_LIBERAM, ehPatrimonioProduto, motivoDeNaoLiberarSolicitacao, solicitacaoQuitada } from '../utils/solicitacaoCp.js';
+import { payloadDaSolicitacao, formaDoCp, tipoDocumentoDoCp, inclusaoDaSolicitacao, escolherFornecedor, podeRenumerarDocumento, documentoComSufixo, observacaoDaSolicitacao, STATUS_QUE_LIBERAM, ehPatrimonioProduto, motivoDeNaoLiberarSolicitacao, solicitacaoQuitada } from '../utils/solicitacaoCp.js';
 import { validarInclusao } from '../services/hcContasPagar.js';
 
 const HOJE = '2026-11-23';
@@ -110,7 +110,10 @@ describe('cadastros', () => {
   it('entre pessoas com o mesmo documento, escolhe o fornecedor ativo', () => {
     expect(escolherFornecedor([{ code: 1, is_fornecedor: false }, { code: 2, is_fornecedor: true, inativo: true }, { code: 3, is_fornecedor: true, inativo: false }]).code).toBe(3);
     expect(escolherFornecedor([{ code: 2, is_fornecedor: true, inativo: true }]).code).toBe(2);
-    expect(escolherFornecedor([{ code: 1, is_fornecedor: false }])).toBeNull();
+    // sem a marca de fornecedor a pessoa do cadastro serve do mesmo jeito (a marca só desempata)
+    expect(escolherFornecedor([{ code: 1, is_fornecedor: false }]).code).toBe(1);
+    expect(escolherFornecedor([{ code: 1, is_fornecedor: false, inativo: true }, { code: 4, is_fornecedor: false }]).code).toBe(4);
+    expect(escolherFornecedor([{ code: 5, is_fornecedor: false }, { code: 2, is_fornecedor: true, inativo: true }]).code).toBe(5);
     expect(escolherFornecedor([])).toBeNull();
   });
 });
@@ -145,5 +148,19 @@ describe('liberar a solicitação para pagamento (Liberação do HeadCoach)', ()
     expect(solicitacaoQuitada([{ situacao: 'cancelado' }])).toBe(false);
     expect(solicitacaoQuitada([])).toBe(false);
     expect(solicitacaoQuitada(null)).toBe(false);
+  });
+});
+
+describe('número de controle repetido em pedidos diferentes', () => {
+  it('sem nota fiscal o documento pode ganhar sufixo; com nota a trava continua', () => {
+    expect(podeRenumerarDocumento({ tem_nota_fiscal: false })).toBe(true);
+    expect(podeRenumerarDocumento({ tem_nota_fiscal: null })).toBe(true);
+    expect(podeRenumerarDocumento({ tem_nota_fiscal: true })).toBe(false);
+    expect(podeRenumerarDocumento({ tem_nota_fiscal: 'true' })).toBe(false);
+  });
+  it('o sufixo cabe nos 40 caracteres do documento', () => {
+    expect(documentoComSufixo('2411202601', 2)).toBe('2411202601-2');
+    expect(documentoComSufixo('1'.repeat(40), 3)).toHaveLength(40);
+    expect(documentoComSufixo('1'.repeat(40), 3).endsWith('-3')).toBe(true);
   });
 });

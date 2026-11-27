@@ -134,8 +134,23 @@ export function solicitacaoQuitada(titulos) {
   return vivos.length > 0 && vivos.every((t) => t.situacao === 'pago');
 }
 
-/** Entre as pessoas com o mesmo CPF/CNPJ, a que é fornecedor ativo. */
+/**
+ * Solicitação SEM nota fiscal leva no "documento" um número de controle do setor (data +
+ * sequência, ex.: 2411202601) que se repete em pedidos diferentes do mesmo dia para o mesmo
+ * fornecedor. O contas a pagar não aceita dois lançamentos com o mesmo documento e parcela, então
+ * o segundo pedido ficava em "Erro no envio". Sem nota, o número ganha um sufixo (-2, -3…).
+ * COM nota fiscal a trava continua: mesmo número de nota do mesmo fornecedor é a mesma conta.
+ */
+export const podeRenumerarDocumento = (sol) => !(sol?.tem_nota_fiscal === true || sol?.tem_nota_fiscal === 'true');
+export const documentoComSufixo = (base, n) => `${String(base).slice(0, 40 - String(n).length - 1)}-${n}`;
+
+/**
+ * Entre as pessoas com o mesmo CPF/CNPJ, a que recebe o pagamento. A marca
+ * "fornecedor" do cadastro só desempata: era uma trava do TOTVS e o Contas a
+ * Pagar do HeadCoach paga qualquer pessoa cadastrada (Yago, 27/11/2026 —
+ * funcionário, prestador e gráfica ficavam barrados em "Erro no envio").
+ */
 export function escolherFornecedor(pessoas) {
   const lista = pessoas || [];
-  return lista.find((p) => p.is_fornecedor && !p.inativo) || lista.find((p) => p.is_fornecedor) || null;
+  return lista.find((p) => p.is_fornecedor && !p.inativo) || lista.find((p) => !p.inativo) || lista.find((p) => p.is_fornecedor) || lista[0] || null;
 }

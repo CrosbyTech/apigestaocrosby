@@ -454,15 +454,10 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
         out.recusadas.push({ ...base, motivo: `Fornecedor ${esc.fornecedorCodigo} não encontrado no cadastro de fornecedores.` });
         continue;
       }
-      if (fornHc.naoFornecedor) {
-        out.recusadas.push({ ...base, motivo: `${fornHc.code} ${fornHc.nome} não está marcado como FORNECEDOR no cadastro — marque como fornecedor e tente de novo.` });
-        continue;
-      }
       despesaCodigo = Number(soDig(esc.despesaCodigo));
     } else {
       const fb = FORNECEDOR_BANCO[String(conta?.banco || '').toUpperCase()];
       fornHc = fb ? await fornecedorHc({ cnpj: fb.cnpj }) : null;
-      if (fornHc?.naoFornecedor) fornHc = null;
     }
     if (!fornHc) {
       out.recusadas.push({ ...base, motivo: `Banco ${conta?.banco || '?'} sem fornecedor de tarifa no cadastro — informe o código do fornecedor.` });

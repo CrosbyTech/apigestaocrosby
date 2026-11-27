@@ -20,7 +20,7 @@
 import supabase from '../config/supabase.js';
 import { CpError, PERFIS_FINANCEIRO, validarInclusao, inserirTitulos, rotuloDuplicata } from './hcContasPagar.js';
 import { liberarTitulos, EM_ANDAMENTO } from './hcCpLiberacao.js';
-import { inclusaoDaSolicitacao, escolherFornecedor, motivoDeNaoLiberarSolicitacao, ORIGEM_SOLICITACAO, DESTINO_HC, STATUS_QUE_ENVIAM } from '../utils/solicitacaoCp.js';
+import { inclusaoDaSolicitacao, escolherFornecedor, motivoDeNaoLiberarSolicitacao, podeRenumerarDocumento, documentoComSufixo, ORIGEM_SOLICITACAO, DESTINO_HC, STATUS_QUE_ENVIAM } from '../utils/solicitacaoCp.js';
 import { escrituracaoDaSolicitacao } from '../utils/hcCpEscrituracao.js';
 
 const dig = (v) => String(v ?? '').replace(/\D+/g, '');
@@ -90,16 +90,11 @@ async function fornecedorDaSolicitacao(sol) {
   if (doc.length !== 11 && doc.length !== 14) throw new CpError('A solicitação está sem o CPF/CNPJ do fornecedor', 'FORNECEDOR');
   const local = await q(supabase.from('erp_pessoas').select('code, nome, cpf_cnpj, is_fornecedor, inativo').eq('cpf_cnpj', doc));
   let escolhido = escolherFornecedor(local);
-  let achados = local || [];
-  if (!escolhido) {
-    const doCadastro = await trazerFornecedorDoCadastro(doc);
-    if (doCadastro.length) achados = doCadastro;
-    escolhido = escolherFornecedor(doCadastro);
-  }
+  if (!escolhido) escolhido = escolherFornecedor(await trazerFornecedorDoCadastro(doc));
   if (escolhido) return Number(escolhido.code);
   const nome = sol.supplier_name || doc;
-  if (achados.length) throw new CpError(`${nome} (${doc}) está no cadastro, mas não está marcado como fornecedor. Marque como fornecedor e envie de novo.`, 'FORNECEDOR');
-  throw new CpError(`${nome} (${doc}) não está no cadastro de fornecedores. Cadastre o fornecedor e envie de novo.`, 'FORNECEDOR', 404);
+  // sem a trava da marca "fornecedor": só barra quem não existe no cadastro de pessoas (falta o código)
+  throw new CpError(`${nome} (${doc}) não está no cadastro de pessoas. Cadastre e envie de novo.`, 'FORNECEDOR', 404);
 }
 
 const titulosDaSolicitacao = (id) => q(supabase.from('hc_cp_titulos').select('id, empresa, fornecedor_code, fornecedor_nome, duplicata, parcela, valor, vencimento, situacao').eq('origem', ORIGEM_SOLICITACAO).eq('origem_ref', String(id)).neq('situacao', 'cancelado').order('parcela'));
@@ -135,6 +130,29 @@ export async function prepararDuplicata(sol) {
   return validarInclusao(corpo);
 }
 
+/** Grava a duplicata da solicitação; sem nota fiscal, número de controle repetido em outro pedido vira "-2", "-3"… */
+async function inserirDaSolicitacao(sol, opcoes) {
+  const dados = await prepararDuplicata(sol);
+  try {
+    return await inserirTitulos(dados, opcoes);
+  } catch (e) {
+    const base = dados.comum?.documento_fiscal;
+    if (!(e instanceof CpError) || e.code !== 'DUPLICADA' || !base || !podeRenumerarDocumento(sol)) throw e;
+    let ultimo = e;
+    for (let n = 2; n <= 9; n += 1) {
+      try {
+        const criados = await inserirTitulos({ ...dados, comum: { ...dados.comum, documento_fiscal: documentoComSufixo(base, n) } }, opcoes);
+        console.log(`🧾 [solicitação → contas a pagar] ${sol.id}: documento ${base} já usado em outro pedido; lançada como ${documentoComSufixo(base, n)}`);
+        return criados;
+      } catch (e2) {
+        if (!(e2 instanceof CpError) || e2.code !== 'DUPLICADA') throw e2;
+        ultimo = e2;
+      }
+    }
+    throw ultimo;
+  }
+}
+
 /**
  * Envia a solicitação aprovada para o contas a pagar do HeadCoach.
  * @returns {{ solicitacao, titulos, rotulo, jaEnviada }}
@@ -159,7 +177,7 @@ export async function enviarSolicitacaoAoCp(user, id) {
 
   let criados;
   try {
-    criados = await inserirTitulos(await prepararDuplicata(sol), { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id), escrituracao });
+    criados = await inserirDaSolicitacao(sol, { por: quem(user), origem: ORIGEM_SOLICITACAO, origemRef: String(sol.id), escrituracao });
   } catch (e) {
     // o erro fica na solicitação (como ficava o erro do envio antigo) para o financeiro corrigir e reenviar
     if (e instanceof CpError && e.status !== 500) await supabase.from('solicitacoes_crosby').update({ status: 'erro_envio', totvs_erro: e.message, totvs_response: { destino: DESTINO_HC, erro: e.code || null } }).eq('id', sol.id);
