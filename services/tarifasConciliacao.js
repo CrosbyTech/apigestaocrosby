@@ -403,8 +403,9 @@ async function criarNoTotvs({ branchCnpj, supplierCpfCnpj, valor, data, observac
  * @param {boolean} [simular]       só valida e mostra o que faria
  */
 export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = null, usuario = null, simular = false }) {
-  // itens: [{ lancamentoId, fornecedorCodigo?, despesaCodigo? }] — fornecedor e
-  // despesa escolhidos na tela (qualquer saída); sem eles, só tarifa (banco + 7008)
+  // itens: [{ lancamentoId, fornecedorCodigo?, despesaCodigo?, centroCustoCodigo? }] — fornecedor e
+  // despesa escolhidos na tela (qualquer saída); sem eles, só tarifa (banco + 7008).
+  // centroCustoCodigo é opcional (Liberação de Pagamento, 27/11/2026); sem ele vale o 10.
   const escolhas = new Map((itensIn || []).map((x) => [Number(x.lancamentoId), x]));
   const ids = [...new Set([...(lancamentoIds || []), ...(itensIn || []).map((x) => x.lancamentoId)].map(Number).filter(Boolean))];
   if (!ids.length) throw new Error('Marque pelo menos uma saída.');
@@ -490,7 +491,7 @@ export async function criarDuplicatasTarifas({ lancamentoIds, itens: itensIn = n
         tipoDocumento: 'outro',
         formaPagamento: 'debito_automatico',
         despesaCode: despesaCodigo,
-        centroCustoCode: DESPESA_TARIFA.centroCusto,
+        centroCustoCode: Number(soDig(esc.centroCustoCodigo)) || DESPESA_TARIFA.centroCusto,
         emissao: l.data,
         vencimento: l.data,
         valor,
