@@ -348,8 +348,10 @@ export async function devolverLiberacoes(user, b = {}) {
  * o que falta = baixa parcial) e fecha a liberação como PAGA. Erro de regra sai
  * como CpError (quem chama decide se ignora). Usada pelo PAGAR da tela e pela
  * baixa automática pelo extrato.
+ * juros / multa: o que foi pago A MAIS que a duplicata (conta atrasada); entram na
+ * baixa e na duplicata, e o valor pago passa a ser o da duplicata + o acréscimo.
  */
-export async function pagarUmaLiberacao(l, { data, banco, por, porId = null, observacao = null } = {}) {
+export async function pagarUmaLiberacao(l, { data, banco, por, porId = null, observacao = null, juros = 0, multa = 0 } = {}) {
   if (!EM_ANDAMENTO.includes(l.status)) throw new CpError(`está ${STATUS[l.status].toLowerCase()}`);
   if (!banco) throw new CpError('sem o banco de onde o pagamento saiu');
   // relê a duplicata: outra baixa pode ter entrado desde que a tela carregou
@@ -357,7 +359,8 @@ export async function pagarUmaLiberacao(l, { data, banco, por, porId = null, obs
   if (!t || t.situacao !== 'aberto') throw new CpError(t?.situacao === 'pago' ? 'a duplicata já está paga' : 'a duplicata não está mais em aberto');
   const falta = saldoDoTitulo(t);
   const valor = Math.min(Number(l.valor), falta);
-  const r = await aplicarBaixa(t, { dataPagamento: data, valorPago: valor < falta - 0.005 ? valor : null, formaPagamento: l.forma_pagamento || t.forma_pagamento || null, conta: banco, observacao: ['Liberação de Pagamento', observacao, l.observacao].filter(Boolean).join(' · ') }, { por, porId, semLiberacao: true });
+  const acrescimo = round2((Number(juros) || 0) + (Number(multa) || 0));
+  const r = await aplicarBaixa(t, { dataPagamento: data, juros: Number(juros) || 0, multa: Number(multa) || 0, valorPago: valor < falta - 0.005 ? round2(valor + acrescimo) : null, formaPagamento: l.forma_pagamento || t.forma_pagamento || null, conta: banco, observacao: ['Liberação de Pagamento', observacao, l.observacao].filter(Boolean).join(' · ') }, { por, porId, semLiberacao: true });
   const agora = new Date().toISOString();
   // só fecha se ainda estiver em andamento (duas pessoas pagando a mesma ao mesmo tempo)
   await q(supabase.from('hc_cp_liberacoes').update({ status: 'pago', valor: r.pago > 0 ? r.pago : l.valor, banco, pago_por: por, pago_em: agora, data_pagamento: r.data, baixa_id: r.baixa?.id || null, atualizado_por: por, atualizado_em: agora }).eq('id', l.id).in('status', EM_ANDAMENTO));

@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { casarIncluidos, conferirEscolhas, janelaDosExtratos, bancoDaConta, pontosDaSaida, contraparteDaSaida, addDias, DIAS_ATRAS } from '../utils/hcCpBaixaAutomatica.js';
+import { casarIncluidos, conferirEscolhas, marcarCentavos, ACRESCIMO_MAX, janelaDosExtratos, bancoDaConta, pontosDaSaida, contraparteDaSaida, addDias, DIAS_ATRAS } from '../utils/hcCpBaixaAutomatica.js';
 
 // pontuação simples de nome para o teste: fração das palavras do fornecedor que aparecem no extrato
 const pontuar = (a, b) => {
@@ -238,5 +238,69 @@ describe('sugestões aprovadas pelo usuário', () => {
     const r = conferirEscolhas([null, { id: 'x', lancamentoId: 7 }, { id: 1 }, { id: 1, lancamentoId: 7 }, { id: 1, lancamentoId: 8 }], sugestoes);
     expect(r.aceitas.map((x) => [x.id, x.saida.id])).toEqual([[1, 7]]);
     expect(conferirEscolhas(undefined, sugestoes)).toEqual({ aceitas: [], recusadas: [] });
+  });
+});
+
+describe('sugestão "paga com acréscimo" (juros e multa)', () => {
+  const telefonica = (id, valor) => lib(id, valor, 'TELEFONICA BRASIL', { code: 30, doc: '02558157000162' });
+
+  it('mesmo fornecedor e valor um pouco maior: vem como sugestão, com o acréscimo', () => {
+    const r = casar([telefonica(1, 199.99)], [saida(7, 204.24, 'TELEFONICA BRASIL', { data: '2026-11-26' })]);
+    expect(r.casadas).toEqual([]);
+    expect(r.sugestoes).toHaveLength(1);
+    expect(r.sugestoes[0].saidas.map((x) => [x.saida.id, x.acrescimo])).toEqual([[7, 4.25]]);
+  });
+
+  it('valor maior para OUTRO nome não é oferecido', () => {
+    const r = casar([telefonica(1, 199.99)], [saida(7, 204.24, 'PADARIA DO ZE')]);
+    expect(r.sugestoes).toEqual([]);
+  });
+
+  it('acima do limite de acréscimo não é oferecido; no limite, é', () => {
+    expect(ACRESCIMO_MAX).toBe(0.1);
+    expect(casar([telefonica(1, 100)], [saida(7, 110.01, 'TELEFONICA BRASIL')]).sugestoes).toEqual([]);
+    expect(casar([telefonica(1, 100)], [saida(7, 110, 'TELEFONICA BRASIL')]).sugestoes[0].saidas[0].acrescimo).toBe(10);
+  });
+
+  it('saída MENOR que a duplicata nunca é oferecida', () => {
+    expect(casar([telefonica(1, 199.99)], [saida(7, 199.98, 'TELEFONICA BRASIL')]).sugestoes).toEqual([]);
+  });
+
+  it('duas duplicatas iguais e duas saídas iguais com acréscimo: as duas saídas são oferecidas às duas', () => {
+    const r = casar([telefonica(1, 199.99), telefonica(2, 199.99)], [saida(7, 204.24, 'TELEFONICA BRASIL'), saida(8, 204.24, 'TELEFONICA BRASIL')]);
+    expect(r.sugestoes.map((x) => x.saidas.map((y) => y.saida.id).sort())).toEqual([[7, 8], [7, 8]]);
+    // aprovar a mesma saída para as duas é recusado; cada uma com a sua passa
+    expect(conferirEscolhas([{ id: 1, lancamentoId: 7 }, { id: 2, lancamentoId: 7 }], r.sugestoes).recusadas.map((x) => x.id)).toEqual([2]);
+    const ok = conferirEscolhas([{ id: 1, lancamentoId: 7 }, { id: 2, lancamentoId: 8 }], r.sugestoes);
+    expect(ok.aceitas.map((x) => [x.id, x.saida.id, x.acrescimo])).toEqual([[1, 7, 4.25], [2, 8, 4.25]]);
+  });
+
+  it('valor igual (outro nome) vem antes do valor com acréscimo', () => {
+    const r = casar([telefonica(1, 199.99)], [saida(7, 204.24, 'TELEFONICA BRASIL'), saida(8, 199.99, 'JOAO DA SILVA')]);
+    expect(r.sugestoes[0].saidas.map((x) => [x.saida.id, x.acrescimo])).toEqual([[8, 0], [7, 4.25]]);
+  });
+
+  it('a saída que casou sozinha com outra duplicata não vira acréscimo de ninguém', () => {
+    const r = casar([telefonica(1, 199.99), telefonica(2, 204.24)], [saida(7, 204.24, 'TELEFONICA BRASIL')]);
+    expect(r.casadas.map((c) => c.liberacoes)).toEqual([[2]]);
+    expect(r.sugestoes).toEqual([]);
+  });
+});
+
+describe('sugestões que já vêm marcadas: diferença de centavos para o mesmo fornecedor', () => {
+  const sug = (id, saidas) => ({ id, saidas });
+  it('marca até R$ 0,10 de diferença', () => {
+    const m = marcarCentavos([sug(1, [{ saida: { id: 7 }, pontos: 1, acrescimo: 0.01 }]), sug(2, [{ saida: { id: 8 }, pontos: 0.7, acrescimo: 0.1 }]), sug(3, [{ saida: { id: 9 }, pontos: 1, acrescimo: 0.11 }])]);
+    expect(m).toEqual({ 1: 7, 2: 8 });
+  });
+  it('não marca valor igual de outro nome, nem acréscimo sem o nome bater', () => {
+    expect(marcarCentavos([sug(1, [{ saida: { id: 7 }, pontos: 0, acrescimo: 0 }]), sug(2, [{ saida: { id: 8 }, pontos: 0.2, acrescimo: 0.05 }])])).toEqual({});
+  });
+  it('a mesma saída não é marcada para duas duplicatas', () => {
+    const m = marcarCentavos([sug(1, [{ saida: { id: 7 }, pontos: 1, acrescimo: 0.05 }]), sug(2, [{ saida: { id: 7 }, pontos: 1, acrescimo: 0.05 }, { saida: { id: 8 }, pontos: 1, acrescimo: 0.05 }])]);
+    expect(m).toEqual({ 1: 7, 2: 8 });
+  });
+  it('lista vazia', () => {
+    expect(marcarCentavos(null)).toEqual({});
   });
 });

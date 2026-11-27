@@ -13,6 +13,8 @@
 export const DIAS_ATRAS = 30;
 export const NOME_MIN = 0.6; // fração do nome do fornecedor que precisa aparecer na saída
 const MAX_SOMA = 16; // liberações do mesmo fornecedor testadas na soma
+export const ACRESCIMO_MAX = 0.1; // pagamento com juros/multa: a saída pode ser até 10% maior que a duplicata
+export const CENTAVOS_MARCADOS = 10; // diferença de até R$ 0,10 para o mesmo fornecedor: a sugestão já vem marcada
 
 const dig = (v) => String(v ?? '').replace(/\D+/g, '');
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
@@ -162,14 +164,25 @@ export function casarIncluidos(liberacoes, saidas, { pontuar, usadas = new Set()
   // ── 3) SUGESTÕES (Yago, 27/11/2026): a liberação que não casou sozinha, mas tem saída livre de valor
   //    IGUAL no extrato (o nome veio diferente, ou há mais de uma possível). O sistema não baixa:
   //    mostra as saídas e o usuário marca qual é e aprova. A mais parecida com o fornecedor vem primeiro.
+  //    PAGA COM ACRÉSCIMO (Yago, 27/11/2026): a conta atrasada sai no extrato com juros e multa, então o
+  //    valor é um pouco MAIOR que o da duplicata. Aí o fornecedor tem de bater (nome ou CPF/CNPJ) — valor
+  //    diferente para outro nome não é oferecido — e o acréscimo vai até ACRESCIMO_MAX. A diferença é
+  //    lançada na baixa como juros e multa.
   const sugestoes = [];
   for (const lib of libs) {
     if (feitas.has(lib.id)) continue;
     const V = centavos(lib.valor);
-    const possiveis = livres
+    const teto = Math.floor(V * (1 + ACRESCIMO_MAX));
+    const iguais = livres
       .filter((l) => !tomadas.has(l.id) && centavos(l.valor) === V)
-      .map((l) => ({ saida: l, pontos: doFornecedor(lib.titulo, l) }))
+      .map((l) => ({ saida: l, pontos: doFornecedor(lib.titulo, l), acrescimo: 0 }))
       .sort((a, b) => b.pontos - a.pontos || String(b.saida.data).localeCompare(String(a.saida.data)));
+    const maiores = livres
+      .filter((l) => !tomadas.has(l.id) && centavos(l.valor) > V && centavos(l.valor) <= teto)
+      .map((l) => ({ saida: l, pontos: doFornecedor(lib.titulo, l), acrescimo: (centavos(l.valor) - V) / 100 }))
+      .filter((x) => x.pontos >= NOME_MIN)
+      .sort((a, b) => a.acrescimo - b.acrescimo || String(b.saida.data).localeCompare(String(a.saida.data)));
+    const possiveis = [...iguais, ...maiores];
     if (possiveis.length) sugestoes.push({ id: lib.id, saidas: possiveis });
   }
   return { casadas, semSaida, sugestoes };
@@ -180,7 +193,7 @@ export function casarIncluidos(liberacoes, saidas, { pontuar, usadas = new Set()
  * a saída tem de continuar entre as possíveis daquela liberação, e cada saída paga uma só.
  * @param escolhidas [{ id (liberação), lancamentoId }]
  * @param sugestoes  o que casarIncluidos devolveu agora
- * @returns {{ aceitas: [{ id, saida, pontos }], recusadas: [{ id, motivo }] }}
+ * @returns {{ aceitas: [{ id, saida, pontos, acrescimo }], recusadas: [{ id, motivo }] }}
  */
 export function conferirEscolhas(escolhidas, sugestoes) {
   const porLiberacao = new Map((sugestoes || []).map((s) => [Number(s.id), s]));
@@ -200,8 +213,26 @@ export function conferirEscolhas(escolhidas, sugestoes) {
     else if (saidasVistas.has(lancamento)) recusadas.push({ id, motivo: 'a mesma saída foi escolhida para outra duplicata: cada saída paga uma só' });
     else {
       saidasVistas.add(lancamento);
-      aceitas.push({ id, saida: c.saida, pontos: c.pontos });
+      aceitas.push({ id, saida: c.saida, pontos: c.pontos, acrescimo: c.acrescimo || 0 });
     }
   }
   return { aceitas, recusadas };
+}
+
+/**
+ * Sugestões que já vêm MARCADAS na tela: o mesmo fornecedor e diferença de centavos
+ * (até CENTAVOS_MARCADOS) — boleto atualizado, arredondamento. Cada saída marca uma só.
+ * Continua sendo o usuário quem aprova (dá para desmarcar).
+ * @returns {Object} { [id da liberação]: id da saída }
+ */
+export function marcarCentavos(sugestoes) {
+  const marcadas = {};
+  const usadas = new Set();
+  for (const s of sugestoes || []) {
+    const c = s.saidas.find((x) => x.pontos >= NOME_MIN && x.acrescimo > 0 && Math.round(x.acrescimo * 100) <= CENTAVOS_MARCADOS && !usadas.has(String(x.saida.id)));
+    if (!c) continue;
+    usadas.add(String(c.saida.id));
+    marcadas[s.id] = c.saida.id;
+  }
+  return marcadas;
 }

@@ -21,6 +21,11 @@
 //     as saídas possíveis. O sistema não baixa: o usuário marca qual é e aprova
 //     ("escolhidas"), com a mesma senha. A conciliação dessa saída fica como
 //     confirmada por ele, não como automática.
+//   • PAGA COM ACRÉSCIMO (27/11/2026): conta atrasada sai com juros e multa, e o
+//     valor do extrato fica um pouco maior que o da duplicata. Com o mesmo
+//     fornecedor e até 10% a mais, a saída também vem como sugestão; aprovada, a
+//     baixa grava o valor que saiu e lança a diferença como juros/multa na
+//     duplicata. Diferença de centavos (até R$ 0,10) já vem marcada.
 // Nada vai ao TOTVS.
 // =============================================================================
 import supabase from '../config/supabase.js';
@@ -28,7 +33,7 @@ import { CpError, conferirSenha, rotuloDuplicata } from './hcContasPagar.js';
 import { incluidasDoUsuario, pagarUmaLiberacao } from './hcCpLiberacao.js';
 import { nomeScore, puxarTudo } from './conciliacaoAprovados.js';
 import { atribuirChaves, salvarConciliacao } from './fluxoCaixaConciliacao.js';
-import { casarIncluidos, conferirEscolhas, janelaDosExtratos, bancoDaConta, contraparteDaSaida, DIAS_ATRAS, NOME_MIN } from '../utils/hcCpBaixaAutomatica.js';
+import { casarIncluidos, conferirEscolhas, marcarCentavos, janelaDosExtratos, bancoDaConta, contraparteDaSaida, DIAS_ATRAS, NOME_MIN, ACRESCIMO_MAX } from '../utils/hcCpBaixaAutomatica.js';
 
 const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
 const hojeBrasil = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Recife' }).format(new Date());
@@ -89,9 +94,9 @@ export async function baixaAutomatica(user, b = {}) {
   const porId = new Map(incluidas.map((l) => [l.id, l]));
   const { saidas, usadas, contaPorId, ultimaSaida } = incluidas.length ? await saidasDosExtratos(periodo) : { saidas: [], usadas: new Set(), contaPorId: new Map(), ultimaSaida: null };
   const { casadas, semSaida, sugestoes } = casarIncluidos(incluidas, saidas, { pontuar: nomeScore, usadas });
-  const saidaDaTela = (l, pontos) => {
+  const saidaDaTela = (l, pontos, acrescimo = 0) => {
     const conta = contaPorId.get(l.conta_id);
-    return { lancamentoId: l.id, data: l.data, valor: round2(Math.abs(Number(l.valor))), banco: bancoDaConta(conta), conta: conta?.apelido || null, contraparte: contraparteDaSaida(l).slice(0, 120), nomeParecido: pontos >= NOME_MIN };
+    return { lancamentoId: l.id, data: l.data, valor: round2(Math.abs(Number(l.valor))), banco: bancoDaConta(conta), conta: conta?.apelido || null, contraparte: contraparteDaSaida(l).slice(0, 120), nomeParecido: pontos >= NOME_MIN, acrescimo: round2(acrescimo) };
   };
 
   const achados = casadas.map((c) => {
@@ -116,7 +121,9 @@ export async function baixaAutomatica(user, b = {}) {
       ...base,
       casadas: achados,
       // não casaram sozinhas, mas há saída de valor igual: o usuário escolhe e aprova
-      sugestoes: sugestoes.map((x) => ({ ...daTela(porId.get(x.id)), saidas: x.saidas.map((c) => saidaDaTela(c.saida, c.pontos)) })),
+      sugestoes: sugestoes.map((x) => ({ ...daTela(porId.get(x.id)), saidas: x.saidas.map((c) => saidaDaTela(c.saida, c.pontos, c.acrescimo)) })),
+      marcadas: marcarCentavos(sugestoes), // diferença de centavos para o mesmo fornecedor: já vem marcada (o usuário pode desmarcar)
+      acrescimoMaximo: ACRESCIMO_MAX,
       semSaida: semSaida.filter((x) => !comSugestao.has(x.id)).map((x) => ({ ...daTela(porId.get(x.id)), motivo: x.motivo })),
     };
   }
@@ -167,14 +174,16 @@ export async function baixaAutomatica(user, b = {}) {
   for (const e of aceitas) {
     const lib = porId.get(e.id);
     const l = daTela(lib);
-    const s = saidaDaTela(e.saida, e.pontos);
+    const s = saidaDaTela(e.saida, e.pontos, e.acrescimo);
     const rotulo = `${l.fornecedor} ${l.rotulo}`;
+    const comAcrescimo = s.acrescimo > 0 ? ` · pago R$ ${s.valor.toFixed(2).replace('.', ',')}, com R$ ${s.acrescimo.toFixed(2).replace('.', ',')} de juros e multa` : '';
     let pagou = false;
     try {
-      const r = await pagarUmaLiberacao(lib, { data: s.data, banco: s.banco, por, porId: user?.id || null, observacao: `baixa pelo extrato confirmada por ${por || 'usuário'} (${s.conta || s.banco} · saída para ${s.contraparte})` });
+      // o acréscimo (o que saiu a mais no extrato) entra na baixa e na duplicata como juros e multa
+      const r = await pagarUmaLiberacao(lib, { data: s.data, banco: s.banco, por, porId: user?.id || null, juros: s.acrescimo, observacao: `baixa pelo extrato confirmada por ${por || 'usuário'} (${s.conta || s.banco} · saída para ${s.contraparte}${comAcrescimo})` });
       pagas += 1;
       valorPago = round2(valorPago + r.pago);
-      baixadas.push({ ...l, data: s.data, banco: s.banco, valorPago: r.pago, sugestao: true });
+      baixadas.push({ ...l, data: s.data, banco: s.banco, valorPago: r.pago, acrescimo: s.acrescimo, sugestao: true });
       pagou = true;
     } catch (err) {
       if (!(err instanceof CpError) || err.status === 500) throw err;
@@ -186,7 +195,7 @@ export async function baixaAutomatica(user, b = {}) {
           lancamentoId: s.lancamentoId,
           origem: 'MANUAL',
           referencia: { destino: 'contas-pagar-headcoach', nome: l.fornecedor, valor: s.valor, confirmadaPor: por, liberacoes: [{ liberacaoId: l.id, tituloId: l.tituloId, duplicata: l.rotulo, empresa: l.empresa, valor: l.valor }] },
-          justificativa: `Contas a Pagar HeadCoach · ${l.fornecedor} · duplicata ${l.rotulo} — saída para "${s.contraparte}", confirmada por ${por || 'usuário'} na baixa da Liberação de Pagamento (o nome no extrato é diferente do fornecedor)`,
+          justificativa: `Contas a Pagar HeadCoach · ${l.fornecedor} · duplicata ${l.rotulo} — saída para "${s.contraparte}", confirmada por ${por || 'usuário'} na baixa da Liberação de Pagamento${s.acrescimo > 0 ? ` (pago com R$ ${s.acrescimo.toFixed(2).replace('.', ',')} de juros e multa)` : ' (o nome no extrato é diferente do fornecedor)'}`,
           usuario: por,
         });
       } catch (err) {
