@@ -39,6 +39,8 @@ import { obterPeriodoStone, obterDiaStone } from './stoneConciliacao.js';
 import { mapearFiliaisTotvsPorCnpj, resolverFiliaisLoja, buscarTitulosCartaoStone } from './totvsCartoesStone.js';
 import { bater } from './stoneBatimento.js';
 import { ehLinhaFolha, candidatosFolha } from './folhaConciliacao.js';
+import { fonteHcCr, marcarTitulosHcCr, desmarcarTitulosHcCr } from './conciliacaoPixHc.js';
+import { candidatosPixHc, juntarCandidatos } from '../utils/conciliacaoPixHc.js';
 import { vincularComprovanteASolicitacao, solicitacoesDaConciliacao, levarComprovanteDoHc, comprovantePorChave, urlComprovante } from './comprovantesStone.js';
 
 const T = { conc: 'fluxo_caixa_conciliacoes', lanc: 'fluxo_caixa_lancamentos', lib: 'pagamentos_liberacao', sol: 'solicitacoes_crosby' };
@@ -1358,6 +1360,7 @@ async function filiaisDaConta(cnpj) {
 // é central: clientes de qualquer loja pagam nela → todas as empresas, com
 // ponto extra para as do CNPJ da conta.
 const filiasSeguras = (l) => filiaisParaPix(l).catch(() => ({ filiais: [], proprias: [] }));
+const empresasHcDaConta = (l, proprias) => (proprias?.length ? proprias : STONE_LOJAS.find((x) => x.cnpj === soDigitos(l.conta_cnpj))?.filiais || []);
 async function filiaisParaPix(l) {
   const proprias = await filiaisDaConta(l.conta_cnpj).catch(() => []);
   if (String(l.banco || '').toUpperCase() === 'STONE' && proprias.length) return { filiais: proprias, proprias };
@@ -1669,6 +1672,12 @@ export const ehDepositoRedeProvavel = (l, candidatos, diaStoneLido) =>
   !/ANTECIPA/i.test(semAcento(String(l.memo || ''))) &&
   diaStoneLido &&
   (!candidatos || candidatos.length === 0);
+// Dia com data deslocada (Ayrton Senna, 18–19/11/2026): a Stone creditou de uma vez depósitos
+// que o arquivo dela data em outros dias. Quando alguma entrada de cartão do dia tem depósito de
+// valor idêntico no arquivo em outra data, o dia não é "depósito da Rede": fica pendente.
+export function diaComDepositoDeOutraData(linhasDoDia, itensStone) {
+  return (linhasDoDia || []).some((x) => (itensStone || []).some((c) => Math.abs(c.valor - round2(Number(x.valor))) <= VALOR_TOL && Math.abs(diffDias(c.data, x.data)) > 2));
+}
 const conciliacaoDepositoRede = (l) => ({
   origem: 'REDE_DEPOSITO',
   referencia: { adquirente: 'REDE', bandeira: l.bandeira || null, memo: l.memo || null, motivos: ['linha por bandeira sem depósito no arquivo da Stone do dia'] },
@@ -1911,7 +1920,7 @@ export async function salvarConciliacao({ lancamentoId, origem, referencia, just
       throw new Error(`${r?.nm_fornecedor ? `${r.nm_fornecedor}: ` : ''}${faltam.values().next().value}.`);
     }
   }
-  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'HC_CP', 'TOTVS_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
+  if (!['LIBERACAO', 'SOLICITACAO', 'TOTVS_CP', 'HC_CP', 'TOTVS_CR', 'HC_CR', 'STONE', 'REDE_DEPOSITO', 'MANUAL', 'MULTIPLO', 'PRO_LABORE', 'TECHFIN', 'FOLHA'].includes(origem)) throw new Error('Origem inválida.');
   if (origem === 'MANUAL' && !justificativa) throw new Error('Informe a justificativa.');
   if (origem === 'PRO_LABORE') {
     const pessoa = PESSOAS_PRO_LABORE.find((p) => p.id === referencia?.pessoaId) || PESSOAS_PRO_LABORE.find((p) => p.cpf === soDigitos(referencia?.cpf));
@@ -2029,6 +2038,13 @@ async function gravarConciliacaoRow(row) {
     if (levados.length && !data.solicitacaoVinculada) data.solicitacaoVinculada = { id: levados[0].solicitacaoId, comprovante: levados[0].url, jaEstavaPaga: levados[0].jaEstavaPaga };
   } catch (e) {
     console.error('[conciliacao] comprovante → solicitação (HeadCoach) falhou:', e.message);
+  }
+  // Entrada conciliada com venda em Pix do PDV Crosby: o título do contas a receber do
+  // HeadCoach sai de "a conciliar" (e volta, se a linha foi regravada com outra origem)
+  try {
+    data.hcCr = await marcarTitulosHcCr(data);
+  } catch (e) {
+    console.error('[conciliacao] marcar título do contas a receber HeadCoach falhou:', e.message);
   }
   // Saída conciliada = duplicata paga: "PAGO VIA CONCILIAÇÃO" na Consulta do
   // contas a pagar e APROVADO → PAGO na Liberação (Yago, 09/11/2026)
@@ -2150,6 +2166,10 @@ export async function empresaDespesaDeItens(itens) {
       const linhas = Array.isArray(t.rateio) && t.rateio.length ? t.rateio : [{ despesa_code: t.despesa_code, despesa_nome: t.despesa_nome }];
       out.set(`HC_CP:${t.id}`, { ...emp(t.empresa, null), despesa: [...new Set(linhas.map((r) => `${r.despesa_code} ${r.despesa_nome || ''}`.trim()))].join(' / '), despesaCodigo: t.despesa_code || null });
     }
+  }
+  for (const i of itens.filter((x) => x.origem === 'HC_CR')) {
+    const b = String(i.empresa || '').replace(/\D/g, '');
+    if (b) out.set(`HC_CR:${i.id}`, { ...emp(b, null), despesa: null, despesaCodigo: null });
   }
   for (const i of itens.filter((x) => x.origem === 'TOTVS_CR')) {
     const b = String(i.id).split('|')[0];
@@ -2347,6 +2367,29 @@ export async function detalheConciliacao(id) {
       origem.aviso = `Não foi possível consultar a duplicata no TOTVS agora (${e.message}).`;
     }
   }
+  else if (c.origem === 'HC_CR') {
+    const h = ref.hcCr || {};
+    origem = {
+      tipo: 'Venda em Pix · PDV Crosby (HeadCoach)',
+      cliente: true,
+      empresa: ref.empresa || null,
+      fornecedor: ref.nome,
+      doc: ref.doc,
+      duplicata: h.fatura ?? String(ref.duplicata || '').split('|')[0],
+      parcela: h.parcela ?? String(ref.duplicata || '').split('|')[1] ?? null,
+      emissao: h.emissao || ref.emissao || ref.data,
+      vencimento: ref.vencimento,
+      dataPagamento: ref.data,
+      valor: ref.valor,
+      valorPago: ref.valor,
+      forma: 'Pix',
+      banco: null,
+      despesa: ref.detalhe,
+      status: 'Pago',
+      venda: h.vendaId ?? null,
+      nf: h.nf ?? null,
+    };
+  }
   else if (c.origem === 'TOTVS_CR') {
     const [branch, tit, parc] = String(ref.id || '').split('|');
     const cr = ref.cr || {};
@@ -2482,6 +2525,11 @@ export async function excluirConciliacao(id) {
   } catch (e) {
     console.error('[conciliacao] limpar PAGO VIA CONCILIAÇÃO falhou:', e.message);
   }
+  try {
+    await desmarcarTitulosHcCr(id);
+  } catch (e) {
+    console.error('[conciliacao] soltar título do contas a receber HeadCoach falhou:', e.message);
+  }
   return { id };
 }
 
@@ -2503,18 +2551,22 @@ export async function buscarCandidatos(lancamentoId) {
       // cliente revenda/franquia pode ser parcial (fica para escolha manual)
       l.semParcial = ehEntradaPixTotvs(l) || ehEntradaPixMaquininha(l);
       const { filiais, proprias } = await filiasSeguras(l);
-      l.filiaisConta = proprias;
-      if (!filiais.length) return { lancamento: l, candidatos: [], avisos: [`Nenhuma empresa do TOTVS para esta conta (CNPJ ${l.conta_cnpj || '?'}).`] };
+      // vendas em Pix do PDV Crosby (HeadCoach): loja + valor + dia da venda
+      l.filiaisConta = empresasHcDaConta(l, proprias);
+      l.pixMaquininha = ehEntradaPixMaquininha(l);
+      const avisos = [];
+      const hc = await fonteHcCr(l.filiaisConta, { de: l.data, ate: l.data }).catch((e) => (avisos.push(`Vendas do PDV Crosby (HeadCoach): ${e.message}`), []));
+      if (!filiais.length && !hc.length) return { lancamento: l, candidatos: [], avisos: [`Nenhuma empresa do TOTVS para esta conta (CNPJ ${l.conta_cnpj || '?'}).`, ...avisos] };
       const janela = janelaMensal({ de: l.data, ate: l.data });
-      const cr = await fonteTotvsCR(filiais, janela);
+      const cr = filiais.length ? await fonteTotvsCR(filiais, janela).catch((e) => (avisos.push(`Contas a Receber TOTVS: ${e.message}`), [])) : [];
       const usados = await usadosNaJanela({ de: l.data, ate: l.data });
-      const candidatos = candidatosPara(l, { totvs: cr }, usados);
+      const candidatos = juntarCandidatos(candidatosPara(l, { totvs: cr }, usados), candidatosPixHc(l, hc, usados));
       let decisao = decidir(candidatos);
       if (!decisao.automatico && !candidatos.some((c) => !c.parcial) && ehEntradaPixTotvs(l)) {
         const lote = loteTitulosPix(l, cr, usados);
         if (lote) decisao = { automatico: true, motivo: 'lote de Pix TOTVS', lote: itensLotePix(lote), justificativa: justificativaLotePix(lote) };
       }
-      return { lancamento: l, candidatos, avisos: [], decisao, filiais };
+      return { lancamento: l, candidatos, avisos, decisao, filiais };
     }
     if (!ehEntradaStone(l)) return { lancamento: l, candidatos: [], avisos: ['Só entradas Pix e as vendas Stone (antecipação/liquidação) têm busca automática por enquanto; para boleto/TED use a justificativa manual.'] };
     const loja = lojaStoneDoCnpj(l.conta_cnpj);
@@ -2537,13 +2589,13 @@ export async function buscarCandidatos(lancamentoId) {
   return { lancamento: l, candidatos, avisos: fontes.avisos, decisao: decidir(candidatos) };
 }
 
-export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.emissao ? { emissao: c.emissao } : {}), ...(c.stone ? { stone: c.stone } : {}), ...(c.cr ? { cr: c.cr } : {}), ...(c.taxaFixa ? { taxaFixa: c.taxaFixa } : {}), ...(c.folha ? { folha: c.folha } : {}) });
+export const referenciaDe = (c) => ({ id: c.id, nome: c.nome, doc: c.doc, valor: c.valor, valorDuplicata: c.valorDuplicata ?? c.valor, parcial: !!c.parcial, restanteDepois: c.restanteDepois ?? null, data: c.data, vencimento: c.vencimento, empresa: c.empresa, detalhe: c.detalhe, duplicata: c.duplicata, motivos: c.motivos, ...(c.emissao ? { emissao: c.emissao } : {}), ...(c.stone ? { stone: c.stone } : {}), ...(c.cr ? { cr: c.cr } : {}), ...(c.hcCr ? { hcCr: c.hcCr } : {}), ...(c.taxaFixa ? { taxaFixa: c.taxaFixa } : {}), ...(c.folha ? { folha: c.folha } : {}) });
 
 // regra de aceite automático: melhor ≥ 70 e com folga ≥ 15 pontos para o 2º.
 // Candidatos "gêmeos" (mesma origem, nome, data e valor — ex.: 3 pagamentos
 // iguais à Claro no mesmo dia) não contam como ambiguidade: o 1º é usado e
 // os demais ficam para as próximas linhas iguais.
-const gemeos = (a, b) => a.origem === b.origem && a.data === b.data && Math.abs(a.valor - b.valor) < 0.011 && normNome(a.nome) === normNome(b.nome);
+const gemeos = (a, b) => a.origem === b.origem && a.data === b.data && Math.abs(a.valor - b.valor) < 0.011 && ((a.semNome && b.semNome && a.branch === b.branch) || normNome(a.nome) === normNome(b.nome));
 export function decidir(candidatosTodos) {
   // Solicitação nunca concilia (nem automático) — só consulta (Titia, 11/11/2026)
   const candidatos = (candidatosTodos || []).filter((c) => c.origem !== 'SOLICITACAO' && !c.bloqueio);
@@ -2608,12 +2660,16 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
       if (!crPorCnpj.has(chave)) {
         const { filiais, proprias } = await filiasSeguras(l);
         const itens = filiais.length ? await fonteTotvsCR(filiais, janelaMensal({ de, ate })).catch((e) => (resultado.avisos.push(`Contas a Receber TOTVS: ${e.message}`), [])) : [];
-        if (!filiais.length) resultado.avisos.push(`${l.conta_apelido}: nenhuma empresa do TOTVS para a conta; Pix fica pendente.`);
-        crPorCnpj.set(chave, { itens, proprias });
+        const empresasHc = empresasHcDaConta(l, proprias);
+        const hc = await fonteHcCr(empresasHc, { de, ate }).catch((e) => (resultado.avisos.push(`Vendas do PDV Crosby (HeadCoach): ${e.message}`), []));
+        if (!filiais.length && !hc.length) resultado.avisos.push(`${l.conta_apelido}: nenhuma empresa do TOTVS para a conta; Pix fica pendente.`);
+        crPorCnpj.set(chave, { itens, proprias: empresasHc, hc });
       }
       const f = crPorCnpj.get(chave);
       l.filiaisConta = f.proprias;
-      candidatos = candidatosPara(l, { totvs: f.itens }, usados);
+      l.pixMaquininha = ehEntradaPixMaquininha(l);
+      // TOTVS + vendas em Pix do PDV Crosby (loja + valor + dia da venda)
+      candidatos = juntarCandidatos(candidatosPara(l, { totvs: f.itens }, usados), candidatosPixHc(l, f.hc, usados));
       if (!candidatos.some((c) => !c.parcial) && ehEntradaPixTotvs(l)) {
         const lote = loteTitulosPix(l, f.itens, usados);
         if (lote) {
@@ -2644,6 +2700,13 @@ export async function conciliarAutomatico({ contaId, de, ate, usuario, simular =
       candidatos = candidatosEntradaStone(l, fonte.itens, usados);
       if (!candidatos.length && String(l.data) >= hoje) {
         resultado.aguardandoArquivo += 1;
+        continue;
+      }
+      const doDia = pendentes.filter((x) => x.conta_id === l.conta_id && x.data === l.data && x.valor > 0 && ehEntradaStone(x));
+      if (ehDepositoRedeProvavel(l, candidatos, !(fonte.diasComErro || new Set()).has(l.data)) && diaComDepositoDeOutraData(doDia, fonte.itens)) {
+        resultado.semCandidato += 1;
+        const aviso = `${l.conta_apelido}: entradas de cartão de ${l.data} batem com depósitos que a Stone data em outros dias; ficam pendentes para conferir (não são depósito da Rede).`;
+        if (!resultado.avisos.includes(aviso)) resultado.avisos.push(aviso);
         continue;
       }
       if (ehDepositoRedeProvavel(l, candidatos, !(fonte.diasComErro || new Set()).has(l.data))) {
