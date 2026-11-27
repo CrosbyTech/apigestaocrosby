@@ -70,6 +70,11 @@ export const TRANSFER_NATURE = { venda: 'Sale', transferencia: 'Transfer' };
 
 export const STOCK_MOVEMENT = { recebimento_transferencia: 'TransferReceipt', estorno_recebimento: 'ReceiptReversal' };
 export const RFID_MOVEMENT = { venda: 'Sale', devolucao: 'Return', estorno: 'Reversal' };
+// contas fixas das lojas (HeadCoach › Financeiro › Contas a Pagar › Contas Fixas das Lojas)
+export const FIXED_EXPENSE_TYPE = { ALUGUEL: 'Rent', CONDOMINIO: 'CondoFee', ENERGIA: 'Electricity', AGUA: 'Water', INTERNET: 'Internet', TELEFONE: 'Phone', AGUA_MINERAL: 'DrinkingWater', OUTRA: 'Other' };
+export const FIXED_EXPENSE_COLUMN = { ALUGUEL: 'Rent', CONDOMINIO: 'CondoFee', ENERGIA: 'Electricity', AGUA: 'Water', INTERNET: 'Internet', OUTRAS: 'Other' };
+export const FIXED_EXPENSE_CHANNEL = { robo_whatsapp: 'WhatsappBot', email_automatico: 'EmailAutomatic', email: 'Email', whatsapp: 'Whatsapp', site: 'Website', loja_envia: 'StoreSends', pix_direto: 'DirectPix', boleto: 'SupplierBankSlip', sob_demanda: 'OnDemand', fora_do_controle: 'OutOfControl', nao_definido: 'Undefined' };
+export const FIXED_EXPENSE_BRANCH_TYPE = { matriz: 'Headquarters', loja_rua: 'StreetStore', loja_shopping: 'MallStore', imovel: 'Property' };
 // tipo fiscal da peça na nota: produção própria (CFOP 5101/6101…) ou adquirida de terceiros (5102/6102…)
 export const ITEM_FISCAL_TYPE = { producao: 'OwnProduction', adquirido: 'Purchased' };
 

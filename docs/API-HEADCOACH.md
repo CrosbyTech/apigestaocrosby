@@ -839,6 +839,64 @@ Parâmetros:
 
 Resposta:  `PayableCostCenter`
 
+### GET /api/headcoach/accounts-payable/v1/fixed-expense-branches
+
+Contas fixas: lojas e imóveis — Cadastro das lojas e dos imóveis que têm contas fixas (aluguel, energia, água…). `branchKey` é a chave usada em /fixed-expenses: o código da empresa em texto ou, nos imóveis que não são empresa, um nome (TERRENO_PAINEL). `costCenterCode` é o centro de custo da loja no Contas a Pagar — é por ele que um título de /documents é reconhecido como da loja.
+
+Parâmetros:
+- `branchCode` (integer) — Código da empresa.
+- `branchType` (string) — Tipo (aceita lista). Valores: Headquarters, StreetStore, MallStore, Property.
+- `isActive` (boolean) — Só as que aparecem na planilha (true).
+- `costCenterCode` (integer) — Centro de custo.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `FixedExpenseBranch`
+
+### GET /api/headcoach/accounts-payable/v1/fixed-expense-branches/{branchKey}
+
+Contas fixas: lojas e imóveis — um registro — Cadastro das lojas e dos imóveis que têm contas fixas (aluguel, energia, água…). `branchKey` é a chave usada em /fixed-expenses: o código da empresa em texto ou, nos imóveis que não são empresa, um nome (TERRENO_PAINEL). `costCenterCode` é o centro de custo da loja no Contas a Pagar — é por ele que um título de /documents é reconhecido como da loja.
+
+Parâmetros:
+- `branchKey` (caminho, obrigatório) — Chave da loja (código da empresa em texto, ou o nome do imóvel).
+
+Resposta:  `FixedExpenseBranch`
+
+### GET /api/headcoach/accounts-payable/v1/fixed-expenses
+
+Contas fixas: despesas de cada loja e como pegar a conta — Uma linha por despesa fixa de uma loja (aluguel, condomínio, energia, água, internet, telefone…): o fornecedor, o dia do vencimento, a forma de pagamento e COMO PEGAR a conta para pagar (`howToGetChannel` = por onde ela chega; `howToGetInstructions` = o passo a passo). Loja × despesa que não aparece aqui ainda está "sem cadastro" na planilha. A observação interna do cadastro (login de site, documento do titular) NÃO sai nesta API.
+
+Parâmetros:
+- `branchKey` (string) — Despesas de uma loja.
+- `expenseType` (string) — Tipo da despesa (aceita lista). Valores: Rent, CondoFee, Electricity, Water, Internet, Phone, DrinkingWater, Other.
+- `howToGetChannel` (string) — Por onde a conta chega (aceita lista). Valores: WhatsappBot, EmailAutomatic, Email, Whatsapp, Website, StoreSends, DirectPix, SupplierBankSlip, OnDemand, OutOfControl, Undefined.
+- `supplierName` (string) — Parte do nome do fornecedor.
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `FixedExpense`
+
+### GET /api/headcoach/accounts-payable/v1/fixed-expenses/{expenseId}
+
+Contas fixas: despesas de cada loja e como pegar a conta — um registro — Uma linha por despesa fixa de uma loja (aluguel, condomínio, energia, água, internet, telefone…): o fornecedor, o dia do vencimento, a forma de pagamento e COMO PEGAR a conta para pagar (`howToGetChannel` = por onde ela chega; `howToGetInstructions` = o passo a passo). Loja × despesa que não aparece aqui ainda está "sem cadastro" na planilha. A observação interna do cadastro (login de site, documento do titular) NÃO sai nesta API.
+
+Parâmetros:
+- `expenseId` (caminho, obrigatório) — Identificador da despesa.
+
+Resposta:  `FixedExpense`
+
+### GET /api/headcoach/accounts-payable/v1/fixed-expense-notes
+
+Contas fixas: anotações por loja e despesa — Anotação de uma célula da planilha (loja × coluna de despesa). `notApplicable` = a loja não tem aquela despesa (por exemplo, energia dentro do boleto do shopping), então ela não conta como "sem cadastro".
+
+Parâmetros:
+- `branchKey` (string) — Anotações de uma loja.
+- `notApplicable` (boolean) — Só as marcadas como não se aplica (true).
+- `page` (integer) — Página (começa em 1).
+- `pageSize` (integer) — Itens por página (até 1000).
+
+Resposta: página de `FixedExpenseNote`
+
 Esquemas:
 
 **PayableSettlement** — Pagamentos das duplicatas, com juros, multa e desconto. Uma linha por pagamento: a duplicata paga em parte tem várias, e `documentValue` − (`paidValue` − juros − multa + desconto) é o que ficou em aberto depois de cada uma. Não há estorno de baixa.
@@ -949,6 +1007,59 @@ Esquemas:
 - `costCenterName` (string) — Nome do centro de custo.
 - `costCenterType` (string) — Empresa, setor ou outro. Valores: Branch, Department, Other.
 - `isActive` (boolean) — Em uso.
+
+**FixedExpenseBranch** — Cadastro das lojas e dos imóveis que têm contas fixas (aluguel, energia, água…). `branchKey` é a chave usada em /fixed-expenses: o código da empresa em texto ou, nos imóveis que não são empresa, um nome (TERRENO_PAINEL). `costCenterCode` é o centro de custo da loja no Contas a Pagar — é por ele que um título de /documents é reconhecido como da loja.
+
+- `branchKey` (string) — Chave da loja ou imóvel.
+- `branchCode` (integer) — Código da empresa (general/branches). Nulo nos imóveis que não são empresa.
+- `name` (string) — Nome como o financeiro chama (MIDWAY, NATAL (MATRIZ)…).
+- `branchType` (string) — Matriz, loja de rua, loja de shopping ou imóvel. Valores: Headquarters, StreetStore, MallStore, Property.
+- `companyName` (string) — Razão social.
+- `fantasyName` (string) — Nome fantasia.
+- `cnpj` (string) — CNPJ, só dígitos.
+- `stateRegistration` (string) — Inscrição estadual.
+- `group` (string) — Grupo de empresas.
+- `address` (string) — Endereço.
+- `district` (string) — Bairro.
+- `city` (string) — Cidade.
+- `state` (string) — UF.
+- `zipCode` (string) — CEP, só dígitos.
+- `mallName` (string) — Shopping ou condomínio, quando a loja fica em um.
+- `phone` (string) — Telefone da loja.
+- `email` (string) — E-mail da loja.
+- `contactName` (string) — Responsável na loja.
+- `costCenterCode` (integer) — Centro de custo da loja no Contas a Pagar (/cost-centers).
+- `observation` (string) — Observação.
+- `sortOrder` (integer) — Ordem em que aparece na planilha.
+- `isActive` (boolean) — Aparece na planilha.
+- `changedBy` (string) — Quem alterou por último.
+- `lastChangeDate` (date-time) — Última alteração.
+
+**FixedExpense** — Uma linha por despesa fixa de uma loja (aluguel, condomínio, energia, água, internet, telefone…): o fornecedor, o dia do vencimento, a forma de pagamento e COMO PEGAR a conta para pagar (`howToGetChannel` = por onde ela chega; `howToGetInstructions` = o passo a passo). Loja × despesa que não aparece aqui ainda está "sem cadastro" na planilha. A observação interna do cadastro (login de site, documento do titular) NÃO sai nesta API.
+
+- `expenseId` (string) — Identificador da despesa.
+- `branchKey` (string) — Loja ou imóvel (/fixed-expense-branches).
+- `expenseType` (string) — Tipo da despesa. Valores: Rent, CondoFee, Electricity, Water, Internet, Phone, DrinkingWater, Other.
+- `supplierCode` (integer) — Código do fornecedor, quando informado.
+- `supplierName` (string) — Fornecedor.
+- `dueDay` (integer) — Dia do mês em que a conta vence.
+- `paymentMethod` (string) — Forma de pagamento como cadastrada (BOLETO, PIX…).
+- `howToGetChannel` (string) — Por onde a conta chega: robô do WhatsApp, e-mail que o HeadCoach lança sozinho, e-mail, WhatsApp, site da operadora, a loja envia, Pix direto ao locador, boleto do fornecedor, compra sob demanda, fora do controle ou a definir. Valores: WhatsappBot, EmailAutomatic, Email, Whatsapp, Website, StoreSends, DirectPix, SupplierBankSlip, OnDemand, OutOfControl, Undefined.
+- `howToGetInstructions` (string) — Passo a passo de como pegar a conta para pagar.
+- `contractDueDate` (date) — Vencimento do contrato de aluguel, quando informado.
+- `hasContract` (boolean) — Tem o contrato anexado no HeadCoach.
+- `createdDate` (date-time) — Quando foi cadastrada.
+- `lastChangeDate` (date-time) — Última alteração.
+
+**FixedExpenseNote** — Anotação de uma célula da planilha (loja × coluna de despesa). `notApplicable` = a loja não tem aquela despesa (por exemplo, energia dentro do boleto do shopping), então ela não conta como "sem cadastro".
+
+- `branchKey` (string) — Loja ou imóvel.
+- `expenseColumn` (string) — Coluna da planilha: aluguel, condomínio, energia, água, internet ou outras. Valores: Rent, CondoFee, Electricity, Water, Internet, Other.
+- `notApplicable` (boolean) — A loja não tem essa despesa: os lançamentos que caírem nela são desconsiderados.
+- `onlyRegisteredSuppliers` (boolean) — A célula só considera os fornecedores do cadastro da loja (/fixed-expenses): título de outro fornecedor no centro de custo da loja não conta nela.
+- `observation` (string) — Anotação.
+- `changedBy` (string) — Quem anotou.
+- `lastChangeDate` (date-time) — Quando.
 
 ## CustomerBalance — `customer-balance`
 

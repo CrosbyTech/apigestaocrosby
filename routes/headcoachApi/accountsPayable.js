@@ -1,6 +1,6 @@
 // API HEADCOACH › accounts-payable — contas a pagar próprio do HeadCoach.
 import { criarModulo, f, q } from './_engine.js';
-import { inverso } from './_maps.js';
+import { inverso, FIXED_EXPENSE_TYPE, FIXED_EXPENSE_COLUMN, FIXED_EXPENSE_CHANNEL, FIXED_EXPENSE_BRANCH_TYPE } from './_maps.js';
 
 // os mapas ficam aqui porque só este módulo usa
 const PAYABLE_STATUS = { aberto: 'Open', pago: 'Paid', cancelado: 'Canceled' };
@@ -241,6 +241,102 @@ modulo.recurso({
     q('costCenterType', 'enum', 'tipo', 'Tipo (aceita lista).', { map: inverso(COST_CENTER_TYPE) }),
     q('isActive', 'bool', 'ativo', 'Só os em uso (true).'),
   ],
+});
+
+// ─── CONTAS FIXAS DAS LOJAS (HeadCoach › Financeiro › Contas a Pagar › Contas Fixas das Lojas) ───
+// A página junta, por loja, aluguel, condomínio, energia, água e internet: quem é o fornecedor,
+// COMO PEGAR a conta para pagar e o que foi pago no mês. O que aconteceu no mês sai de /documents
+// (centro de custo da loja + despesa 4001, 4005, 6010, 6011, 6028, 6012, pelo mês do vencimento).
+modulo.recurso({
+  name: 'FixedExpenseBranch',
+  path: '/fixed-expense-branches',
+  table: 'contas_fixas_lojas',
+  summary: 'Contas fixas: lojas e imóveis',
+  description: 'Cadastro das lojas e dos imóveis que têm contas fixas (aluguel, energia, água…). `branchKey` é a chave usada em /fixed-expenses: o código da empresa em texto ou, nos imóveis que não são empresa, um nome (TERRENO_PAINEL). `costCenterCode` é o centro de custo da loja no Contas a Pagar — é por ele que um título de /documents é reconhecido como da loja.',
+  key: [{ param: 'branchKey', col: 'cd_filial', type: 'string', description: 'Chave da loja (código da empresa em texto, ou o nome do imóvel).' }],
+  order: [['ordem', true], ['cd_filial', true]],
+  fields: [
+    f('branchKey', 'cd_filial', 'string', 'Chave da loja ou imóvel.', { example: '95' }),
+    f('branchCode', 'empresa', 'integer', 'Código da empresa (general/branches). Nulo nos imóveis que não são empresa.'),
+    f('name', 'nome', 'string', 'Nome como o financeiro chama (MIDWAY, NATAL (MATRIZ)…).'),
+    f('branchType', 'tipo', 'string', 'Matriz, loja de rua, loja de shopping ou imóvel.', { map: FIXED_EXPENSE_BRANCH_TYPE }),
+    f('companyName', 'razao_social', 'string', 'Razão social.'),
+    f('fantasyName', 'nome_fantasia', 'string', 'Nome fantasia.'),
+    f('cnpj', 'cnpj', 'string', 'CNPJ, só dígitos.'),
+    f('stateRegistration', 'inscricao_estadual', 'string', 'Inscrição estadual.'),
+    f('group', 'grupo', 'string', 'Grupo de empresas.'),
+    f('address', 'endereco', 'string', 'Endereço.'),
+    f('district', 'bairro', 'string', 'Bairro.'),
+    f('city', 'cidade', 'string', 'Cidade.'),
+    f('state', 'uf', 'string', 'UF.'),
+    f('zipCode', 'cep', 'string', 'CEP, só dígitos.'),
+    f('mallName', 'shopping', 'string', 'Shopping ou condomínio, quando a loja fica em um.'),
+    f('phone', 'telefone', 'string', 'Telefone da loja.'),
+    f('email', 'email', 'string', 'E-mail da loja.'),
+    f('contactName', 'responsavel', 'string', 'Responsável na loja.'),
+    f('costCenterCode', 'centro_custo_code', 'integer', 'Centro de custo da loja no Contas a Pagar (/cost-centers).'),
+    f('observation', 'observacao', 'string', 'Observação.'),
+    f('sortOrder', 'ordem', 'integer', 'Ordem em que aparece na planilha.'),
+    f('isActive', 'ativo', 'boolean', 'Aparece na planilha.'),
+    f('changedBy', 'atualizado_por', 'string', 'Quem alterou por último.'),
+    f('lastChangeDate', 'atualizado_em', 'date-time', 'Última alteração.'),
+  ],
+  filters: [
+    q('branchCode', 'int', 'empresa', 'Código da empresa.'),
+    q('branchType', 'enum', 'tipo', 'Tipo (aceita lista).', { map: inverso(FIXED_EXPENSE_BRANCH_TYPE) }),
+    q('isActive', 'bool', 'ativo', 'Só as que aparecem na planilha (true).'),
+    q('costCenterCode', 'int', 'centro_custo_code', 'Centro de custo.'),
+  ],
+});
+
+modulo.recurso({
+  name: 'FixedExpense',
+  path: '/fixed-expenses',
+  table: 'despesas_fixas_filial',
+  summary: 'Contas fixas: despesas de cada loja e como pegar a conta',
+  description: 'Uma linha por despesa fixa de uma loja (aluguel, condomínio, energia, água, internet, telefone…): o fornecedor, o dia do vencimento, a forma de pagamento e COMO PEGAR a conta para pagar (`howToGetChannel` = por onde ela chega; `howToGetInstructions` = o passo a passo). Loja × despesa que não aparece aqui ainda está "sem cadastro" na planilha. A observação interna do cadastro (login de site, documento do titular) NÃO sai nesta API.',
+  key: [{ param: 'expenseId', col: 'id', type: 'string', description: 'Identificador da despesa.' }],
+  order: [['cd_filial', true], ['tipo_despesa', true], ['nm_fornecedor', true]],
+  fields: [
+    f('expenseId', 'id', 'string', 'Identificador da despesa.'),
+    f('branchKey', 'cd_filial', 'string', 'Loja ou imóvel (/fixed-expense-branches).', { example: '95' }),
+    f('expenseType', 'tipo_despesa', 'string', 'Tipo da despesa.', { map: FIXED_EXPENSE_TYPE }),
+    f('supplierCode', (d) => (d.cd_fornecedor && /^\d+$/.test(String(d.cd_fornecedor)) ? Number(d.cd_fornecedor) : null), 'integer', 'Código do fornecedor, quando informado.', { cols: ['cd_fornecedor'] }),
+    f('supplierName', 'nm_fornecedor', 'string', 'Fornecedor.'),
+    f('dueDay', (d) => (d.vencimento && /^\d+$/.test(String(d.vencimento)) ? Number(d.vencimento) : null), 'integer', 'Dia do mês em que a conta vence.', { cols: ['vencimento'] }),
+    f('paymentMethod', 'forma_pagamento', 'string', 'Forma de pagamento como cadastrada (BOLETO, PIX…).'),
+    f('howToGetChannel', (d) => FIXED_EXPENSE_CHANNEL[d.como_pegar_canal] || 'Undefined', 'string', 'Por onde a conta chega: robô do WhatsApp, e-mail que o HeadCoach lança sozinho, e-mail, WhatsApp, site da operadora, a loja envia, Pix direto ao locador, boleto do fornecedor, compra sob demanda, fora do controle ou a definir.', { cols: ['como_pegar_canal'], enum: Object.values(FIXED_EXPENSE_CHANNEL) }),
+    f('howToGetInstructions', 'como_pegar', 'string', 'Passo a passo de como pegar a conta para pagar.'),
+    f('contractDueDate', 'contrato_vencimento', 'date', 'Vencimento do contrato de aluguel, quando informado.'),
+    f('hasContract', (d) => !!d.contrato_path, 'boolean', 'Tem o contrato anexado no HeadCoach.', { cols: ['contrato_path'] }),
+    f('createdDate', 'created_at', 'date-time', 'Quando foi cadastrada.'),
+    f('lastChangeDate', 'updated_at', 'date-time', 'Última alteração.'),
+  ],
+  filters: [
+    q('branchKey', 'string', 'cd_filial', 'Despesas de uma loja.'),
+    q('expenseType', 'enum', 'tipo_despesa', 'Tipo da despesa (aceita lista).', { map: inverso(FIXED_EXPENSE_TYPE) }),
+    q('howToGetChannel', 'enum', 'como_pegar_canal', 'Por onde a conta chega (aceita lista).', { map: inverso(FIXED_EXPENSE_CHANNEL) }),
+    q('supplierName', 'text', 'nm_fornecedor', 'Parte do nome do fornecedor.'),
+  ],
+});
+
+modulo.recurso({
+  name: 'FixedExpenseNote',
+  path: '/fixed-expense-notes',
+  table: 'contas_fixas_anotacoes',
+  summary: 'Contas fixas: anotações por loja e despesa',
+  description: 'Anotação de uma célula da planilha (loja × coluna de despesa). `notApplicable` = a loja não tem aquela despesa (por exemplo, energia dentro do boleto do shopping), então ela não conta como "sem cadastro".',
+  order: [['cd_filial', true], ['tipo_despesa', true]],
+  fields: [
+    f('branchKey', 'cd_filial', 'string', 'Loja ou imóvel.'),
+    f('expenseColumn', 'tipo_despesa', 'string', 'Coluna da planilha: aluguel, condomínio, energia, água, internet ou outras.', { map: FIXED_EXPENSE_COLUMN }),
+    f('notApplicable', 'nao_se_aplica', 'boolean', 'A loja não tem essa despesa: os lançamentos que caírem nela são desconsiderados.'),
+    f('onlyRegisteredSuppliers', 'so_cadastro', 'boolean', 'A célula só considera os fornecedores do cadastro da loja (/fixed-expenses): título de outro fornecedor no centro de custo da loja não conta nela.'),
+    f('observation', 'observacao', 'string', 'Anotação.'),
+    f('changedBy', 'atualizado_por', 'string', 'Quem anotou.'),
+    f('lastChangeDate', 'atualizado_em', 'date-time', 'Quando.'),
+  ],
+  filters: [q('branchKey', 'string', 'cd_filial', 'Anotações de uma loja.'), q('notApplicable', 'bool', 'nao_se_aplica', 'Só as marcadas como não se aplica (true).')],
 });
 
 export default modulo;
