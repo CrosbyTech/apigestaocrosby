@@ -1,10 +1,13 @@
 // ============================================================
-// Batimento Stone × TOTVS
+// Batimento Stone × sistema (TOTVS e HeadCoach)
 //
 // Lado Stone : transações CAPTURADAS (FinancialTransactions) no período
 // Lado TOTVS : títulos de cartão (docs 4/5) emitidos no período (± 1 dia de
 //              folga), de QUALQUER portador, enriquecidos com NSU e código de
 //              autorização lidos do pagamento da NF (fiscal/v2/invoices).
+// Lado HeadCoach (27/11/2026): pagamentos em cartão das vendas do PDV Crosby
+//              (services/hcCartoesPdv.js), no mesmo formato dos títulos, com
+//              origem 'headcoach' e titulo negativo (−id do pagamento).
 //
 // A chave do casamento é a IDENTIDADE da transação (NSU e autorização), não o
 // valor. Regra fechada com o Yago em 14/10/2026:
@@ -47,27 +50,34 @@ const NIVEIS = {
   digitado_errado: { nivel: 5, rotulo: 'Data, valor e bandeira batem · NSU/AUT digitados errado' },
 };
 
+// De onde vem o registro do sistema (para os textos de divergência)
+const sistemaDe = (t) => (t?.origem === 'headcoach' ? 'HeadCoach' : 'TOTVS');
+const rotuloTitulo = (t) =>
+  t?.origem === 'headcoach' ? `venda ${t.transacao} (HeadCoach) ${t.valor}` : `${t.filial}/${t.titulo} ${t.valor}`;
+
 function divergencias(s, t) {
   const out = [];
+  const SIS = sistemaDe(t);
   const nsuS = normNsu(s.nsu);
   const nsuT = normNsu(t.nsu);
   const autS = normAut(s.codAutorizacao);
   const autT = normAut(t.autorizacao);
-  if (round2(s.valorBruto) !== round2(t.valor)) out.push(`valor Stone ${s.valorBruto} × TOTVS ${t.valor}`);
-  if (nsuS !== nsuT) out.push(`NSU Stone ${s.nsu ?? '—'} × TOTVS ${t.nsu ?? '—'}`);
-  if (autS !== autT) out.push(`autorização Stone ${s.codAutorizacao ?? '—'} × TOTVS ${t.autorizacao ?? '—'}`);
-  if (s.dataVenda !== t.dataEmissao) out.push(`data Stone ${s.dataVenda} × TOTVS ${t.dataEmissao}`);
-  if (Number(s.parcelas) !== Number(t.parcelas)) out.push(`parcelas Stone ${s.parcelas}x × TOTVS ${t.parcelas}x`);
-  if (normBandeira(s.bandeira) !== normBandeira(t.bandeira))
-    out.push(`bandeira Stone ${s.bandeira} × TOTVS ${t.bandeira}`);
+  if (round2(s.valorBruto) !== round2(t.valor)) out.push(`valor Stone ${s.valorBruto} × ${SIS} ${t.valor}`);
+  if (nsuS !== nsuT) out.push(`NSU Stone ${s.nsu ?? '—'} × ${SIS} ${t.nsu ?? '—'}`);
+  if (autS !== autT) out.push(`autorização Stone ${s.codAutorizacao ?? '—'} × ${SIS} ${t.autorizacao ?? '—'}`);
+  if (s.dataVenda !== t.dataEmissao) out.push(`data Stone ${s.dataVenda} × ${SIS} ${t.dataEmissao}`);
+  if (Number(s.parcelas) !== Number(t.parcelas)) out.push(`parcelas Stone ${s.parcelas}x × ${SIS} ${t.parcelas}x`);
+  // venda do HeadCoach sem bandeira informada no caixa não é divergência
+  if (!t.bandeiraDesconhecida && normBandeira(s.bandeira) !== normBandeira(t.bandeira))
+    out.push(`bandeira Stone ${s.bandeira} × ${SIS} ${t.bandeira}`);
   // pré-pago: as lojas lançam como débito, mas o lançamento pelo HeadCoach
   // baixa como crédito (João, 04/11/2026) → aceita os dois
   const prePago = /^pr[eé]-?pago|voucher/i.test(String(s.tipoConta || ''));
   if (!prePago && normTipo(s.tipoConta) !== normTipo(t.tipoConta))
-    out.push(`tipo Stone ${s.tipoConta} × TOTVS ${t.tipoConta}`);
-  if (!t.portadorStone) out.push(`portador no TOTVS: ${t.portador || '—'} (não é Stone)`);
+    out.push(`tipo Stone ${s.tipoConta} × ${SIS} ${t.tipoConta}`);
+  if (!t.portadorStone) out.push(`portador no ${SIS}: ${t.portador || '—'} (não é Stone)`);
   if (s.cancelada !== t.cancelado)
-    out.push(s.cancelada ? 'cancelada na Stone, ativa no TOTVS' : 'cancelado no TOTVS, ativa na Stone');
+    out.push(s.cancelada ? `cancelada na Stone, ativa no ${SIS}` : `cancelado no ${SIS}, ativa na Stone`);
   return out;
 }
 
@@ -173,10 +183,35 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
       valorTotvsTotal: soma,
       diferencaValor: 0,
       divergencias: [
-        `1 pagamento no cartão dividido em ${extras.length + 1} títulos no TOTVS (${[p.totvs, ...extras].map((t) => `${t.filial}/${t.titulo} ${t.valor}`).join(' + ')})`,
+        `1 pagamento no cartão dividido em ${extras.length + 1} lançamentos no sistema (${[p.totvs, ...extras].map(rotuloTitulo).join(' + ')})`,
         ...divergencias(s, { ...p.totvs, valor: soma }),
       ],
     });
+  }
+
+  // NSU e AUT trocados de campo no caixa (27/11/2026, vendas do PDV Crosby):
+  // o NSU da Stone (14 dígitos) está no campo da autorização do sistema. É
+  // identidade, não coincidência de valor, então casa mesmo havendo duas
+  // vendas de mesmo valor no dia — desde que a autorização também esteja
+  // trocada ou o valor bata. Fica em "Com divergência" para o caixa ver.
+  {
+    const porAutComoNsu = new Map();
+    for (const t of totvsLivres.values()) {
+      const n = normNsu(t.autorizacao);
+      if (n && n.length >= 9) (porAutComoNsu.get(n) || porAutComoNsu.set(n, []).get(n)).push(t);
+    }
+    for (const s of [...stoneLivres.values()]) {
+      const nsuS = normNsu(s.nsu);
+      if (!nsuS) continue;
+      const cands = (porAutComoNsu.get(nsuS) || []).filter(
+        (t) =>
+          totvsLivres.has(t.chave) &&
+          ((normAut(s.codAutorizacao) != null && normAut(s.codAutorizacao) === normAut(t.nsu)) || bateValor(s, t)),
+      );
+      if (cands.length !== 1) continue;
+      fechar(s, cands[0], 'digitado_errado');
+      pares[pares.length - 1].divergencias.unshift('NSU e AUT trocados no caixa');
+    }
   }
 
   // NSU/AUT digitados errados no caixa (João, 05/11/2026): o caixa põe o
@@ -187,7 +222,10 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
   // mesmas parcelas e mesma bandeira (ou bandeira da Stone desconhecida).
   // Concilia, mas fica em "Com divergência" mostrando o que foi digitado.
   const bandeiraOk = (s, t) =>
-    normBandeira(s.bandeira) === normBandeira(t.bandeira) || /^cod/.test(normBandeira(s.bandeira)) || !s.bandeira;
+    normBandeira(s.bandeira) === normBandeira(t.bandeira) ||
+    /^cod/.test(normBandeira(s.bandeira)) ||
+    !s.bandeira ||
+    !!t.bandeiraDesconhecida;
   const compativel = (s, t) =>
     s.dataVenda === t.dataEmissao &&
     Math.abs(round2(s.valorBruto) - round2(t.valor)) <= 0.05 &&
@@ -251,6 +289,17 @@ export function bater(transacoesStone, titulosTotvs, vinculos = []) {
     },
     stoneSemTotvs: { qtd: stoneSemTotvs.length, valor: soma(stoneSemTotvs, (s) => s.valorBruto) },
     totvsSemStone: { qtd: totvsSemStone.length, valor: soma(totvsSemStone, (t) => t.valor) },
+  };
+  // Quanto do lado do sistema é venda do PDV Crosby (HeadCoach)
+  const doHc = (t) => t?.origem === 'headcoach';
+  const paresHc = pares.filter((p) => doHc(p.totvs));
+  resumo.headcoach = {
+    qtd: titulosStone.filter(doHc).length,
+    valor: soma(titulosStone.filter(doHc), (t) => t.valor),
+    conciliadas: paresHc.length,
+    valorConciliado: soma(paresHc, (p) => p.valorTotvsTotal ?? p.totvs.valor),
+    semStone: totvsSemStone.filter(doHc).length,
+    valorSemStone: soma(totvsSemStone.filter(doHc), (t) => t.valor),
   };
   resumo.diferenca = round2(resumo.stone.bruto - resumo.totvs.valor);
   resumo.percentualConciliado =

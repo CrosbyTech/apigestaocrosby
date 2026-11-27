@@ -10,7 +10,9 @@
 //   GET  /lojas                                   → lojas configuradas (sem chaves)
 //   GET  /conciliacao?stonecode=&inicio=&fim=     → só Stone (transações, pagamentos)
 //   GET  /batimento?stonecode=all|<sc>&inicio=&fim=[&force=1]
-//                                                 → Stone × TOTVS por loja
+//                                                 → Stone × sistema por loja: títulos do TOTVS e
+//                                                   vendas em cartão do PDV Crosby (HeadCoach,
+//                                                   origem 'headcoach', titulo = −id do pagamento)
 //   GET  /dia?stonecode=&data=                    → arquivo completo de um dia
 //   POST /atualizar {stonecode, data}             → força novo download de um dia
 //   GET  /vinculos?stonecode=                     → vínculos manuais
@@ -40,6 +42,8 @@ import {
   resolverFiliaisLoja,
 } from '../services/totvsCartoesStone.js';
 import { bater } from '../services/stoneBatimento.js';
+import { buscarPagamentosCartaoPdv, buscarPagamentosPdvPorRef, buscarTransacoesDiaPdv } from '../services/hcCartoesPdv.js';
+import { ehTituloHeadcoach, semEspelhadasNoTotvs } from '../utils/hcCartoesPdv.js';
 import { lancarVendaStone, clientePadraoDaLoja } from '../services/stoneLancarTotvs.js';
 
 const router = express.Router();
@@ -276,9 +280,19 @@ router.get(
     const totvsInicio = addDias(iniTotvs, -1);
     const totvsFim = addDias(per.fimIso, 1);
 
-    const [titulosTodos, vincRes, stonePorLoja] = await Promise.all([
+    // HeadCoach: pagamentos em cartão das vendas do PDV Crosby das mesmas
+    // empresas, mesma folga. Falha aqui não derruba o batimento do TOTVS.
+    let erroHeadcoach = null;
+    const [titulosTodos, titulosHc, vincRes, stonePorLoja] = await Promise.all([
       filiais.length
         ? buscarTitulosCartaoStone({ branchCodes: filiais, inicioIso: totvsInicio, fimIso: totvsFim })
+        : Promise.resolve([]),
+      filiais.length
+        ? buscarPagamentosCartaoPdv({ empresas: filiais, inicioIso: totvsInicio, fimIso: totvsFim }).catch((e) => {
+            erroHeadcoach = e.message;
+            console.warn(`[stone] vendas em cartão do PDV Crosby: ${e.message}`);
+            return [];
+          })
         : Promise.resolve([]),
       listarVinculos(comChave.map((l) => l.stonecode)),
       mapLimit(comChave, 3, async (loja) => {
@@ -290,13 +304,25 @@ router.get(
     // Vínculo manual pode apontar para título que a busca por portador STONE
     // não traz (caixa lançou com outro portador): busca esses pelo código,
     // senão o vínculo salvo nunca vira par.
+    // A venda do HeadCoach que também está no TOTVS (espelho) fica só com o
+    // título do TOTVS, para não aparecer duas vezes.
+    titulosTodos.push(...semEspelhadasNoTotvs(titulosHc, titulosTodos));
     const chavesTotvs = new Set(titulosTodos.map((t) => t.chave));
     const faltam = (vincRes.vinculos || []).filter((v) => !chavesTotvs.has(`${v.filial}|${v.titulo}`));
-    if (faltam.length) {
+    const faltamTotvs = faltam.filter((v) => !ehTituloHeadcoach(v));
+    const faltamHc = faltam.filter((v) => ehTituloHeadcoach(v));
+    if (faltamTotvs.length) {
       try {
-        titulosTodos.push(...(await buscarTitulosPorCodigo(faltam)));
+        titulosTodos.push(...(await buscarTitulosPorCodigo(faltamTotvs)));
       } catch (e) {
         console.warn(`[stone] títulos dos vínculos manuais: ${e.message}`);
+      }
+    }
+    if (faltamHc.length) {
+      try {
+        titulosTodos.push(...(await buscarPagamentosPdvPorRef(faltamHc)));
+      } catch (e) {
+        console.warn(`[stone] vendas do PDV Crosby dos vínculos manuais: ${e.message}`);
       }
     }
 
@@ -350,6 +376,16 @@ router.get(
         cancelados: titulosNoPeriodo.filter((t) => t.cancelado).length,
       };
       b.resumo.diferenca = +(b.resumo.stone.bruto - b.resumo.totvs.valor).toFixed(2);
+      // parte do sistema que é venda do PDV Crosby (HeadCoach), no período
+      const hcNoPeriodo = titulosNoPeriodo.filter(ehTituloHeadcoach);
+      const hcSemStone = b.totvsSemStone.filter(ehTituloHeadcoach);
+      b.resumo.headcoach = {
+        ...b.resumo.headcoach,
+        qtd: hcNoPeriodo.length,
+        valor: +hcNoPeriodo.reduce((s, t) => s + t.valor, 0).toFixed(2),
+        semStone: hcSemStone.length,
+        valorSemStone: +hcSemStone.reduce((s, t) => s + t.valor, 0).toFixed(2),
+      };
 
       const pagamentos = dias.flatMap((d) =>
         d.pagamentos.map((p) => {
@@ -435,6 +471,13 @@ router.get(
       stoneTaxa: agg((r) => r.stone.taxa),
       totvsQtd: agg((r) => r.totvs.qtd),
       totvsValor: agg((r) => r.totvs.valor),
+      // dentro do total do sistema, o que é venda do PDV Crosby (HeadCoach)
+      headcoachQtd: agg((r) => r.headcoach?.qtd),
+      headcoachValor: agg((r) => r.headcoach?.valor),
+      headcoachConciliadas: agg((r) => r.headcoach?.conciliadas),
+      headcoachSemStoneQtd: agg((r) => r.headcoach?.semStone),
+      headcoachSemStoneValor: agg((r) => r.headcoach?.valorSemStone),
+      headcoachErro: erroHeadcoach,
       conciliadasQtd: agg((r) => r.conciliadas.qtd),
       conciliadasValor: agg((r) => r.conciliadas.valorStone),
       comDivergencia: agg((r) => r.conciliadas.comDivergencia),
@@ -536,8 +579,28 @@ router.get(
     const loja = comFiliaisTotvs(cfg, await mapaFiliaisSeguro());
     if (!loja.filiais?.length) return errorResponse(res, 'Loja sem filial TOTVS resolvida.', 422);
     const t0 = Date.now();
-    const transacoes = await buscarTransacoesDia({ branchCodes: loja.filiais, dataIso: String(data) });
+    // vendas do dia dos dois lados: TOTVS e PDV Crosby (HeadCoach). Um lado
+    // fora do ar não esconde o outro; só falha se os dois falharem.
+    const avisos = [];
+    const [doTotvs, doHc] = await Promise.all([
+      buscarTransacoesDia({ branchCodes: loja.filiais, dataIso: String(data) }).catch((e) => {
+        avisos.push(`TOTVS: ${e.message}`);
+        return null;
+      }),
+      buscarTransacoesDiaPdv({ empresas: loja.filiais, dataIso: String(data) }).catch((e) => {
+        avisos.push(`HeadCoach: ${e.message}`);
+        return null;
+      }),
+    ]);
+    if (doTotvs == null && doHc == null) throw new Error(avisos.join(' · '));
+    // a venda do HeadCoach espelhada no TOTVS aparece só pelo TOTVS
+    const noTotvs = new Set((doTotvs || []).map((t) => `${t.filial}|${t.transacao}`));
+    const hcSemEspelho = (doHc || []).filter((t) => !(t.transacaoTotvs != null && noTotvs.has(`${t.filial}|${t.transacaoTotvs}`)));
+    const transacoes = [...(doTotvs || []), ...hcSemEspelho].sort((a, b) =>
+      String(a.hora || '').localeCompare(String(b.hora || '')),
+    );
     return successResponse(res, {
+      avisos,
       loja: { stonecode: loja.stonecode, nome: loja.nome, filiais: loja.filiais },
       data: String(data),
       total: transacoes.length,
