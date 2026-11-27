@@ -812,6 +812,48 @@ const perdasFilialBlueCard = (cd) => {
   const n = parseInt(cd, 10);
   return Number.isFinite(n) && n < 5999 && !PERDAS_BLC_FILIAIS_FORA.has(n);
 };
+
+// Variação do saldo (Niziany 27/11/2026), de set/26 em diante: perdas do mês =
+// saldo inadimplente no fim do mês − saldo no fim do mês anterior. Saldo em D =
+// FATURA (tipo 1) dos 4 canais vencida antes de D e não baixada até D; título
+// baixado depois de D conta a fatura inteira (estava aberto em D). Qualquer baixa
+// até D fecha o título, inclusive abatimento (tp_baixa 17, vl_pago = 0).
+const PERDAS_SALDO_DESDE = '2026-09';
+const PERDAS_SALDO_INICIO = '2024-04-01'; // mesma janela do Dashboard ("Tudo")
+const mesAnterior = (m) => {
+  const [a, mm] = m.split('-').map(Number);
+  return new Date(Date.UTC(a, mm - 2, 1)).toISOString().slice(0, 7);
+};
+function saldoInadimplenteEm(itens, D, canalDo) {
+  const por = new Map();
+  let tot = 0;
+  const vistos = new Set(); // a busca em lotes repete títulos
+  for (const it of itens) {
+    if (String(it.tp_documento) !== '1') continue;
+    if (String(it.tp_situacao) !== '1') continue; // situação normal
+    if (String(it.tp_cobranca) === '14') continue;
+    const chave = `${it.cd_empresa}-${it.cd_cliente}-${it.nr_fatura}-${it.nr_parcela}`;
+    if (vistos.has(chave)) continue;
+    vistos.add(chave);
+    const cod = String(it.cd_cliente || '').trim();
+    const canal = canalDo.get(cod);
+    if (!canal) continue;
+    if (canal === 'BLC' && !perdasFilialBlueCard(it.cd_empresa)) continue;
+    const venc = String(it.dt_vencimento || '').slice(0, 10);
+    if (!venc || venc >= D) continue;
+    const liq = it.dt_liq ? String(it.dt_liq).slice(0, 10) : null;
+    if (liq && liq <= D) continue;
+    const s = liq ? Number(it.vl_fatura) || 0 : (Number(it.vl_fatura) || 0) - (Number(it.vl_pago) || 0);
+    if (s <= 0.005) continue;
+    const nome =
+      cod === PERDAS_CLIENTE_PROPRIO.codigo
+        ? PERDAS_CLIENTE_PROPRIO.nome
+        : (PERDAS_CANAIS.find((c) => c.canal === canal) || { nome: 'Outro' }).nome;
+    por.set(nome, (por.get(nome) || 0) + s);
+    tot += s;
+  }
+  return { tot, por };
+}
 async function calcularPerdasInadimplencia(mes, base) {
   // 1) clientes por canal (precedência = ordem)
   const canalDo = new Map();
@@ -834,6 +876,60 @@ async function calcularPerdasInadimplencia(mes, base) {
   }
   const codigos = [...canalDo.keys()];
   if (!codigos.length) return { total: 0, canais: [], titulos: 0, clientes: 0 };
+  if (mes >= PERDAS_SALDO_DESDE) {
+    const hojeS = new Date().toISOString().slice(0, 10);
+    const d1 = ultimoDia(mesAnterior(mes));
+    const d2 = ultimoDia(mes) < hojeS ? ultimoDia(mes) : hojeS;
+    const lotesS = [];
+    for (let i = 0; i < codigos.length; i += 500) lotesS.push(codigos.slice(i, i + 500));
+    const its = [];
+    for (let i = 0; i < lotesS.length; i += 5) {
+      const rs = await Promise.all(
+        lotesS.slice(i, i + 5).map((l) =>
+          axios
+            .get(`${base}/api/totvs/accounts-receivable/filter`, {
+              params: {
+                dt_inicio: PERDAS_SALDO_INICIO,
+                dt_fim: d2,
+                modo: 'vencimento',
+                situacao: '1',
+                tp_documento: '1',
+                cd_cliente: l.join(','),
+              },
+              timeout: 10 * 60 * 1000,
+            })
+            .then((r) => r.data?.data?.items || r.data?.items || []),
+        ),
+      );
+      rs.forEach((a) => its.push(...a));
+    }
+    if (!its.length) throw new Error('TOTVS não devolveu títulos para o saldo inadimplente');
+    const a = saldoInadimplenteEm(its, d1, canalDo);
+    const b = saldoInadimplenteEm(its, d2, canalDo);
+    const r2s = (x) => Math.round(x * 100) / 100;
+    const nomes = new Set([...a.por.keys(), ...b.por.keys()]);
+    const canais = [...nomes]
+      .map((nome) => ({
+        nome,
+        valor: r2s((b.por.get(nome) || 0) - (a.por.get(nome) || 0)),
+        saldo_ini: r2s(a.por.get(nome) || 0),
+        saldo_fim: r2s(b.por.get(nome) || 0),
+        titulos: 0,
+        clientes: 0,
+      }))
+      .sort((x, y) => y.valor - x.valor);
+    return {
+      total: r2s(b.tot - a.tot),
+      canais,
+      titulos: 0,
+      clientes: 0,
+      regra: 'variacao_saldo',
+      saldo_ini: r2s(a.tot),
+      saldo_fim: r2s(b.tot),
+      d1,
+      d2,
+    };
+  }
   // 2) títulos vencidos no mês, em lotes de 500 clientes
   const hoje = new Date().toISOString().slice(0, 10);
   const fimMes = ultimoDia(mes);
@@ -1422,6 +1518,9 @@ async function calcularPessoalFixo(mes) {
       perdas_canais: perdas.canais,
       perdas_titulos: perdas.titulos,
       perdas_clientes: perdas.clientes,
+      ...(perdas.regra
+        ? { perdas_regra: perdas.regra, perdas_saldo_ini: perdas.saldo_ini, perdas_saldo_fim: perdas.saldo_fim, perdas_datas: [perdas.d1, perdas.d2] }
+        : {}),
       fonte: 'dryland_dp_folha',
       calculado_em: new Date().toISOString(),
     };
