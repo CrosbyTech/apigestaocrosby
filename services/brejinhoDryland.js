@@ -19,7 +19,7 @@
 // ============================================================================
 import axios from 'axios';
 import { drylandRpc } from './pedidosVendaDryland.js';
-import { itensDoCardBrejinho, totaisDosItens } from './brejinhoItens.js';
+import { itensDoCardBrejinho, totaisDosItens, vendedorDoCardBrejinho } from './brejinhoItens.js';
 import { getToken } from '../utils/totvsTokenManager.js';
 import { httpsAgent, httpAgent, TOTVS_BASE_URL } from '../totvsrouter/totvsHelper.js';
 
@@ -200,6 +200,7 @@ export async function obterBrejinho(id) {
     transacaoErro,
     itensCard: doCard.itens,
     itensCardIgnorados: doCard.ignoradas,
+    vendedorCard: vendedorDoCardBrejinho(p.raw),
   };
 }
 
@@ -215,7 +216,9 @@ function formaTexto(cond) {
 /** Card no formato da fila de faturamento, para a tela Expedição → Faturamento. */
 export async function cardBrejinho(chave) {
   const id = String(chave).replace(/^BRJ:/i, '');
-  const { pedido: p, transacao, transacaoErro, itensCard, itensCardIgnorados } = await obterBrejinho(id);
+  const { pedido: p, transacao, transacaoErro, itensCard, itensCardIgnorados, vendedorCard } = await obterBrejinho(id);
+  // Vendedor: o da transação da remessa; card sem transação → o que o Dryland gravou (raw.vendedor_cd)
+  const vendedorCode = transacao?.sellerCode ?? vendedorCard?.code ?? null;
   const daTransacao = (transacao?.itens || []).map((i) => ({
     cod: String(i.productCode),
     descricao: i.nome || `Produto ${i.productCode}`,
@@ -241,7 +244,8 @@ export async function cardBrejinho(chave) {
     dados: {
       nome_cliente: p.cliente,
       codigo_cliente: transacao?.customerCode ? String(transacao.customerCode) : p.customer_code ? String(p.customer_code) : null,
-      cod_vendedor: transacao?.sellerCode ? String(transacao.sellerCode) : null,
+      cod_vendedor: vendedorCode ? String(vendedorCode) : null,
+      vendedor: !transacao?.sellerCode && vendedorCard ? `${vendedorCard.code}${vendedorCard.nome ? ` - ${vendedorCard.nome}` : ''}` : null,
       itens,
       forma_pagamento: formaTexto(p.cond_pagamento),
       parcelamento: p.parcelas ? `${p.parcelas}x` : null,

@@ -1,4 +1,4 @@
-import { itensDoCardBrejinho, totaisDosItens } from '../services/brejinhoItens.js';
+import { itensDoCardBrejinho, totaisDosItens, vendedorDoCardBrejinho } from '../services/brejinhoItens.js';
 
 // card 6723 do Dryland (BRJ 62, F024 - CROSBY CAJAZEIRAS), como veio em 27/11/2026
 const RAW_6723 = {
@@ -62,5 +62,17 @@ describe('Brejinho — peças gravadas no card do Dryland (raw.itens)', () => {
   test('também entende os nomes da fila de faturamento (cod, preco, descricao, tamanho)', () => {
     const { itens } = itensDoCardBrejinho({ itens: [{ cod: 55, quantidade: 2, preco: 30, descricao: 'POLO', tamanho: 'M' }] });
     expect(itens[0]).toMatchObject({ cod: '55', qtd: 2, preco: 30, descricao: 'POLO', tam: 'M' });
+  });
+});
+
+describe('Brejinho — vendedor gravado no card (raw.vendedor_cd / raw.vendedor)', () => {
+  test('card 6723: vendedor 50 GERAL', () => {
+    expect(vendedorDoCardBrejinho({ vendedor_cd: 50, vendedor: 'GERAL' })).toEqual({ code: 50, nome: 'GERAL' });
+  });
+  test('código em texto e nome ausente', () => {
+    expect(vendedorDoCardBrejinho({ vendedor_cd: '241' })).toEqual({ code: 241, nome: null });
+  });
+  test('sem código (card antigo, raw vazio ou só o nome) → null', () => {
+    for (const raw of [null, undefined, {}, { vendedor: 'GERAL' }, { vendedor_cd: null }, { vendedor_cd: '' }, { vendedor_cd: 0 }]) expect(vendedorDoCardBrejinho(raw)).toBeNull();
   });
 });

@@ -72,6 +72,17 @@ export function itensDoCardBrejinho(raw) {
   return { itens, ignoradas };
 }
 
+/**
+ * Vendedor gravado no card (27/11/2026): raw.vendedor_cd = código do vendedor
+ * (o mesmo do cadastro de vendedores) e raw.vendedor = nome.
+ * Devolve { code, nome } ou null quando o card não traz o código.
+ */
+export function vendedorDoCardBrejinho(raw) {
+  const code = parseInt(String(raw?.vendedor_cd ?? '').replace(/\D/g, ''), 10) || null;
+  if (!code) return null;
+  return { code, nome: texto(raw?.vendedor) };
+}
+
 /** Totais das peças do card (para conferir com qtd_pecas e valor do card). */
 export function totaisDosItens(itens) {
   return {
