@@ -30,6 +30,9 @@
 //   POST /liberacoes/saidas-sem-baixa/casar  { lancamentoId, tituloId }  concilia a saída com a duplicata e dá a baixa
 //                                       (valor igual quita; maior = juros e multa; menor = parcial; previsão passa a valer a saída)
 //   POST /liberacoes/saidas-sem-baixa/gerar  { lancamentoId, fornecedorCode, despesaCode, centroCustoCode? }  cria a duplicata pela saída, já baixada
+//   GET  /liberacoes/saidas-sem-baixa/solicitacoes?lancamentoId&q  Solicitações Crosby (todos os status) parecidas com a saída, ou pela busca
+//   POST /liberacoes/saidas-sem-baixa/solicitacao  { lancamentoId, solicitacaoId }  aprova, envia ao contas a pagar e casa a saída com a duplicata
+//   POST /liberacoes/saidas-sem-baixa/totvs  { lancamentoId, item }  título do contas a pagar do TOTVS → duplicata no HeadCoach → casa com a saída
 //   POST /liberacoes/devolver           { ids, motivo }  volta para o contas a pagar
 //   POST /liberacoes/baixa-automatica   { confirmar?, ids?, escolhidas?, senha? }  confere as INCLUÍDAS nos extratos (hoje e 30 dias para trás);
 //                                       sem confirmar = só mostra o que achou (casadas + sugestoes + semSaida); com confirmar + senha = grava a
@@ -44,7 +47,7 @@ import { requireAuth } from '../middlewares/auth.js';
 import { enviarSolicitacaoAoCp, liberarSolicitacaoParaPagamento } from '../services/solicitacaoContasPagar.js';
 import { opcoesDaLiberacao, listarLiberacoes, liberarTitulos, mudarStatus, editarLiberacao, devolverLiberacoes, reenviarAoBot, definirBanco } from '../services/hcCpLiberacao.js';
 import { baixaAutomatica } from '../services/hcCpBaixaAutomatica.js';
-import { saidasSemBaixa, casarSaida, gerarDuplicataDaSaida } from '../services/hcCpSaidasSemBaixa.js';
+import { saidasSemBaixa, casarSaida, gerarDuplicataDaSaida, solicitacoesParaASaida, casarComSolicitacao, casarComTituloTotvs } from '../services/hcCpSaidasSemBaixa.js';
 import { enviarDoTotvsParaLiberacao } from '../services/hcCpDoTotvs.js';
 import { mudarEscrituracao, sincronizarEscrituracaoDasSolicitacoes } from '../services/hcCpEscrituracao.js';
 import { montarSaldos } from '../services/relatorioSaldosWhatsapp.js';
@@ -125,6 +128,9 @@ router.post('/liberacoes/pagar', (_req, res) => errorResponse(res, 'O pagamento 
 router.get('/liberacoes/saidas-sem-baixa', rota((req) => saidasSemBaixa(req.user, req.query || {}), (r) => `${tantas(r.saidas.length, 'saída do banco sem baixa', 'saídas do banco sem baixa')}`));
 const comoCasou = (r) => (r.tipo === 'acrescimo' ? ` com R$ ${Number(r.juros).toFixed(2).replace('.', ',')} de juros e multa` : r.tipo === 'parcial' ? ` · baixa parcial, faltam R$ ${Number(r.resta).toFixed(2).replace('.', ',')}` : r.tipo === 'previsao' ? ' · a previsão passou a valer o valor da saída' : '');
 router.post('/liberacoes/saidas-sem-baixa/casar', rota((req) => casarSaida(req.user, req.body || {}), (r) => `Saída casada com ${r.titulo.fornecedor} ${r.titulo.rotulo}: baixa de R$ ${Number(r.pago).toFixed(2).replace('.', ',')}${comoCasou(r)}${r.aviso ? ` · ATENÇÃO: ${r.aviso}` : ''}`));
+router.get('/liberacoes/saidas-sem-baixa/solicitacoes', rota((req) => solicitacoesParaASaida(req.user, req.query || {}), (r) => `${tantas(r.solicitacoes.length, 'solicitação', 'solicitações')}`));
+router.post('/liberacoes/saidas-sem-baixa/solicitacao', rota((req) => casarComSolicitacao(req.user, req.body || {}), (r) => `${r.patrimonio ? `Solicitação de patrimônio conciliada com a saída e lançada no contas a pagar já paga (duplicata ${r.titulo.rotulo}); ` : r.enviou ? `Solicitação aprovada e enviada ao contas a pagar (duplicata ${r.titulo.rotulo}); ` : ''}saída casada com ${r.titulo.fornecedor} ${r.titulo.rotulo}: baixa de R$ ${Number(r.pago).toFixed(2).replace('.', ',')}${comoCasou(r)}${r.aviso ? ` · ATENÇÃO: ${r.aviso}` : ''}`));
+router.post('/liberacoes/saidas-sem-baixa/totvs', rota((req) => casarComTituloTotvs(req.user, req.body || {}), (r) => `${r.criou ? `Duplicata ${r.titulo.rotulo} criada no Contas a Pagar HeadCoach; ` : ''}saída casada com ${r.titulo.fornecedor} ${r.titulo.rotulo}: baixa de R$ ${Number(r.pago).toFixed(2).replace('.', ',')}${comoCasou(r)}${r.aviso ? ` · ATENÇÃO: ${r.aviso}` : ''}`));
 router.post('/liberacoes/saidas-sem-baixa/gerar', rota((req) => gerarDuplicataDaSaida(req.user, req.body || {}), (r) => `Duplicata ${r.duplicata} de ${r.fornecedor} gerada pela saída, já baixada e conciliada`));
 router.post('/liberacoes/devolver', rota((req) => devolverLiberacoes(req.user, req.body || {}), (r) => comIgnoradas(`${tantas(r.devolvidas, 'devolvida', 'devolvidas')} ao contas a pagar`, r)));
 router.post(

@@ -38,9 +38,11 @@ async function todas(montar) {
 /**
  * b: { itens: [linha da Consulta antiga: cd_empresa, cd_fornecedor, nm_fornecedor, nr_duplicata, nr_parcela,
  *      nr_portador, cd_despesaitem, ds_despesaitem, cd_ccusto, ds_ccusto, dt_emissao, dt_vencimento, vl_duplicata, …] }
- * @returns {{ criadas, jaExistiam, liberadas, ignoradas: [{ rotulo, motivo }] }}
+ * opcoes.semLiberar: só cria (ou acha) a duplicata, sem mandar para a Liberação — usado quando ela vai ser
+ *   casada direto com uma saída do banco (Liberação › Incluídos › saídas sem baixa).
+ * @returns {{ criadas, jaExistiam, liberadas, ids, ignoradas: [{ rotulo, motivo }] }}
  */
-export async function enviarDoTotvsParaLiberacao(user, b = {}) {
+export async function enviarDoTotvsParaLiberacao(user, b = {}, { semLiberar = false } = {}) {
   const { codes } = await empresasPermitidas(user); // só o financeiro, e só das empresas dele
   const itens = (Array.isArray(b.itens) ? b.itens : []).filter((i) => i && typeof i === 'object');
   if (!itens.length) throw new CpError('Selecione ao menos um título');
@@ -75,7 +77,7 @@ export async function enviarDoTotvsParaLiberacao(user, b = {}) {
     }
     candidatas.push(linha);
   }
-  if (!candidatas.length) return { criadas: 0, jaExistiam: 0, liberadas: 0, ignoradas };
+  if (!candidatas.length) return { criadas: 0, jaExistiam: 0, liberadas: 0, ids: [], ignoradas };
 
   // o que os fornecedores envolvidos já têm no HeadCoach
   const fornecedores = [...new Set(candidatas.map((l) => l.fornecedor_code))];
@@ -127,13 +129,13 @@ export async function enviarDoTotvsParaLiberacao(user, b = {}) {
 
   // manda para a Liberação de Pagamento do HeadCoach
   let liberadas = 0;
-  if (ids.length) {
+  if (ids.length && !semLiberar) {
     const r = await liberarTitulos(user, { ids });
     liberadas = r.liberadas;
     ignoradas.push(...(r.ignoradas || []).map((i) => ({ rotulo: i.rotulo, motivo: i.motivo })));
   }
   console.log(`📥 [consulta antiga → HeadCoach] ${criadas} duplicata(s) criada(s), ${jaExistiam} já existiam, ${liberadas} liberada(s) para pagamento · ${por}`);
-  return { criadas, jaExistiam, liberadas, ignoradas };
+  return { criadas, jaExistiam, liberadas, ids, ignoradas };
 }
 
 export default { enviarDoTotvsParaLiberacao };

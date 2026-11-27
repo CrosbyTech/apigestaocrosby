@@ -85,3 +85,35 @@ export function planoDeCasamento(saidaValor, t) {
   if (S > F) return { tipo: 'acrescimo', pago: S / 100, juros: (S - F) / 100, resta: 0, trocaValor: null };
   return { tipo: 'parcial', pago: S / 100, juros: 0, resta: (F - S) / 100, trocaValor: null };
 }
+
+// ─── Solicitações Crosby na janela RESOLVER ──────────────────────────────────
+export const ROTULO_STATUS_SOLICITACAO = { pendente: 'Pendente', aprovado_gestor: 'Aprovada pelo gestor', aprovado_financeiro: 'Aprovada pelo financeiro', enviado_totvs: 'Enviada ao contas a pagar', nota_fiscal: 'Nota fiscal', aguardando_conciliacao: 'Aguardando conciliação', conciliado: 'Conciliada · paga', erro_envio: 'Erro no envio', rejeitado: 'Rejeitada', cancelada: 'Cancelada' };
+
+/** Por que a solicitação SEM duplicata no HeadCoach não pode ser aprovada e enviada daqui (null = pode). */
+export function motivoDeNaoEnviarDaqui(sol) {
+  if (!sol) return 'não foi encontrada';
+  if (sol.status === 'rejeitado') return 'está rejeitada';
+  if (sol.status === 'cancelada') return 'está cancelada';
+  if (sol.status === 'conciliado') return 'é produto de patrimônio que já foi conciliado com outra saída do extrato (já está paga)';
+  if (sol.status === 'enviado_totvs') return 'foi enviada ao contas a pagar antigo e não tem duplicata no HeadCoach: use a aba Contas a Pagar do TOTVS';
+  return null;
+}
+
+/** Das duplicatas da solicitação, a que casa com a saída: a em aberto de mesmo valor; senão a única em aberto. */
+export function tituloParaCasar(titulos, saidaValor) {
+  const abertos = (titulos || []).filter((t) => t.situacao === 'aberto');
+  if (!abertos.length) return { erro: 'a duplicata desta solicitação já está paga' };
+  const igual = abertos.filter((t) => faltaEmCentavos(t) === centavos(saidaValor));
+  if (igual.length) return { titulo: igual[0] };
+  if (abertos.length === 1) return { titulo: abertos[0] };
+  return { erro: `a solicitação tem ${abertos.length} parcelas em aberto e nenhuma do valor da saída: case pela aba das duplicatas` };
+}
+
+/**
+ * O que a janela faz com a solicitação escolhida:
+ *   'casar'            já tem duplicata em aberto no HeadCoach → só casa com a saída;
+ *   'conciliar-lancar' produto de patrimônio aguardando conciliação → concilia com esta saída (fica paga)
+ *                      e lança no contas a pagar já paga;
+ *   'aprovar-enviar-casar' as outras → aprova o que faltar, envia ao contas a pagar e casa.
+ */
+export const acaoDaSolicitacao = (sol, temDuplicata) => (temDuplicata ? 'casar' : sol?.status === 'aguardando_conciliacao' ? 'conciliar-lancar' : 'aprovar-enviar-casar');

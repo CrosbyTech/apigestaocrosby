@@ -277,6 +277,7 @@ export async function saidasPendentes({ de, ate, escopo = 'crosby', sentido = 'S
       const filial = (mapa?.get(soDig(c?.titular_cnpj)) || [])[0] || null;
       return {
         id: l.id,
+        chave: l.chave || null, // identificação estável da linha (o id muda a cada reimportação do extrato)
         data: l.data,
         valor: round2(Math.abs(l.valor)),
         forma: l.forma,

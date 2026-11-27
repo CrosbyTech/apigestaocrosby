@@ -14,7 +14,12 @@
 //     saída maior entra com a diferença como juros e multa; saída menor é baixa
 //     parcial; duplicata de PREVISÃO passa a valer o valor da saída;
 //   • GERAR = criar a duplicata pela própria saída (criarDuplicatasTarifas), já
-//     conciliada e baixada.
+//     conciliada e baixada;
+//   • SOLICITAÇÃO CROSBY (27/11/2026): a janela mostra as solicitações de todos os
+//     status; escolhida uma, o sistema aprova (gestor e financeiro, no nome de quem
+//     clicou), envia ao Contas a Pagar HeadCoach e casa a saída com a duplicata;
+//   • CONTAS A PAGAR DO TOTVS: o título escolhido vira duplicata no HeadCoach (sem
+//     passar pela Liberação) e é casado com a saída.
 // Como na Conciliação, não pede senha (decisão do Yago, 24/11/2026: a baixa que
 // vem da conciliação do extrato não precisa); a tela confirma antes de gravar.
 // =============================================================================
@@ -22,8 +27,12 @@ import supabase from '../config/supabase.js';
 import { CpError, empresasPermitidas, editarTitulo, rotuloDuplicata } from './hcContasPagar.js';
 import { incluidasDoUsuario } from './hcCpLiberacao.js';
 import { nomeScore } from './conciliacaoAprovados.js';
-import { salvarConciliacao, lancamentoComChave } from './fluxoCaixaConciliacao.js';
+import { salvarConciliacao, lancamentoComChave, atribuirChaves } from './fluxoCaixaConciliacao.js';
 import { saidasPendentesComSugestao, criarDuplicatasTarifas } from './tarifasConciliacao.js';
+import { enviarSolicitacaoAoCp } from './solicitacaoContasPagar.js';
+import { enviarDoTotvsParaLiberacao } from './hcCpDoTotvs.js';
+import { ORIGEM_SOLICITACAO } from '../utils/solicitacaoCp.js';
+import { motivoDeNaoEnviarDaqui, tituloParaCasar, acaoDaSolicitacao, ROTULO_STATUS_SOLICITACAO } from '../utils/hcCpSaidasSemBaixa.js';
 import { casarIncluidos, janelaDosExtratos, bancoDaConta, addDias } from '../utils/hcCpBaixaAutomatica.js';
 import { titulosHcDaConciliacao } from '../utils/hcCpComprovante.js';
 import { candidatasDaSaida, planoDeCasamento, faltaEmCentavos } from '../utils/hcCpSaidasSemBaixa.js';
@@ -104,6 +113,7 @@ export async function saidasSemBaixa(user, f = {}) {
       const candidatas = candidatasDaSaida(i, abertos, nomeScore).map((c) => tituloDaTela(c.titulo, { tipo: c.tipo, acrescimo: round2(c.acrescimo), mesmoFornecedor: c.mesmoFornecedor, liberacao: emLiberacao.get(Number(c.titulo.id)) || null }));
       return {
         lancamentoId: i.id,
+        chave: i.chave || null, // a tela devolve junto: se o extrato for reimportado, o servidor acha a linha por ela
         data: i.data,
         valor: i.valor,
         banco: bancoDaConta({ banco: i.banco, apelido: i.conta, titular_cnpj: i.cnpj }),
@@ -127,14 +137,28 @@ export async function saidasSemBaixa(user, f = {}) {
   return { periodo, saidas, total: round2(saidas.reduce((s, x) => s + x.valor, 0)), comSugestao: saidas.filter((x) => x.candidatas.some((c) => c.mesmoFornecedor)).length, naBaixaAutomatica: daBaixaAutomatica.size, baixasSemLinha: conferencia };
 }
 
-/** A saída do extrato, conferida: é saída, não é transferência entre contas e ainda não está conciliada. */
-async function saidaLivre(lancamentoId) {
-  let l;
+/**
+ * A linha do extrato pelo id; se o id não existe mais (o extrato é reimportado de hora em hora e os
+ * ids mudam), pela CHAVE estável da linha (conta|data|valor|memo|n), que a tela manda junto.
+ */
+async function linhaDoExtrato(lancamentoId, chave) {
   try {
-    l = await lancamentoComChave(Number(lancamentoId));
+    return await lancamentoComChave(Number(lancamentoId));
   } catch (e) {
-    throw new CpError(e.message, 'SAIDA', 404);
+    const partes = String(chave || '').split('|');
+    if (partes.length < 5) throw new CpError('Esta linha do extrato mudou (o extrato foi reimportado): clique em ATUALIZAR na lista das saídas', 'SAIDA', 404);
+    const [conta, data, valor] = partes;
+    const irmaos = await q(supabase.from('fluxo_caixa_lancamentos').select('id,conta_id,data,valor,seq,memo,descricao').eq('conta_id', Number(conta)).eq('data', data).eq('valor', Number(valor)));
+    atribuirChaves(irmaos || []);
+    const achada = (irmaos || []).find((x) => x.chave === chave);
+    if (!achada) throw new CpError('Esta linha do extrato não existe mais (o extrato foi reimportado e ela mudou): clique em ATUALIZAR na lista das saídas', 'SAIDA', 404);
+    return lancamentoComChave(achada.id);
   }
+}
+
+/** A saída do extrato, conferida: é saída, não é transferência entre contas e ainda não está conciliada. */
+async function saidaLivre(lancamentoId, chave = null) {
+  const l = await linhaDoExtrato(lancamentoId, chave);
   if (!(Number(l.valor) < 0) || l.transferencia_id || l.tipo === 'TRANSFERENCIA') throw new CpError('Só saída do banco que não seja transferência entre contas pode ser casada', 'SAIDA', 409);
   if (!l.chave) throw new CpError('Não consegui identificar esta linha do extrato', 'SAIDA', 409);
   const ja = await q(supabase.from('fluxo_caixa_conciliacoes').select('id').eq('chave', l.chave).maybeSingle());
@@ -149,7 +173,7 @@ async function saidaLivre(lancamentoId) {
  */
 export async function casarSaida(user, b = {}) {
   const { codes } = await empresasPermitidas(user);
-  const l = await saidaLivre(b.lancamentoId);
+  const l = await saidaLivre(b.lancamentoId, b.chave);
   let t = await q(supabase.from('hc_cp_titulos').select('*').eq('id', Number(b.tituloId)).maybeSingle());
   if (!t) throw new CpError('Duplicata não encontrada', 'NOT_FOUND', 404);
   if (!codes.includes(Number(t.empresa))) throw new CpError(`Você não tem acesso à empresa ${t.empresa}`, 'SEM_PERMISSAO', 403);
@@ -205,7 +229,7 @@ export async function casarSaida(user, b = {}) {
  */
 export async function gerarDuplicataDaSaida(user, b = {}) {
   await empresasPermitidas(user);
-  const l = await saidaLivre(b.lancamentoId);
+  const l = await saidaLivre(b.lancamentoId, b.chave);
   const fornecedor = Number(dig(b.fornecedorCode));
   const despesa = Number(dig(b.despesaCode));
   if (!fornecedor) throw new CpError('Escolha o fornecedor da duplicata');
@@ -224,4 +248,169 @@ export async function gerarDuplicataDaSaida(user, b = {}) {
   return { titulo: t ? tituloDaTela(t, { situacao: t.situacao }) : null, duplicata: criada.duplicata, fornecedor: criada.fornecedor, empresa: criada.empresa, valor: criada.valor };
 }
 
-export default { saidasSemBaixa, casarSaida, gerarDuplicataDaSaida };
+// ─── Solicitações Crosby ─────────────────────────────────────────────────────
+const CAMPOS_SOL = 'id, status, tipo_solicitacao, solicitante, setor, supplier_name, supplier_cpf_cnpj, valor_total, dt_vencimento, dt_emissao, descricao, tem_nota_fiscal, nf_escriturado_em, duplicate_code, nm_empresa, cd_empresa, pago_em, data_solicitacao, created_at';
+
+async function titulosDasSolicitacoes(ids) {
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += 100) {
+    const lote = await q(supabase.from('hc_cp_titulos').select(`${CAMPOS_TITULO}, origem_ref`).eq('origem', ORIGEM_SOLICITACAO).in('origem_ref', ids.slice(i, i + 100).map(String)).neq('situacao', 'cancelado').order('parcela'));
+    for (const t of lote || []) {
+      const k = String(t.origem_ref);
+      if (!out.has(k)) out.set(k, []);
+      out.get(k).push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * Solicitações Crosby para resolver a saída: sem busca, as de mesmo valor (ou até 10% menor, paga
+ * com juros) e as do mesmo recebedor; com busca, por fornecedor, solicitante, CPF/CNPJ, número ou valor.
+ * f: { lancamentoId, q? }
+ */
+export async function solicitacoesParaASaida(user, f = {}) {
+  await empresasPermitidas(user);
+  const termo = String(f.q || '').trim();
+  const filtros = [];
+  let valorDaSaida = null;
+  if (termo) {
+    const numero = Number(termo.replace(/\./g, '').replace(',', '.'));
+    const d = dig(termo);
+    const nome = termo.replace(/[%_,()]/g, ' ');
+    filtros.push(`supplier_name.ilike.%${nome}%`, `solicitante.ilike.%${nome}%`);
+    if (d.length >= 5) filtros.push(`supplier_cpf_cnpj.ilike.%${d}%`, `duplicate_code.eq.${d}`);
+    if (Number.isFinite(numero) && numero > 0) filtros.push(`valor_total.eq.${numero}`);
+  } else {
+    const l = await linhaDoExtrato(f.lancamentoId, f.chave);
+    const valor = round2(Math.abs(Number(l.valor)));
+    valorDaSaida = valor;
+    const nome = String(l.contraparte_nome && !/^(transfer|pix|pagamento|ted|doc)/i.test(l.contraparte_nome) ? l.contraparte_nome : l.memo || '')
+      .replace(/\s+-\s+(Transfer.ncia|Pagamento).*$/i, '')
+      .replace(/[%_,()."']/g, ' ')
+      .trim();
+    const palavras = nome.split(/\s+/).filter((p) => p.length > 2).slice(0, 2).join(' ');
+    filtros.push(`and(valor_total.gte.${round2(valor / 1.1)},valor_total.lte.${valor})`);
+    if (palavras.length >= 4) filtros.push(`supplier_name.ilike.%${palavras}%`);
+  }
+  const lista = await q(supabase.from('solicitacoes_crosby').select(CAMPOS_SOL).or(filtros.join(',')).order('created_at', { ascending: false }).limit(80));
+  const titulos = await titulosDasSolicitacoes((lista || []).map((x) => x.id));
+  let solicitacoes = (lista || []).map((x) => {
+    const dup = (titulos.get(String(x.id)) || []).map((t) => tituloDaTela(t, { situacao: t.situacao }));
+    const abertas = dup.filter((t) => t.situacao === 'aberto');
+    const motivo = dup.length ? (abertas.length ? null : 'a duplicata desta solicitação já está paga') : motivoDeNaoEnviarDaqui(x);
+    return {
+      id: x.id,
+      status: x.status,
+      statusRotulo: ROTULO_STATUS_SOLICITACAO[x.status] || x.status,
+      tipo: x.tipo_solicitacao,
+      solicitante: x.solicitante,
+      setor: x.setor,
+      fornecedor: x.supplier_name,
+      cpfCnpj: x.supplier_cpf_cnpj,
+      valor: Number(x.valor_total),
+      vencimento: x.dt_vencimento ? String(x.dt_vencimento).slice(0, 10) : null,
+      descricao: x.descricao ? String(x.descricao).slice(0, 200) : null,
+      notaFiscal: x.tem_nota_fiscal === true,
+      escriturada: Boolean(x.nf_escriturado_em),
+      empresa: x.cd_empresa,
+      criadaEm: String(x.data_solicitacao || x.created_at || '').slice(0, 10),
+      paga: Boolean(x.pago_em),
+      duplicatas: dup,
+      pode: !motivo,
+      motivo: motivo ? `Esta solicitação ${motivo}`.replace('Esta solicitação a duplicata', 'A duplicata') : null,
+      acao: acaoDaSolicitacao(x, dup.length > 0),
+    };
+  });
+  // sem busca: primeiro as de valor igual ao da saída, depois as que dão para resolver daqui
+  if (!termo && valorDaSaida != null) {
+    const igual = (x) => Math.round(x.valor * 100) === Math.round(valorDaSaida * 100);
+    solicitacoes = solicitacoes.map((x, i) => ({ x, i })).sort((p, o) => Number(igual(o.x)) - Number(igual(p.x)) || Number(o.x.pode) - Number(p.x.pode) || p.i - o.i).map((p) => p.x);
+  }
+  return { solicitacoes };
+}
+
+/**
+ * Aprova (se ainda faltar), envia a solicitação ao Contas a Pagar HeadCoach e casa a saída com a
+ * duplicata. A que já tem duplicata em aberto só é casada.
+ * b: { lancamentoId, solicitacaoId }
+ */
+export async function casarComSolicitacao(user, b = {}) {
+  await empresasPermitidas(user);
+  const l = await saidaLivre(b.lancamentoId, b.chave); // antes de aprovar qualquer coisa: a saída tem de estar livre
+  const saida = round2(Math.abs(Number(l.valor)));
+  const sol = await q(supabase.from('solicitacoes_crosby').select('*').eq('id', b.solicitacaoId).maybeSingle());
+  if (!sol) throw new CpError('Solicitação não encontrada', 'NOT_FOUND', 404);
+  let titulos = (await titulosDasSolicitacoes([sol.id])).get(String(sol.id)) || [];
+  let enviou = false;
+  // PRODUTO DE PATRIMÔNIO aguardando conciliação: esta saída É o pagamento dela. Usa o fluxo que já existe
+  // (a mesma conciliação da tela das Solicitações): a solicitação fica conciliada e paga com esta saída,
+  // e a duplicata entra no contas a pagar já paga.
+  if (!titulos.length && sol.status === 'aguardando_conciliacao') {
+    const { conciliarManual } = await import('./conciliacaoPatrimonio.js');
+    try {
+      await conciliarManual({ solicitacaoId: sol.id, lancamentoId: l.id, usuario: quem(user) });
+    } catch (e) {
+      throw new CpError(`Não conciliei a solicitação com esta saída: ${e.message}`, 'PATRIMONIO', 409);
+    }
+    let r;
+    try {
+      r = await enviarSolicitacaoAoCp(user, sol.id);
+    } catch (e) {
+      throw new CpError(`A saída foi conciliada com a solicitação (que ficou paga), mas a duplicata não entrou no contas a pagar: ${e.message}. Lance pela tela das Solicitações.`, 'PATRIMONIO', 409);
+    }
+    const t = await q(supabase.from('hc_cp_titulos').select(CAMPOS_TITULO).eq('id', r.titulos[0].id).maybeSingle());
+    console.log(`🏦 [liberação · saída sem baixa] saída ${l.id} conciliada com a solicitação de patrimônio ${sol.id} e lançada no contas a pagar (${r.rotulo}) · ${quem(user)}`);
+    return { conciliacaoId: null, tipo: 'igual', pago: saida, juros: 0, resta: 0, titulo: tituloDaTela(t || r.titulos[0], { situacao: t?.situacao || 'pago' }), aviso: t?.situacao === 'pago' ? null : 'a duplicata entrou no contas a pagar, mas não ficou paga: confira', enviou: true, patrimonio: true, solicitacaoId: sol.id };
+  }
+  if (!titulos.length) {
+    const motivo = motivoDeNaoEnviarDaqui(sol);
+    if (motivo) throw new CpError(`Esta solicitação ${motivo}`, 'NAO_ENVIA', 409);
+    // aprovações que faltam, no nome de quem clicou
+    const agora = new Date().toISOString();
+    const por = quem(user);
+    const uuid = /^[0-9a-f-]{36}$/i.test(String(user?.id || '')) ? user.id : null;
+    const patch = {};
+    if (sol.status === 'pendente') Object.assign(patch, { aprovado_gestor_em: agora, aprovado_gestor_por: uuid, aprovado_gestor_por_nome: por });
+    if (['pendente', 'aprovado_gestor'].includes(sol.status)) Object.assign(patch, { status: 'aprovado_financeiro', aprovado_financeiro_em: agora, aprovado_financeiro_por: uuid, aprovado_financeiro_por_nome: por });
+    if (Object.keys(patch).length) await q(supabase.from('solicitacoes_crosby').update(patch).eq('id', sol.id).eq('status', sol.status));
+    const r = await enviarSolicitacaoAoCp(user, sol.id); // cria a duplicata (ou grava o erro de envio na solicitação)
+    titulos = r.titulos || [];
+    enviou = true;
+  }
+  const escolha = tituloParaCasar(titulos, saida);
+  if (escolha.erro) throw new CpError(`${enviou ? 'A solicitação foi enviada ao contas a pagar, mas não casei: ' : 'Não dá para casar: '}${escolha.erro}`, 'NAO_CASA', 409);
+  let r;
+  try {
+    r = await casarSaida(user, { lancamentoId: l.id, tituloId: escolha.titulo.id });
+  } catch (e) {
+    if (enviou && e instanceof CpError) throw new CpError(`A solicitação foi aprovada e enviada ao contas a pagar (duplicata ${rotuloDuplicata(escolha.titulo)}), mas a saída não casou: ${e.message}`, e.code, e.status);
+    throw e;
+  }
+  return { ...r, enviou, solicitacaoId: sol.id };
+}
+
+// ─── Contas a pagar do TOTVS ─────────────────────────────────────────────────
+/**
+ * O título do contas a pagar do TOTVS vira duplicata no Contas a Pagar HeadCoach (sem passar pela
+ * Liberação) e é casado com a saída. Se a duplicata já existe em aberto lá, só casa.
+ * b: { lancamentoId, item: linha da consulta do TOTVS (cd_empresa, cd_fornecedor, nr_duplicata, nr_parcela, vl_duplicata, dt_vencimento…) }
+ */
+export async function casarComTituloTotvs(user, b = {}) {
+  await empresasPermitidas(user);
+  const l = await saidaLivre(b.lancamentoId, b.chave);
+  const item = b.item && typeof b.item === 'object' && !Array.isArray(b.item) ? b.item : null;
+  if (!item) throw new CpError('Escolha o título do contas a pagar');
+  const r = await enviarDoTotvsParaLiberacao(user, { itens: [item] }, { semLiberar: true });
+  if (!r.ids?.length) throw new CpError(`Não criei a duplicata no HeadCoach: ${r.ignoradas?.[0]?.motivo || 'motivo não informado'}`, 'TOTVS', 409);
+  let casou;
+  try {
+    casou = await casarSaida(user, { lancamentoId: l.id, tituloId: r.ids[0] });
+  } catch (e) {
+    if (r.criadas && e instanceof CpError) throw new CpError(`A duplicata foi criada no Contas a Pagar HeadCoach, mas a saída não casou: ${e.message}`, e.code, e.status);
+    throw e;
+  }
+  return { ...casou, criou: r.criadas > 0 };
+}
+
+export default { saidasSemBaixa, casarSaida, gerarDuplicataDaSaida, solicitacoesParaASaida, casarComSolicitacao, casarComTituloTotvs };

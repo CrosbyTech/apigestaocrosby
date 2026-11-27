@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { faltaEmCentavos, tipoDoValor, candidatasDaSaida, planoDeCasamento } from '../utils/hcCpSaidasSemBaixa.js';
+import { faltaEmCentavos, tipoDoValor, candidatasDaSaida, planoDeCasamento, motivoDeNaoEnviarDaqui, tituloParaCasar, acaoDaSolicitacao } from '../utils/hcCpSaidasSemBaixa.js';
 
 // pontuação simples de nome para o teste: fração das palavras do fornecedor que aparecem no extrato
 const pontuar = (a, b) => {
@@ -84,5 +84,30 @@ describe('previsão só é sugerida perto do vencimento', () => {
   });
   it('sem a data da saída não filtra (quem chama decide)', () => {
     expect(candidatasDaSaida(saida(128.26), [previsao(1, '2026-12-14')], pontuar)).toHaveLength(1);
+  });
+});
+
+describe('Solicitações Crosby na janela RESOLVER', () => {
+  it('rejeitada, cancelada, conciliada com outra saída ou enviada ao contas a pagar antigo: não dá para enviar daqui', () => {
+    expect(motivoDeNaoEnviarDaqui({ status: 'rejeitado' })).toMatch(/rejeitada/);
+    expect(motivoDeNaoEnviarDaqui({ status: 'cancelada' })).toMatch(/cancelada/);
+    expect(motivoDeNaoEnviarDaqui({ status: 'conciliado' })).toMatch(/já foi conciliado/);
+    expect(motivoDeNaoEnviarDaqui({ status: 'enviado_totvs' })).toMatch(/Contas a Pagar do TOTVS/);
+    expect(motivoDeNaoEnviarDaqui(null)).toMatch(/não foi encontrada/);
+  });
+  it('pendente, aprovada, nota fiscal, erro de envio e aguardando conciliação: pode', () => {
+    for (const status of ['pendente', 'aprovado_gestor', 'aprovado_financeiro', 'nota_fiscal', 'erro_envio', 'aguardando_conciliacao']) expect(motivoDeNaoEnviarDaqui({ status })).toBeNull();
+  });
+  it('o que a janela faz com cada uma', () => {
+    expect(acaoDaSolicitacao({ status: 'pendente' }, false)).toBe('aprovar-enviar-casar');
+    expect(acaoDaSolicitacao({ status: 'aguardando_conciliacao' }, false)).toBe('conciliar-lancar');
+    expect(acaoDaSolicitacao({ status: 'enviado_totvs' }, true)).toBe('casar');
+  });
+  it('a duplicata que casa: a em aberto de mesmo valor; senão a única em aberto', () => {
+    const p = (id, valor, situacao = 'aberto') => tit(id, valor, 'X', { situacao });
+    expect(tituloParaCasar([p(1, 100), p(2, 200)], 200).titulo.id).toBe(2);
+    expect(tituloParaCasar([p(1, 100, 'pago'), p(2, 200)], 150).titulo.id).toBe(2);
+    expect(tituloParaCasar([p(1, 100), p(2, 200)], 150).erro).toMatch(/2 parcelas em aberto/);
+    expect(tituloParaCasar([p(1, 100, 'pago')], 100).erro).toMatch(/já está paga/);
   });
 });
